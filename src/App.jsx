@@ -113,7 +113,7 @@ export default function App() {
     }} />;
   }
   const signOut = async () => { await sessionStore.clear(); setSession(null); };
-  if (session.employee.role === 'manager') {
+  if (session.employee.role === 'manager' || session.employee.role === 'owner') {
     return <ManagerShell employee={session.employee} onSignOut={signOut} />;
   }
   return <EmployeeApp employee={session.employee} onSignOut={signOut} />;
@@ -196,10 +196,15 @@ function SignIn({ onSignIn }) {
           </button>
         </div>
       </div>
-      <div className="text-center pb-6 text-xs text-stone-400 font-mono">v5 · work blocks</div>
+      <div className="text-center pb-6 text-xs text-stone-400 font-mono">v6 · roles &amp; damage</div>
     </div>
   );
 }
+
+// Role helpers — keep this central so we never drift
+const isOwner   = (e) => e?.role === 'owner';
+const isManager = (e) => e?.role === 'manager' || e?.role === 'owner';
+const canSeeMoney = (e) => isOwner(e); // managers don't see $
 
 // =================================================================
 // EMPLOYEE APP — three-state machine
@@ -935,6 +940,7 @@ function TaskCard({ task, isActive, onStop, onResume, onAddPhoto }) {
     : Date.now() - new Date(task.start_time).getTime();
   const before = (task.photos || []).filter(p => p.kind === 'before');
   const after  = (task.photos || []).filter(p => p.kind === 'after');
+  const damage = (task.photos || []).filter(p => p.kind === 'damage');
   const isDone = !!task.end_time;
   return (
     <div className={`rounded-2xl p-4 border-2 transition-all ${isActive ? 'border-amber-300 bg-amber-50/50' : 'border-stone-200 bg-white'}`}>
@@ -944,6 +950,11 @@ function TaskCard({ task, isActive, onStop, onResume, onAddPhoto }) {
             {isDone && <Check size={14} className="text-emerald-600 flex-shrink-0" />}
             {isActive && <span className="w-2 h-2 rounded-full bg-amber-600 animate-pulse flex-shrink-0" />}
             <span className="font-serif text-lg text-stone-900 truncate">{task.name}</span>
+            {damage.length > 0 && (
+              <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-red-100 text-red-700 flex-shrink-0">
+                ⚠ {damage.length}
+              </span>
+            )}
           </div>
           <div className="text-xs text-stone-500 font-mono">
             {fmtClock(task.start_time)}{task.end_time && ` — ${fmtClock(task.end_time)}`} · {fmtTimeShort(elapsed)}
@@ -959,14 +970,18 @@ function TaskCard({ task, isActive, onStop, onResume, onAddPhoto }) {
           </button>
         )}
       </div>
-      <div className="grid grid-cols-2 gap-2">
+      <div className="grid grid-cols-3 gap-2">
         <button onClick={() => onAddPhoto('before')}
-          className="px-3 py-2.5 rounded-xl bg-stone-100 hover:bg-stone-200 text-stone-700 text-sm font-medium flex items-center justify-center gap-2 active:scale-95 transition-transform">
-          <Camera size={14} /> Before {before.length > 0 && <span className="text-amber-700">({before.length})</span>}
+          className="px-2 py-2.5 rounded-xl bg-stone-100 hover:bg-stone-200 text-stone-700 text-xs font-medium flex items-center justify-center gap-1.5 active:scale-95 transition-transform">
+          <Camera size={13} /> Before {before.length > 0 && <span className="text-amber-700 font-mono">({before.length})</span>}
         </button>
         <button onClick={() => onAddPhoto('after')}
-          className="px-3 py-2.5 rounded-xl bg-stone-100 hover:bg-stone-200 text-stone-700 text-sm font-medium flex items-center justify-center gap-2 active:scale-95 transition-transform">
-          <Camera size={14} /> After {after.length > 0 && <span className="text-amber-700">({after.length})</span>}
+          className="px-2 py-2.5 rounded-xl bg-stone-100 hover:bg-stone-200 text-stone-700 text-xs font-medium flex items-center justify-center gap-1.5 active:scale-95 transition-transform">
+          <Camera size={13} /> After {after.length > 0 && <span className="text-amber-700 font-mono">({after.length})</span>}
+        </button>
+        <button onClick={() => onAddPhoto('damage')}
+          className="px-2 py-2.5 rounded-xl bg-red-50 hover:bg-red-100 text-red-700 text-xs font-medium flex items-center justify-center gap-1.5 active:scale-95 transition-transform">
+          <Camera size={13} /> Damage {damage.length > 0 && <span className="font-mono">({damage.length})</span>}
         </button>
       </div>
     </div>
@@ -1040,7 +1055,7 @@ function compressImage(file) {
   });
 }
 
-function Header({ name, onSignOut }) {
+function Header({ name, onSignOut, role }) {
   return (
     <div className="flex items-center justify-between px-5 py-4 bg-stone-50 border-b border-stone-200">
       <div className="flex items-center gap-2.5">
@@ -1051,7 +1066,15 @@ function Header({ name, onSignOut }) {
           <div className="font-serif text-base text-stone-900 leading-none">
             Tidy<span className="italic text-amber-700">Track</span>
           </div>
-          <div className="text-xs text-stone-500 font-mono">{name}</div>
+          <div className="text-xs text-stone-500 font-mono flex items-center gap-1.5">
+            {name}
+            {role === 'owner' && (
+              <span className="text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-800">Owner</span>
+            )}
+            {role === 'manager' && (
+              <span className="text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-stone-200 text-stone-700">Manager</span>
+            )}
+          </div>
         </div>
       </div>
       <button onClick={onSignOut} className="text-xs text-stone-500 font-mono hover:text-stone-900">Sign out</button>
@@ -1064,20 +1087,28 @@ function Header({ name, onSignOut }) {
 // =================================================================
 function ManagerShell({ employee, onSignOut }) {
   const [tab, setTab] = useState('dashboard');
+  const showMoneyTabs = canSeeMoney(employee); // owner only
+
+  // If a manager somehow lands on a money tab (e.g. via stale state), bounce them home
+  useEffect(() => {
+    if (!showMoneyTabs && (tab === 'invoice' || tab === 'payroll')) setTab('dashboard');
+  }, [showMoneyTabs, tab]);
+
   return (
     <div className="min-h-screen bg-stone-50">
       {tab === 'dashboard' && <ManagerDashboard employee={employee} onSignOut={onSignOut} />}
       {tab === 'team'      && <EmployeeAdmin   employee={employee} onSignOut={onSignOut} />}
       {tab === 'props'     && <PropertyAdmin   employee={employee} onSignOut={onSignOut} />}
-      {tab === 'invoice'   && <InvoiceView     employee={employee} onSignOut={onSignOut} />}
-      {tab === 'payroll'   && <ExportView      employee={employee} onSignOut={onSignOut} />}
+      {showMoneyTabs && tab === 'invoice'   && <InvoiceView     employee={employee} onSignOut={onSignOut} />}
+      {showMoneyTabs && tab === 'payroll'   && <ExportView      employee={employee} onSignOut={onSignOut} />}
+
       <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-stone-200 px-1 py-2 z-30">
-        <div className="max-w-md mx-auto grid grid-cols-5 gap-0.5">
+        <div className={`max-w-md mx-auto grid gap-0.5 ${showMoneyTabs ? 'grid-cols-5' : 'grid-cols-3'}`}>
           <TabButton active={tab==='dashboard'} onClick={() => setTab('dashboard')} icon={<LayoutDashboard size={18} />} label="Shifts" />
           <TabButton active={tab==='team'}      onClick={() => setTab('team')}      icon={<Users size={18} />} label="Team" />
           <TabButton active={tab==='props'}     onClick={() => setTab('props')}     icon={<Building2 size={18} />} label="Properties" />
-          <TabButton active={tab==='invoice'}   onClick={() => setTab('invoice')}   icon={<FileText size={18} />} label="Invoices" />
-          <TabButton active={tab==='payroll'}   onClick={() => setTab('payroll')}   icon={<DollarSign size={18} />} label="Payroll" />
+          {showMoneyTabs && <TabButton active={tab==='invoice'} onClick={() => setTab('invoice')} icon={<FileText size={18} />} label="Invoices" />}
+          {showMoneyTabs && <TabButton active={tab==='payroll'} onClick={() => setTab('payroll')} icon={<DollarSign size={18} />} label="Payroll" />}
         </div>
       </div>
     </div>
@@ -1102,14 +1133,16 @@ function ManagerDashboard({ employee, onSignOut }) {
   const [view, setView] = useState('shifts');
   const [selectedShift, setSelectedShift] = useState(null);
   const [filter, setFilter] = useState('week');
+  const [subView, setSubView] = useState('list'); // 'list' | 'today'
   const [loaded, setLoaded] = useState(false);
+  const showMoney = canSeeMoney(employee);
 
   const load = useCallback(async () => {
     const sinceDays = filter === 'today' ? 1 : filter === 'week' ? 7 : 365;
     const since = new Date(Date.now() - sinceDays * 24 * 60 * 60 * 1000).toISOString();
     const { data } = await supabase
       .from('shifts')
-      .select('*, employee:employees(id,name), customer:customers(id,name,property_type,bill_rate_hourly), work_blocks(id, end_time)')
+      .select('*, employee:employees(id,name), customer:customers(id,name,property_type,bill_rate_hourly), work_blocks(id, end_time, start_time, bill_rate_at_work, unit:units(label), party:parties(label))')
       .gte('start_time', since)
       .order('start_time', { ascending: false });
     setShifts(data || []); setLoaded(true);
@@ -1118,17 +1151,34 @@ function ManagerDashboard({ employee, onSignOut }) {
 
   if (!loaded) return <Splash text="Loading dashboard…" />;
   if (view === 'detail' && selectedShift) {
-    return <ShiftDetail shiftId={selectedShift.id}
+    return <ShiftDetail shiftId={selectedShift.id} viewerRole={employee.role}
       onBack={() => { setView('shifts'); setSelectedShift(null); load(); }} />;
   }
 
   const activeCount = shifts.filter(s => !s.end_time).length;
   const totalHours = shifts.filter(s => s.end_time)
     .reduce((sum, s) => sum + (new Date(s.end_time) - new Date(s.start_time)), 0);
+  // Total billable across all shifts (only used if showMoney)
+  let totalBillable = 0;
+  if (showMoney) {
+    shifts.forEach(s => {
+      if (!s.end_time) return;
+      if (s.customer?.property_type === 'multi_unit') {
+        (s.work_blocks || []).forEach(b => {
+          if (!b.end_time) return;
+          const h = (new Date(b.end_time) - new Date(b.start_time)) / 1000 / 3600;
+          totalBillable += h * (b.bill_rate_at_work || s.customer?.bill_rate_hourly || 0);
+        });
+      } else if (s.bill_rate_at_work) {
+        const h = (new Date(s.end_time) - new Date(s.start_time)) / 1000 / 3600;
+        totalBillable += h * s.bill_rate_at_work;
+      }
+    });
+  }
 
   return (
     <div className="pb-24">
-      <Header name={employee.name} onSignOut={onSignOut} />
+      <Header name={employee.name} onSignOut={onSignOut} role={employee.role} />
       <div className="px-5 pt-6">
         <div className="text-xs uppercase tracking-widest text-stone-400 font-mono mb-3">
           {new Date().toLocaleDateString('en-US', { weekday:'long', month:'long', day:'numeric' })}
@@ -1139,7 +1189,11 @@ function ManagerDashboard({ employee, onSignOut }) {
         <div className="grid grid-cols-2 gap-3 mb-6">
           <StatCard label="On the clock" value={activeCount} unit="now" highlight={activeCount > 0} />
           <StatCard label={`${filter === 'today' ? 'Today' : filter === 'week' ? 'Week' : 'Total'} hours`} value={fmtTimeShort(totalHours)} />
-          <StatCard label="Shifts" value={shifts.length} unit="logged" />
+          {showMoney ? (
+            <StatCard label="Billable" value={fmtMoney(totalBillable)} accent />
+          ) : (
+            <StatCard label="Shifts" value={shifts.length} unit="logged" />
+          )}
           <StatCard label="Active" value={activeCount} unit="cleaners" />
         </div>
       </div>
@@ -1151,41 +1205,245 @@ function ManagerDashboard({ employee, onSignOut }) {
           </button>
         ))}
       </div>
-      <div className="px-5">
-        <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-3">Shifts ({shifts.length})</div>
-        {shifts.length === 0 ? (
-          <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">No shifts in this period.</div>
-        ) : (
-          <div className="space-y-2">
-            {shifts.map(s => {
-              const dur = (s.end_time ? new Date(s.end_time) : new Date()) - new Date(s.start_time);
-              const blockCount = s.work_blocks?.length || 0;
-              return (
-                <button key={s.id} onClick={() => { setSelectedShift(s); setView('detail'); }}
-                  className="w-full text-left p-4 rounded-2xl bg-white border border-stone-200 hover:border-stone-400 transition-colors">
-                  <div className="flex items-center justify-between mb-2">
-                    <div className="flex items-center gap-2">
-                      {!s.end_time && <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />}
-                      <span className="font-serif text-lg text-stone-900">{s.employee?.name}</span>
-                    </div>
-                    <span className="text-xs text-stone-500 font-mono">{fmtDate(s.start_time)}</span>
-                  </div>
-                  {s.customer && (
-                    <div className="text-xs text-amber-700 font-mono mb-2 flex items-center gap-1.5">
-                      <Building2 size={11} /> {s.customer.name}
-                      {blockCount > 0 && <span className="text-stone-500">· {blockCount} {blockCount === 1 ? 'block' : 'blocks'}</span>}
-                    </div>
-                  )}
-                  <div className="flex items-center justify-between text-xs text-stone-500 font-mono">
-                    <span>{fmtClock(s.start_time)} {s.end_time ? `— ${fmtClock(s.end_time)}` : '— active'} · {fmtTimeShort(dur)}</span>
-                    <ChevronRight size={14} />
-                  </div>
-                </button>
-              );
-            })}
-          </div>
-        )}
+
+      {/* New: sub-view toggle (List of shifts vs grouped-by-apartment) */}
+      <div className="px-5 mb-4 flex gap-2 border-b border-stone-200 pb-3">
+        <button onClick={() => setSubView('list')}
+          className={`px-3 py-1.5 rounded-full text-xs font-mono uppercase tracking-wider transition-colors ${subView === 'list' ? 'bg-stone-200 text-stone-900' : 'text-stone-500'}`}>
+          Shift list
+        </button>
+        <button onClick={() => setSubView('today')}
+          className={`px-3 py-1.5 rounded-full text-xs font-mono uppercase tracking-wider transition-colors ${subView === 'today' ? 'bg-stone-200 text-stone-900' : 'text-stone-500'}`}>
+          By apartment / party
+        </button>
       </div>
+
+      {subView === 'today' ? (
+        <GroupedByPartyView shifts={shifts} showMoney={showMoney}
+          onOpenShift={(s) => { setSelectedShift(s); setView('detail'); }} />
+      ) : (
+        <ShiftList shifts={shifts} showMoney={showMoney}
+          onOpen={(s) => { setSelectedShift(s); setView('detail'); }} />
+      )}
+    </div>
+  );
+}
+
+// Plain shift list (existing behavior, just extracted)
+function ShiftList({ shifts, showMoney, onOpen }) {
+  return (
+    <div className="px-5">
+      <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-3">Shifts ({shifts.length})</div>
+      {shifts.length === 0 ? (
+        <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">No shifts in this period.</div>
+      ) : (
+        <div className="space-y-2">
+          {shifts.map(s => {
+            const dur = (s.end_time ? new Date(s.end_time) : new Date()) - new Date(s.start_time);
+            const blockCount = s.work_blocks?.length || 0;
+            // Per-shift billable
+            let billable = 0;
+            if (showMoney && s.end_time) {
+              if (s.customer?.property_type === 'multi_unit') {
+                billable = (s.work_blocks || []).reduce((sum, b) => {
+                  if (!b.end_time) return sum;
+                  const h = (new Date(b.end_time) - new Date(b.start_time)) / 1000 / 3600;
+                  return sum + h * (b.bill_rate_at_work || s.customer?.bill_rate_hourly || 0);
+                }, 0);
+              } else if (s.bill_rate_at_work) {
+                billable = (dur / 1000 / 3600) * s.bill_rate_at_work;
+              }
+            }
+            return (
+              <button key={s.id} onClick={() => onOpen(s)}
+                className="w-full text-left p-4 rounded-2xl bg-white border border-stone-200 hover:border-stone-400 transition-colors">
+                <div className="flex items-center justify-between mb-2">
+                  <div className="flex items-center gap-2">
+                    {!s.end_time && <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />}
+                    <span className="font-serif text-lg text-stone-900">{s.employee?.name}</span>
+                  </div>
+                  <span className="text-xs text-stone-500 font-mono">{fmtDate(s.start_time)}</span>
+                </div>
+                {s.customer && (
+                  <div className="text-xs text-amber-700 font-mono mb-2 flex items-center gap-1.5">
+                    <Building2 size={11} /> {s.customer.name}
+                    {blockCount > 0 && <span className="text-stone-500">· {blockCount} {blockCount === 1 ? 'block' : 'blocks'}</span>}
+                  </div>
+                )}
+                <div className="flex items-center justify-between text-xs text-stone-500 font-mono">
+                  <span>{fmtClock(s.start_time)} {s.end_time ? `— ${fmtClock(s.end_time)}` : '— active'} · {fmtTimeShort(dur)}</span>
+                  <span className="flex items-center gap-2">
+                    {showMoney && billable > 0 && <span className="text-emerald-700 font-medium">{fmtMoney(billable)}</span>}
+                    <ChevronRight size={14} />
+                  </span>
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// New: groups all work into Property → Unit → Party rows showing who worked it and for how long
+function GroupedByPartyView({ shifts, showMoney, onOpenShift }) {
+  // Flatten every work_block from every shift into a list, plus simple-property shifts as standalone rows
+  const rows = [];
+  shifts.forEach(s => {
+    if (s.customer?.property_type === 'multi_unit' && s.work_blocks?.length) {
+      s.work_blocks.forEach(b => {
+        rows.push({
+          kind: 'block',
+          shift: s,
+          block: b,
+          property: s.customer?.name || 'Unknown',
+          unit: b.unit?.label || '—',
+          party: b.party?.label || '—',
+          employee: s.employee?.name || '—',
+          start: b.start_time,
+          end: b.end_time,
+          rate: b.bill_rate_at_work || s.customer?.bill_rate_hourly || 0
+        });
+      });
+    } else {
+      rows.push({
+        kind: 'shift',
+        shift: s,
+        property: s.customer?.name || 'No property',
+        unit: '—',
+        party: '—',
+        employee: s.employee?.name || '—',
+        start: s.start_time,
+        end: s.end_time,
+        rate: s.bill_rate_at_work || 0
+      });
+    }
+  });
+
+  // Group by property + unit + party
+  const groups = {};
+  rows.forEach(r => {
+    const key = `${r.property}::${r.unit}::${r.party}`;
+    if (!groups[key]) groups[key] = { property: r.property, unit: r.unit, party: r.party, entries: [] };
+    groups[key].entries.push(r);
+  });
+
+  // Group those further by property for display
+  const byProperty = {};
+  Object.values(groups).forEach(g => {
+    if (!byProperty[g.property]) byProperty[g.property] = [];
+    byProperty[g.property].push(g);
+  });
+
+  // Sort each property's entries naturally by unit then party
+  Object.values(byProperty).forEach(arr => {
+    arr.sort((a, b) => naturalCompare(a.unit, b.unit) || naturalCompare(a.party, b.party));
+  });
+
+  const propertyNames = Object.keys(byProperty).sort();
+
+  if (propertyNames.length === 0) {
+    return (
+      <div className="px-5">
+        <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
+          No work in this period.
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="px-5 space-y-6">
+      {propertyNames.map(propName => {
+        const propGroups = byProperty[propName];
+        const propTotalMs = propGroups.reduce((sum, g) =>
+          sum + g.entries.reduce((s, e) => s + ((e.end ? new Date(e.end) : new Date()) - new Date(e.start)), 0), 0);
+        const propTotalBillable = !showMoney ? 0 : propGroups.reduce((sum, g) =>
+          sum + g.entries.reduce((s, e) => {
+            if (!e.end) return s;
+            const h = (new Date(e.end) - new Date(e.start)) / 1000 / 3600;
+            return s + h * (e.rate || 0);
+          }, 0), 0);
+
+        return (
+          <div key={propName}>
+            <div className="flex items-baseline justify-between mb-2 pb-2 border-b border-stone-200">
+              <h3 className="font-serif text-xl text-stone-900 flex items-center gap-2">
+                <Building2 size={16} /> {propName}
+              </h3>
+              <div className="font-mono text-xs text-stone-500">
+                {fmtTimeShort(propTotalMs)}
+                {showMoney && propTotalBillable > 0 && (
+                  <> · <span className="text-emerald-700">{fmtMoney(propTotalBillable)}</span></>
+                )}
+              </div>
+            </div>
+            <div className="space-y-2">
+              {propGroups.map(g => {
+                const totalMs = g.entries.reduce((s, e) =>
+                  s + ((e.end ? new Date(e.end) : new Date()) - new Date(e.start)), 0);
+                const totalBillable = !showMoney ? 0 : g.entries.reduce((s, e) => {
+                  if (!e.end) return s;
+                  const h = (new Date(e.end) - new Date(e.start)) / 1000 / 3600;
+                  return s + h * (e.rate || 0);
+                }, 0);
+                const hasLive = g.entries.some(e => !e.end);
+
+                return (
+                  <div key={`${g.unit}::${g.party}`} className="bg-white border border-stone-200 rounded-2xl p-4">
+                    <div className="flex items-start justify-between mb-2">
+                      <div className="flex-1">
+                        <div className="font-serif text-base text-stone-900 flex items-center gap-2 flex-wrap">
+                          {g.unit !== '—' && <span>{g.unit}</span>}
+                          {g.party !== '—' && <span className="italic text-amber-700">· {g.party}</span>}
+                          {hasLive && (
+                            <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 flex items-center gap-1">
+                              <span className="w-1.5 h-1.5 rounded-full bg-emerald-600 animate-pulse" />
+                              live
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-xs text-stone-500 font-mono mt-0.5">
+                          Total: {fmtTimeShort(totalMs)}
+                          {showMoney && totalBillable > 0 && (
+                            <> · <span className="text-emerald-700 font-medium">{fmtMoney(totalBillable)}</span></>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Per-employee rows */}
+                    <div className="mt-3 space-y-1.5">
+                      {g.entries.map((e, i) => {
+                        const dur = (e.end ? new Date(e.end) : new Date()) - new Date(e.start);
+                        const billable = showMoney && e.end ? (dur / 1000 / 3600) * (e.rate || 0) : 0;
+                        return (
+                          <button key={i} onClick={() => onOpenShift(e.shift)}
+                            className="w-full text-left flex items-center justify-between p-2 -m-2 rounded-lg hover:bg-stone-50 transition-colors">
+                            <div className="flex items-center gap-2 min-w-0">
+                              <User size={12} className="text-stone-400 flex-shrink-0" />
+                              <span className="text-sm text-stone-900 truncate">{e.employee}</span>
+                              <span className="text-xs text-stone-500 font-mono flex-shrink-0">
+                                {fmtClock(e.start)}{e.end ? `–${fmtClock(e.end)}` : ' →'}
+                              </span>
+                            </div>
+                            <div className="text-xs font-mono text-stone-700 flex items-center gap-2 flex-shrink-0">
+                              {fmtTimeShort(dur)}
+                              {showMoney && billable > 0 && <span className="text-emerald-700">{fmtMoney(billable)}</span>}
+                              <ChevronRight size={12} className="text-stone-400" />
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -1205,7 +1463,8 @@ function StatCard({ label, value, unit, highlight, accent }) {
 // =================================================================
 // SHIFT DETAIL (shows work blocks for multi-unit)
 // =================================================================
-function ShiftDetail({ shiftId, onBack }) {
+function ShiftDetail({ shiftId, viewerRole, onBack }) {
+  const showMoney = viewerRole === 'owner';
   const [shift, setShift] = useState(null);
   const [workBlocks, setWorkBlocks] = useState([]);
   const [tasks, setTasks] = useState([]);
@@ -1269,7 +1528,7 @@ function ShiftDetail({ shiftId, onBack }) {
               <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">No work blocks.</div>
             ) : (
               <div className="space-y-3">
-                {workBlocks.map(b => <WorkBlockDetail key={b.id} block={b} rate={shift.customer?.bill_rate_hourly} />)}
+                {workBlocks.map(b => <WorkBlockDetail key={b.id} block={b} rate={shift.customer?.bill_rate_hourly} showMoney={showMoney} />)}
               </div>
             )}
           </>
@@ -1288,7 +1547,7 @@ function ShiftDetail({ shiftId, onBack }) {
   );
 }
 
-function WorkBlockDetail({ block, rate }) {
+function WorkBlockDetail({ block, rate, showMoney }) {
   const dur = (block.end_time ? new Date(block.end_time) : new Date()) - new Date(block.start_time);
   const blockRate = block.bill_rate_at_work || rate || 0;
   const billable = block.end_time ? (dur / 1000 / 3600) * blockRate : 0;
@@ -1304,7 +1563,7 @@ function WorkBlockDetail({ block, rate }) {
             {fmtClock(block.start_time)}{block.end_time && ` — ${fmtClock(block.end_time)}`} · {fmtTimeShort(dur)}
           </div>
         </div>
-        {billable > 0 && (
+        {showMoney && billable > 0 && (
           <div className="text-right ml-2">
             <div className="font-mono text-sm text-emerald-700 font-medium">{fmtMoney(billable)}</div>
           </div>
@@ -1323,49 +1582,95 @@ function WorkBlockDetail({ block, rate }) {
 function TaskDetail({ task, compact }) {
   const before = (task.photos || []).filter(p => p.kind === 'before');
   const after  = (task.photos || []).filter(p => p.kind === 'after');
+  const damage = (task.photos || []).filter(p => p.kind === 'damage');
   const dur = (task.end_time ? new Date(task.end_time) : new Date()) - new Date(task.start_time);
   return (
     <div className={compact ? '' : 'p-4 rounded-2xl bg-white border border-stone-200'}>
       <div className="flex items-start justify-between mb-2">
         <div className="flex-1 min-w-0">
-          <div className="font-serif text-base text-stone-900">{task.name}</div>
+          <div className="flex items-center gap-2 flex-wrap">
+            <div className="font-serif text-base text-stone-900">{task.name}</div>
+            {damage.length > 0 && (
+              <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-red-100 text-red-700">
+                ⚠ Damage reported
+              </span>
+            )}
+          </div>
           <div className="text-xs text-stone-500 font-mono">
             {fmtClock(task.start_time)}{task.end_time && ` — ${fmtClock(task.end_time)}`} · {fmtTimeShort(dur)}
           </div>
         </div>
         {!task.end_time && <span className="px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 text-xs font-mono">live</span>}
       </div>
-      {(before.length > 0 || after.length > 0) && (
-        <div className="grid grid-cols-2 gap-3 mt-2">
+      {(before.length > 0 || after.length > 0 || damage.length > 0) && (
+        <div className="grid grid-cols-3 gap-2 mt-2">
           <PhotoColumn label="Before" photos={before} />
           <PhotoColumn label="After"  photos={after} />
+          <PhotoColumn label="Damage" photos={damage} highlight="red" />
         </div>
       )}
     </div>
   );
 }
 
-function PhotoColumn({ label, photos }) {
+function PhotoColumn({ label, photos, highlight }) {
   const [zoom, setZoom] = useState(null);
+  const isDamage = highlight === 'red';
   return (
     <div>
-      <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-1">{label} ({photos.length})</div>
+      <div className={`text-xs uppercase tracking-wider font-mono mb-1 flex items-center gap-1.5 ${isDamage ? 'text-red-700 font-semibold' : 'text-stone-500'}`}>
+        {label}
+        <span className={`font-mono ${isDamage ? 'text-red-700' : 'text-stone-400'}`}>({photos.length})</span>
+      </div>
       {photos.length === 0 ? (
-        <div className="aspect-square rounded-lg border-2 border-dashed border-stone-200 flex items-center justify-center text-stone-300">
+        <div className={`aspect-square rounded-lg border-2 border-dashed flex items-center justify-center ${isDamage ? 'border-red-200 text-red-200' : 'border-stone-200 text-stone-300'}`}>
           <Camera size={18} />
         </div>
       ) : (
         <div className="grid grid-cols-2 gap-1">
-          {photos.map(p => (
-            <button key={p.id} onClick={() => setZoom(p.public_url)} className="aspect-square rounded overflow-hidden">
+          {photos.slice(0, 4).map((p, i) => (
+            <button key={p.id} onClick={() => setZoom(p.public_url)}
+              className={`aspect-square rounded overflow-hidden relative ${isDamage ? 'ring-2 ring-red-400' : ''}`}>
               <img src={p.public_url} alt="" className="w-full h-full object-cover" />
+              {/* If we hide some, show a "+N" overlay on the last visible thumbnail */}
+              {i === 3 && photos.length > 4 && (
+                <div className="absolute inset-0 bg-stone-900/70 flex items-center justify-center text-stone-50 font-mono text-sm">
+                  +{photos.length - 4}
+                </div>
+              )}
             </button>
           ))}
         </div>
       )}
       {zoom && (
-        <div onClick={() => setZoom(null)} className="fixed inset-0 bg-stone-900/90 z-50 flex items-center justify-center p-4 cursor-pointer">
-          <img src={zoom} alt="" className="max-w-full max-h-full rounded-xl" />
+        <PhotoZoomViewer photos={photos} initialUrl={zoom} onClose={() => setZoom(null)} />
+      )}
+    </div>
+  );
+}
+
+// Photo viewer that lets you swipe through all photos in a bucket
+function PhotoZoomViewer({ photos, initialUrl, onClose }) {
+  const startIdx = Math.max(0, photos.findIndex(p => p.public_url === initialUrl));
+  const [idx, setIdx] = useState(startIdx);
+  const photo = photos[idx];
+  if (!photo) return null;
+  return (
+    <div className="fixed inset-0 bg-stone-900/95 z-50 flex flex-col items-center justify-center p-4">
+      <button onClick={onClose}
+        className="absolute top-4 right-4 p-2 rounded-full bg-stone-800 text-stone-50 z-10">
+        <X size={20} />
+      </button>
+      <div className="absolute top-4 left-4 px-3 py-1.5 rounded-full bg-stone-800 text-stone-50 text-xs font-mono z-10">
+        {idx + 1} / {photos.length}
+      </div>
+      <img src={photo.public_url} alt="" className="max-w-full max-h-[85vh] rounded-xl" />
+      {photos.length > 1 && (
+        <div className="mt-4 flex items-center gap-3">
+          <button onClick={() => setIdx((idx - 1 + photos.length) % photos.length)}
+            className="px-4 py-2 rounded-full bg-stone-800 text-stone-50 text-sm">← Prev</button>
+          <button onClick={() => setIdx((idx + 1) % photos.length)}
+            className="px-4 py-2 rounded-full bg-stone-800 text-stone-50 text-sm">Next →</button>
         </div>
       )}
     </div>
@@ -1387,7 +1692,7 @@ function EmployeeAdmin({ employee, onSignOut }) {
   useEffect(() => { load(); }, []);
   if (!loaded) return <Splash text="Loading…" />;
   if (editing) {
-    return <EmployeeForm employee={editing === 'new' ? null : editing} currentUserId={employee.id}
+    return <EmployeeForm employee={editing === 'new' ? null : editing} currentUserId={employee.id} currentUserRole={employee.role}
       onCancel={() => setEditing(null)} onSaved={() => { setEditing(null); load(); }} />;
   }
   const visible = employees.filter(e => showInactive || e.active);
@@ -1419,7 +1724,8 @@ function EmployeeAdmin({ employee, onSignOut }) {
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2 mb-1">
                     <span className="font-serif text-lg text-stone-900">{e.name}</span>
-                    {e.role === 'manager' && <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-amber-100 text-amber-800">Manager</span>}
+                    {e.role === 'owner' && <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-amber-100 text-amber-800">Owner</span>}
+                    {e.role === 'manager' && <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-200 text-stone-700">Manager</span>}
                     {!e.active && <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-200 text-stone-600">Inactive</span>}
                   </div>
                   <div className="text-xs text-stone-500 font-mono">PIN: •••• {e.id === employee.id && '· (you)'}</div>
@@ -1434,7 +1740,7 @@ function EmployeeAdmin({ employee, onSignOut }) {
   );
 }
 
-function EmployeeForm({ employee, currentUserId, onCancel, onSaved }) {
+function EmployeeForm({ employee, currentUserId, currentUserRole, onCancel, onSaved }) {
   const isNew = !employee;
   const [name, setName] = useState(employee?.name || '');
   const [pin, setPin] = useState(employee?.pin || '');
@@ -1443,6 +1749,7 @@ function EmployeeForm({ employee, currentUserId, onCancel, onSaved }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const isSelf = employee?.id === currentUserId;
+  const canEditOwner = currentUserRole === 'owner';
   const save = async () => {
     setError('');
     if (!name.trim()) { setError('Name is required'); return; }
@@ -1490,7 +1797,7 @@ function EmployeeForm({ employee, currentUserId, onCancel, onSaved }) {
         </div>
         <div>
           <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Role</label>
-          <div className="grid grid-cols-2 gap-2">
+          <div className={`grid gap-2 ${canEditOwner ? 'grid-cols-3' : 'grid-cols-2'}`}>
             <button onClick={() => setRole('employee')} type="button"
               className={`p-3 rounded-xl border-2 text-left ${role === 'employee' ? 'border-stone-900 bg-white' : 'border-stone-200 bg-white/50'}`}>
               <div className="font-medium text-stone-900 text-sm">Employee</div>
@@ -1499,7 +1806,16 @@ function EmployeeForm({ employee, currentUserId, onCancel, onSaved }) {
               className={`p-3 rounded-xl border-2 text-left ${role === 'manager' ? 'border-stone-900 bg-white' : 'border-stone-200 bg-white/50'}`}>
               <div className="font-medium text-stone-900 text-sm">Manager</div>
             </button>
+            {canEditOwner && (
+              <button onClick={() => setRole('owner')} type="button"
+                className={`p-3 rounded-xl border-2 text-left ${role === 'owner' ? 'border-amber-700 bg-amber-50' : 'border-stone-200 bg-white/50'}`}>
+                <div className="font-medium text-stone-900 text-sm">Owner</div>
+              </button>
+            )}
           </div>
+          {role === 'owner' && (
+            <p className="text-xs text-amber-700 mt-2">⚠ Owners have full admin access including bill rates and pay info.</p>
+          )}
         </div>
         <div className="p-4 rounded-2xl bg-white border border-stone-200">
           <label className="flex items-center justify-between cursor-pointer">
@@ -1546,7 +1862,7 @@ function PropertyAdmin({ employee, onSignOut }) {
   useEffect(() => { load(); }, []);
   if (!loaded) return <Splash text="Loading…" />;
   if (view.kind === 'property-edit') {
-    return <PropertyForm property={view.property}
+    return <PropertyForm property={view.property} currentUserRole={employee.role}
       onCancel={() => setView({ kind: 'list' })}
       onSaved={() => { setView({ kind: 'list' }); load(); }} />;
   }
@@ -1620,6 +1936,7 @@ function PropertyAdmin({ employee, onSignOut }) {
                       <MapPin size={11} /> {p.address}
                     </div>
                   )}
+                  {canSeeMoney(employee) && (
                   <div className="flex items-center gap-3 mt-2 text-xs text-stone-600">
                     {p.bill_mode === 'hourly' && p.bill_rate_hourly && (
                       <span className="flex items-center gap-1"><DollarSign size={11} />{Number(p.bill_rate_hourly).toFixed(2)}/hr</span>
@@ -1628,6 +1945,7 @@ function PropertyAdmin({ employee, onSignOut }) {
                       <span className="flex items-center gap-1"><DollarSign size={11} />{Number(p.flat_rate_amount).toFixed(2)} flat</span>
                     )}
                   </div>
+                  )}
                 </div>
                 <ChevronRight size={16} className="text-stone-400 flex-shrink-0 ml-2 mt-1" />
               </div>
@@ -1639,7 +1957,7 @@ function PropertyAdmin({ employee, onSignOut }) {
   );
 }
 
-function PropertyForm({ property, onCancel, onSaved }) {
+function PropertyForm({ property, currentUserRole, onCancel, onSaved }) {
   const isNew = !property;
   const [name, setName] = useState(property?.name || '');
   const [address, setAddress] = useState(property?.address || '');
@@ -1651,6 +1969,7 @@ function PropertyForm({ property, onCancel, onSaved }) {
   const [active, setActive] = useState(property?.active ?? true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const canEditMoney = currentUserRole === 'owner';
   useEffect(() => {
     if (type === 'multi_unit' && billMode === 'flat') setBillMode('hourly');
   }, [type, billMode]);
@@ -1712,6 +2031,7 @@ function PropertyForm({ property, onCancel, onSaved }) {
             </button>
           </div>
         </div>
+        {canEditMoney && (
         <div>
           <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Bill mode</label>
           <div className="grid grid-cols-2 gap-2 mb-3">
@@ -1740,6 +2060,7 @@ function PropertyForm({ property, onCancel, onSaved }) {
             </div>
           )}
         </div>
+        )}
         <div>
           <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Address</label>
           <input type="text" value={address} onChange={(e) => setAddress(e.target.value)}

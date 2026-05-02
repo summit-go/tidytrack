@@ -3202,11 +3202,13 @@ function PortalHome({ property, onSignOut, onOpenUnitDay }) {
     let since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
 
     // If property has a portal_start_date, never show data from before it.
-    // Take the LATER of (filter window start) and (portal start date).
+    // Use UTC midnight on the start date — the back end stores timestamps as UTC.
     if (property.portal_start_date) {
-      const portalStart = new Date(property.portal_start_date + 'T00:00:00').toISOString();
+      // portal_start_date is a date string like "2026-05-04"
+      const portalStart = `${property.portal_start_date}T00:00:00Z`;
       if (portalStart > since) since = portalStart;
     }
+    console.log('[Portal] filtering from:', since, '| portal_start_date:', property.portal_start_date);
 
     if (property.property_type === 'multi_unit') {
       // Pull work blocks for this property in range, grouped by date+unit
@@ -3285,6 +3287,11 @@ function PortalHome({ property, onSignOut, onOpenUnitDay }) {
         {property.address && (
           <div className="text-sm text-stone-300 mt-1 flex items-center gap-1.5">
             <MapPin size={13} /> {property.address}
+          </div>
+        )}
+        {property.portal_start_date && (
+          <div className="text-xs text-amber-400 font-mono mt-2">
+            Showing cleanings from {new Date(property.portal_start_date + 'T12:00:00').toLocaleDateString('en-US', { month:'long', day:'numeric', year:'numeric' })} forward
           </div>
         )}
       </div>

@@ -1,11 +1,11 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { createClient } from '@supabase/supabase-js';
 import {
-  Clock, Camera, LogOut, ChevronRight, Plus, Pause, Play, Check,
+  Clock, Camera, LogOut, ChevronRight, ChevronLeft, Plus, Pause, Play, Check,
   ArrowLeft, Users, Image as ImageIcon, Download, X, MapPin,
   Briefcase, Delete, AlertCircle, UserPlus, Building2,
   Trash2, Eye, EyeOff, LayoutDashboard, FileText, DollarSign,
-  Home, Layers, User, Edit2, Copy, Printer
+  Home, Layers, User, Edit2, Copy, Printer, Calendar
 } from 'lucide-react';
 
 // =================================================================
@@ -1116,16 +1116,17 @@ function Header({ name, onSignOut, role }) {
 // =================================================================
 
 function ManagerShell({ employee, onSignOut }) {
-  const [tab, setTab] = useState('dashboard');
+  const [tab, setTab] = useState('daily');
   const showMoneyTabs = canSeeMoney(employee); // owner only
 
   // If a manager somehow lands on a money tab (e.g. via stale state), bounce them home
   useEffect(() => {
-    if (!showMoneyTabs && (tab === 'invoice' || tab === 'payroll')) setTab('dashboard');
+    if (!showMoneyTabs && (tab === 'invoice' || tab === 'payroll')) setTab('daily');
   }, [showMoneyTabs, tab]);
 
   return (
     <div className="min-h-screen bg-stone-50">
+      {tab === 'daily'     && <DailyView        employee={employee} onSignOut={onSignOut} />}
       {tab === 'dashboard' && <ManagerDashboard employee={employee} onSignOut={onSignOut} />}
       {tab === 'team'      && <EmployeeAdmin   employee={employee} onSignOut={onSignOut} />}
       {tab === 'props'     && <PropertyAdmin   employee={employee} onSignOut={onSignOut} />}
@@ -1133,7 +1134,8 @@ function ManagerShell({ employee, onSignOut }) {
       {showMoneyTabs && tab === 'payroll'   && <ExportView      employee={employee} onSignOut={onSignOut} />}
 
       <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-stone-200 px-1 py-2 z-30">
-        <div className={`max-w-md mx-auto grid gap-0.5 ${showMoneyTabs ? 'grid-cols-5' : 'grid-cols-3'}`}>
+        <div className={`max-w-md mx-auto grid gap-0.5 ${showMoneyTabs ? 'grid-cols-6' : 'grid-cols-4'}`}>
+          <TabButton active={tab==='daily'}     onClick={() => setTab('daily')}     icon={<Calendar size={18} />} label="Daily" />
           <TabButton active={tab==='dashboard'} onClick={() => setTab('dashboard')} icon={<LayoutDashboard size={18} />} label="Shifts" />
           <TabButton active={tab==='team'}      onClick={() => setTab('team')}      icon={<Users size={18} />} label="Team" />
           <TabButton active={tab==='props'}     onClick={() => setTab('props')}     icon={<Building2 size={18} />} label="Properties" />
@@ -1997,6 +1999,7 @@ function PropertyForm({ property, currentUserRole, onCancel, onSaved }) {
   const [hourlyRate, setHourlyRate] = useState(property?.bill_rate_hourly?.toString() || '');
   const [flatAmount, setFlatAmount] = useState(property?.flat_rate_amount?.toString() || '');
   const [portalCode, setPortalCode] = useState(property?.portal_code || '');
+  const [portalStartDate, setPortalStartDate] = useState(property?.portal_start_date || '');
   const [active, setActive] = useState(property?.active ?? true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -2022,6 +2025,7 @@ function PropertyForm({ property, currentUserRole, onCancel, onSaved }) {
       bill_rate_hourly: billMode === 'hourly' && hourlyRate ? parseFloat(hourlyRate) : null,
       flat_rate_amount: billMode === 'flat' && flatAmount ? parseFloat(flatAmount) : null,
       portal_code: portalCode.trim() || null,
+      portal_start_date: portalStartDate || null,
       active
     };
     const { error: e } = isNew
@@ -2133,6 +2137,28 @@ function PropertyForm({ property, currentUserRole, onCancel, onSaved }) {
               ? <>Share this code with the property manager. They can sign in at <code className="font-mono bg-white px-1.5 py-0.5 rounded">/#/portal</code> to see cleaning photos. Leave empty to disable portal access.</>
               : <>Optional. If set, the property manager can sign in at <code className="font-mono bg-white px-1.5 py-0.5 rounded">/#/portal</code> with this code to see cleaning photos for this property only.</>}
           </p>
+
+          {/* Portal start date — only show if portal is enabled */}
+          {portalCode && (
+            <div className="mt-4 pt-4 border-t border-stone-200">
+              <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Portal start date (optional)</label>
+              <div className="flex gap-2">
+                <input type="date" value={portalStartDate} onChange={(e) => setPortalStartDate(e.target.value)}
+                  className="flex-1 px-4 py-3 rounded-xl border border-stone-300 bg-white focus:outline-none focus:border-stone-900 text-stone-900 font-mono" />
+                {portalStartDate && (
+                  <button type="button" onClick={() => setPortalStartDate('')}
+                    className="px-3 rounded-xl border border-stone-300 bg-white text-stone-500 text-sm hover:bg-stone-100">
+                    Clear
+                  </button>
+                )}
+              </div>
+              <p className="text-xs text-stone-500 mt-2">
+                {portalStartDate
+                  ? <>The property manager will only see cleanings from <strong>{new Date(portalStartDate + 'T12:00:00').toLocaleDateString('en-US', { month:'long', day:'numeric', year:'numeric' })}</strong> forward.</>
+                  : <>If set, only cleanings from this date forward will be visible to the property manager. Useful for hiding old test data or starting fresh with a new client.</>}
+              </p>
+            </div>
+          )}
         </div>
 
         <div className="p-4 rounded-2xl bg-white border border-stone-200">
@@ -3173,7 +3199,14 @@ function PortalHome({ property, onSignOut, onOpenUnitDay }) {
   useEffect(() => { (async () => {
     setLoaded(false);
     const days = filter === '7d' ? 7 : filter === '30d' ? 30 : 365;
-    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+    let since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+
+    // If property has a portal_start_date, never show data from before it.
+    // Take the LATER of (filter window start) and (portal start date).
+    if (property.portal_start_date) {
+      const portalStart = new Date(property.portal_start_date + 'T00:00:00').toISOString();
+      if (portalStart > since) since = portalStart;
+    }
 
     if (property.property_type === 'multi_unit') {
       // Pull work blocks for this property in range, grouped by date+unit
@@ -3337,6 +3370,13 @@ function PortalUnitDay({ property, unitId, date, onBack }) {
 
   useEffect(() => { (async () => {
     setLoaded(false);
+
+    // Enforce portal start date — refuse to load anything before it
+    if (property.portal_start_date && date < property.portal_start_date) {
+      setBlocks([]); setLoaded(true);
+      return;
+    }
+
     const dayStart = `${date}T00:00:00`;
     const dayEnd = `${date}T23:59:59`;
 
@@ -3490,6 +3530,539 @@ function PortalPhotoSection({ label, photos, highlight, description }) {
       {zoom && (
         <PhotoZoomViewer photos={photos} initialUrl={zoom.public_url} onClose={() => setZoom(null)} />
       )}
+    </div>
+  );
+}
+
+// =================================================================
+// DAILY VIEW — calendar-first drill-down
+// Calendar month → pick a date → see units cleaned that day → pick a unit → full detail
+// =================================================================
+function DailyView({ employee, onSignOut }) {
+  const [view, setView] = useState({ kind: 'calendar' });
+  const showMoney = canSeeMoney(employee);
+
+  if (view.kind === 'day') {
+    return <DailyDayDetail date={view.date} employee={employee} showMoney={showMoney}
+      onBack={() => setView({ kind: 'calendar' })}
+      onOpenUnit={(propertyId, unitId, unitLabel, propertyName) =>
+        setView({ kind: 'unit-day', date: view.date, propertyId, unitId, unitLabel, propertyName })} />;
+  }
+  if (view.kind === 'unit-day') {
+    return <DailyUnitDayDetail date={view.date} propertyId={view.propertyId} unitId={view.unitId}
+      unitLabel={view.unitLabel} propertyName={view.propertyName}
+      employee={employee} showMoney={showMoney}
+      onBack={() => setView({ kind: 'day', date: view.date })} />;
+  }
+
+  return <DailyCalendar employee={employee} onSignOut={onSignOut}
+    onPickDay={(date) => setView({ kind: 'day', date })} />;
+}
+
+// Helpers — local-time YYYY-MM-DD (avoids UTC midnight bugs)
+const toDateKey = (d) => {
+  const yr = d.getFullYear();
+  const mo = String(d.getMonth() + 1).padStart(2, '0');
+  const dy = String(d.getDate()).padStart(2, '0');
+  return `${yr}-${mo}-${dy}`;
+};
+
+function DailyCalendar({ employee, onSignOut, onPickDay }) {
+  const today = new Date();
+  const [viewMonth, setViewMonth] = useState(new Date(today.getFullYear(), today.getMonth(), 1));
+  const [activity, setActivity] = useState({}); // { 'YYYY-MM-DD': { shiftCount, propertyCount, hasDamage } }
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => { (async () => {
+    setLoaded(false);
+    // Pull all shifts in this month (and a buffer so leading/trailing days work)
+    const start = new Date(viewMonth.getFullYear(), viewMonth.getMonth() - 1, 1).toISOString();
+    const end   = new Date(viewMonth.getFullYear(), viewMonth.getMonth() + 2, 1).toISOString();
+    const { data: shifts } = await supabase
+      .from('shifts')
+      .select('id, start_time, customer_id, customer:customers(name), tasks(photos(kind)), work_blocks(tasks(photos(kind)))')
+      .gte('start_time', start)
+      .lt('start_time', end);
+
+    const map = {};
+    (shifts || []).forEach(s => {
+      const key = toDateKey(new Date(s.start_time));
+      if (!map[key]) map[key] = { shiftCount: 0, properties: new Set(), hasDamage: false };
+      map[key].shiftCount++;
+      if (s.customer_id) map[key].properties.add(s.customer_id);
+      // Check tasks (simple property)
+      (s.tasks || []).forEach(t => (t.photos || []).forEach(p => {
+        if (p.kind === 'damage') map[key].hasDamage = true;
+      }));
+      // Check work_blocks tasks (multi-unit)
+      (s.work_blocks || []).forEach(b => (b.tasks || []).forEach(t => (t.photos || []).forEach(p => {
+        if (p.kind === 'damage') map[key].hasDamage = true;
+      })));
+    });
+    // Convert sets to counts for rendering
+    const final = {};
+    Object.entries(map).forEach(([k, v]) => {
+      final[k] = { shiftCount: v.shiftCount, propertyCount: v.properties.size, hasDamage: v.hasDamage };
+    });
+    setActivity(final); setLoaded(true);
+  })(); }, [viewMonth]);
+
+  // Build the calendar grid
+  const year = viewMonth.getFullYear();
+  const month = viewMonth.getMonth();
+  const firstDay = new Date(year, month, 1);
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const startWeekday = firstDay.getDay(); // 0 = Sunday
+
+  const cells = [];
+  // Leading blanks
+  for (let i = 0; i < startWeekday; i++) cells.push(null);
+  // Days of the month
+  for (let d = 1; d <= daysInMonth; d++) {
+    const date = new Date(year, month, d);
+    cells.push({ day: d, key: toDateKey(date), date });
+  }
+  // Trailing blanks to fill last row
+  while (cells.length % 7 !== 0) cells.push(null);
+
+  const monthName = viewMonth.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+  const todayKey = toDateKey(today);
+
+  const goPrev = () => setViewMonth(new Date(year, month - 1, 1));
+  const goNext = () => setViewMonth(new Date(year, month + 1, 1));
+  const goToday = () => setViewMonth(new Date(today.getFullYear(), today.getMonth(), 1));
+
+  return (
+    <div className="pb-24">
+      <Header name={employee.name} onSignOut={onSignOut} role={employee.role} />
+      <div className="px-5 pt-6">
+        <div className="text-xs uppercase tracking-widest text-stone-400 font-mono mb-3">
+          Daily browser
+        </div>
+        <h1 className="text-4xl font-light text-stone-900 tracking-tight mb-6">
+          By <span className="font-serif italic text-amber-700">date</span>
+        </h1>
+
+        {/* Month navigator */}
+        <div className="flex items-center justify-between mb-4">
+          <button onClick={goPrev}
+            className="p-2 rounded-full bg-stone-100 hover:bg-stone-200 active:scale-95 transition-all">
+            <ChevronLeft size={18} className="text-stone-700" />
+          </button>
+          <div className="text-center">
+            <div className="font-serif text-xl text-stone-900">{monthName}</div>
+            <button onClick={goToday} className="text-xs font-mono text-amber-700 hover:text-amber-800 mt-0.5">
+              Jump to today
+            </button>
+          </div>
+          <button onClick={goNext}
+            className="p-2 rounded-full bg-stone-100 hover:bg-stone-200 active:scale-95 transition-all">
+            <ChevronRight size={18} className="text-stone-700" />
+          </button>
+        </div>
+
+        {/* Weekday headers */}
+        <div className="grid grid-cols-7 gap-1 mb-1">
+          {['S','M','T','W','T','F','S'].map((d, i) => (
+            <div key={i} className="text-center text-[10px] font-mono uppercase tracking-wider text-stone-400 py-1">
+              {d}
+            </div>
+          ))}
+        </div>
+
+        {/* Calendar grid */}
+        <div className="grid grid-cols-7 gap-1">
+          {cells.map((cell, i) => {
+            if (!cell) return <div key={i} />;
+            const a = activity[cell.key];
+            const isToday = cell.key === todayKey;
+            const isFuture = cell.date > today;
+            return (
+              <button key={i}
+                disabled={!a}
+                onClick={() => a && onPickDay(cell.key)}
+                className={`aspect-square rounded-xl flex flex-col items-center justify-center text-sm relative transition-all ${
+                  !a ? (isFuture ? 'text-stone-300' : 'text-stone-400 hover:bg-stone-50') :
+                  a.hasDamage ? 'bg-red-50 border-2 border-red-300 text-red-900 hover:border-red-500 active:scale-95' :
+                  'bg-amber-50 border-2 border-amber-300 text-amber-900 hover:border-amber-500 active:scale-95'
+                } ${isToday ? 'ring-2 ring-stone-900 ring-offset-1' : ''}`}>
+                <div className={`font-mono ${a ? 'font-bold' : ''}`}>{cell.day}</div>
+                {a && (
+                  <div className="text-[9px] font-mono mt-0.5 leading-none">
+                    {a.shiftCount} {a.shiftCount === 1 ? 'shift' : 'shifts'}
+                  </div>
+                )}
+                {a?.hasDamage && (
+                  <div className="absolute top-0.5 right-0.5 w-1.5 h-1.5 rounded-full bg-red-500" />
+                )}
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Legend */}
+        <div className="mt-4 flex items-center justify-center gap-4 text-xs text-stone-500 font-mono">
+          <div className="flex items-center gap-1.5">
+            <div className="w-3 h-3 rounded bg-amber-50 border-2 border-amber-300" />
+            Cleaned
+          </div>
+          <div className="flex items-center gap-1.5">
+            <div className="w-3 h-3 rounded bg-red-50 border-2 border-red-300" />
+            Damage
+          </div>
+          <div className="flex items-center gap-1.5">
+            <div className="w-3 h-3 rounded ring-2 ring-stone-900" />
+            Today
+          </div>
+        </div>
+
+        {!loaded && <div className="text-center mt-6 text-xs text-stone-400 font-mono">Loading…</div>}
+        {loaded && Object.keys(activity).length === 0 && (
+          <div className="mt-6 text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
+            No cleanings recorded this month.
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Day detail: shows all properties + units cleaned on this date
+function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit }) {
+  const [data, setData] = useState(null);
+
+  useEffect(() => { (async () => {
+    const dayStart = `${date}T00:00:00`;
+    const dayEnd   = `${date}T23:59:59`;
+
+    // Get all shifts that started this day
+    const { data: shifts } = await supabase
+      .from('shifts')
+      .select('*, employee:employees(id,name), customer:customers(id,name,property_type,bill_rate_hourly), work_blocks(id, start_time, end_time, bill_rate_at_work, unit:units(id, label), party:parties(id, label, full_name), tasks(*, photos(*)))')
+      .gte('start_time', dayStart)
+      .lte('start_time', dayEnd)
+      .order('start_time');
+
+    // Group by property → unit
+    // For multi_unit shifts we use work_blocks. For simple shifts, group by property only.
+    const groups = {};  // { propertyId: { property, units: { unitId: { unitLabel, employees: Set, totalMs, hasDamage, photoCount } } } }
+
+    (shifts || []).forEach(s => {
+      if (!s.customer_id) return;
+      const propId = s.customer_id;
+      if (!groups[propId]) {
+        groups[propId] = { property: s.customer, units: {}, simpleShifts: [] };
+      }
+      const propGroup = groups[propId];
+
+      if (s.customer.property_type === 'multi_unit') {
+        (s.work_blocks || []).forEach(b => {
+          if (!b.unit) return;
+          const uId = b.unit.id;
+          if (!propGroup.units[uId]) {
+            propGroup.units[uId] = {
+              unitId: uId, unitLabel: b.unit.label,
+              employees: new Set(), totalMs: 0, hasDamage: false, photoCount: 0, blocks: []
+            };
+          }
+          const ug = propGroup.units[uId];
+          ug.employees.add(s.employee?.name || '?');
+          ug.blocks.push({ block: b, employee: s.employee, rate: s.customer.bill_rate_hourly });
+          if (b.end_time) {
+            ug.totalMs += new Date(b.end_time) - new Date(b.start_time);
+          } else {
+            ug.totalMs += new Date() - new Date(b.start_time);
+          }
+          (b.tasks || []).forEach(t => (t.photos || []).forEach(p => {
+            ug.photoCount++;
+            if (p.kind === 'damage') ug.hasDamage = true;
+          }));
+        });
+      } else {
+        propGroup.simpleShifts.push(s);
+      }
+    });
+
+    setData({ groups, shifts: shifts || [] });
+  })(); }, [date]);
+
+  if (!data) return <Splash text="Loading…" />;
+
+  const dateObj = new Date(date + 'T12:00:00');
+  const propIds = Object.keys(data.groups);
+  const totalShifts = data.shifts.length;
+  const totalProperties = propIds.length;
+
+  return (
+    <div className="pb-24">
+      <div className="bg-stone-900 text-stone-50 px-5 pt-5 pb-6">
+        <button onClick={onBack} className="flex items-center gap-2 text-stone-400 text-sm mb-4 hover:text-stone-50">
+          <ArrowLeft size={16} /> Back to calendar
+        </button>
+        <div className="text-xs uppercase tracking-widest text-stone-400 font-mono mb-2">
+          {dateObj.toLocaleDateString('en-US', { weekday:'long' })}
+        </div>
+        <h1 className="font-serif text-3xl mb-1">
+          {dateObj.toLocaleDateString('en-US', { month:'long', day:'numeric', year:'numeric' })}
+        </h1>
+        <div className="text-sm text-stone-300 mt-2">
+          {totalShifts} {totalShifts === 1 ? 'shift' : 'shifts'} across {totalProperties} {totalProperties === 1 ? 'property' : 'properties'}
+        </div>
+      </div>
+
+      <div className="px-5 pt-6">
+        {propIds.length === 0 ? (
+          <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
+            No cleanings on this date.
+          </div>
+        ) : (
+          <div className="space-y-6">
+            {propIds.map(propId => {
+              const pg = data.groups[propId];
+              const unitIds = Object.keys(pg.units);
+              const sortedUnits = unitIds.map(id => pg.units[id])
+                .sort((a, b) => naturalCompare(a.unitLabel, b.unitLabel));
+
+              return (
+                <div key={propId}>
+                  <div className="flex items-baseline justify-between mb-3 pb-2 border-b border-stone-200">
+                    <h3 className="font-serif text-xl text-stone-900 flex items-center gap-2">
+                      <Building2 size={16} /> {pg.property.name}
+                    </h3>
+                    <span className="text-xs font-mono text-stone-500">
+                      {sortedUnits.length || pg.simpleShifts.length} {(sortedUnits.length || pg.simpleShifts.length) === 1 ? 'cleaning' : 'cleanings'}
+                    </span>
+                  </div>
+
+                  {/* Multi-unit: list of units */}
+                  {sortedUnits.length > 0 && (
+                    <div className="space-y-2">
+                      {sortedUnits.map(u => (
+                        <button key={u.unitId}
+                          onClick={() => onOpenUnit(propId, u.unitId, u.unitLabel, pg.property.name)}
+                          className={`w-full text-left p-4 rounded-2xl border transition-colors ${
+                            u.hasDamage ? 'bg-red-50/50 border-red-200 hover:border-red-400' : 'bg-white border-stone-200 hover:border-stone-400'
+                          }`}>
+                          <div className="flex items-center justify-between">
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center gap-2 flex-wrap mb-1">
+                                <span className="font-serif text-lg text-stone-900">{u.unitLabel}</span>
+                                {u.hasDamage && (
+                                  <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-red-100 text-red-700">
+                                    ⚠ Damage
+                                  </span>
+                                )}
+                              </div>
+                              <div className="text-xs text-stone-500 font-mono">
+                                {fmtTimeShort(u.totalMs)} total · {u.employees.size} {u.employees.size === 1 ? 'cleaner' : 'cleaners'} · {u.photoCount} {u.photoCount === 1 ? 'photo' : 'photos'}
+                              </div>
+                              <div className="text-xs text-stone-600 mt-1">
+                                {[...u.employees].join(', ')}
+                              </div>
+                            </div>
+                            <ChevronRight size={16} className="text-stone-400 flex-shrink-0 ml-2" />
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Simple-property shifts: just list them as-is */}
+                  {pg.simpleShifts.length > 0 && (
+                    <div className="space-y-2">
+                      {pg.simpleShifts.map(s => {
+                        const dur = (s.end_time ? new Date(s.end_time) : new Date()) - new Date(s.start_time);
+                        return (
+                          <div key={s.id} className="p-4 rounded-2xl bg-white border border-stone-200">
+                            <div className="font-serif text-base text-stone-900">{s.employee?.name}</div>
+                            <div className="text-xs text-stone-500 font-mono mt-1">
+                              {fmtClock(s.start_time)}{s.end_time && ` — ${fmtClock(s.end_time)}`} · {fmtTimeShort(dur)}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+
+  // Helper hoisted so we can call it inside the JSX above
+  // (onOpenUnit comes in as a prop from the parent — see DailyView)
+}
+
+// Unit + day detail — full breakdown of who cleaned what at that unit on that date, with photos
+function DailyUnitDayDetail({ date, propertyId, unitId, unitLabel, propertyName, employee, showMoney, onBack }) {
+  const [blocks, setBlocks] = useState([]);
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => { (async () => {
+    setLoaded(false);
+    const dayStart = `${date}T00:00:00`;
+    const dayEnd   = `${date}T23:59:59`;
+    const { data } = await supabase
+      .from('work_blocks')
+      .select('*, party:parties(label, full_name), shift:shifts!inner(customer_id, employee:employees(id,name), bill_rate_at_work, customer:customers(bill_rate_hourly)), tasks(*, photos(*))')
+      .eq('unit_id', unitId)
+      .gte('start_time', dayStart)
+      .lte('start_time', dayEnd)
+      .order('start_time');
+    const filtered = (data || []).filter(b => b.shift?.customer_id === propertyId);
+    setBlocks(filtered);
+    setLoaded(true);
+  })(); }, [date, unitId, propertyId]);
+
+  if (!loaded) return <Splash text="Loading…" />;
+
+  // Aggregate stats
+  const employeeTimes = {}; // name -> totalMs
+  let totalMs = 0;
+  let totalBillable = 0;
+  const allTasks = [];
+  blocks.forEach(b => {
+    const dur = (b.end_time ? new Date(b.end_time) : new Date()) - new Date(b.start_time);
+    totalMs += dur;
+    const empName = b.shift?.employee?.name || '?';
+    employeeTimes[empName] = (employeeTimes[empName] || 0) + dur;
+    if (showMoney && b.end_time) {
+      const rate = b.bill_rate_at_work || b.shift?.customer?.bill_rate_hourly || 0;
+      totalBillable += (dur / 1000 / 3600) * rate;
+    }
+    (b.tasks || []).forEach(t => allTasks.push({ ...t, employee: empName, party: b.party }));
+  });
+
+  // Group tasks by party for display
+  const partyGroups = {};
+  blocks.forEach(b => {
+    const partyKey = b.party?.id || 'no-party';
+    if (!partyGroups[partyKey]) {
+      partyGroups[partyKey] = { party: b.party, blocks: [] };
+    }
+    partyGroups[partyKey].blocks.push(b);
+  });
+
+  const dateObj = new Date(date + 'T12:00:00');
+
+  return (
+    <div className="pb-24">
+      <style>{`
+        @media print {
+          body { background: white !important; }
+          .no-print { display: none !important; }
+        }
+      `}</style>
+
+      <div className="no-print bg-stone-900 text-stone-50 px-5 py-4 flex items-center justify-between">
+        <button onClick={onBack} className="flex items-center gap-2 text-stone-400 text-sm hover:text-stone-50">
+          <ArrowLeft size={16} /> Back
+        </button>
+        <button onClick={() => window.print()}
+          className="px-4 py-2 rounded-full bg-stone-50 text-stone-900 text-sm font-medium flex items-center gap-2">
+          <Printer size={14} /> Print
+        </button>
+      </div>
+
+      <div className="px-5 pt-6">
+        <div className="text-xs uppercase tracking-widest text-stone-400 font-mono mb-2">
+          {dateObj.toLocaleDateString('en-US', { weekday:'long', month:'long', day:'numeric', year:'numeric' })}
+        </div>
+        <h1 className="font-serif text-3xl text-stone-900 mb-1">{unitLabel}</h1>
+        <div className="text-sm text-stone-600 flex items-center gap-1.5">
+          <Building2 size={13} /> {propertyName}
+        </div>
+
+        {/* Stats summary */}
+        <div className={`grid ${showMoney ? 'grid-cols-3' : 'grid-cols-2'} gap-3 mt-6 mb-6`}>
+          <div className="p-4 rounded-2xl bg-white border border-stone-200">
+            <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-1">Total time</div>
+            <div className="text-2xl font-serif">{fmtTimeShort(totalMs)}</div>
+          </div>
+          <div className="p-4 rounded-2xl bg-white border border-stone-200">
+            <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-1">Cleaners</div>
+            <div className="text-2xl font-serif">{Object.keys(employeeTimes).length}</div>
+          </div>
+          {showMoney && (
+            <div className="p-4 rounded-2xl bg-amber-50 border border-amber-200">
+              <div className="text-xs uppercase tracking-wider font-mono text-amber-700 mb-1">Billable</div>
+              <div className="text-2xl font-serif text-amber-900">{fmtMoney(totalBillable)}</div>
+            </div>
+          )}
+        </div>
+
+        {/* Per-employee summary */}
+        <div className="mb-6">
+          <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-3">Time by cleaner</div>
+          <div className="space-y-2">
+            {Object.entries(employeeTimes)
+              .sort((a, b) => b[1] - a[1])
+              .map(([name, ms]) => (
+                <div key={name} className="flex items-center justify-between p-3 bg-white border border-stone-200 rounded-xl">
+                  <div className="flex items-center gap-2">
+                    <User size={14} className="text-stone-400" />
+                    <span className="text-stone-900">{name}</span>
+                  </div>
+                  <span className="font-mono text-sm text-stone-700">{fmtTimeShort(ms)}</span>
+                </div>
+              ))}
+          </div>
+        </div>
+
+        {/* Per-party detail */}
+        <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-3">Cleaning details</div>
+        {blocks.length === 0 ? (
+          <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
+            No work blocks recorded.
+          </div>
+        ) : (
+          <div className="space-y-4">
+            {Object.values(partyGroups).map((pg, i) => (
+              <div key={i} className="p-4 rounded-2xl bg-white border border-stone-200">
+                {pg.party && (
+                  <div className="font-serif text-lg text-stone-900 mb-2">
+                    {pg.party.label}
+                    {pg.party.full_name && <span className="text-sm text-stone-500 ml-2">{pg.party.full_name}</span>}
+                  </div>
+                )}
+                <div className="space-y-3">
+                  {pg.blocks.map(b => {
+                    const dur = (b.end_time ? new Date(b.end_time) : new Date()) - new Date(b.start_time);
+                    const billable = showMoney && b.end_time
+                      ? (dur / 1000 / 3600) * (b.bill_rate_at_work || b.shift?.customer?.bill_rate_hourly || 0)
+                      : 0;
+                    return (
+                      <div key={b.id} className="pb-3 border-b border-stone-100 last:border-b-0 last:pb-0">
+                        <div className="flex items-start justify-between mb-2 flex-wrap gap-2">
+                          <div className="flex items-center gap-2">
+                            <User size={13} className="text-stone-400" />
+                            <span className="font-medium text-stone-900 text-sm">{b.shift?.employee?.name}</span>
+                          </div>
+                          <div className="text-xs font-mono text-stone-500">
+                            {fmtClock(b.start_time)}{b.end_time && ` — ${fmtClock(b.end_time)}`} · {fmtTimeShort(dur)}
+                            {showMoney && billable > 0 && <span className="text-emerald-700 ml-2">{fmtMoney(billable)}</span>}
+                          </div>
+                        </div>
+                        {b.work_notes && (
+                          <div className="text-xs text-stone-600 italic mb-2 pl-5">"{b.work_notes}"</div>
+                        )}
+                        {b.tasks?.length > 0 && (
+                          <div className="pl-5 space-y-2">
+                            {b.tasks.map(t => <TaskDetail key={t.id} task={t} compact />)}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

@@ -11,9 +11,10 @@ import {
 // =================================================================
 // 🔧 PASTE YOUR SUPABASE KEYS HERE
 // =================================================================
-const SUPABASE_URL = "https://bbaynvqnbkjyqhzhhypr.supabase.co"; const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJiYXludnFuYmtqeXFoemhoeXByIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc0NzQ2MTMsImV4cCI6MjA5MzA1MDYxM30.ZXUoHFj_IwMe6rX8RxK8Dj4kAB9AS7X9xZAhQ84wDEk";
-const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+const SUPABASE_URL = "https://bbaynvqnbkjyqhzhhypr.supabase.co/rest/v1/";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJiYXludnFuYmtqeXFoemhoeXByIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc0NzQ2MTMsImV4cCI6MjA5MzA1MDYxM30.ZXUoHFj_IwMe6rX8RxK8Dj4kAB9AS7X9xZAhQ84wDEk";
 
+const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 const PHOTO_BUCKET = 'task-photos';
 
 // =================================================================
@@ -4168,16 +4169,21 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit }) {
 
 // Unit + day detail — full breakdown of who cleaned what at that unit on that date, with photos
 function DailyUnitDayDetail({ date, propertyId, unitId, unitLabel, propertyName, employee, showMoney, onBack }) {
+  const canEdit = employee?.role === 'owner' || employee?.role === 'manager';
   const [blocks, setBlocks] = useState([]);
   const [loaded, setLoaded] = useState(false);
+  const [editingBlock, setEditingBlock] = useState(null);
+  const [deletingBlock, setDeletingBlock] = useState(null);
+  const [deletingShift, setDeletingShift] = useState(null); // shift obj
+  const [busy, setBusy] = useState(false);
 
-  useEffect(() => { (async () => {
+  const reload = async () => {
     setLoaded(false);
     const dayStart = `${date}T00:00:00`;
     const dayEnd   = `${date}T23:59:59`;
     const { data } = await supabase
       .from('work_blocks')
-      .select('*, party:parties(label, full_name), shift:shifts!inner(customer_id, employee:employees(id,name), bill_rate_at_work, customer:customers(bill_rate_hourly)), tasks(*, photos(*))')
+      .select('*, party:parties(label, full_name), shift:shifts!inner(id, customer_id, start_time, end_time, employee:employees(id,name), bill_rate_at_work, customer:customers(bill_rate_hourly, name)), tasks(*, photos(*))')
       .eq('unit_id', unitId)
       .gte('start_time', dayStart)
       .lte('start_time', dayEnd)
@@ -4185,7 +4191,38 @@ function DailyUnitDayDetail({ date, propertyId, unitId, unitLabel, propertyName,
     const filtered = (data || []).filter(b => b.shift?.customer_id === propertyId);
     setBlocks(filtered);
     setLoaded(true);
-  })(); }, [date, unitId, propertyId]);
+  };
+
+  useEffect(() => { reload(); /* eslint-disable-next-line */ }, [date, unitId, propertyId]);
+
+  const saveBlockTimes = async (block, startISO, endISO) => {
+    setBusy(true);
+    const { error } = await supabase.from('work_blocks')
+      .update({ start_time: startISO, end_time: endISO || null })
+      .eq('id', block.id);
+    setBusy(false);
+    if (error) { alert('Could not save: ' + error.message); return; }
+    setEditingBlock(null);
+    reload();
+  };
+
+  const deleteBlock = async (block) => {
+    setBusy(true);
+    const { error } = await supabase.from('work_blocks').delete().eq('id', block.id);
+    setBusy(false);
+    if (error) { alert('Could not delete: ' + error.message); return; }
+    setDeletingBlock(null);
+    reload();
+  };
+
+  const deleteShift = async (shift) => {
+    setBusy(true);
+    const { error } = await supabase.from('shifts').delete().eq('id', shift.id);
+    setBusy(false);
+    if (error) { alert('Could not delete: ' + error.message); return; }
+    setDeletingShift(null);
+    reload();
+  };
 
   if (!loaded) return <Splash text="Loading…" />;
 
@@ -4324,6 +4361,23 @@ function DailyUnitDayDetail({ date, propertyId, unitId, unitLabel, propertyName,
                             {b.tasks.map(t => <TaskDetail key={t.id} task={t} compact />)}
                           </div>
                         )}
+                        {/* Per-block edit/delete actions */}
+                        {canEdit && (
+                          <div className="mt-3 pl-5 flex gap-2 no-print">
+                            <button onClick={() => setEditingBlock(b)}
+                              className="px-3 py-1.5 rounded-lg bg-stone-50 hover:bg-stone-100 text-stone-700 text-xs font-medium flex items-center gap-1.5">
+                              <Edit2 size={11} /> Edit times
+                            </button>
+                            <button onClick={() => setDeletingBlock(b)}
+                              className="px-3 py-1.5 rounded-lg border border-red-200 text-red-700 text-xs font-medium flex items-center gap-1.5 hover:bg-red-50">
+                              <Trash2 size={11} /> Delete block
+                            </button>
+                            <button onClick={() => setDeletingShift(b.shift)}
+                              className="px-3 py-1.5 rounded-lg border border-red-200 text-red-700 text-xs font-medium flex items-center gap-1.5 hover:bg-red-50 ml-auto">
+                              <Trash2 size={11} /> Delete this shift
+                            </button>
+                          </div>
+                        )}
                       </div>
                     );
                   })}
@@ -4333,6 +4387,36 @@ function DailyUnitDayDetail({ date, propertyId, unitId, unitLabel, propertyName,
           </div>
         )}
       </div>
+
+      {/* Modals (reused from ShiftDetail) */}
+      {editingBlock && (
+        <TimeEditModal
+          title="Edit work block times"
+          subtitle={`${unitLabel} · ${editingBlock.party?.label || ''}`}
+          startTime={editingBlock.start_time}
+          endTime={editingBlock.end_time}
+          busy={busy}
+          onSave={(s, e) => saveBlockTimes(editingBlock, s, e)}
+          onClose={() => setEditingBlock(null)} />
+      )}
+      {deletingBlock && (
+        <DeleteConfirmModal
+          title="Delete this work block?"
+          description="This removes the work block and all its tasks and photos, but keeps the rest of the shift intact."
+          itemSummary={`${unitLabel} · ${deletingBlock.party?.label || ''} · ${deletingBlock.shift?.employee?.name || ''}`}
+          busy={busy}
+          onConfirm={() => deleteBlock(deletingBlock)}
+          onClose={() => setDeletingBlock(null)} />
+      )}
+      {deletingShift && (
+        <DeleteConfirmModal
+          title="Delete this entire shift?"
+          description="This permanently deletes the whole shift for this cleaner, including ALL work blocks (other apartments too, not just this one), tasks, and photos. This cannot be undone."
+          itemSummary={`${deletingShift.employee?.name} · ${fmtDate(deletingShift.start_time)} · ${deletingShift.customer?.name || ''}`}
+          busy={busy}
+          onConfirm={() => deleteShift(deletingShift)}
+          onClose={() => setDeletingShift(null)} />
+      )}
     </div>
   );
 }

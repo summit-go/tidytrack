@@ -11,10 +11,9 @@ import {
 // =================================================================
 // 🔧 PASTE YOUR SUPABASE KEYS HERE
 // =================================================================
-const SUPABASE_URL = "https://bbaynvqnbkjyqhzhhypr.supabase.co";
-const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJiYXludnFuYmtqeXFoemhoeXByIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc0NzQ2MTMsImV4cCI6MjA5MzA1MDYxM30.ZXUoHFj_IwMe6rX8RxK8Dj4kAB9AS7X9xZAhQ84wDEk";
-
+const SUPABASE_URL = "https://bbaynvqnbkjyqhzhhypr.supabase.co"; const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJiYXludnFuYmtqeXFoemhoeXByIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc0NzQ2MTMsImV4cCI6MjA5MzA1MDYxM30.ZXUoHFj_IwMe6rX8RxK8Dj4kAB9AS7X9xZAhQ84wDEk";
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
 const PHOTO_BUCKET = 'task-photos';
 
 // =================================================================
@@ -1497,10 +1496,17 @@ function StatCard({ label, value, unit, highlight, accent }) {
 // =================================================================
 function ShiftDetail({ shiftId, viewerRole, onBack }) {
   const showMoney = viewerRole === 'owner';
+  const canEdit = viewerRole === 'owner' || viewerRole === 'manager';
   const [shift, setShift] = useState(null);
   const [workBlocks, setWorkBlocks] = useState([]);
   const [tasks, setTasks] = useState([]);
-  useEffect(() => { (async () => {
+  const [editingShift, setEditingShift] = useState(false);
+  const [deletingShift, setDeletingShift] = useState(false);
+  const [editingBlock, setEditingBlock] = useState(null); // block obj
+  const [deletingBlock, setDeletingBlock] = useState(null); // block obj
+  const [busy, setBusy] = useState(false);
+
+  const reload = async () => {
     const { data: s } = await supabase
       .from('shifts').select('*, employee:employees(name), customer:customers(name,address,property_type,bill_rate_hourly)')
       .eq('id', shiftId).single();
@@ -1518,7 +1524,49 @@ function ShiftDetail({ shiftId, viewerRole, onBack }) {
         .order('start_time');
       setTasks(ts || []);
     }
-  })(); }, [shiftId]);
+  };
+  useEffect(() => { reload(); /* eslint-disable-next-line */ }, [shiftId]);
+
+  const saveShiftTimes = async (startISO, endISO) => {
+    setBusy(true);
+    const { error } = await supabase.from('shifts')
+      .update({ start_time: startISO, end_time: endISO || null })
+      .eq('id', shiftId);
+    setBusy(false);
+    if (error) { alert('Could not save: ' + error.message); return; }
+    setEditingShift(false);
+    reload();
+  };
+
+  const deleteShift = async () => {
+    setBusy(true);
+    // Cascade should handle work_blocks/tasks/photos via the original schema
+    const { error } = await supabase.from('shifts').delete().eq('id', shiftId);
+    setBusy(false);
+    if (error) { alert('Could not delete: ' + error.message); return; }
+    setDeletingShift(false);
+    onBack();
+  };
+
+  const saveBlockTimes = async (block, startISO, endISO) => {
+    setBusy(true);
+    const { error } = await supabase.from('work_blocks')
+      .update({ start_time: startISO, end_time: endISO || null })
+      .eq('id', block.id);
+    setBusy(false);
+    if (error) { alert('Could not save: ' + error.message); return; }
+    setEditingBlock(null);
+    reload();
+  };
+
+  const deleteBlock = async (block) => {
+    setBusy(true);
+    const { error } = await supabase.from('work_blocks').delete().eq('id', block.id);
+    setBusy(false);
+    if (error) { alert('Could not delete: ' + error.message); return; }
+    setDeletingBlock(null);
+    reload();
+  };
 
   if (!shift) return <Splash text="Loading…" />;
   const dur = (shift.end_time ? new Date(shift.end_time) : new Date()) - new Date(shift.start_time);
@@ -1560,7 +1608,10 @@ function ShiftDetail({ shiftId, viewerRole, onBack }) {
               <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">No work blocks.</div>
             ) : (
               <div className="space-y-3">
-                {workBlocks.map(b => <WorkBlockDetail key={b.id} block={b} rate={shift.customer?.bill_rate_hourly} showMoney={showMoney} />)}
+                {workBlocks.map(b => <WorkBlockDetail key={b.id} block={b} rate={shift.customer?.bill_rate_hourly} showMoney={showMoney}
+                  canEdit={canEdit}
+                  onEdit={() => setEditingBlock(b)}
+                  onDelete={() => setDeletingBlock(b)} />)}
               </div>
             )}
           </>
@@ -1574,12 +1625,208 @@ function ShiftDetail({ shiftId, viewerRole, onBack }) {
             )}
           </>
         )}
+
+        {/* Owner/manager-only edit & delete actions for the whole shift */}
+        {canEdit && (
+          <div className="mt-8 pt-6 border-t border-stone-200 space-y-2">
+            <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-3">Shift actions</div>
+            <button onClick={() => setEditingShift(true)}
+              className="w-full py-3 rounded-2xl bg-stone-100 hover:bg-stone-200 text-stone-800 text-sm font-medium flex items-center justify-center gap-2 disabled:opacity-50"
+              disabled={busy}>
+              <Edit2 size={14} /> Edit clock-in / clock-out times
+            </button>
+            <button onClick={() => setDeletingShift(true)}
+              className="w-full py-3 rounded-2xl border-2 border-red-200 text-red-700 text-sm font-medium flex items-center justify-center gap-2 disabled:opacity-50"
+              disabled={busy}>
+              <Trash2 size={14} /> Delete shift
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* Modals */}
+      {editingShift && shift && (
+        <TimeEditModal
+          title="Edit shift times"
+          subtitle={`${shift.employee?.name} · ${shift.customer?.name || 'No property'}`}
+          startTime={shift.start_time}
+          endTime={shift.end_time}
+          busy={busy}
+          onSave={saveShiftTimes}
+          onClose={() => setEditingShift(false)} />
+      )}
+      {deletingShift && shift && (
+        <DeleteConfirmModal
+          title="Delete this shift?"
+          description="This will permanently delete the entire shift, including all work blocks, tasks, and photos. This cannot be undone."
+          itemSummary={`${shift.employee?.name} · ${fmtDate(shift.start_time)} · ${shift.customer?.name || 'No property'}`}
+          busy={busy}
+          onConfirm={deleteShift}
+          onClose={() => setDeletingShift(false)} />
+      )}
+      {editingBlock && (
+        <TimeEditModal
+          title="Edit work block times"
+          subtitle={`${editingBlock.unit?.label || ''} · ${editingBlock.party?.label || ''}`}
+          startTime={editingBlock.start_time}
+          endTime={editingBlock.end_time}
+          busy={busy}
+          onSave={(s, e) => saveBlockTimes(editingBlock, s, e)}
+          onClose={() => setEditingBlock(null)} />
+      )}
+      {deletingBlock && (
+        <DeleteConfirmModal
+          title="Delete this work block?"
+          description="This removes the work block and all its tasks and photos, but keeps the rest of the shift intact."
+          itemSummary={`${deletingBlock.unit?.label || ''} · ${deletingBlock.party?.label || ''}`}
+          busy={busy}
+          onConfirm={() => deleteBlock(deletingBlock)}
+          onClose={() => setDeletingBlock(null)} />
+      )}
+    </div>
+  );
+}
+
+// =================================================================
+// Edit/delete modals
+// =================================================================
+
+// Convert an ISO timestamp into the value format the <input type="datetime-local"> expects:
+// YYYY-MM-DDTHH:MM in *local* time (no timezone suffix).
+function isoToLocalInput(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+// And the reverse: convert "YYYY-MM-DDTHH:MM" local-time string into a UTC ISO string.
+function localInputToISO(local) {
+  if (!local) return null;
+  // new Date('YYYY-MM-DDTHH:MM') is interpreted as local time
+  return new Date(local).toISOString();
+}
+
+function TimeEditModal({ title, subtitle, startTime, endTime, busy, onSave, onClose }) {
+  const [startVal, setStartVal] = useState(isoToLocalInput(startTime));
+  const [endVal, setEndVal] = useState(isoToLocalInput(endTime));
+  const [error, setError] = useState('');
+
+  const handleSave = () => {
+    setError('');
+    if (!startVal) { setError('Start time is required.'); return; }
+    const startISO = localInputToISO(startVal);
+    const endISO = endVal ? localInputToISO(endVal) : null;
+    if (endISO && new Date(endISO) <= new Date(startISO)) {
+      setError('End time must be after start time.');
+      return;
+    }
+    onSave(startISO, endISO);
+  };
+
+  const clearEnd = () => setEndVal('');
+
+  return (
+    <div className="fixed inset-0 bg-stone-900/80 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
+      <div className="bg-stone-50 w-full sm:max-w-md sm:rounded-3xl rounded-t-3xl max-h-[90vh] flex flex-col">
+        <div className="flex items-center justify-between p-5 border-b border-stone-200">
+          <div>
+            <div className="font-serif text-xl text-stone-900">{title}</div>
+            {subtitle && <div className="text-xs text-stone-500 font-mono mt-0.5">{subtitle}</div>}
+          </div>
+          <button onClick={onClose} className="p-2 rounded-full hover:bg-stone-100">
+            <X size={20} className="text-stone-600" />
+          </button>
+        </div>
+        <div className="flex-1 overflow-y-auto p-5 space-y-5">
+          <div>
+            <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Start time</label>
+            <input type="datetime-local" value={startVal} onChange={(e) => setStartVal(e.target.value)}
+              className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white focus:outline-none focus:border-stone-900 text-stone-900 font-mono" />
+          </div>
+          <div>
+            <div className="flex items-baseline justify-between mb-2">
+              <label className="text-xs uppercase tracking-wider text-stone-500 font-mono">End time</label>
+              {endVal && (
+                <button onClick={clearEnd} type="button"
+                  className="text-xs font-mono text-stone-500 hover:text-stone-900">Clear (still active)</button>
+              )}
+            </div>
+            <input type="datetime-local" value={endVal} onChange={(e) => setEndVal(e.target.value)}
+              className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white focus:outline-none focus:border-stone-900 text-stone-900 font-mono" />
+            {!endVal && (
+              <p className="text-xs text-stone-500 mt-1">Empty = still active (no clock-out yet).</p>
+            )}
+          </div>
+          {error && (
+            <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-red-700 text-sm flex items-start gap-2">
+              <AlertCircle size={16} className="flex-shrink-0 mt-0.5" /><span>{error}</span>
+            </div>
+          )}
+        </div>
+        <div className="p-5 border-t border-stone-200 flex gap-2">
+          <button onClick={onClose} disabled={busy}
+            className="flex-1 py-3 rounded-2xl bg-stone-100 text-stone-700 font-medium disabled:opacity-50">
+            Cancel
+          </button>
+          <button onClick={handleSave} disabled={busy}
+            className="flex-1 py-3 rounded-2xl bg-stone-900 text-stone-50 font-medium disabled:opacity-50">
+            {busy ? 'Saving…' : 'Save changes'}
+          </button>
+        </div>
       </div>
     </div>
   );
 }
 
-function WorkBlockDetail({ block, rate, showMoney }) {
+function DeleteConfirmModal({ title, description, itemSummary, busy, onConfirm, onClose }) {
+  const [typed, setTyped] = useState('');
+  const matches = typed.trim().toUpperCase() === 'DELETE';
+
+  return (
+    <div className="fixed inset-0 bg-stone-900/80 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
+      <div className="bg-stone-50 w-full sm:max-w-md sm:rounded-3xl rounded-t-3xl max-h-[90vh] flex flex-col">
+        <div className="flex items-center justify-between p-5 border-b border-stone-200">
+          <div className="flex items-center gap-2">
+            <AlertCircle className="text-red-600" size={20} />
+            <div className="font-serif text-xl text-stone-900">{title}</div>
+          </div>
+          <button onClick={onClose} className="p-2 rounded-full hover:bg-stone-100">
+            <X size={20} className="text-stone-600" />
+          </button>
+        </div>
+        <div className="flex-1 overflow-y-auto p-5 space-y-4">
+          {itemSummary && (
+            <div className="p-3 rounded-xl bg-stone-100 text-stone-800 text-sm font-mono">
+              {itemSummary}
+            </div>
+          )}
+          <p className="text-sm text-stone-700">{description}</p>
+          <div>
+            <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">
+              Type <code className="font-mono bg-stone-200 px-1.5 py-0.5 rounded">DELETE</code> to confirm
+            </label>
+            <input type="text" value={typed} onChange={(e) => setTyped(e.target.value)}
+              placeholder="DELETE"
+              className="w-full px-4 py-3 rounded-xl border-2 border-stone-300 bg-white focus:outline-none focus:border-red-500 text-stone-900 font-mono uppercase tracking-widest" />
+          </div>
+        </div>
+        <div className="p-5 border-t border-stone-200 flex gap-2">
+          <button onClick={onClose} disabled={busy}
+            className="flex-1 py-3 rounded-2xl bg-stone-100 text-stone-700 font-medium disabled:opacity-50">
+            Cancel
+          </button>
+          <button onClick={onConfirm} disabled={busy || !matches}
+            className="flex-1 py-3 rounded-2xl bg-red-600 text-white font-medium disabled:opacity-40 disabled:cursor-not-allowed">
+            {busy ? 'Deleting…' : 'Delete forever'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function WorkBlockDetail({ block, rate, showMoney, canEdit, onEdit, onDelete }) {
   const dur = (block.end_time ? new Date(block.end_time) : new Date()) - new Date(block.start_time);
   const blockRate = block.bill_rate_at_work || rate || 0;
   const billable = block.end_time ? (dur / 1000 / 3600) * blockRate : 0;
@@ -1605,6 +1852,22 @@ function WorkBlockDetail({ block, rate, showMoney }) {
       {block.tasks?.length > 0 && (
         <div className="mt-3 pt-3 border-t border-stone-100 space-y-3">
           {block.tasks.map(t => <TaskDetail key={t.id} task={t} compact />)}
+        </div>
+      )}
+      {canEdit && (onEdit || onDelete) && (
+        <div className="mt-3 pt-3 border-t border-stone-100 flex gap-2">
+          {onEdit && (
+            <button onClick={onEdit}
+              className="flex-1 py-2 rounded-xl bg-stone-50 hover:bg-stone-100 text-stone-700 text-xs font-medium flex items-center justify-center gap-1.5">
+              <Edit2 size={12} /> Edit times
+            </button>
+          )}
+          {onDelete && (
+            <button onClick={onDelete}
+              className="flex-1 py-2 rounded-xl border border-red-200 text-red-700 text-xs font-medium flex items-center justify-center gap-1.5 hover:bg-red-50">
+              <Trash2 size={12} /> Delete
+            </button>
+          )}
         </div>
       )}
     </div>

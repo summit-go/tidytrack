@@ -11,12 +11,13 @@ import {
 // =================================================================
 // 🔧 PASTE YOUR SUPABASE KEYS HERE
 // =================================================================
-const SUPABASE_URL = "https://bbaynvqnbkjyqhzhhypr.supabase.co";
+const SUPABASE_URL = "https://bbaynvqnbkjyqhzhhypr.supabase.co/rest";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJiYXludnFuYmtqeXFoemhoeXByIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc0NzQ2MTMsImV4cCI6MjA5MzA1MDYxM30.ZXUoHFj_IwMe6rX8RxK8Dj4kAB9AS7X9xZAhQ84wDEk";
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 const PHOTO_BUCKET = 'task-photos';
 const ASSIGNMENT_BUCKET = 'assignments';
+const PM_UPLOAD_BUCKET = 'pm-uploads';
 const ASSIGNMENT_MAX_SIZE_MB = 20; // sanity cap on upload size
 
 // =================================================================
@@ -1158,6 +1159,38 @@ async function uploadAssignmentFile(file, customerId) {
   if (upErr) throw upErr;
   const { data: { publicUrl } } = supabase.storage.from(ASSIGNMENT_BUCKET).getPublicUrl(path);
   return { path, publicUrl, kind: isPdf ? 'pdf' : 'image' };
+}
+
+// Upload to the PM bucket — used for both PM photo uploads and PM assignment uploads
+async function uploadPmFile(file, customerId) {
+  if (file.size > ASSIGNMENT_MAX_SIZE_MB * 1024 * 1024) {
+    throw new Error(`File too large. Max ${ASSIGNMENT_MAX_SIZE_MB}MB.`);
+  }
+  const isPdf = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
+  const isImage = file.type.startsWith('image/');
+  if (!isPdf && !isImage) {
+    throw new Error('Only PDFs and images are supported.');
+  }
+  let uploadBody = file;
+  let contentType = file.type || (isPdf ? 'application/pdf' : 'image/jpeg');
+  let ext = isPdf ? 'pdf' : 'jpg';
+  if (isImage) {
+    uploadBody = await compressImage(file);
+    contentType = 'image/jpeg';
+    ext = 'jpg';
+  }
+  const path = `${customerId}/${Date.now()}_${Math.random().toString(36).slice(2, 8)}.${ext}`;
+  const { error: upErr } = await supabase.storage.from(PM_UPLOAD_BUCKET)
+    .upload(path, uploadBody, { contentType });
+  if (upErr) throw upErr;
+  const { data: { publicUrl } } = supabase.storage.from(PM_UPLOAD_BUCKET).getPublicUrl(path);
+  return { path, publicUrl, kind: isPdf ? 'pdf' : 'image' };
+}
+
+// Delete a file from PM uploads bucket (used when PM edits to swap the file, or rejects)
+async function deletePmFile(path) {
+  if (!path) return;
+  await supabase.storage.from(PM_UPLOAD_BUCKET).remove([path]);
 }
 
 function Header({ name, onSignOut, role }) {
@@ -3589,34 +3622,29 @@ function PortalDashboard({ property, onSignOut }) {
 }
 
 function PortalHome({ property, onSignOut, onOpenUnitDay }) {
-  const [groups, setGroups] = useState([]);  // [{ date, units: [{ unitId, label, photoCount, hasDamage }] }]
+  const [tab, setTab] = useState('history'); // 'history' | 'upload-photo' | 'assignments'
+  const [groups, setGroups] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [filter, setFilter] = useState('30d');
 
   useEffect(() => { (async () => {
+    if (tab !== 'history') return;
     setLoaded(false);
     const days = filter === '7d' ? 7 : filter === '30d' ? 30 : 365;
     let since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
-
-    // If property has a portal_start_date, never show data from before it.
-    // Use UTC midnight on the start date — the back end stores timestamps as UTC.
     if (property.portal_start_date) {
-      // portal_start_date is a date string like "2026-05-04"
       const portalStart = `${property.portal_start_date}T00:00:00Z`;
       if (portalStart > since) since = portalStart;
     }
     console.log('[Portal] filtering from:', since, '| portal_start_date:', property.portal_start_date);
 
     if (property.property_type === 'multi_unit') {
-      // Pull work blocks for this property in range, grouped by date+unit
       const { data: blocks } = await supabase
         .from('work_blocks')
         .select('id, start_time, end_time, unit:units(id, label), shift:shifts!inner(customer_id), tasks(id, photos(kind))')
         .gte('start_time', since)
         .order('start_time', { ascending: false });
       const filtered = (blocks || []).filter(b => b.shift?.customer_id === property.id && b.unit);
-
-      // Group by date
       const byDate = {};
       filtered.forEach(b => {
         const date = new Date(b.start_time).toISOString().split('T')[0];
@@ -3625,43 +3653,38 @@ function PortalHome({ property, onSignOut, onOpenUnitDay }) {
         if (!byDate[date][u.id]) byDate[date][u.id] = { unitId: u.id, label: u.label, photoCount: 0, hasDamage: false };
         (b.tasks || []).forEach(t => (t.photos || []).forEach(p => {
           if (p.kind === 'damage') byDate[date][u.id].hasDamage = true;
-          else byDate[date][u.id].photoCount++;
+          byDate[date][u.id].photoCount++;
         }));
       });
-
-      const out = Object.keys(byDate).sort().reverse().map(date => ({
-        date,
-        units: Object.values(byDate[date]).sort((a, b) => naturalCompare(a.label, b.label))
-      }));
+      const out = Object.entries(byDate)
+        .map(([date, byUnit]) => ({
+          date,
+          units: Object.values(byUnit).sort((a, b) => naturalCompare(a.label, b.label))
+        }))
+        .sort((a, b) => b.date.localeCompare(a.date));
       setGroups(out);
     } else {
-      // Simple property: group shifts by date directly
-      const { data: shifts } = await supabase
-        .from('shifts')
+      // Simple property
+      const { data: shifts } = await supabase.from('shifts')
         .select('id, start_time, end_time, tasks(id, photos(kind))')
         .eq('customer_id', property.id)
         .gte('start_time', since)
         .order('start_time', { ascending: false });
-      const byDate = {};
-      (shifts || []).forEach(s => {
-        const date = new Date(s.start_time).toISOString().split('T')[0];
-        if (!byDate[date]) byDate[date] = { unitId: null, label: 'Cleaning', photoCount: 0, hasDamage: false };
+      const out = (shifts || []).map(s => {
+        let photoCount = 0, hasDamage = false;
         (s.tasks || []).forEach(t => (t.photos || []).forEach(p => {
-          if (p.kind === 'damage') byDate[date].hasDamage = true;
-          else byDate[date].photoCount++;
+          photoCount++;
+          if (p.kind === 'damage') hasDamage = true;
         }));
+        return {
+          date: new Date(s.start_time).toISOString().split('T')[0],
+          units: [{ unitId: null, label: 'Cleaning visit', photoCount, hasDamage }]
+        };
       });
-      const out = Object.keys(byDate).sort().reverse().map(date => ({
-        date, units: [byDate[date]]
-      }));
       setGroups(out);
     }
     setLoaded(true);
-  })(); }, [property.id, filter]);
-
-  const totalPhotos = groups.reduce((sum, g) => sum + g.units.reduce((s, u) => s + u.photoCount, 0), 0);
-  const damageCount = groups.reduce((sum, g) => sum + g.units.filter(u => u.hasDamage).length, 0);
-  const totalCleanings = groups.reduce((sum, g) => sum + g.units.length, 0);
+  })(); }, [property.id, filter, tab]);
 
   return (
     <div className="min-h-screen bg-stone-50 pb-12">
@@ -3693,78 +3716,117 @@ function PortalHome({ property, onSignOut, onOpenUnitDay }) {
         )}
       </div>
 
-      <div className="px-5 pt-6">
-        <div className="grid grid-cols-3 gap-3 mb-6">
-          <div className="p-4 rounded-2xl bg-white border border-stone-200">
-            <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-1">Cleanings</div>
-            <div className="text-2xl font-serif">{totalCleanings}</div>
-          </div>
-          <div className="p-4 rounded-2xl bg-white border border-stone-200">
-            <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-1">Photos</div>
-            <div className="text-2xl font-serif">{totalPhotos}</div>
-          </div>
-          <div className={`p-4 rounded-2xl border ${damageCount > 0 ? 'bg-red-50 border-red-200' : 'bg-white border-stone-200'}`}>
-            <div className={`text-xs uppercase tracking-wider font-mono mb-1 ${damageCount > 0 ? 'text-red-700' : 'text-stone-500'}`}>Damage</div>
-            <div className={`text-2xl font-serif ${damageCount > 0 ? 'text-red-800' : ''}`}>{damageCount}</div>
-          </div>
+      {/* Tab switcher */}
+      <div className="px-5 pt-4">
+        <div className="flex gap-1 bg-stone-100 p-1 rounded-xl">
+          <button onClick={() => setTab('history')}
+            className={`flex-1 py-2 px-2 rounded-lg text-xs font-medium ${tab === 'history' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+            History
+          </button>
+          <button onClick={() => setTab('upload-photo')}
+            className={`flex-1 py-2 px-2 rounded-lg text-xs font-medium ${tab === 'upload-photo' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+            Upload photo
+          </button>
+          <button onClick={() => setTab('assignments')}
+            className={`flex-1 py-2 px-2 rounded-lg text-xs font-medium ${tab === 'assignments' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+            Assignments
+          </button>
         </div>
-
-        <div className="mb-4 flex gap-2">
-          {[{ id: '7d', label: '7 days' }, { id: '30d', label: '30 days' }, { id: '1y', label: '1 year' }].map(f => (
-            <button key={f.id} onClick={() => setFilter(f.id)}
-              className={`px-4 py-2 rounded-full text-sm font-medium transition-colors ${
-                filter === f.id ? 'bg-stone-900 text-stone-50' : 'bg-stone-100 text-stone-600'
-              }`}>
-              {f.label}
-            </button>
-          ))}
-        </div>
-
-        {!loaded ? <Splash text="Loading…" /> : groups.length === 0 ? (
-          <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
-            No cleanings in this period.
-          </div>
-        ) : (
-          <div className="space-y-6">
-            {groups.map(g => (
-              <div key={g.date}>
-                <div className="text-sm font-mono text-stone-500 mb-2 uppercase tracking-wider">
-                  {new Date(g.date + 'T12:00:00').toLocaleDateString('en-US', { weekday:'long', month:'long', day:'numeric', year:'numeric' })}
-                </div>
-                <div className="space-y-2">
-                  {g.units.map(u => (
-                    <button key={`${g.date}-${u.unitId || 'simple'}`}
-                      onClick={() => onOpenUnitDay(u.unitId, g.date)}
-                      className={`w-full text-left p-4 rounded-2xl border transition-colors ${
-                        u.hasDamage ? 'bg-red-50/50 border-red-200 hover:border-red-400' : 'bg-white border-stone-200 hover:border-stone-400'
-                      }`}>
-                      <div className="flex items-center justify-between">
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <span className="font-serif text-lg text-stone-900">{u.label}</span>
-                            {u.hasDamage && (
-                              <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-red-100 text-red-700">
-                                ⚠ Damage report
-                              </span>
-                            )}
-                          </div>
-                          <div className="text-xs text-stone-500 font-mono mt-0.5">
-                            {u.photoCount} {u.photoCount === 1 ? 'photo' : 'photos'}
-                          </div>
-                        </div>
-                        <ChevronRight size={16} className="text-stone-400" />
-                      </div>
-                    </button>
-                  ))}
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
       </div>
+
+      {tab === 'history' && (
+        <PortalHistoryTab property={property} groups={groups} loaded={loaded}
+          filter={filter} setFilter={setFilter} onOpenUnitDay={onOpenUnitDay} />
+      )}
+      {tab === 'upload-photo' && (
+        <PortalPhotoUploadTab property={property} />
+      )}
+      {tab === 'assignments' && (
+        <PortalAssignmentsTab property={property} />
+      )}
     </div>
   );
 }
+
+// History tab — the original PortalHome content extracted
+function PortalHistoryTab({ property, groups, loaded, filter, setFilter, onOpenUnitDay }) {
+  const totalPhotos = groups.reduce((sum, g) => sum + g.units.reduce((s, u) => s + u.photoCount, 0), 0);
+  const damageCount = groups.reduce((sum, g) => sum + g.units.filter(u => u.hasDamage).length, 0);
+  const totalCleanings = groups.reduce((sum, g) => sum + g.units.length, 0);
+
+  return (
+    <div className="px-5 pt-6">
+      <div className="grid grid-cols-3 gap-3 mb-6">
+        <div className="p-4 rounded-2xl bg-white border border-stone-200">
+          <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-1">Cleanings</div>
+          <div className="text-2xl font-serif">{totalCleanings}</div>
+        </div>
+        <div className="p-4 rounded-2xl bg-white border border-stone-200">
+          <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-1">Photos</div>
+          <div className="text-2xl font-serif">{totalPhotos}</div>
+        </div>
+        <div className={`p-4 rounded-2xl border ${damageCount > 0 ? 'bg-red-50 border-red-200' : 'bg-white border-stone-200'}`}>
+          <div className={`text-xs uppercase tracking-wider font-mono mb-1 ${damageCount > 0 ? 'text-red-700' : 'text-stone-500'}`}>Damage</div>
+          <div className={`text-2xl font-serif ${damageCount > 0 ? 'text-red-800' : ''}`}>{damageCount}</div>
+        </div>
+      </div>
+
+      <div className="mb-4 flex gap-2">
+        {[{ id: '7d', label: '7 days' }, { id: '30d', label: '30 days' }, { id: '1y', label: '1 year' }].map(f => (
+          <button key={f.id} onClick={() => setFilter(f.id)}
+            className={`px-4 py-2 rounded-full text-sm font-medium transition-colors ${
+              filter === f.id ? 'bg-stone-900 text-stone-50' : 'bg-stone-100 text-stone-600'
+            }`}>
+            {f.label}
+          </button>
+        ))}
+      </div>
+
+      {!loaded ? <Splash text="Loading…" /> : groups.length === 0 ? (
+        <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
+          No cleanings in this period.
+        </div>
+      ) : (
+        <div className="space-y-6">
+          {groups.map(g => (
+            <div key={g.date}>
+              <div className="text-sm font-mono text-stone-500 mb-2 uppercase tracking-wider">
+                {new Date(g.date + 'T12:00:00').toLocaleDateString('en-US', { weekday:'long', month:'long', day:'numeric', year:'numeric' })}
+              </div>
+              <div className="space-y-2">
+                {g.units.map(u => (
+                  <button key={`${g.date}-${u.unitId || 'simple'}`}
+                    onClick={() => onOpenUnitDay(u.unitId, g.date)}
+                    className={`w-full text-left p-4 rounded-2xl border transition-colors ${
+                      u.hasDamage ? 'bg-red-50/50 border-red-200 hover:border-red-400' : 'bg-white border-stone-200 hover:border-stone-400'
+                    }`}>
+                    <div className="flex items-center justify-between">
+                      <div className="flex-1">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="font-serif text-lg text-stone-900">{u.label}</span>
+                          {u.hasDamage && (
+                            <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-red-100 text-red-700">
+                              ⚠ Damage reported
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-xs text-stone-500 font-mono mt-1">
+                          {u.photoCount} {u.photoCount === 1 ? 'photo' : 'photos'}
+                        </div>
+                      </div>
+                      <ChevronRight size={16} className="text-stone-400 flex-shrink-0 ml-2" />
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 
 // Detail screen: one unit, one day. Shows all parties cleaned with photos.
 function PortalUnitDay({ property, unitId, date, onBack }) {
@@ -3958,9 +4020,14 @@ function DailyView({ employee, onSignOut }) {
       employee={employee} showMoney={showMoney}
       onBack={() => setView({ kind: 'day', date: view.date })} />;
   }
+  if (view.kind === 'inbox') {
+    return <InboxView employee={employee}
+      onBack={() => setView({ kind: 'calendar' })} />;
+  }
 
   return <DailyCalendar employee={employee} onSignOut={onSignOut}
-    onPickDay={(date) => setView({ kind: 'day', date })} />;
+    onPickDay={(date) => setView({ kind: 'day', date })}
+    onOpenInbox={() => setView({ kind: 'inbox' })} />;
 }
 
 // Helpers — local-time YYYY-MM-DD (avoids UTC midnight bugs)
@@ -3971,11 +4038,26 @@ const toDateKey = (d) => {
   return `${yr}-${mo}-${dy}`;
 };
 
-function DailyCalendar({ employee, onSignOut, onPickDay }) {
+function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox }) {
   const today = new Date();
   const [viewMonth, setViewMonth] = useState(new Date(today.getFullYear(), today.getMonth(), 1));
-  const [activity, setActivity] = useState({}); // { 'YYYY-MM-DD': { shiftCount, propertyCount, hasDamage } }
+  const [activity, setActivity] = useState({});
   const [loaded, setLoaded] = useState(false);
+  const [inboxCounts, setInboxCounts] = useState({ pendingAssignments: 0, newPhotos: 0 });
+
+  // Load inbox counts
+  useEffect(() => {
+    (async () => {
+      const { count: pAssign } = await supabase.from('assignments')
+        .select('id', { count: 'exact', head: true })
+        .eq('source', 'pm').eq('pm_status', 'pending');
+      const { count: pPhotos } = await supabase.from('pm_photos')
+        .select('id', { count: 'exact', head: true })
+        .eq('status', 'new');
+      setInboxCounts({ pendingAssignments: pAssign || 0, newPhotos: pPhotos || 0 });
+    })();
+  }, []);
+  const inboxTotal = inboxCounts.pendingAssignments + inboxCounts.newPhotos;
 
   useEffect(() => { (async () => {
     setLoaded(false);
@@ -4040,6 +4122,28 @@ function DailyCalendar({ employee, onSignOut, onPickDay }) {
     <div className="pb-24">
       <Header name={employee.name} onSignOut={onSignOut} role={employee.role} />
       <div className="px-5 pt-6">
+        {inboxTotal > 0 && (
+          <button onClick={onOpenInbox}
+            className="w-full mb-5 p-4 rounded-2xl bg-amber-50 border-2 border-amber-300 hover:border-amber-500 active:scale-98 transition-all flex items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 rounded-full bg-amber-600 text-white flex items-center justify-center font-mono text-sm font-bold">
+                {inboxTotal}
+              </div>
+              <div className="text-left">
+                <div className="font-serif text-base text-stone-900">
+                  Inbox — needs review
+                </div>
+                <div className="text-xs text-stone-600 font-mono">
+                  {inboxCounts.pendingAssignments > 0 && `${inboxCounts.pendingAssignments} ${inboxCounts.pendingAssignments === 1 ? 'assignment' : 'assignments'}`}
+                  {inboxCounts.pendingAssignments > 0 && inboxCounts.newPhotos > 0 && ' · '}
+                  {inboxCounts.newPhotos > 0 && `${inboxCounts.newPhotos} ${inboxCounts.newPhotos === 1 ? 'photo' : 'photos'}`}
+                  {' from property managers'}
+                </div>
+              </div>
+            </div>
+            <ChevronRight size={18} className="text-stone-400 flex-shrink-0" />
+          </button>
+        )}
         <div className="text-xs uppercase tracking-widest text-stone-400 font-mono mb-3">
           Daily browser
         </div>
@@ -5207,7 +5311,7 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
   const load = async () => {
     let q = supabase
       .from('assignment_targets')
-      .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active), unit:units(id, label), party:parties(id, label), starter:employees!started_by(name), completer:employees!completed_by(name)');
+      .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status), unit:units(id, label), party:parties(id, label), starter:employees!started_by(name), completer:employees!completed_by(name)');
 
     if (!showDone) q = q.neq('status', 'done');
 
@@ -5223,7 +5327,12 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
     if (error) {
       console.error('[AssignmentBanner] load error:', error);
     }
-    const filtered = (data || []).filter(t => t.assignment?.customer_id === propertyId && t.assignment?.active);
+    // Hide non-approved PM assignments from cleaners — they should only see what's approved
+    const filtered = (data || []).filter(t =>
+      t.assignment?.customer_id === propertyId &&
+      t.assignment?.active &&
+      (t.assignment?.source !== 'pm' || t.assignment?.pm_status === 'approved')
+    );
     setTargets(filtered);
     setLoaded(true);
   };
@@ -5452,7 +5561,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate }) 
     setLoadError(null);
     const { data, error } = await supabase
       .from('assignment_targets')
-      .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active), unit:units(id, label), party:parties(id, label), starter:employees!started_by(name), completer:employees!completed_by(name)')
+      .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status), unit:units(id, label), party:parties(id, label), starter:employees!started_by(name), completer:employees!completed_by(name)')
       .eq('status', statusFilter);
     if (error) {
       console.error('[Assignments] load error:', error);
@@ -5460,7 +5569,12 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate }) 
       setTargets([]); setLoaded(true);
       return;
     }
-    const filtered = (data || []).filter(t => t.assignment?.customer_id === propertyId && t.assignment?.active);
+    // Hide non-approved PM assignments from cleaners
+    const filtered = (data || []).filter(t =>
+      t.assignment?.customer_id === propertyId &&
+      t.assignment?.active &&
+      (t.assignment?.source !== 'pm' || t.assignment?.pm_status === 'approved')
+    );
     if (statusFilter === 'done') {
       filtered.sort((a, b) => new Date(b.completed_at || 0) - new Date(a.completed_at || 0));
     } else {
@@ -5961,6 +6075,988 @@ function AllOpenAssignments({ employee, onBack, onOpenAssignment }) {
             })}
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+// =================================================================
+// PORTAL — PM PHOTO UPLOAD TAB
+// Property manager uploads a photo (or set of photos) for owner review.
+// =================================================================
+function PortalPhotoUploadTab({ property }) {
+  const isMulti = property.property_type === 'multi_unit';
+  const [units, setUnits] = useState([]);
+  const [unitId, setUnitId] = useState('');
+  const [parties, setParties] = useState([]);
+  const [partyId, setPartyId] = useState('');
+  const [title, setTitle] = useState('');
+  const [notes, setNotes] = useState('');
+  const [file, setFile] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState('');
+  const [success, setSuccess] = useState(false);
+  const [error, setError] = useState('');
+  const [history, setHistory] = useState([]);
+
+  useEffect(() => {
+    if (!isMulti) return;
+    (async () => {
+      const { data } = await supabase.from('units')
+        .select('*, parties(id, label, full_name, active, sort_order)')
+        .eq('customer_id', property.id).eq('active', true)
+        .order('sort_order').order('label');
+      setUnits((data || []).slice().sort((a, b) => naturalCompare(a.label, b.label)));
+    })();
+  }, [property.id, isMulti]);
+
+  useEffect(() => {
+    if (!unitId) { setParties([]); return; }
+    const u = units.find(x => x.id === unitId);
+    setParties((u?.parties || []).filter(p => p.active).sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0)));
+  }, [unitId, units]);
+
+  // Load history of PM photos for this property
+  const loadHistory = async () => {
+    const { data } = await supabase.from('pm_photos')
+      .select('*, unit:units(label), party:parties(label)')
+      .eq('customer_id', property.id)
+      .neq('status', 'archived')
+      .order('created_at', { ascending: false })
+      .limit(20);
+    setHistory(data || []);
+  };
+  useEffect(() => { loadHistory(); }, [property.id]);
+
+  const reset = () => {
+    setTitle(''); setNotes(''); setFile(null);
+    setUnitId(''); setPartyId('');
+    setError(''); setProgress('');
+  };
+
+  const handleFile = (e) => {
+    const f = e.target.files?.[0];
+    if (f && !f.type.startsWith('image/')) {
+      setError('Please choose an image file (JPG, PNG, etc).');
+      return;
+    }
+    setFile(f || null);
+    setError('');
+  };
+
+  const save = async () => {
+    setError('');
+    if (!file) { setError('Choose a photo first.'); return; }
+    setBusy(true);
+    try {
+      setProgress('Uploading photo…');
+      const { path, publicUrl } = await uploadPmFile(file, property.id);
+      setProgress('Saving…');
+      const { error: e } = await supabase.from('pm_photos').insert({
+        customer_id: property.id,
+        unit_id: unitId || null,
+        party_id: partyId || null,
+        title: title.trim() || null,
+        notes: notes.trim() || null,
+        photo_url: publicUrl,
+        photo_path: path,
+        status: 'new'
+      });
+      if (e) throw e;
+      setSuccess(true);
+      reset();
+      loadHistory();
+      setTimeout(() => setSuccess(false), 3000);
+    } catch (err) {
+      setError(err.message || String(err));
+    } finally {
+      setBusy(false); setProgress('');
+    }
+  };
+
+  return (
+    <div className="px-5 pt-6 space-y-5">
+      <div>
+        <h2 className="font-serif text-2xl text-stone-900 mb-1">Send a photo</h2>
+        <p className="text-sm text-stone-600">
+          Upload photos you want the cleaning team to see — damage, items left behind, anything worth flagging.
+        </p>
+      </div>
+
+      <div>
+        <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Title (optional)</label>
+        <input type="text" value={title} onChange={(e) => setTitle(e.target.value)}
+          placeholder="e.g. Damage in master bath" maxLength={120}
+          className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white text-stone-900" />
+      </div>
+
+      <div>
+        <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Notes (optional)</label>
+        <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={3}
+          placeholder="Add any context the cleaners should know…"
+          className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white text-stone-900 resize-none" />
+      </div>
+
+      {isMulti && (
+        <>
+          <div>
+            <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Unit (optional)</label>
+            <select value={unitId} onChange={(e) => { setUnitId(e.target.value); setPartyId(''); }}
+              className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white">
+              <option value="">— Whole property —</option>
+              {units.map(u => <option key={u.id} value={u.id}>{u.label}</option>)}
+            </select>
+          </div>
+          {unitId && parties.length > 0 && (
+            <div>
+              <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Party (optional)</label>
+              <select value={partyId} onChange={(e) => setPartyId(e.target.value)}
+                className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white">
+                <option value="">— Any —</option>
+                {parties.map(p => <option key={p.id} value={p.id}>{p.label}{p.full_name ? ` (${p.full_name})` : ''}</option>)}
+              </select>
+            </div>
+          )}
+        </>
+      )}
+
+      <div>
+        <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Photo</label>
+        <label className={`block w-full p-6 border-2 border-dashed rounded-2xl text-center cursor-pointer transition-colors ${file ? 'border-emerald-300 bg-emerald-50' : 'border-stone-300 hover:border-stone-900'}`}>
+          {file ? (
+            <>
+              <Check size={28} className="mx-auto mb-2 text-emerald-600" />
+              <div className="text-stone-900 font-medium text-sm">{file.name}</div>
+              <div className="text-xs text-stone-500 mt-0.5">{(file.size / 1024).toFixed(1)} KB · tap to change</div>
+            </>
+          ) : (
+            <>
+              <Camera size={28} className="mx-auto mb-2 text-stone-400" />
+              <div className="text-stone-700 font-medium text-sm">Choose a photo</div>
+              <div className="text-xs text-stone-500 mt-0.5">Max {ASSIGNMENT_MAX_SIZE_MB}MB</div>
+            </>
+          )}
+          <input type="file" accept="image/*" onChange={handleFile} className="hidden" />
+        </label>
+      </div>
+
+      {error && (
+        <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-red-700 text-sm flex items-start gap-2">
+          <AlertCircle size={16} className="flex-shrink-0 mt-0.5" /><span>{error}</span>
+        </div>
+      )}
+      {busy && progress && (
+        <div className="p-3 rounded-xl bg-stone-100 text-stone-700 text-sm font-mono flex items-center gap-3">
+          <div className="w-4 h-4 border-2 border-stone-700 border-t-transparent rounded-full animate-spin flex-shrink-0" />
+          {progress}
+        </div>
+      )}
+      {success && (
+        <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-sm flex items-center gap-2">
+          <Check size={16} /> Photo sent. The cleaning team will see it.
+        </div>
+      )}
+
+      <button onClick={save} disabled={busy || !file}
+        className="w-full py-4 rounded-2xl bg-stone-900 text-stone-50 font-medium disabled:opacity-50">
+        {busy ? 'Sending…' : 'Send photo'}
+      </button>
+
+      {/* Recent uploads */}
+      {history.length > 0 && (
+        <div className="pt-6 border-t border-stone-200">
+          <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-3">
+            Recently sent ({history.length})
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            {history.map(p => (
+              <a key={p.id} href={p.photo_url} target="_blank" rel="noreferrer"
+                className="aspect-square rounded-xl overflow-hidden bg-stone-100 relative">
+                <img src={p.photo_url} alt={p.title || ''} className="w-full h-full object-cover" />
+                {p.status === 'seen' && (
+                  <div className="absolute bottom-1 right-1 px-1.5 py-0.5 rounded-full bg-emerald-600 text-white text-[9px] font-mono uppercase tracking-wider">
+                    Seen
+                  </div>
+                )}
+              </a>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// =================================================================
+// PORTAL — PM ASSIGNMENTS TAB
+// Property manager creates/edits/submits assignment drafts; once
+// approved they become read-only.
+// =================================================================
+function PortalAssignmentsTab({ property }) {
+  const [assignments, setAssignments] = useState([]);
+  const [loaded, setLoaded] = useState(false);
+  const [view, setView] = useState({ kind: 'list' });
+
+  const load = async () => {
+    const { data } = await supabase.from('assignments')
+      .select('*, targets:assignment_targets(id, status, unit:units(label), party:parties(label))')
+      .eq('customer_id', property.id)
+      .eq('source', 'pm')
+      .order('created_at', { ascending: false });
+    setAssignments(data || []);
+    setLoaded(true);
+  };
+  useEffect(() => { load(); }, [property.id]);
+
+  if (view.kind === 'new') {
+    return <PortalAssignmentForm property={property}
+      onCancel={() => setView({ kind: 'list' })}
+      onSaved={() => { setView({ kind: 'list' }); load(); }} />;
+  }
+  if (view.kind === 'edit') {
+    return <PortalAssignmentForm property={property} assignment={view.assignment}
+      onCancel={() => setView({ kind: 'list' })}
+      onSaved={() => { setView({ kind: 'list' }); load(); }} />;
+  }
+  if (view.kind === 'detail') {
+    return <PortalAssignmentDetail property={property} assignment={view.assignment}
+      onBack={() => { setView({ kind: 'list' }); load(); }}
+      onEdit={() => setView({ kind: 'edit', assignment: view.assignment })} />;
+  }
+
+  const groups = {
+    draft: assignments.filter(a => a.pm_status === 'draft'),
+    pending: assignments.filter(a => a.pm_status === 'pending'),
+    approved: assignments.filter(a => a.pm_status === 'approved'),
+    rejected: assignments.filter(a => a.pm_status === 'rejected'),
+  };
+
+  return (
+    <div className="px-5 pt-6 space-y-5">
+      <div>
+        <h2 className="font-serif text-2xl text-stone-900 mb-1">Your assignments</h2>
+        <p className="text-sm text-stone-600">
+          Create assignments for the cleaning team. They take effect once approved.
+        </p>
+      </div>
+
+      <button onClick={() => setView({ kind: 'new' })}
+        className="w-full py-4 rounded-2xl bg-stone-900 text-stone-50 font-medium flex items-center justify-center gap-2">
+        <Plus size={18} /> New assignment
+      </button>
+
+      {!loaded ? <Splash text="Loading…" /> : assignments.length === 0 ? (
+        <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
+          You haven't created any assignments yet.
+        </div>
+      ) : (
+        <>
+          <PortalAssignmentSection title="Drafts" subtitle="You can still edit these" items={groups.draft}
+            color="stone" onOpen={(a) => setView({ kind: 'detail', assignment: a })} />
+          <PortalAssignmentSection title="Pending review" subtitle="Waiting for the owner to approve" items={groups.pending}
+            color="amber" onOpen={(a) => setView({ kind: 'detail', assignment: a })} />
+          <PortalAssignmentSection title="Needs changes" subtitle="Owner asked for changes — edit and resubmit" items={groups.rejected}
+            color="red" onOpen={(a) => setView({ kind: 'detail', assignment: a })} />
+          <PortalAssignmentSection title="Approved" subtitle="Active — visible to the cleaning team" items={groups.approved}
+            color="emerald" onOpen={(a) => setView({ kind: 'detail', assignment: a })} />
+        </>
+      )}
+    </div>
+  );
+}
+
+function PortalAssignmentSection({ title, subtitle, items, color, onOpen }) {
+  if (items.length === 0) return null;
+  const colors = {
+    stone: 'border-stone-300 bg-stone-50',
+    amber: 'border-amber-300 bg-amber-50',
+    red: 'border-red-300 bg-red-50',
+    emerald: 'border-emerald-300 bg-emerald-50',
+  };
+  return (
+    <div>
+      <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2">
+        {title} ({items.length})
+      </div>
+      <p className="text-xs text-stone-500 mb-3">{subtitle}</p>
+      <div className="space-y-2">
+        {items.map(a => (
+          <button key={a.id} onClick={() => onOpen(a)}
+            className={`w-full text-left p-4 rounded-2xl border-2 hover:border-stone-900 transition-colors ${colors[color]}`}>
+            <div className="flex items-start justify-between gap-2">
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 mb-1">
+                  {a.file_kind === 'pdf'
+                    ? <FileText size={14} className="text-stone-600 flex-shrink-0" />
+                    : <ImageIcon size={14} className="text-stone-600 flex-shrink-0" />}
+                  <span className="font-serif text-base text-stone-900 truncate">{a.title}</span>
+                </div>
+                <div className="text-xs text-stone-500 font-mono">
+                  {fmtDate(a.created_at)} · {a.targets?.length || 0} {a.targets?.length === 1 ? 'target' : 'targets'}
+                </div>
+                {a.pm_rejection_reason && (
+                  <div className="text-xs text-red-700 italic mt-1">"{a.pm_rejection_reason}"</div>
+                )}
+              </div>
+              <ChevronRight size={16} className="text-stone-400 flex-shrink-0" />
+            </div>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// PM-side form for creating or editing an assignment
+function PortalAssignmentForm({ property, assignment, onCancel, onSaved }) {
+  const isMulti = property.property_type === 'multi_unit';
+  const isEdit = !!assignment;
+  const [title, setTitle] = useState(assignment?.title || '');
+  const [notes, setNotes] = useState(assignment?.notes || '');
+  const [file, setFile] = useState(null); // a NEW file (replaces existing)
+  const [keepExistingFile, setKeepExistingFile] = useState(isEdit);
+  const [scope, setScope] = useState(isMulti ? 'specific' : 'property');
+  const [units, setUnits] = useState([]);
+  const [unitId, setUnitId] = useState('');
+  const [partyId, setPartyId] = useState('');
+  const [parties, setParties] = useState([]);
+  const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState('');
+  const [error, setError] = useState('');
+
+  // Load units for multi-unit properties
+  useEffect(() => {
+    if (!isMulti) return;
+    (async () => {
+      const { data } = await supabase.from('units')
+        .select('*, parties(id, label, full_name, active, sort_order)')
+        .eq('customer_id', property.id).eq('active', true)
+        .order('sort_order').order('label');
+      setUnits((data || []).slice().sort((a, b) => naturalCompare(a.label, b.label)));
+    })();
+  }, [property.id, isMulti]);
+
+  // If editing, load the existing target so dropdowns are pre-populated
+  useEffect(() => {
+    if (!isEdit || !assignment) return;
+    (async () => {
+      const { data } = await supabase.from('assignment_targets')
+        .select('unit_id, party_id').eq('assignment_id', assignment.id).limit(1).maybeSingle();
+      if (data) {
+        if (data.unit_id) { setUnitId(data.unit_id); setScope('specific'); }
+        if (data.party_id) setPartyId(data.party_id);
+        if (!data.unit_id && !data.party_id) setScope('property');
+      }
+    })();
+  }, [isEdit, assignment]);
+
+  useEffect(() => {
+    if (!unitId) { setParties([]); return; }
+    const u = units.find(x => x.id === unitId);
+    setParties((u?.parties || []).filter(p => p.active).sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0)));
+  }, [unitId, units]);
+
+  const handleFile = (e) => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    const isOk = f.type === 'application/pdf' || f.type.startsWith('image/');
+    if (!isOk) { setError('Only PDFs and images.'); return; }
+    setFile(f); setKeepExistingFile(false); setError('');
+  };
+
+  const save = async (submitForApproval) => {
+    setError('');
+    if (!title.trim()) { setError('Add a title.'); return; }
+    if (!keepExistingFile && !file) { setError('Pick a PDF or image.'); return; }
+    if (isMulti && scope === 'specific' && (!unitId || !partyId)) {
+      setError('Pick a unit and party.'); return;
+    }
+    setBusy(true);
+    try {
+      let filePayload = null;
+      if (file) {
+        setProgress('Uploading file…');
+        const { path, publicUrl, kind } = await uploadPmFile(file, property.id);
+        filePayload = { file_path: path, file_url: publicUrl, file_kind: kind };
+      }
+
+      const newStatus = submitForApproval ? 'pending' : 'draft';
+
+      if (isEdit) {
+        setProgress('Saving changes…');
+        const patch = {
+          title: title.trim(),
+          notes: notes.trim() || null,
+          pm_status: newStatus,
+          pm_rejection_reason: null  // clear any prior rejection note on resubmit
+        };
+        if (filePayload) {
+          // delete the old file before replacing
+          if (assignment.file_path) await deletePmFile(assignment.file_path);
+          Object.assign(patch, filePayload);
+        }
+        const { error: e1 } = await supabase.from('assignments').update(patch).eq('id', assignment.id);
+        if (e1) throw e1;
+
+        // Replace targets with the new selection
+        await supabase.from('assignment_targets').delete().eq('assignment_id', assignment.id);
+        const targetRow = {
+          assignment_id: assignment.id,
+          unit_id: !isMulti || scope === 'property' ? null : unitId,
+          party_id: !isMulti || scope === 'property' ? null : partyId,
+          status: 'pending'
+        };
+        const { error: e2 } = await supabase.from('assignment_targets').insert(targetRow);
+        if (e2) throw e2;
+      } else {
+        setProgress('Creating assignment…');
+        const { data: created, error: e1 } = await supabase.from('assignments').insert({
+          customer_id: property.id,
+          title: title.trim(),
+          notes: notes.trim() || null,
+          source: 'pm',
+          pm_status: newStatus,
+          active: true,
+          ...filePayload
+        }).select().single();
+        if (e1) throw e1;
+        const targetRow = {
+          assignment_id: created.id,
+          unit_id: !isMulti || scope === 'property' ? null : unitId,
+          party_id: !isMulti || scope === 'property' ? null : partyId,
+          status: 'pending'
+        };
+        const { error: e2 } = await supabase.from('assignment_targets').insert(targetRow);
+        if (e2) throw e2;
+      }
+      onSaved();
+    } catch (err) {
+      setError(err.message || String(err));
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-stone-50 pb-12">
+      <div className="flex items-center gap-3 px-5 py-4 border-b border-stone-200">
+        <button onClick={onCancel} className="p-2 -ml-2 rounded-full hover:bg-stone-100">
+          <ArrowLeft size={20} className="text-stone-700" />
+        </button>
+        <div>
+          <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">{property.name}</div>
+          <div className="font-serif text-xl text-stone-900">
+            {isEdit ? 'Edit assignment' : 'New assignment'}
+          </div>
+        </div>
+      </div>
+
+      <div className="px-5 pt-6 space-y-5">
+        <div>
+          <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Title</label>
+          <input type="text" value={title} onChange={(e) => setTitle(e.target.value)}
+            placeholder="e.g. Deep clean Apt 301-2 — Tuesday"
+            className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white" />
+        </div>
+
+        <div>
+          <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Notes / instructions</label>
+          <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={4}
+            placeholder="What needs to be done…"
+            className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white resize-none" />
+        </div>
+
+        <div>
+          <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">File (PDF or image)</label>
+          {keepExistingFile && assignment?.file_url && (
+            <div className="mb-2 p-3 rounded-xl bg-stone-100 flex items-center gap-2 text-sm">
+              {assignment.file_kind === 'pdf' ? <FileText size={16} /> : <ImageIcon size={16} />}
+              <span className="flex-1 truncate text-stone-700">Existing file</span>
+              <a href={assignment.file_url} target="_blank" rel="noreferrer"
+                className="text-xs text-amber-700 font-mono">View</a>
+              <button type="button" onClick={() => setKeepExistingFile(false)}
+                className="text-xs text-stone-500 font-mono">Replace</button>
+            </div>
+          )}
+          {!keepExistingFile && (
+            <label className={`block w-full p-6 border-2 border-dashed rounded-2xl text-center cursor-pointer ${file ? 'border-emerald-300 bg-emerald-50' : 'border-stone-300'}`}>
+              {file ? (
+                <>
+                  <Check size={24} className="mx-auto mb-1 text-emerald-600" />
+                  <div className="text-sm text-stone-900">{file.name}</div>
+                  <div className="text-xs text-stone-500">{(file.size / 1024).toFixed(1)} KB</div>
+                </>
+              ) : (
+                <>
+                  <FileText size={24} className="mx-auto mb-1 text-stone-400" />
+                  <div className="text-sm text-stone-700">Choose PDF or image</div>
+                </>
+              )}
+              <input type="file" accept="application/pdf,image/*" onChange={handleFile} className="hidden" />
+            </label>
+          )}
+        </div>
+
+        {isMulti && (
+          <>
+            <div>
+              <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Where?</label>
+              <div className="grid grid-cols-2 gap-2">
+                <button type="button" onClick={() => setScope('specific')}
+                  className={`p-3 rounded-xl border-2 text-left ${scope === 'specific' ? 'border-stone-900 bg-white' : 'border-stone-200 bg-white/50'}`}>
+                  <div className="font-medium text-sm">One party</div>
+                </button>
+                <button type="button" onClick={() => setScope('property')}
+                  className={`p-3 rounded-xl border-2 text-left ${scope === 'property' ? 'border-stone-900 bg-white' : 'border-stone-200 bg-white/50'}`}>
+                  <div className="font-medium text-sm">Whole property</div>
+                </button>
+              </div>
+            </div>
+            {scope === 'specific' && (
+              <>
+                <div>
+                  <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Unit</label>
+                  <select value={unitId} onChange={(e) => { setUnitId(e.target.value); setPartyId(''); }}
+                    className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white">
+                    <option value="">— Pick a unit —</option>
+                    {units.map(u => <option key={u.id} value={u.id}>{u.label}</option>)}
+                  </select>
+                </div>
+                {unitId && (
+                  <div>
+                    <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Party</label>
+                    <select value={partyId} onChange={(e) => setPartyId(e.target.value)}
+                      className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white">
+                      <option value="">— Pick a party —</option>
+                      {parties.map(p => <option key={p.id} value={p.id}>{p.label}{p.full_name ? ` (${p.full_name})` : ''}</option>)}
+                    </select>
+                  </div>
+                )}
+              </>
+            )}
+          </>
+        )}
+
+        {error && (
+          <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-red-700 text-sm flex items-start gap-2">
+            <AlertCircle size={16} className="flex-shrink-0 mt-0.5" /><span>{error}</span>
+          </div>
+        )}
+        {busy && progress && (
+          <div className="p-3 rounded-xl bg-stone-100 text-stone-700 text-sm font-mono flex items-center gap-3">
+            <div className="w-4 h-4 border-2 border-stone-700 border-t-transparent rounded-full animate-spin flex-shrink-0" />
+            {progress}
+          </div>
+        )}
+
+        <div className="space-y-2 pt-2">
+          <button onClick={() => save(true)} disabled={busy}
+            className="w-full py-4 rounded-2xl bg-stone-900 text-stone-50 font-medium disabled:opacity-50">
+            {busy ? 'Working…' : 'Submit for approval'}
+          </button>
+          <button onClick={() => save(false)} disabled={busy}
+            className="w-full py-3 rounded-2xl bg-stone-100 text-stone-700 text-sm font-medium disabled:opacity-50">
+            Save as draft
+          </button>
+        </div>
+        <p className="text-xs text-stone-500 text-center">
+          Drafts can be edited freely. Once you submit for approval, you can't edit until the owner reviews.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+// PM-side detail/view of one of their assignments
+function PortalAssignmentDetail({ property, assignment, onBack, onEdit }) {
+  const [busy, setBusy] = useState(false);
+  const canEdit = assignment.pm_status === 'draft' || assignment.pm_status === 'rejected';
+  const canDelete = canEdit;
+
+  const submit = async () => {
+    setBusy(true);
+    const { error } = await supabase.from('assignments')
+      .update({ pm_status: 'pending', pm_rejection_reason: null })
+      .eq('id', assignment.id);
+    setBusy(false);
+    if (error) { alert('Could not submit: ' + error.message); return; }
+    onBack();
+  };
+
+  const remove = async () => {
+    if (!confirm('Delete this assignment? This cannot be undone.')) return;
+    setBusy(true);
+    if (assignment.file_path) await deletePmFile(assignment.file_path);
+    await supabase.from('assignments').delete().eq('id', assignment.id);
+    setBusy(false);
+    onBack();
+  };
+
+  const statusLabels = {
+    draft: { text: 'Draft', color: 'bg-stone-200 text-stone-700' },
+    pending: { text: 'Pending approval', color: 'bg-amber-100 text-amber-800' },
+    approved: { text: 'Approved — visible to team', color: 'bg-emerald-100 text-emerald-800' },
+    rejected: { text: 'Needs changes', color: 'bg-red-100 text-red-700' },
+  };
+  const s = statusLabels[assignment.pm_status] || statusLabels.draft;
+
+  return (
+    <div className="min-h-screen bg-stone-50 pb-12">
+      <div className="flex items-center gap-3 px-5 py-4 border-b border-stone-200">
+        <button onClick={onBack} className="p-2 -ml-2 rounded-full hover:bg-stone-100">
+          <ArrowLeft size={20} className="text-stone-700" />
+        </button>
+        <div className="flex-1 min-w-0">
+          <div className="text-xs uppercase tracking-wider text-stone-500 font-mono truncate">{property.name}</div>
+          <div className="font-serif text-xl text-stone-900 truncate">{assignment.title}</div>
+        </div>
+      </div>
+      <div className="px-5 pt-6 space-y-5">
+        <div className={`p-3 rounded-xl text-sm flex items-center gap-2 ${s.color}`}>
+          <Check size={14} /> {s.text}
+        </div>
+
+        {assignment.pm_rejection_reason && (
+          <div className="p-4 rounded-2xl bg-red-50 border border-red-200">
+            <div className="text-xs uppercase tracking-wider font-mono text-red-700 mb-1">Owner's note</div>
+            <div className="text-sm text-red-900 whitespace-pre-wrap">{assignment.pm_rejection_reason}</div>
+          </div>
+        )}
+
+        {assignment.file_url && (
+          <div className="p-4 rounded-2xl bg-white border border-stone-200">
+            <div className="flex items-center gap-3 mb-3">
+              {assignment.file_kind === 'pdf'
+                ? <FileText size={20} className="text-stone-600" />
+                : <ImageIcon size={20} className="text-stone-600" />}
+              <div className="flex-1">
+                <div className="font-serif text-base text-stone-900">Attached file</div>
+                <div className="text-xs text-stone-500 font-mono">{assignment.file_kind?.toUpperCase()}</div>
+              </div>
+            </div>
+            {assignment.file_kind === 'image' && (
+              <img src={assignment.file_url} alt="" className="w-full rounded-xl mb-3" />
+            )}
+            <a href={assignment.file_url} target="_blank" rel="noreferrer"
+              className="w-full inline-flex items-center justify-center gap-2 py-2.5 rounded-xl bg-stone-900 text-stone-50 text-sm font-medium">
+              <Eye size={14} /> Open
+            </a>
+          </div>
+        )}
+
+        {assignment.notes && (
+          <div className="p-4 rounded-2xl bg-amber-50 border border-amber-200">
+            <div className="text-xs uppercase tracking-wider font-mono text-amber-700 mb-1">Notes</div>
+            <div className="text-sm text-stone-800 whitespace-pre-wrap">{assignment.notes}</div>
+          </div>
+        )}
+
+        {canEdit ? (
+          <div className="space-y-2 pt-2">
+            <button onClick={submit} disabled={busy}
+              className="w-full py-4 rounded-2xl bg-stone-900 text-stone-50 font-medium disabled:opacity-50">
+              {busy ? 'Working…' : 'Submit for approval'}
+            </button>
+            <button onClick={onEdit} disabled={busy}
+              className="w-full py-3 rounded-2xl bg-stone-100 text-stone-700 text-sm font-medium flex items-center justify-center gap-2">
+              <Edit2 size={14} /> Edit
+            </button>
+            {canDelete && (
+              <button onClick={remove} disabled={busy}
+                className="w-full py-3 rounded-2xl border-2 border-red-200 text-red-700 text-sm font-medium flex items-center justify-center gap-2">
+                <Trash2 size={14} /> Delete
+              </button>
+            )}
+          </div>
+        ) : assignment.pm_status === 'pending' ? (
+          <div className="p-4 rounded-2xl bg-amber-50 border border-amber-200 text-sm text-stone-700">
+            This assignment is locked while waiting for the owner to review. You'll be able to edit again if changes are requested.
+          </div>
+        ) : (
+          <div className="p-4 rounded-2xl bg-emerald-50 border border-emerald-200 text-sm text-stone-700">
+            This assignment is active and visible to the cleaning team. It can't be edited from here.
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// =================================================================
+// INBOX VIEW — owner/manager review of PM uploads
+// Two tabs: Pending assignments + New photos
+// =================================================================
+function InboxView({ employee, onBack }) {
+  const [tab, setTab] = useState('assignments');
+  const [pendingAssignments, setPendingAssignments] = useState([]);
+  const [newPhotos, setNewPhotos] = useState([]);
+  const [loaded, setLoaded] = useState(false);
+  const [reviewAssignment, setReviewAssignment] = useState(null); // for approval modal
+  const [reviewPhoto, setReviewPhoto] = useState(null); // for photo zoom
+
+  const load = async () => {
+    setLoaded(false);
+    const { data: aData } = await supabase.from('assignments')
+      .select('*, property:customers(id, name, property_type), targets:assignment_targets(id, unit:units(label), party:parties(label))')
+      .eq('source', 'pm').eq('pm_status', 'pending')
+      .order('created_at', { ascending: false });
+    const { data: pData } = await supabase.from('pm_photos')
+      .select('*, property:customers(id, name), unit:units(label), party:parties(label)')
+      .eq('status', 'new')
+      .order('created_at', { ascending: false });
+    setPendingAssignments(aData || []);
+    setNewPhotos(pData || []);
+    setLoaded(true);
+  };
+  useEffect(() => { load(); }, []);
+
+  const markPhotoSeen = async (photo) => {
+    await supabase.from('pm_photos').update({
+      status: 'seen',
+      reviewed_by: employee.id,
+      reviewed_at: new Date().toISOString()
+    }).eq('id', photo.id);
+    load();
+  };
+  const archivePhoto = async (photo) => {
+    if (!confirm('Archive this photo? It will no longer appear in your inbox.')) return;
+    await supabase.from('pm_photos').update({
+      status: 'archived',
+      reviewed_by: employee.id,
+      reviewed_at: new Date().toISOString()
+    }).eq('id', photo.id);
+    load();
+  };
+
+  return (
+    <div className="pb-24">
+      <div className="flex items-center gap-3 px-5 py-4 border-b border-stone-200">
+        <button onClick={onBack} className="p-2 -ml-2 rounded-full hover:bg-stone-100">
+          <ArrowLeft size={20} className="text-stone-700" />
+        </button>
+        <div>
+          <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">From property managers</div>
+          <div className="font-serif text-xl text-stone-900">Inbox</div>
+        </div>
+      </div>
+
+      <div className="px-5 pt-4">
+        <div className="flex gap-1 bg-stone-100 p-1 rounded-xl mb-5">
+          <button onClick={() => setTab('assignments')}
+            className={`flex-1 py-2 px-2 rounded-lg text-xs font-medium ${tab === 'assignments' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+            Assignments ({pendingAssignments.length})
+          </button>
+          <button onClick={() => setTab('photos')}
+            className={`flex-1 py-2 px-2 rounded-lg text-xs font-medium ${tab === 'photos' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+            Photos ({newPhotos.length})
+          </button>
+        </div>
+
+        {!loaded ? <Splash text="Loading…" /> : tab === 'assignments' ? (
+          pendingAssignments.length === 0 ? (
+            <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
+              No assignments waiting for review.
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {pendingAssignments.map(a => (
+                <button key={a.id} onClick={() => setReviewAssignment(a)}
+                  className="w-full text-left p-4 rounded-2xl bg-white border-2 border-amber-200 hover:border-amber-500 transition-colors">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 mb-1 flex-wrap">
+                        {a.file_kind === 'pdf'
+                          ? <FileText size={14} className="text-stone-500 flex-shrink-0" />
+                          : <ImageIcon size={14} className="text-stone-500 flex-shrink-0" />}
+                        <span className="font-serif text-base text-stone-900 truncate">{a.title}</span>
+                      </div>
+                      <div className="text-xs text-stone-600 font-mono mb-1 flex items-center gap-1.5">
+                        <Building2 size={11} /> {a.property?.name}
+                      </div>
+                      {a.targets?.[0] && (a.targets[0].unit?.label || a.targets[0].party?.label) && (
+                        <div className="text-xs text-stone-500 font-mono">
+                          {a.targets[0].unit?.label}{a.targets[0].party?.label && ` · ${a.targets[0].party.label}`}
+                        </div>
+                      )}
+                      <div className="text-xs text-stone-400 font-mono mt-1">
+                        Submitted {fmtDate(a.created_at)}
+                      </div>
+                    </div>
+                    <ChevronRight size={16} className="text-stone-400 flex-shrink-0" />
+                  </div>
+                </button>
+              ))}
+            </div>
+          )
+        ) : (
+          newPhotos.length === 0 ? (
+            <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
+              No new photos.
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {newPhotos.map(p => (
+                <div key={p.id} className="p-4 rounded-2xl bg-white border-2 border-amber-200">
+                  <div className="text-xs text-stone-600 font-mono mb-2 flex items-center gap-1.5">
+                    <Building2 size={11} /> {p.property?.name}
+                    {p.unit?.label && <span>· {p.unit.label}</span>}
+                    {p.party?.label && <span>· {p.party.label}</span>}
+                  </div>
+                  {p.title && <div className="font-serif text-base text-stone-900 mb-1">{p.title}</div>}
+                  {p.notes && <div className="text-sm text-stone-700 mb-2 whitespace-pre-wrap">{p.notes}</div>}
+                  <button onClick={() => setReviewPhoto(p)} className="block w-full rounded-xl overflow-hidden bg-stone-100 mb-3">
+                    <img src={p.photo_url} alt={p.title || ''} className="w-full max-h-96 object-contain" />
+                  </button>
+                  <div className="text-[10px] text-stone-400 font-mono mb-3">
+                    Sent {fmtDate(p.created_at)}
+                  </div>
+                  <div className="flex gap-2">
+                    <button onClick={() => markPhotoSeen(p)}
+                      className="flex-1 py-2 rounded-xl bg-stone-900 text-stone-50 text-sm font-medium flex items-center justify-center gap-2">
+                      <Check size={14} /> Mark seen
+                    </button>
+                    <button onClick={() => archivePhoto(p)}
+                      className="py-2 px-3 rounded-xl border border-stone-300 text-stone-600 text-sm font-medium flex items-center justify-center gap-1">
+                      <X size={14} /> Archive
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )
+        )}
+      </div>
+
+      {reviewAssignment && (
+        <ReviewAssignmentModal assignment={reviewAssignment} employee={employee}
+          onDone={() => { setReviewAssignment(null); load(); }}
+          onClose={() => setReviewAssignment(null)} />
+      )}
+      {reviewPhoto && (
+        <div className="fixed inset-0 bg-stone-900/95 z-50 flex flex-col" onClick={() => setReviewPhoto(null)}>
+          <div className="flex items-center justify-between p-4 text-stone-50">
+            <div className="text-sm font-mono truncate flex-1">{reviewPhoto.title || 'Photo from PM'}</div>
+            <button className="p-2 rounded-full bg-stone-800 ml-2">
+              <X size={20} />
+            </button>
+          </div>
+          <div className="flex-1 flex items-center justify-center p-4">
+            <img src={reviewPhoto.photo_url} alt="" className="max-w-full max-h-full object-contain" />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Modal for owner/manager to approve or reject a PM assignment
+function ReviewAssignmentModal({ assignment, employee, onDone, onClose }) {
+  const [rejectMode, setRejectMode] = useState(false);
+  const [rejectReason, setRejectReason] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  const approve = async () => {
+    setBusy(true); setError('');
+    const { error: e } = await supabase.from('assignments').update({
+      pm_status: 'approved',
+      approved_by: employee.id,
+      approved_at: new Date().toISOString(),
+      pm_rejection_reason: null
+    }).eq('id', assignment.id);
+    setBusy(false);
+    if (e) { setError(e.message); return; }
+    onDone();
+  };
+
+  const reject = async () => {
+    if (!rejectReason.trim()) { setError('Please tell the PM what to change.'); return; }
+    setBusy(true); setError('');
+    const { error: e } = await supabase.from('assignments').update({
+      pm_status: 'rejected',
+      pm_rejection_reason: rejectReason.trim()
+    }).eq('id', assignment.id);
+    setBusy(false);
+    if (e) { setError(e.message); return; }
+    onDone();
+  };
+
+  return (
+    <div className="fixed inset-0 bg-stone-900/80 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
+      <div className="bg-stone-50 w-full sm:max-w-lg sm:rounded-3xl rounded-t-3xl max-h-[90vh] flex flex-col">
+        <div className="flex items-center justify-between p-5 border-b border-stone-200">
+          <div className="flex-1 min-w-0">
+            <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">Review submission</div>
+            <div className="font-serif text-xl text-stone-900 truncate">{assignment.title}</div>
+          </div>
+          <button onClick={onClose} className="p-2 rounded-full hover:bg-stone-100">
+            <X size={20} className="text-stone-600" />
+          </button>
+        </div>
+        <div className="flex-1 overflow-y-auto p-5 space-y-4">
+          {assignment.notes && (
+            <div className="p-3 rounded-xl bg-stone-100 text-sm text-stone-800 whitespace-pre-wrap">
+              {assignment.notes}
+            </div>
+          )}
+          {assignment.file_url && (
+            <div>
+              {assignment.file_kind === 'image' ? (
+                <img src={assignment.file_url} alt="" className="w-full rounded-xl" />
+              ) : (
+                <a href={assignment.file_url} target="_blank" rel="noreferrer"
+                  className="block p-4 rounded-xl bg-white border border-stone-200 hover:border-stone-400">
+                  <div className="flex items-center gap-2">
+                    <FileText size={18} className="text-stone-600" />
+                    <span className="text-sm text-stone-800 flex-1">Open PDF</span>
+                    <Eye size={14} className="text-stone-500" />
+                  </div>
+                </a>
+              )}
+            </div>
+          )}
+
+          {rejectMode && (
+            <div>
+              <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">
+                Tell the PM what needs to change
+              </label>
+              <textarea value={rejectReason} onChange={(e) => setRejectReason(e.target.value)} rows={4}
+                placeholder="e.g. Wrong apartment — should be B3-205 instead of B3-105"
+                className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white resize-none" />
+            </div>
+          )}
+
+          {error && (
+            <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-red-700 text-sm flex items-start gap-2">
+              <AlertCircle size={16} className="flex-shrink-0 mt-0.5" /><span>{error}</span>
+            </div>
+          )}
+        </div>
+        <div className="p-5 border-t border-stone-200 space-y-2">
+          {rejectMode ? (
+            <>
+              <button onClick={reject} disabled={busy}
+                className="w-full py-3 rounded-2xl bg-red-600 text-white font-medium disabled:opacity-50">
+                {busy ? 'Sending…' : 'Send back to PM with note'}
+              </button>
+              <button onClick={() => { setRejectMode(false); setError(''); }} disabled={busy}
+                className="w-full py-2 rounded-2xl text-stone-600 text-sm font-medium">
+                Cancel
+              </button>
+            </>
+          ) : (
+            <>
+              <button onClick={approve} disabled={busy}
+                className="w-full py-4 rounded-2xl bg-emerald-600 text-white font-medium flex items-center justify-center gap-2 disabled:opacity-50">
+                <Check size={16} /> {busy ? 'Approving…' : 'Approve & make visible to cleaners'}
+              </button>
+              <button onClick={() => setRejectMode(true)} disabled={busy}
+                className="w-full py-3 rounded-2xl border-2 border-red-200 text-red-700 text-sm font-medium">
+                Send back for changes
+              </button>
+            </>
+          )}
+        </div>
       </div>
     </div>
   );

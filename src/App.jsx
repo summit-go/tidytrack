@@ -4743,6 +4743,27 @@ function AssignmentForm({ property, employee, onCancel, onSaved }) {
     }));
   };
 
+  // Select / deselect every active party inside a unit, for one row
+  const toggleAllInUnit = (rowId, unit) => {
+    setRows(prev => prev.map(r => {
+      if (r.id !== rowId) return r;
+      const activeParties = (unit.parties || []).filter(p => p.active);
+      const allSelected = activeParties.every(p =>
+        r.multipleTargets.some(t => t.unitId === unit.id && (t.partyId || null) === p.id));
+      const next = allSelected
+        ? r.multipleTargets.filter(t => t.unitId !== unit.id)
+        : [
+            ...r.multipleTargets.filter(t => t.unitId !== unit.id),
+            ...activeParties.map(p => ({ unitId: unit.id, partyId: p.id }))
+          ];
+      return { ...r, multipleTargets: next };
+    }));
+  };
+
+  // Per-row search text for the multi-select
+  const [unitSearches, setUnitSearches] = useState({}); // { [rowId]: 'searchString' }
+  const setUnitSearch = (rowId, q) => setUnitSearches(prev => ({ ...prev, [rowId]: q }));
+
   const validateRows = () => {
     if (rows.length === 0) return 'Add at least one file.';
     for (const r of rows) {
@@ -4810,7 +4831,7 @@ function AssignmentForm({ property, employee, onCancel, onSaved }) {
   };
 
   return (
-    <div className="min-h-screen bg-stone-50 pb-32">
+    <div className="min-h-screen bg-stone-50 pb-48">
       <div className="flex items-center gap-3 px-5 py-4 border-b border-stone-200 sticky top-0 bg-stone-50 z-10">
         <button onClick={onCancel} className="p-2 -ml-2 rounded-full hover:bg-stone-100">
           <ArrowLeft size={20} className="text-stone-700" />
@@ -4921,15 +4942,41 @@ function AssignmentForm({ property, employee, onCancel, onSaved }) {
 
                       {row.scope === 'multiple' && (
                         <div>
-                          <div className="text-xs text-stone-500 font-mono mb-1">{row.multipleTargets.length} selected</div>
-                          <details className="border border-stone-200 rounded-lg bg-white">
-                            <summary className="px-3 py-2 cursor-pointer text-sm">Pick units &amp; parties</summary>
-                            <div className="max-h-64 overflow-y-auto border-t border-stone-200">
-                              {units.map(u => {
+                          <div className="flex items-baseline justify-between mb-2">
+                            <div className="text-xs text-stone-500 font-mono">{row.multipleTargets.length} selected</div>
+                            {row.multipleTargets.length > 0 && (
+                              <button type="button" onClick={() => updateRow(row.id, { multipleTargets: [] })}
+                                className="text-xs font-mono text-stone-500 hover:text-stone-900">Clear all</button>
+                            )}
+                          </div>
+                          <input type="text"
+                            value={unitSearches[row.id] || ''}
+                            onChange={(e) => setUnitSearch(row.id, e.target.value)}
+                            placeholder={`Search ${units.length} units (e.g. "B3" or "B10-2")…`}
+                            className="w-full px-3 py-2 rounded-lg border border-stone-300 bg-white text-sm mb-2" />
+                          <div className="border border-stone-200 rounded-lg bg-white max-h-72 overflow-y-auto">
+                            {(() => {
+                              const q = (unitSearches[row.id] || '').trim().toLowerCase();
+                              const filteredUnits = q
+                                ? units.filter(u => u.label.toLowerCase().includes(q))
+                                : units;
+                              if (filteredUnits.length === 0) {
+                                return <div className="p-4 text-center text-sm text-stone-400">No units match "{q}".</div>;
+                              }
+                              return filteredUnits.map(u => {
                                 const ap = (u.parties || []).filter(p => p.active).sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0));
+                                const allSelected = ap.length > 0 && ap.every(p => row.multipleTargets.some(t => t.unitId === u.id && (t.partyId || null) === p.id));
+                                const someSelected = !allSelected && ap.some(p => row.multipleTargets.some(t => t.unitId === u.id && (t.partyId || null) === p.id));
                                 return (
                                   <div key={u.id} className="border-b border-stone-100 last:border-b-0">
-                                    <div className="px-3 py-1.5 bg-stone-50 text-xs font-mono text-stone-700">{u.label}</div>
+                                    <button type="button"
+                                      onClick={() => toggleAllInUnit(row.id, u)}
+                                      className="w-full flex items-center justify-between px-3 py-2 bg-stone-50 hover:bg-stone-100 text-left">
+                                      <span className="font-mono text-xs text-stone-700">{u.label}</span>
+                                      <span className={`text-[10px] font-mono uppercase tracking-wider ${allSelected ? 'text-emerald-700' : someSelected ? 'text-amber-700' : 'text-stone-400'}`}>
+                                        {allSelected ? '✓ all selected' : someSelected ? 'some' : `tap for all (${ap.length})`}
+                                      </span>
+                                    </button>
                                     <div className="pl-5 py-1">
                                       {ap.map(p => {
                                         const selected = row.multipleTargets.some(t => t.unitId === u.id && (t.partyId || null) === p.id);
@@ -4939,15 +4986,16 @@ function AssignmentForm({ property, employee, onCancel, onSaved }) {
                                               onChange={() => toggleTarget(row.id, u.id, p.id)}
                                               className="w-3.5 h-3.5 rounded accent-stone-900" />
                                             <span className="text-stone-700">{p.label}</span>
+                                            {p.full_name && <span className="text-stone-500">({p.full_name})</span>}
                                           </label>
                                         );
                                       })}
                                     </div>
                                   </div>
                                 );
-                              })}
-                            </div>
-                          </details>
+                              });
+                            })()}
+                          </div>
                         </div>
                       )}
                     </div>

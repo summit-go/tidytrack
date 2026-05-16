@@ -11,7 +11,7 @@ import {
 // =================================================================
 // 🔧 PASTE YOUR SUPABASE KEYS HERE
 // =================================================================
-const SUPABASE_URL = "https://bbaynvqnbkjyqhzhhypr.supabase.co";
+const SUPABASE_URL = "https://bbaynvqnbkjyqhzhhypr.supabase.co/";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJiYXludnFuYmtqeXFoemhoeXByIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc0NzQ2MTMsImV4cCI6MjA5MzA1MDYxM30.ZXUoHFj_IwMe6rX8RxK8Dj4kAB9AS7X9xZAhQ84wDEk";
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
@@ -6098,6 +6098,7 @@ function PortalPhotoUploadTab({ property }) {
   const [success, setSuccess] = useState(false);
   const [error, setError] = useState('');
   const [history, setHistory] = useState([]);
+  const [zoomPhoto, setZoomPhoto] = useState(null);
 
   useEffect(() => {
     if (!isMulti) return;
@@ -6268,18 +6269,56 @@ function PortalPhotoUploadTab({ property }) {
           <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-3">
             Recently sent ({history.length})
           </div>
-          <div className="grid grid-cols-2 gap-2">
+          <div className="space-y-3">
             {history.map(p => (
-              <a key={p.id} href={p.photo_url} target="_blank" rel="noreferrer"
-                className="aspect-square rounded-xl overflow-hidden bg-stone-100 relative">
-                <img src={p.photo_url} alt={p.title || ''} className="w-full h-full object-cover" />
-                {p.status === 'seen' && (
-                  <div className="absolute bottom-1 right-1 px-1.5 py-0.5 rounded-full bg-emerald-600 text-white text-[9px] font-mono uppercase tracking-wider">
-                    Seen
+              <div key={p.id} className="p-3 rounded-2xl bg-white border border-stone-200">
+                <div className="flex gap-3">
+                  <button onClick={() => setZoomPhoto(p)}
+                    className="flex-shrink-0 w-20 h-20 rounded-xl overflow-hidden bg-stone-100">
+                    <img src={p.photo_url} alt={p.title || ''} className="w-full h-full object-cover" />
+                  </button>
+                  <div className="flex-1 min-w-0">
+                    {p.title && (
+                      <div className="font-serif text-sm text-stone-900 truncate mb-0.5">{p.title}</div>
+                    )}
+                    {(p.unit?.label || p.party?.label) && (
+                      <div className="text-[10px] font-mono text-stone-500 mb-1">
+                        {p.unit?.label}{p.party?.label && ` · ${p.party.label}`}
+                      </div>
+                    )}
+                    {p.notes && (
+                      <div className="text-xs text-stone-600 line-clamp-2 mb-1">{p.notes}</div>
+                    )}
+                    <div className="flex items-center gap-2 text-[10px] font-mono">
+                      <span className="text-stone-400">{fmtDate(p.created_at)}</span>
+                      <span className={`px-1.5 py-0.5 rounded-full ${p.status === 'seen' ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
+                        {p.status === 'seen' ? 'Seen by owner' : 'Awaiting review'}
+                      </span>
+                    </div>
                   </div>
-                )}
-              </a>
+                </div>
+              </div>
             ))}
+          </div>
+        </div>
+      )}
+
+      {/* Photo zoom modal */}
+      {zoomPhoto && (
+        <div className="fixed inset-0 bg-stone-900/95 z-50 flex flex-col">
+          <div className="flex items-center justify-between p-4 text-stone-50 bg-stone-900 flex-shrink-0">
+            <div className="text-sm font-mono truncate flex-1">{zoomPhoto.title || 'Photo'}</div>
+            <button onClick={() => setZoomPhoto(null)} className="p-2 rounded-full bg-stone-800 ml-2 flex-shrink-0">
+              <X size={20} />
+            </button>
+          </div>
+          <div className="flex-1 overflow-auto p-4">
+            <img src={zoomPhoto.photo_url} alt="" className="w-full h-auto rounded-xl" />
+            {zoomPhoto.notes && (
+              <div className="mt-3 p-3 rounded-xl bg-stone-800 text-stone-200 text-sm whitespace-pre-wrap">
+                {zoomPhoto.notes}
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -6788,23 +6827,45 @@ function PortalAssignmentDetail({ property, assignment, onBack, onEdit }) {
 function InboxView({ employee, onBack }) {
   const [tab, setTab] = useState('assignments');
   const [pendingAssignments, setPendingAssignments] = useState([]);
+  const [reviewedAssignments, setReviewedAssignments] = useState([]);
   const [newPhotos, setNewPhotos] = useState([]);
+  const [reviewedPhotos, setReviewedPhotos] = useState([]);
   const [loaded, setLoaded] = useState(false);
-  const [reviewAssignment, setReviewAssignment] = useState(null); // for approval modal
-  const [reviewPhoto, setReviewPhoto] = useState(null); // for photo zoom
+  const [reviewAssignment, setReviewAssignment] = useState(null);
+  const [reviewPhoto, setReviewPhoto] = useState(null);
 
   const load = async () => {
     setLoaded(false);
+    // Pending assignments
     const { data: aData } = await supabase.from('assignments')
       .select('*, property:customers(id, name, property_type), targets:assignment_targets(id, unit:units(label), party:parties(label))')
       .eq('source', 'pm').eq('pm_status', 'pending')
       .order('created_at', { ascending: false });
+    setPendingAssignments(aData || []);
+
+    // Already-reviewed PM assignments (approved or rejected) — for the "Reviewed" tab
+    const { data: rData } = await supabase.from('assignments')
+      .select('*, property:customers(id, name, property_type), targets:assignment_targets(id, unit:units(label), party:parties(label))')
+      .eq('source', 'pm').in('pm_status', ['approved', 'rejected'])
+      .order('approved_at', { ascending: false, nullsFirst: false })
+      .limit(50);
+    setReviewedAssignments(rData || []);
+
+    // New photos
     const { data: pData } = await supabase.from('pm_photos')
       .select('*, property:customers(id, name), unit:units(label), party:parties(label)')
       .eq('status', 'new')
       .order('created_at', { ascending: false });
-    setPendingAssignments(aData || []);
     setNewPhotos(pData || []);
+
+    // Reviewed photos (seen or archived)
+    const { data: rpData } = await supabase.from('pm_photos')
+      .select('*, property:customers(id, name), unit:units(label), party:parties(label)')
+      .in('status', ['seen', 'archived'])
+      .order('reviewed_at', { ascending: false, nullsFirst: false })
+      .limit(50);
+    setReviewedPhotos(rpData || []);
+
     setLoaded(true);
   };
   useEffect(() => { load(); }, []);
@@ -6826,6 +6887,20 @@ function InboxView({ employee, onBack }) {
     }).eq('id', photo.id);
     load();
   };
+  const restorePhoto = async (photo) => {
+    await supabase.from('pm_photos').update({
+      status: 'new',
+      reviewed_by: null,
+      reviewed_at: null
+    }).eq('id', photo.id);
+    load();
+  };
+  const deletePhoto = async (photo) => {
+    if (!confirm('Permanently delete this photo? This cannot be undone.')) return;
+    if (photo.photo_path) await supabase.storage.from(PM_UPLOAD_BUCKET).remove([photo.photo_path]);
+    await supabase.from('pm_photos').delete().eq('id', photo.id);
+    load();
+  };
 
   return (
     <div className="pb-24">
@@ -6840,14 +6915,18 @@ function InboxView({ employee, onBack }) {
       </div>
 
       <div className="px-5 pt-4">
-        <div className="flex gap-1 bg-stone-100 p-1 rounded-xl mb-5">
+        <div className="flex gap-1 bg-stone-100 p-1 rounded-xl mb-5 overflow-x-auto">
           <button onClick={() => setTab('assignments')}
-            className={`flex-1 py-2 px-2 rounded-lg text-xs font-medium ${tab === 'assignments' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+            className={`flex-1 py-2 px-2 rounded-lg text-xs font-medium whitespace-nowrap ${tab === 'assignments' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
             Assignments ({pendingAssignments.length})
           </button>
           <button onClick={() => setTab('photos')}
-            className={`flex-1 py-2 px-2 rounded-lg text-xs font-medium ${tab === 'photos' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+            className={`flex-1 py-2 px-2 rounded-lg text-xs font-medium whitespace-nowrap ${tab === 'photos' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
             Photos ({newPhotos.length})
+          </button>
+          <button onClick={() => setTab('reviewed')}
+            className={`flex-1 py-2 px-2 rounded-lg text-xs font-medium whitespace-nowrap ${tab === 'reviewed' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+            Reviewed
           </button>
         </div>
 
@@ -6887,7 +6966,7 @@ function InboxView({ employee, onBack }) {
               ))}
             </div>
           )
-        ) : (
+        ) : tab === 'photos' ? (
           newPhotos.length === 0 ? (
             <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
               No new photos.
@@ -6923,6 +7002,93 @@ function InboxView({ employee, onBack }) {
               ))}
             </div>
           )
+        ) : (
+          /* Reviewed tab — combines reviewed photos and reviewed assignments */
+          <div className="space-y-6">
+            {reviewedPhotos.length === 0 && reviewedAssignments.length === 0 ? (
+              <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
+                Nothing reviewed yet. Once you review photos or approve/reject assignments they show up here.
+              </div>
+            ) : (
+              <>
+                {reviewedAssignments.length > 0 && (
+                  <div>
+                    <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-3">
+                      Reviewed assignments ({reviewedAssignments.length})
+                    </div>
+                    <div className="space-y-2">
+                      {reviewedAssignments.map(a => {
+                        const isApproved = a.pm_status === 'approved';
+                        return (
+                          <div key={a.id} className={`p-4 rounded-2xl border ${isApproved ? 'bg-emerald-50 border-emerald-200' : 'bg-red-50 border-red-200'}`}>
+                            <div className="flex items-center gap-2 mb-1 flex-wrap">
+                              {a.file_kind === 'pdf'
+                                ? <FileText size={14} className="text-stone-600 flex-shrink-0" />
+                                : <ImageIcon size={14} className="text-stone-600 flex-shrink-0" />}
+                              <span className="font-serif text-base text-stone-900 truncate flex-1">{a.title}</span>
+                              <span className={`text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full ${isApproved ? 'bg-emerald-100 text-emerald-800' : 'bg-red-100 text-red-700'}`}>
+                                {isApproved ? 'Approved' : 'Rejected'}
+                              </span>
+                            </div>
+                            <div className="text-xs text-stone-600 font-mono mb-1 flex items-center gap-1.5">
+                              <Building2 size={11} /> {a.property?.name}
+                            </div>
+                            {a.pm_rejection_reason && (
+                              <div className="text-xs text-red-700 italic mt-1">"{a.pm_rejection_reason}"</div>
+                            )}
+                            <div className="flex gap-2 mt-2">
+                              {a.file_url && (
+                                <a href={a.file_url} target="_blank" rel="noreferrer"
+                                  className="px-3 py-1.5 rounded-lg bg-stone-100 hover:bg-stone-200 text-stone-700 text-xs font-medium flex items-center gap-1">
+                                  <Eye size={12} /> Open file
+                                </a>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {reviewedPhotos.length > 0 && (
+                  <div>
+                    <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-3">
+                      Reviewed photos ({reviewedPhotos.length})
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      {reviewedPhotos.map(p => (
+                        <div key={p.id} className="relative">
+                          <button onClick={() => setReviewPhoto(p)}
+                            className="block w-full aspect-square rounded-xl overflow-hidden bg-stone-100">
+                            <img src={p.photo_url} alt={p.title || ''} className="w-full h-full object-cover" />
+                          </button>
+                          <div className="absolute bottom-1 left-1 right-1 flex items-center justify-between">
+                            <span className={`text-[9px] uppercase tracking-wider font-mono px-1.5 py-0.5 rounded-full ${p.status === 'seen' ? 'bg-emerald-600 text-white' : 'bg-stone-700 text-white'}`}>
+                              {p.status}
+                            </span>
+                          </div>
+                          <div className="mt-1 px-1 text-[10px] font-mono text-stone-500 truncate">
+                            {p.property?.name}{p.unit?.label && ` · ${p.unit.label}`}
+                          </div>
+                          <div className="px-1 flex gap-2 mt-1">
+                            <button onClick={() => restorePhoto(p)}
+                              className="text-[10px] font-mono text-stone-600 hover:text-stone-900">
+                              Restore
+                            </button>
+                            <button onClick={() => deletePhoto(p)}
+                              className="text-[10px] font-mono text-red-600 hover:text-red-800">
+                              Delete
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
         )}
       </div>
 
@@ -6932,15 +7098,26 @@ function InboxView({ employee, onBack }) {
           onClose={() => setReviewAssignment(null)} />
       )}
       {reviewPhoto && (
-        <div className="fixed inset-0 bg-stone-900/95 z-50 flex flex-col" onClick={() => setReviewPhoto(null)}>
-          <div className="flex items-center justify-between p-4 text-stone-50">
+        <div className="fixed inset-0 bg-stone-900/95 z-50 flex flex-col">
+          <div className="flex items-center justify-between p-4 text-stone-50 bg-stone-900 flex-shrink-0">
             <div className="text-sm font-mono truncate flex-1">{reviewPhoto.title || 'Photo from PM'}</div>
-            <button className="p-2 rounded-full bg-stone-800 ml-2">
+            <button onClick={() => setReviewPhoto(null)} className="p-2 rounded-full bg-stone-800 ml-2 flex-shrink-0">
               <X size={20} />
             </button>
           </div>
-          <div className="flex-1 flex items-center justify-center p-4">
-            <img src={reviewPhoto.photo_url} alt="" className="max-w-full max-h-full object-contain" />
+          <div className="flex-1 overflow-auto p-4">
+            <img src={reviewPhoto.photo_url} alt="" className="w-full h-auto rounded-xl" />
+            {reviewPhoto.notes && (
+              <div className="mt-3 p-3 rounded-xl bg-stone-800 text-stone-200 text-sm whitespace-pre-wrap">
+                {reviewPhoto.notes}
+              </div>
+            )}
+          </div>
+          <div className="p-3 bg-stone-900 flex-shrink-0">
+            <a href={reviewPhoto.photo_url} target="_blank" rel="noreferrer"
+              className="block w-full text-center py-3 rounded-xl bg-stone-50 text-stone-900 text-sm font-medium">
+              Open full-size in new tab
+            </a>
           </div>
         </div>
       )}

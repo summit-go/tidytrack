@@ -340,6 +340,21 @@ function EmployeeApp({ employee, onSignOut }) {
     setBusy(false);
   };
 
+  // Switch property = clock out current shift, then drop straight on the property picker.
+  // Cleaner break than clock-out → home → clock-in.
+  const switchProperty = async () => {
+    if (!confirm('Clock out here and pick a new property?')) return;
+    setBusy(true);
+    if (activeTask) await stopTask(activeTask, false);
+    if (activeBlock && !activeBlock.end_time) {
+      await supabase.from('work_blocks').update({ end_time: new Date().toISOString() }).eq('id', activeBlock.id);
+    }
+    await supabase.from('shifts').update({ end_time: new Date().toISOString() }).eq('id', shift.id);
+    setShift(null); setWorkBlocks([]); setActiveBlock(null); setTasks([]); setActiveTask(null);
+    setClockInFlow({ step: 'property' });  // Jump straight to the picker
+    setBusy(false);
+  };
+
   // Work blocks
   const startNewBlock = () => setBlockStartFlow({ step: 'unit' });
   const onPickBlockUnit = (unit) => setBlockStartFlow({ step: 'party', unit });
@@ -462,7 +477,8 @@ function EmployeeApp({ employee, onSignOut }) {
 
   if (isMulti && !activeBlock) {
     return <PropertyHub shift={shift} workBlocks={workBlocks} employeeName={employee.name} employee={employee}
-      onSignOut={onSignOut} onClockOut={clockOut} onStartNew={startNewBlock} onReopen={reopenBlock} busy={busy} />;
+      onSignOut={onSignOut} onClockOut={clockOut} onSwitchProperty={switchProperty}
+      onStartNew={startNewBlock} onReopen={reopenBlock} busy={busy} />;
   }
   if (isMulti && activeBlock) {
     return <BlockView shift={shift} block={activeBlock} tasks={tasks} activeTask={activeTask}
@@ -476,6 +492,7 @@ function EmployeeApp({ employee, onSignOut }) {
   }
   return <SimpleShiftView shift={shift} tasks={tasks} activeTask={activeTask}
     employeeName={employee.name} employee={employee} onSignOut={onSignOut} onClockOut={clockOut}
+    onSwitchProperty={switchProperty}
     newTaskName={newTaskName} setNewTaskName={setNewTaskName}
     onStartTask={startTask} onStopTask={stopTask} onResumeTask={resumeTask}
     onAddPhoto={(taskId, kind) => setPhotoModal({ taskId, kind })}
@@ -486,7 +503,7 @@ function EmployeeApp({ employee, onSignOut }) {
 // =================================================================
 // PROPERTY HUB (multi-unit, between work blocks)
 // =================================================================
-function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onClockOut, onStartNew, onReopen, busy }) {
+function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onClockOut, onSwitchProperty, onStartNew, onReopen, busy }) {
   useTick(true);
   const elapsed = Date.now() - new Date(shift.start_time).getTime();
 
@@ -494,15 +511,21 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
     <div className="min-h-screen bg-stone-50 pb-24">
       <Header name={employeeName} onSignOut={onSignOut} />
       <div className="bg-stone-900 text-stone-50 px-5 py-5 sticky top-0 z-10 shadow-md">
-        <div className="flex items-center justify-between mb-3">
+        <div className="flex items-start justify-between mb-3 gap-2">
           <div>
             <div className="text-xs uppercase tracking-widest text-stone-400 font-mono">At property</div>
             <div className="text-3xl font-mono font-light tracking-tight">{fmtTime(elapsed)}</div>
           </div>
-          <button onClick={onClockOut} disabled={busy}
-            className="px-4 py-2.5 rounded-full bg-amber-700 text-stone-50 text-sm font-medium flex items-center gap-2 active:scale-95 transition-transform disabled:opacity-50">
-            <LogOut size={14} /> Clock out
-          </button>
+          <div className="flex flex-col gap-1.5 items-end">
+            <button onClick={onClockOut} disabled={busy}
+              className="px-4 py-2.5 rounded-full bg-amber-700 text-stone-50 text-sm font-medium flex items-center gap-2 active:scale-95 transition-transform disabled:opacity-50">
+              <LogOut size={14} /> Clock out
+            </button>
+            <button onClick={onSwitchProperty} disabled={busy}
+              className="px-3 py-1.5 rounded-full bg-stone-700 hover:bg-stone-600 text-stone-50 text-xs font-medium flex items-center gap-1.5 disabled:opacity-50">
+              <Home size={11} /> Switch property
+            </button>
+          </div>
         </div>
         <div className="flex items-center gap-1.5 text-xs text-amber-400 font-mono">
           <Building2 size={11} /> {shift.customer?.name}
@@ -512,7 +535,7 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
         </div>
       </div>
 
-      <AssignmentBanner propertyId={shift.customer_id} unitId={null} partyId={null} employee={employee} />
+      <AssignmentsPanel propertyId={shift.customer_id} employee={employee} />
 
       <div className="px-4 pt-6">
         <button onClick={onStartNew} disabled={busy}
@@ -585,8 +608,9 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
       <Header name={employeeName} onSignOut={onSignOut} />
       <div className="bg-stone-900 text-stone-50 px-5 py-5 sticky top-0 z-10 shadow-md">
         <div className="flex items-center justify-between mb-3">
-          <button onClick={onPause} className="flex items-center gap-1.5 text-xs text-stone-400 font-mono hover:text-stone-50">
-            <ArrowLeft size={12} /> Pause &amp; back to property
+          <button onClick={onPause}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-50 text-xs font-medium">
+            <Home size={12} /> Property home
           </button>
           <button onClick={onFinish} disabled={busy}
             className="px-4 py-2 rounded-full bg-amber-700 text-stone-50 text-sm font-medium flex items-center gap-2 active:scale-95 transition-transform disabled:opacity-50">
@@ -664,7 +688,7 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
 // =================================================================
 // SIMPLE SHIFT VIEW (single-bill properties)
 // =================================================================
-function SimpleShiftView({ shift, tasks, activeTask, employeeName, employee, onSignOut, onClockOut,
+function SimpleShiftView({ shift, tasks, activeTask, employeeName, employee, onSignOut, onClockOut, onSwitchProperty,
   newTaskName, setNewTaskName, onStartTask, onStopTask, onResumeTask, onAddPhoto,
   photoModal, onClosePhotoModal, onUploadPhoto, busy }) {
   useTick(true);
@@ -675,15 +699,23 @@ function SimpleShiftView({ shift, tasks, activeTask, employeeName, employee, onS
     <div className="min-h-screen bg-stone-50 pb-24">
       <Header name={employeeName} onSignOut={onSignOut} />
       <div className="bg-stone-900 text-stone-50 px-5 py-5 sticky top-0 z-10 shadow-md">
-        <div className="flex items-center justify-between mb-3">
+        <div className="flex items-start justify-between mb-3 gap-2">
           <div>
             <div className="text-xs uppercase tracking-widest text-stone-400 font-mono">On the clock</div>
             <div className="text-3xl font-mono font-light tracking-tight">{fmtTime(elapsed)}</div>
           </div>
-          <button onClick={onClockOut} disabled={busy}
-            className="px-4 py-2.5 rounded-full bg-amber-700 text-stone-50 text-sm font-medium flex items-center gap-2 active:scale-95 transition-transform disabled:opacity-50">
-            <LogOut size={14} /> Clock out
-          </button>
+          <div className="flex flex-col gap-1.5 items-end">
+            <button onClick={onClockOut} disabled={busy}
+              className="px-4 py-2.5 rounded-full bg-amber-700 text-stone-50 text-sm font-medium flex items-center gap-2 active:scale-95 transition-transform disabled:opacity-50">
+              <LogOut size={14} /> Clock out
+            </button>
+            {shift.customer_id && (
+              <button onClick={onSwitchProperty} disabled={busy}
+                className="px-3 py-1.5 rounded-full bg-stone-700 hover:bg-stone-600 text-stone-50 text-xs font-medium flex items-center gap-1.5 disabled:opacity-50">
+                <Home size={11} /> Switch property
+              </button>
+            )}
+          </div>
         </div>
         {shift.customer?.name && (
           <div className="flex items-center gap-1.5 text-xs text-amber-400 font-mono">
@@ -1211,6 +1243,7 @@ function ManagerDashboard({ employee, onSignOut }) {
   const [filter, setFilter] = useState('week');
   const [subView, setSubView] = useState('list'); // 'list' | 'today'
   const [loaded, setLoaded] = useState(false);
+  const [liveSheetOpen, setLiveSheetOpen] = useState(false);
   const showMoney = canSeeMoney(employee);
 
   const load = useCallback(async () => {
@@ -1263,14 +1296,16 @@ function ManagerDashboard({ employee, onSignOut }) {
           Dash<span className="font-serif italic text-amber-700">board</span>
         </h1>
         <div className="grid grid-cols-2 gap-3 mb-6">
-          <StatCard label="On the clock" value={activeCount} unit="now" highlight={activeCount > 0} />
+          <StatCard label="On the clock" value={activeCount} unit="now" highlight={activeCount > 0}
+            onClick={activeCount > 0 ? () => setLiveSheetOpen(true) : null} />
           <StatCard label={`${filter === 'today' ? 'Today' : filter === 'week' ? 'Week' : 'Total'} hours`} value={fmtTimeShort(totalHours)} />
           {showMoney ? (
             <StatCard label="Billable" value={fmtMoney(totalBillable)} accent />
           ) : (
             <StatCard label="Shifts" value={shifts.length} unit="logged" />
           )}
-          <StatCard label="Active" value={activeCount} unit="cleaners" />
+          <StatCard label="Active" value={activeCount} unit="cleaners"
+            onClick={activeCount > 0 ? () => setLiveSheetOpen(true) : null} />
         </div>
       </div>
       <div className="px-5 mb-4 flex gap-2">
@@ -1300,6 +1335,12 @@ function ManagerDashboard({ employee, onSignOut }) {
       ) : (
         <ShiftList shifts={shifts} showMoney={showMoney}
           onOpen={(s) => { setSelectedShift(s); setView('detail'); }} />
+      )}
+
+      {liveSheetOpen && (
+        <LiveCleanersSheet
+          onClose={() => setLiveSheetOpen(false)}
+          onOpenShift={(s) => { setLiveSheetOpen(false); setSelectedShift(s); setView('detail'); }} />
       )}
     </div>
   );
@@ -1524,16 +1565,22 @@ function GroupedByPartyView({ shifts, showMoney, onOpenShift }) {
   );
 }
 
-function StatCard({ label, value, unit, highlight, accent }) {
-  return (
-    <div className={`p-4 rounded-2xl ${highlight ? 'bg-stone-900 text-stone-50' : accent ? 'bg-amber-50 border border-amber-200' : 'bg-white border border-stone-200'}`}>
-      <div className={`text-xs uppercase tracking-wider font-mono mb-1 ${highlight ? 'text-stone-400' : accent ? 'text-amber-700' : 'text-stone-500'}`}>{label}</div>
+function StatCard({ label, value, unit, highlight, accent, onClick }) {
+  const className = `p-4 rounded-2xl text-left w-full transition-transform ${highlight ? 'bg-stone-900 text-stone-50' : accent ? 'bg-amber-50 border border-amber-200' : 'bg-white border border-stone-200'} ${onClick ? 'active:scale-98 hover:opacity-90 cursor-pointer' : ''}`;
+  const content = (
+    <>
+      <div className={`text-xs uppercase tracking-wider font-mono mb-1 flex items-center justify-between ${highlight ? 'text-stone-400' : accent ? 'text-amber-700' : 'text-stone-500'}`}>
+        <span>{label}</span>
+        {onClick && <ChevronRight size={11} className="opacity-60" />}
+      </div>
       <div className="flex items-baseline gap-1.5">
         <span className={`text-2xl font-serif ${accent ? 'text-amber-900' : ''}`}>{value}</span>
         {unit && <span className={`text-xs font-mono ${highlight ? 'text-stone-400' : 'text-stone-500'}`}>{unit}</span>}
       </div>
-    </div>
+    </>
   );
+  if (onClick) return <button onClick={onClick} className={className}>{content}</button>;
+  return <div className={className}>{content}</div>;
 }
 
 // =================================================================
@@ -4593,274 +4640,347 @@ function AssignmentList({ property, employee, onBack, onNew, onOpen }) {
 }
 
 // =================================================================
-// ASSIGNMENT FORM — upload doc + target selection
+// ASSIGNMENT FORM — bulk multi-file uploader
+//
+// Lets the owner/manager pick multiple files at once and configure
+// each one individually (title, notes, property/unit/party target)
+// before saving them all in one batch.
+//
+// `property` is the *default* property (where they came from). Each
+// file can be retargeted to a different property if needed.
 // =================================================================
 function AssignmentForm({ property, employee, onCancel, onSaved }) {
-  const isMulti = property.property_type === 'multi_unit';
-  const [title, setTitle] = useState('');
-  const [notes, setNotes] = useState('');
-  const [file, setFile] = useState(null);
-  const [scope, setScope] = useState(isMulti ? 'specific' : 'property'); // 'property' | 'specific' | 'multiple'
-  const [units, setUnits] = useState([]);          // all units in the property (multi-unit only)
-  const [unitId, setUnitId] = useState('');        // for 'specific' scope
-  const [partyId, setPartyId] = useState('');      // for 'specific' scope
-  const [parties, setParties] = useState([]);      // parties of unitId
-  const [selectedTargets, setSelectedTargets] = useState([]); // for 'multiple': [{ unitId, partyId }]
-  const [unitSearch, setUnitSearch] = useState('');
-  const [error, setError] = useState('');
+  // Each row: { id, file, title, notes, propertyId, scope, unitId, partyId, multipleTargets }
+  const [rows, setRows] = useState([]);
+  const [allProperties, setAllProperties] = useState([]);
+  // Cache of units per property: { [propertyId]: [{id, label, parties:[...]}] }
+  const [unitsByProperty, setUnitsByProperty] = useState({});
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState('');
+  const [error, setError] = useState('');
 
-  // Load units for multi-unit properties
   useEffect(() => {
-    if (!isMulti) return;
     (async () => {
-      const { data } = await supabase.from('units')
-        .select('*, parties(id, label, full_name, active, sort_order)')
-        .eq('customer_id', property.id).eq('active', true)
-        .order('sort_order').order('label');
-      const sorted = (data || []).slice().sort((a, b) => naturalCompare(a.label, b.label));
-      setUnits(sorted);
+      const { data } = await supabase.from('customers').select('*')
+        .eq('active', true).order('name');
+      setAllProperties(data || []);
     })();
-  }, [property.id, isMulti]);
+  }, []);
 
-  // When unitId changes (specific scope), load parties for that unit
+  // Load units for a property on demand (and cache)
+  const ensureUnitsLoaded = async (propertyId) => {
+    if (unitsByProperty[propertyId]) return unitsByProperty[propertyId];
+    const { data } = await supabase.from('units')
+      .select('*, parties(id, label, full_name, active, sort_order)')
+      .eq('customer_id', propertyId).eq('active', true)
+      .order('sort_order').order('label');
+    const sorted = (data || []).slice().sort((a, b) => naturalCompare(a.label, b.label));
+    setUnitsByProperty(prev => ({ ...prev, [propertyId]: sorted }));
+    return sorted;
+  };
+
+  // When a property is set/changed on a row, prefetch its units
   useEffect(() => {
-    if (scope !== 'specific' || !unitId) { setParties([]); return; }
-    const u = units.find(x => x.id === unitId);
-    setParties((u?.parties || []).filter(p => p.active).sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0)));
-  }, [unitId, scope, units]);
+    const ids = [...new Set(rows.map(r => r.propertyId).filter(Boolean))];
+    ids.forEach(id => { if (!unitsByProperty[id]) ensureUnitsLoaded(id); });
+    // eslint-disable-next-line
+  }, [rows]);
 
-  const filteredUnits = unitSearch.trim()
-    ? units.filter(u => u.label.toLowerCase().includes(unitSearch.trim().toLowerCase()))
-    : units;
+  const addFiles = (files) => {
+    const newRows = Array.from(files).map(f => {
+      // Pre-strip extension for a sensible default title
+      const baseName = (f.name || '').replace(/\.[a-z0-9]+$/i, '');
+      const defaultProperty = property?.id || (allProperties[0]?.id || '');
+      const isMulti = allProperties.find(p => p.id === defaultProperty)?.property_type === 'multi_unit';
+      return {
+        id: `${Date.now()}_${Math.random().toString(36).slice(2,8)}`,
+        file: f,
+        title: baseName.slice(0, 80),
+        notes: '',
+        propertyId: defaultProperty,
+        scope: isMulti ? 'specific' : 'property',
+        unitId: '',
+        partyId: '',
+        multipleTargets: []  // [{ unitId, partyId }]
+      };
+    });
+    setRows(prev => [...prev, ...newRows]);
+  };
 
-  const toggleTarget = (uId, pId) => {
-    const key = `${uId}::${pId || ''}`;
-    setSelectedTargets(prev => {
-      const exists = prev.find(t => `${t.unitId}::${t.partyId || ''}` === key);
-      if (exists) return prev.filter(t => `${t.unitId}::${t.partyId || ''}` !== key);
-      return [...prev, { unitId: uId, partyId: pId || null }];
+  const handleFileInput = (e) => {
+    if (e.target.files && e.target.files.length > 0) {
+      addFiles(e.target.files);
+      e.target.value = ''; // reset so picking the same file again re-fires
+    }
+  };
+
+  const updateRow = (id, patch) => {
+    setRows(prev => prev.map(r => r.id === id ? { ...r, ...patch } : r));
+  };
+
+  const removeRow = (id) => {
+    setRows(prev => prev.filter(r => r.id !== id));
+  };
+
+  // When the property on a row changes, reset its scope/targets
+  const changeRowProperty = (id, newPropId) => {
+    const isMulti = allProperties.find(p => p.id === newPropId)?.property_type === 'multi_unit';
+    updateRow(id, {
+      propertyId: newPropId,
+      scope: isMulti ? 'specific' : 'property',
+      unitId: '', partyId: '', multipleTargets: []
     });
   };
 
-  const isTargetSelected = (uId, pId) =>
-    selectedTargets.some(t => t.unitId === uId && (t.partyId || null) === (pId || null));
+  const toggleTarget = (rowId, uId, pId) => {
+    setRows(prev => prev.map(r => {
+      if (r.id !== rowId) return r;
+      const exists = r.multipleTargets.some(t => t.unitId === uId && (t.partyId || null) === (pId || null));
+      const next = exists
+        ? r.multipleTargets.filter(t => !(t.unitId === uId && (t.partyId || null) === (pId || null)))
+        : [...r.multipleTargets, { unitId: uId, partyId: pId || null }];
+      return { ...r, multipleTargets: next };
+    }));
+  };
 
-  const save = async () => {
-    setError('');
-    if (!title.trim()) { setError('Title is required.'); return; }
-    if (!file) { setError('Please upload a PDF or image file.'); return; }
-    if (isMulti) {
-      if (scope === 'specific' && (!unitId || !partyId)) {
-        setError('Pick a specific unit and party.'); return;
-      }
-      if (scope === 'multiple' && selectedTargets.length === 0) {
-        setError('Select at least one unit/party.'); return;
+  const validateRows = () => {
+    if (rows.length === 0) return 'Add at least one file.';
+    for (const r of rows) {
+      if (!r.title.trim()) return `One of the files is missing a title.`;
+      if (!r.propertyId) return `One of the files has no property set.`;
+      const prop = allProperties.find(p => p.id === r.propertyId);
+      const isMulti = prop?.property_type === 'multi_unit';
+      if (isMulti) {
+        if (r.scope === 'specific' && (!r.unitId || !r.partyId)) {
+          return `"${r.title}" needs a unit and party.`;
+        }
+        if (r.scope === 'multiple' && r.multipleTargets.length === 0) {
+          return `"${r.title}" needs at least one selected unit/party.`;
+        }
       }
     }
+    return null;
+  };
 
+  const saveAll = async () => {
+    setError('');
+    const v = validateRows();
+    if (v) { setError(v); return; }
     setBusy(true);
     try {
-      setProgress('Uploading file…');
-      const { path, publicUrl, kind } = await uploadAssignmentFile(file, property.id);
+      for (let i = 0; i < rows.length; i++) {
+        const r = rows[i];
+        setProgress(`Uploading file ${i + 1} of ${rows.length}…`);
+        const { path, publicUrl, kind } = await uploadAssignmentFile(r.file, r.propertyId);
 
-      setProgress('Creating assignment…');
-      const { data: created, error: e } = await supabase.from('assignments')
-        .insert({
-          customer_id: property.id,
-          title: title.trim(),
-          notes: notes.trim() || null,
-          file_path: path,
-          file_url: publicUrl,
-          file_kind: kind,
-          uploaded_by: employee.id,
-          active: true
-        }).select().single();
-      if (e) throw e;
+        const { data: created, error: e } = await supabase.from('assignments')
+          .insert({
+            customer_id: r.propertyId,
+            title: r.title.trim(),
+            notes: r.notes.trim() || null,
+            file_path: path,
+            file_url: publicUrl,
+            file_kind: kind,
+            uploaded_by: employee.id,
+            active: true
+          }).select().single();
+        if (e) throw e;
 
-      // Build targets
-      let targetRows = [];
-      if (!isMulti || scope === 'property') {
-        targetRows = [{ assignment_id: created.id, unit_id: null, party_id: null, status: 'pending' }];
-      } else if (scope === 'specific') {
-        targetRows = [{ assignment_id: created.id, unit_id: unitId, party_id: partyId, status: 'pending' }];
-      } else if (scope === 'multiple') {
-        targetRows = selectedTargets.map(t => ({
-          assignment_id: created.id, unit_id: t.unitId, party_id: t.partyId, status: 'pending'
-        }));
+        const prop = allProperties.find(p => p.id === r.propertyId);
+        const isMulti = prop?.property_type === 'multi_unit';
+        let targetRows = [];
+        if (!isMulti || r.scope === 'property') {
+          targetRows = [{ assignment_id: created.id, unit_id: null, party_id: null, status: 'pending' }];
+        } else if (r.scope === 'specific') {
+          targetRows = [{ assignment_id: created.id, unit_id: r.unitId, party_id: r.partyId, status: 'pending' }];
+        } else if (r.scope === 'multiple') {
+          targetRows = r.multipleTargets.map(t => ({
+            assignment_id: created.id, unit_id: t.unitId, party_id: t.partyId, status: 'pending'
+          }));
+        }
+        const { error: te } = await supabase.from('assignment_targets').insert(targetRows);
+        if (te) throw te;
       }
-
-      setProgress(`Creating ${targetRows.length} target${targetRows.length === 1 ? '' : 's'}…`);
-      const { error: te } = await supabase.from('assignment_targets').insert(targetRows);
-      if (te) throw te;
-
-      onSaved();
+      setProgress(`Done — ${rows.length} assignment${rows.length === 1 ? '' : 's'} created.`);
+      setTimeout(() => onSaved(), 400);
     } catch (err) {
-      setBusy(false);
       setError(err.message || String(err));
+      setBusy(false);
     }
   };
 
   return (
-    <div className="min-h-screen bg-stone-50 pb-24">
-      <div className="flex items-center gap-3 px-5 py-4 border-b border-stone-200">
+    <div className="min-h-screen bg-stone-50 pb-32">
+      <div className="flex items-center gap-3 px-5 py-4 border-b border-stone-200 sticky top-0 bg-stone-50 z-10">
         <button onClick={onCancel} className="p-2 -ml-2 rounded-full hover:bg-stone-100">
           <ArrowLeft size={20} className="text-stone-700" />
         </button>
         <div>
-          <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">{property.name}</div>
-          <div className="font-serif text-xl text-stone-900">New assignment</div>
+          <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">New assignments</div>
+          <div className="font-serif text-xl text-stone-900">Upload &amp; assign</div>
         </div>
       </div>
 
-      <div className="px-5 pt-6 space-y-5">
-        <div>
-          <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Title</label>
-          <input type="text" value={title} onChange={(e) => setTitle(e.target.value)}
-            placeholder="e.g. Week of May 13 — kitchen + bath"
-            className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white focus:outline-none focus:border-stone-900 text-stone-900" />
-        </div>
+      <div className="px-5 pt-6">
+        {/* File picker — always available, can add more */}
+        <label className="block w-full p-6 border-2 border-dashed border-stone-300 rounded-2xl text-center cursor-pointer hover:border-stone-900 transition-colors mb-4">
+          <Plus size={28} className="mx-auto mb-2 text-stone-500" />
+          <div className="text-stone-700 font-medium text-sm">
+            {rows.length === 0 ? 'Pick one or more PDFs / images' : 'Add more files'}
+          </div>
+          <div className="text-xs text-stone-500 mt-0.5">You can configure each one below before saving</div>
+          <input type="file" accept="application/pdf,image/*" multiple onChange={handleFileInput} className="hidden" />
+        </label>
 
-        <div>
-          <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Notes (optional)</label>
-          <textarea value={notes} onChange={(e) => setNotes(e.target.value)}
-            placeholder="Any standing instructions or context for the cleaners…" rows={3}
-            className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white focus:outline-none focus:border-stone-900 text-stone-900 resize-none" />
-        </div>
-
-        <div>
-          <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">File (PDF or image)</label>
-          <label className={`block w-full p-6 border-2 border-dashed rounded-2xl text-center cursor-pointer transition-colors ${file ? 'border-emerald-300 bg-emerald-50' : 'border-stone-300 hover:border-stone-900'}`}>
-            {file ? (
-              <>
-                <Check size={28} className="mx-auto mb-2 text-emerald-600" />
-                <div className="text-stone-900 font-medium text-sm">{file.name}</div>
-                <div className="text-xs text-stone-500 mt-0.5">{(file.size / 1024).toFixed(1)} KB · tap to change</div>
-              </>
-            ) : (
-              <>
-                <FileText size={28} className="mx-auto mb-2 text-stone-400" />
-                <div className="text-stone-700 font-medium text-sm">Choose PDF or image</div>
-                <div className="text-xs text-stone-500 mt-0.5">Max {ASSIGNMENT_MAX_SIZE_MB}MB</div>
-              </>
-            )}
-            <input type="file" accept="application/pdf,image/*" onChange={(e) => setFile(e.target.files?.[0] || null)}
-              className="hidden" />
-          </label>
-        </div>
-
-        {isMulti && (
-          <div>
-            <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Scope</label>
-            <div className="grid grid-cols-2 gap-2">
-              <button onClick={() => setScope('specific')} type="button"
-                className={`p-3 rounded-xl border-2 text-left ${scope === 'specific' ? 'border-stone-900 bg-white' : 'border-stone-200 bg-white/50'}`}>
-                <div className="font-medium text-stone-900 text-sm">One party</div>
-                <div className="text-xs text-stone-500">Single unit + party</div>
-              </button>
-              <button onClick={() => setScope('multiple')} type="button"
-                className={`p-3 rounded-xl border-2 text-left ${scope === 'multiple' ? 'border-stone-900 bg-white' : 'border-stone-200 bg-white/50'}`}>
-                <div className="font-medium text-stone-900 text-sm">Multiple</div>
-                <div className="text-xs text-stone-500">Pick from a list</div>
-              </button>
-            </div>
+        {rows.length === 0 && (
+          <div className="text-center py-8 text-stone-400 text-sm">
+            No files yet. Pick some files to get started.
           </div>
         )}
 
-        {isMulti && scope === 'specific' && (
-          <>
-            <div>
-              <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Unit</label>
-              <select value={unitId} onChange={(e) => { setUnitId(e.target.value); setPartyId(''); }}
-                className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white focus:outline-none focus:border-stone-900 text-stone-900">
-                <option value="">— Pick a unit —</option>
-                {units.map(u => <option key={u.id} value={u.id}>{u.label}</option>)}
-              </select>
-            </div>
-            {unitId && (
-              <div>
-                <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Party</label>
-                <select value={partyId} onChange={(e) => setPartyId(e.target.value)}
-                  className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white focus:outline-none focus:border-stone-900 text-stone-900">
-                  <option value="">— Pick a party —</option>
-                  {parties.map(p => <option key={p.id} value={p.id}>{p.label}{p.full_name ? ` (${p.full_name})` : ''}</option>)}
-                </select>
-              </div>
-            )}
-          </>
-        )}
+        {/* Per-file configuration rows */}
+        <div className="space-y-3">
+          {rows.map((row, idx) => {
+            const prop = allProperties.find(p => p.id === row.propertyId);
+            const isMulti = prop?.property_type === 'multi_unit';
+            const units = unitsByProperty[row.propertyId] || [];
+            const rowParties = (units.find(u => u.id === row.unitId)?.parties || [])
+              .filter(p => p.active).sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0));
+            const isPdf = row.file.type === 'application/pdf' || /\.pdf$/i.test(row.file.name);
 
-        {isMulti && scope === 'multiple' && (
-          <div>
-            <div className="flex items-baseline justify-between mb-2">
-              <label className="text-xs uppercase tracking-wider text-stone-500 font-mono">Select units &amp; parties</label>
-              <span className="text-xs font-mono text-stone-500">{selectedTargets.length} selected</span>
-            </div>
-            <input type="text" value={unitSearch} onChange={(e) => setUnitSearch(e.target.value)}
-              placeholder={`Search ${units.length} units…`}
-              className="w-full px-3 py-2 rounded-lg border border-stone-300 bg-white text-sm mb-2" />
-            <div className="border border-stone-200 rounded-xl max-h-96 overflow-y-auto bg-white">
-              {filteredUnits.length === 0 ? (
-                <div className="p-4 text-center text-sm text-stone-400">No units match.</div>
-              ) : filteredUnits.map(u => {
-                const activeParties = (u.parties || []).filter(p => p.active).sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0));
-                // "Select unit only" if no parties or as a convenience: tap unit to select all parties
-                const allSelected = activeParties.length > 0 && activeParties.every(p => isTargetSelected(u.id, p.id));
-                const toggleAllInUnit = () => {
-                  if (allSelected) {
-                    setSelectedTargets(prev => prev.filter(t => t.unitId !== u.id));
-                  } else {
-                    const additions = activeParties.map(p => ({ unitId: u.id, partyId: p.id }))
-                      .filter(t => !isTargetSelected(t.unitId, t.partyId));
-                    setSelectedTargets(prev => [...prev, ...additions]);
-                  }
-                };
-                return (
-                  <div key={u.id} className="border-b border-stone-100 last:border-b-0">
-                    <button onClick={toggleAllInUnit}
-                      className="w-full flex items-center justify-between p-3 hover:bg-stone-50 text-left">
-                      <span className="font-serif text-sm text-stone-900">{u.label}</span>
-                      <span className="text-xs font-mono text-stone-500">
-                        {allSelected ? 'All selected' : `Tap for all (${activeParties.length})`}
-                      </span>
-                    </button>
-                    <div className="pl-6 pb-2">
-                      {activeParties.map(p => (
-                        <label key={p.id} className="flex items-center gap-2 py-1.5 text-sm cursor-pointer">
-                          <input type="checkbox" checked={isTargetSelected(u.id, p.id)}
-                            onChange={() => toggleTarget(u.id, p.id)}
-                            className="w-4 h-4 rounded accent-stone-900" />
-                          <span className="text-stone-700">{p.label}</span>
-                          {p.full_name && <span className="text-xs text-stone-500">{p.full_name}</span>}
-                        </label>
-                      ))}
+            return (
+              <div key={row.id} className="p-4 rounded-2xl bg-white border border-stone-200">
+                <div className="flex items-start gap-3 mb-3">
+                  <div className="flex-shrink-0 w-10 h-10 rounded-xl bg-stone-100 flex items-center justify-center">
+                    {isPdf ? <FileText size={18} className="text-stone-600" /> : <ImageIcon size={18} className="text-stone-600" />}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="text-xs font-mono text-stone-500 truncate">{row.file.name}</div>
+                    <div className="text-[10px] font-mono text-stone-400">
+                      {(row.file.size / 1024).toFixed(0)} KB · #{idx + 1}
                     </div>
                   </div>
-                );
-              })}
-            </div>
-          </div>
-        )}
+                  <button onClick={() => removeRow(row.id)} disabled={busy}
+                    className="p-2 rounded-full hover:bg-stone-100 text-stone-500">
+                    <X size={16} />
+                  </button>
+                </div>
 
-        {error && (
-          <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-red-700 text-sm flex items-start gap-2">
-            <AlertCircle size={16} className="flex-shrink-0 mt-0.5" /><span>{error}</span>
-          </div>
-        )}
+                <div className="space-y-3">
+                  <div>
+                    <label className="text-[10px] uppercase tracking-wider text-stone-500 font-mono mb-1 block">Title</label>
+                    <input type="text" value={row.title} onChange={(e) => updateRow(row.id, { title: e.target.value })}
+                      placeholder="e.g. Week of May 13 — kitchen + bath"
+                      className="w-full px-3 py-2 rounded-lg border border-stone-300 bg-white text-sm" />
+                  </div>
 
-        {busy && progress && (
-          <div className="p-3 rounded-xl bg-stone-100 text-stone-700 text-sm font-mono flex items-center gap-3">
-            <div className="w-4 h-4 border-2 border-stone-700 border-t-transparent rounded-full animate-spin flex-shrink-0" />
-            {progress}
-          </div>
-        )}
+                  <div>
+                    <label className="text-[10px] uppercase tracking-wider text-stone-500 font-mono mb-1 block">Notes (optional)</label>
+                    <textarea value={row.notes} onChange={(e) => updateRow(row.id, { notes: e.target.value })}
+                      rows={2} placeholder="Standing instructions or context…"
+                      className="w-full px-3 py-2 rounded-lg border border-stone-300 bg-white text-sm resize-none" />
+                  </div>
 
-        <button onClick={save} disabled={busy}
-          className="w-full py-4 rounded-2xl bg-stone-900 text-stone-50 font-medium active:scale-98 disabled:opacity-50">
-          {busy ? 'Saving…' : 'Create assignment'}
-        </button>
+                  <div>
+                    <label className="text-[10px] uppercase tracking-wider text-stone-500 font-mono mb-1 block">Property</label>
+                    <select value={row.propertyId} onChange={(e) => changeRowProperty(row.id, e.target.value)}
+                      className="w-full px-3 py-2 rounded-lg border border-stone-300 bg-white text-sm">
+                      {allProperties.map(p => <option key={p.id} value={p.id}>{p.name}{p.property_type === 'multi_unit' ? ' (multi-unit)' : ''}</option>)}
+                    </select>
+                  </div>
+
+                  {isMulti && (
+                    <div>
+                      <label className="text-[10px] uppercase tracking-wider text-stone-500 font-mono mb-1 block">Scope</label>
+                      <div className="grid grid-cols-2 gap-2 mb-2">
+                        <button type="button" onClick={() => updateRow(row.id, { scope: 'specific', multipleTargets: [] })}
+                          className={`p-2 rounded-lg border-2 text-xs ${row.scope === 'specific' ? 'border-stone-900 bg-white' : 'border-stone-200 bg-white/50'}`}>
+                          One party
+                        </button>
+                        <button type="button" onClick={() => updateRow(row.id, { scope: 'multiple', unitId: '', partyId: '' })}
+                          className={`p-2 rounded-lg border-2 text-xs ${row.scope === 'multiple' ? 'border-stone-900 bg-white' : 'border-stone-200 bg-white/50'}`}>
+                          Multiple
+                        </button>
+                      </div>
+
+                      {row.scope === 'specific' && (
+                        <div className="grid grid-cols-2 gap-2">
+                          <select value={row.unitId} onChange={(e) => updateRow(row.id, { unitId: e.target.value, partyId: '' })}
+                            className="px-3 py-2 rounded-lg border border-stone-300 bg-white text-sm">
+                            <option value="">Unit…</option>
+                            {units.map(u => <option key={u.id} value={u.id}>{u.label}</option>)}
+                          </select>
+                          <select value={row.partyId} onChange={(e) => updateRow(row.id, { partyId: e.target.value })}
+                            disabled={!row.unitId}
+                            className="px-3 py-2 rounded-lg border border-stone-300 bg-white text-sm disabled:opacity-50">
+                            <option value="">Party…</option>
+                            {rowParties.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}
+                          </select>
+                        </div>
+                      )}
+
+                      {row.scope === 'multiple' && (
+                        <div>
+                          <div className="text-xs text-stone-500 font-mono mb-1">{row.multipleTargets.length} selected</div>
+                          <details className="border border-stone-200 rounded-lg bg-white">
+                            <summary className="px-3 py-2 cursor-pointer text-sm">Pick units &amp; parties</summary>
+                            <div className="max-h-64 overflow-y-auto border-t border-stone-200">
+                              {units.map(u => {
+                                const ap = (u.parties || []).filter(p => p.active).sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0));
+                                return (
+                                  <div key={u.id} className="border-b border-stone-100 last:border-b-0">
+                                    <div className="px-3 py-1.5 bg-stone-50 text-xs font-mono text-stone-700">{u.label}</div>
+                                    <div className="pl-5 py-1">
+                                      {ap.map(p => {
+                                        const selected = row.multipleTargets.some(t => t.unitId === u.id && (t.partyId || null) === p.id);
+                                        return (
+                                          <label key={p.id} className="flex items-center gap-2 py-1 text-xs cursor-pointer">
+                                            <input type="checkbox" checked={selected}
+                                              onChange={() => toggleTarget(row.id, u.id, p.id)}
+                                              className="w-3.5 h-3.5 rounded accent-stone-900" />
+                                            <span className="text-stone-700">{p.label}</span>
+                                          </label>
+                                        );
+                                      })}
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </details>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
       </div>
+
+      {/* Sticky footer with submit */}
+      {rows.length > 0 && (
+        <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-stone-200 p-4 z-30">
+          <div className="max-w-md mx-auto">
+            {error && (
+              <div className="mb-3 p-3 rounded-xl bg-red-50 border border-red-200 text-red-700 text-sm flex items-start gap-2">
+                <AlertCircle size={16} className="flex-shrink-0 mt-0.5" /><span>{error}</span>
+              </div>
+            )}
+            {busy && progress && (
+              <div className="mb-3 p-3 rounded-xl bg-stone-100 text-stone-700 text-sm font-mono flex items-center gap-3">
+                <div className="w-4 h-4 border-2 border-stone-700 border-t-transparent rounded-full animate-spin flex-shrink-0" />
+                {progress}
+              </div>
+            )}
+            <button onClick={saveAll} disabled={busy}
+              className="w-full py-4 rounded-2xl bg-stone-900 text-stone-50 font-medium disabled:opacity-50">
+              {busy ? 'Uploading…' : `Save ${rows.length} assignment${rows.length === 1 ? '' : 's'}`}
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -5013,28 +5133,32 @@ function AssignmentDetail({ property, assignment: assignmentInit, employee, onBa
 // current context (unit + party, or whole property).
 // onUpdate is called after a status change so parent can refresh.
 // =================================================================
-function AssignmentBanner({ propertyId, unitId, partyId, employee, onUpdate }) {
+// AssignmentBanner — inline list of assignments for a given context.
+// Props:
+//   propertyId, unitId, partyId — what context to filter by
+//   employee — current user
+//   showDone — if true, includes done assignments
+//   onUpdate — called after any status change so parent can refresh
+function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = false, onUpdate }) {
   const [targets, setTargets] = useState([]);
   const [loaded, setLoaded] = useState(false);
-  const [opened, setOpened] = useState(null); // target obj for viewer
-  const [statusModal, setStatusModal] = useState(null); // { target, action: 'blocked' | 'done' | 'in_progress' }
+  const [opened, setOpened] = useState(null);
+  const [statusModal, setStatusModal] = useState(null);
+  const [reassignTarget, setReassignTarget] = useState(null);
   const [busy, setBusy] = useState(false);
 
   const load = async () => {
-    // Query: targets whose assignment.customer_id = propertyId, and matching unit/party
-    // We use `inner` join so non-matching property assignments are filtered out
     let q = supabase
       .from('assignment_targets')
-      .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active), unit:units(label), party:parties(label)')
-      .neq('status', 'done');
+      .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active), unit:units(id, label), party:parties(id, label), starter:employees!assignment_targets_started_by_fkey(name), completer:employees!assignment_targets_completed_by_fkey(name)');
+
+    if (!showDone) q = q.neq('status', 'done');
 
     if (unitId && partyId) {
-      // Show: targets matching this exact unit+party OR whole-property (null unit and null party)
       q = q.or(`and(unit_id.eq.${unitId},party_id.eq.${partyId}),and(unit_id.is.null,party_id.is.null)`);
     } else if (unitId) {
       q = q.or(`unit_id.eq.${unitId},and(unit_id.is.null,party_id.is.null)`);
     } else {
-      // Simple property — only whole-property targets
       q = q.is('unit_id', null).is('party_id', null);
     }
 
@@ -5043,17 +5167,19 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, onUpdate }) {
     setTargets(filtered);
     setLoaded(true);
   };
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [propertyId, unitId, partyId]);
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, [propertyId, unitId, partyId, showDone]);
 
   const updateStatus = async (target, newStatus, statusNotes) => {
     setBusy(true);
     const patch = { status: newStatus };
-    if (newStatus === 'in_progress' && !target.started_at) patch.started_at = new Date().toISOString();
+    if (newStatus === 'in_progress') {
+      if (!target.started_at) patch.started_at = new Date().toISOString();
+      patch.started_by = employee?.id || null;
+    }
     if (newStatus === 'done') {
       patch.completed_at = new Date().toISOString();
       patch.completed_by = employee?.id || null;
     } else if (target.status === 'done') {
-      // Reopening — clear completion
       patch.completed_at = null;
       patch.completed_by = null;
     }
@@ -5074,55 +5200,19 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, onUpdate }) {
       <div className="flex items-center gap-2 mb-3">
         <FileText size={16} className="text-blue-700" />
         <span className="text-xs uppercase tracking-wider text-blue-800 font-mono">
-          {targets.length} pending assignment{targets.length === 1 ? '' : 's'}
+          {targets.length} assignment{targets.length === 1 ? '' : 's'}
         </span>
       </div>
       <div className="space-y-2">
-        {targets.map(t => {
-          const s = ASSIGNMENT_STATUSES[t.status] || ASSIGNMENT_STATUSES.pending;
-          return (
-            <div key={t.id} className="p-3 rounded-xl bg-white border border-stone-200">
-              <div className="flex items-start justify-between gap-2 mb-2">
-                <div className="flex-1 min-w-0">
-                  <div className="font-serif text-base text-stone-900 truncate">{t.assignment?.title}</div>
-                  {t.assignment?.notes && (
-                    <div className="text-xs text-stone-600 mt-0.5 line-clamp-2">{t.assignment.notes}</div>
-                  )}
-                  {t.status_notes && (
-                    <div className="text-xs text-red-700 italic mt-1">"{t.status_notes}"</div>
-                  )}
-                </div>
-                <span className={`text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full border ${s.color} flex-shrink-0`}>
-                  {s.label}
-                </span>
-              </div>
-              <div className="flex gap-2 flex-wrap">
-                <button onClick={() => setOpened(t)}
-                  className="px-3 py-1.5 rounded-lg bg-stone-100 hover:bg-stone-200 text-stone-700 text-xs font-medium flex items-center gap-1">
-                  <Eye size={12} /> View doc
-                </button>
-                {t.status === 'pending' && (
-                  <button onClick={() => updateStatus(t, 'in_progress')} disabled={busy}
-                    className="px-3 py-1.5 rounded-lg bg-amber-600 text-white text-xs font-medium flex items-center gap-1 disabled:opacity-50">
-                    <Play size={12} /> Start
-                  </button>
-                )}
-                {(t.status === 'pending' || t.status === 'in_progress' || t.status === 'blocked') && (
-                  <button onClick={() => updateStatus(t, 'done')} disabled={busy}
-                    className="px-3 py-1.5 rounded-lg bg-emerald-600 text-white text-xs font-medium flex items-center gap-1 disabled:opacity-50">
-                    <Check size={12} /> Done
-                  </button>
-                )}
-                {(t.status === 'pending' || t.status === 'in_progress') && (
-                  <button onClick={() => setStatusModal({ target: t, action: 'blocked' })} disabled={busy}
-                    className="px-3 py-1.5 rounded-lg border border-red-200 text-red-700 text-xs font-medium flex items-center gap-1 disabled:opacity-50">
-                    <AlertCircle size={12} /> Blocked
-                  </button>
-                )}
-              </div>
-            </div>
-          );
-        })}
+        {targets.map(t => (
+          <AssignmentCard key={t.id} target={t} busy={busy} propertyId={propertyId}
+            onView={() => setOpened(t)}
+            onStart={() => updateStatus(t, 'in_progress')}
+            onDone={() => updateStatus(t, 'done')}
+            onReopen={() => updateStatus(t, 'pending')}
+            onBlocked={() => setStatusModal({ target: t })}
+            onReassign={() => setReassignTarget(t)} />
+        ))}
       </div>
 
       {opened && <AssignmentViewer target={opened} onClose={() => setOpened(null)} />}
@@ -5132,6 +5222,329 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, onUpdate }) {
           onClose={() => setStatusModal(null)}
           busy={busy} />
       )}
+      {reassignTarget && (
+        <ReassignModal target={reassignTarget} propertyId={propertyId}
+          onSaved={() => { setReassignTarget(null); load(); if (onUpdate) onUpdate(); }}
+          onClose={() => setReassignTarget(null)} />
+      )}
+    </div>
+  );
+}
+
+// Reusable card for one assignment target, used in banner + panel
+function AssignmentCard({ target, busy, onView, onStart, onDone, onReopen, onBlocked, onReassign, propertyId }) {
+  const t = target;
+  const s = ASSIGNMENT_STATUSES[t.status] || ASSIGNMENT_STATUSES.pending;
+  const isDone = t.status === 'done';
+  const [activeCleaners, setActiveCleaners] = useState([]);
+
+  // Pull who's currently working at this target's unit+party (active work blocks today)
+  useEffect(() => {
+    if (!t.unit_id || !t.party_id || isDone) { setActiveCleaners([]); return; }
+    (async () => {
+      const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
+      const { data } = await supabase
+        .from('work_blocks')
+        .select('id, end_time, shift:shifts!inner(employee:employees(id, name), customer_id)')
+        .eq('unit_id', t.unit_id).eq('party_id', t.party_id)
+        .gte('start_time', todayStart.toISOString())
+        .is('end_time', null);
+      const cleaners = (data || [])
+        .filter(b => b.shift?.customer_id === propertyId)
+        .map(b => b.shift?.employee?.name)
+        .filter(Boolean);
+      // dedupe
+      setActiveCleaners([...new Set(cleaners)]);
+    })();
+  }, [t.unit_id, t.party_id, isDone, propertyId, t.status]);
+
+  return (
+    <div className={`p-3 rounded-xl border ${isDone ? 'bg-stone-50 border-stone-200 opacity-90' : 'bg-white border-stone-200'}`}>
+      <div className="flex items-start justify-between gap-2 mb-2">
+        <div className="flex-1 min-w-0">
+          <div className="font-serif text-base text-stone-900 truncate">{t.assignment?.title}</div>
+          {(t.unit?.label || t.party?.label) && (
+            <div className="text-xs font-mono text-stone-500 mt-0.5">
+              {t.unit?.label}{t.party?.label && ` · ${t.party.label}`}
+            </div>
+          )}
+          {t.assignment?.notes && (
+            <div className="text-xs text-stone-600 mt-1 line-clamp-2">{t.assignment.notes}</div>
+          )}
+          {t.status === 'in_progress' && t.starter?.name && (
+            <div className="text-xs text-amber-700 font-mono mt-1">
+              Started by {t.starter.name}{t.started_at && ` · ${fmtClock(t.started_at)}`}
+            </div>
+          )}
+          {activeCleaners.length > 0 && (
+            <div className="text-xs text-emerald-700 font-mono mt-1 flex items-center gap-1">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+              {activeCleaners.length === 1 ? `${activeCleaners[0]} is here` : `${activeCleaners.length} cleaners here: ${activeCleaners.join(', ')}`}
+            </div>
+          )}
+          {isDone && t.completer?.name && (
+            <div className="text-xs text-emerald-700 font-mono mt-1">
+              Done by {t.completer.name}{t.completed_at && ` · ${fmtClock(t.completed_at)}`}
+            </div>
+          )}
+          {t.status_notes && (
+            <div className="text-xs text-red-700 italic mt-1">"{t.status_notes}"</div>
+          )}
+        </div>
+        <span className={`text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full border ${s.color} flex-shrink-0`}>
+          {s.label}
+        </span>
+      </div>
+      <div className="flex gap-2 flex-wrap">
+        <button onClick={onView}
+          className="px-3 py-1.5 rounded-lg bg-stone-100 hover:bg-stone-200 text-stone-700 text-xs font-medium flex items-center gap-1">
+          <Eye size={12} /> View doc
+        </button>
+        {(t.status === 'pending' || t.status === 'blocked' || t.status === 'in_progress') && (
+          <button onClick={onStart} disabled={busy}
+            className="px-3 py-1.5 rounded-lg bg-amber-600 text-white text-xs font-medium flex items-center gap-1 disabled:opacity-50">
+            <Play size={12} /> {t.status === 'in_progress' ? 'I\'m on it too' : 'Start'}
+          </button>
+        )}
+        {(t.status === 'pending' || t.status === 'in_progress' || t.status === 'blocked') && (
+          <button onClick={onDone} disabled={busy}
+            className="px-3 py-1.5 rounded-lg bg-emerald-600 text-white text-xs font-medium flex items-center gap-1 disabled:opacity-50">
+            <Check size={12} /> Done
+          </button>
+        )}
+        {isDone && (
+          <button onClick={onReopen} disabled={busy}
+            className="px-3 py-1.5 rounded-lg border border-stone-300 text-stone-700 text-xs font-medium flex items-center gap-1 disabled:opacity-50">
+            <Play size={12} /> Reopen
+          </button>
+        )}
+        {(t.status === 'pending' || t.status === 'in_progress') && (
+          <button onClick={onBlocked} disabled={busy}
+            className="px-3 py-1.5 rounded-lg border border-red-200 text-red-700 text-xs font-medium flex items-center gap-1 disabled:opacity-50">
+            <AlertCircle size={12} /> Blocked
+          </button>
+        )}
+        {onReassign && (t.unit_id || t.party_id) && (
+          <button onClick={onReassign} disabled={busy}
+            className="px-3 py-1.5 rounded-lg border border-stone-300 text-stone-600 text-xs font-medium flex items-center gap-1 disabled:opacity-50 ml-auto">
+            <Edit2 size={12} /> Reassign
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// AssignmentsPanel — full tabbed view for the property hub.
+// Tabs: Pending | In Progress | Done
+function AssignmentsPanel({ propertyId, employee, refreshKey }) {
+  const [tab, setTab] = useState('pending');
+  const [counts, setCounts] = useState({ pending: 0, in_progress: 0, done: 0, blocked: 0 });
+
+  const loadCounts = async () => {
+    const { data } = await supabase
+      .from('assignment_targets')
+      .select('status, assignment:assignments!inner(customer_id, active)');
+    const filtered = (data || []).filter(t => t.assignment?.customer_id === propertyId && t.assignment?.active);
+    const c = { pending: 0, in_progress: 0, done: 0, blocked: 0 };
+    filtered.forEach(t => { c[t.status] = (c[t.status] || 0) + 1; });
+    setCounts(c);
+  };
+  useEffect(() => { loadCounts(); }, [propertyId, refreshKey]);
+
+  return (
+    <div className="px-4 mt-4">
+      <div className="flex items-center gap-2 mb-3">
+        <FileText size={14} className="text-stone-500" />
+        <span className="text-xs uppercase tracking-wider text-stone-500 font-mono">Assignments</span>
+      </div>
+      <div className="flex gap-1 mb-3 bg-stone-100 p-1 rounded-xl">
+        <button onClick={() => setTab('pending')}
+          className={`flex-1 py-2 px-2 rounded-lg text-xs font-medium transition-colors ${tab === 'pending' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+          Pending{counts.pending > 0 && ` (${counts.pending})`}
+        </button>
+        <button onClick={() => setTab('in_progress')}
+          className={`flex-1 py-2 px-2 rounded-lg text-xs font-medium transition-colors ${tab === 'in_progress' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+          In progress{counts.in_progress > 0 && ` (${counts.in_progress})`}
+        </button>
+        <button onClick={() => setTab('done')}
+          className={`flex-1 py-2 px-2 rounded-lg text-xs font-medium transition-colors ${tab === 'done' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+          Done{counts.done > 0 && ` (${counts.done})`}
+        </button>
+      </div>
+      <AssignmentTabContent propertyId={propertyId} employee={employee} statusFilter={tab}
+        onUpdate={loadCounts} />
+    </div>
+  );
+}
+
+function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate }) {
+  const [targets, setTargets] = useState([]);
+  const [loaded, setLoaded] = useState(false);
+  const [opened, setOpened] = useState(null);
+  const [statusModal, setStatusModal] = useState(null);
+  const [reassignTarget, setReassignTarget] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  const load = async () => {
+    const { data } = await supabase
+      .from('assignment_targets')
+      .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active), unit:units(id, label), party:parties(id, label), starter:employees!assignment_targets_started_by_fkey(name), completer:employees!assignment_targets_completed_by_fkey(name)')
+      .eq('status', statusFilter);
+    const filtered = (data || []).filter(t => t.assignment?.customer_id === propertyId && t.assignment?.active);
+    if (statusFilter === 'done') {
+      filtered.sort((a, b) => new Date(b.completed_at || 0) - new Date(a.completed_at || 0));
+    } else {
+      filtered.sort((a, b) => naturalCompare(a.unit?.label || '', b.unit?.label || '') || naturalCompare(a.party?.label || '', b.party?.label || ''));
+    }
+    setTargets(filtered);
+    setLoaded(true);
+  };
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, [propertyId, statusFilter]);
+
+  const updateStatus = async (target, newStatus, statusNotes) => {
+    setBusy(true);
+    const patch = { status: newStatus };
+    if (newStatus === 'in_progress') {
+      if (!target.started_at) patch.started_at = new Date().toISOString();
+      patch.started_by = employee?.id || null;
+    }
+    if (newStatus === 'done') {
+      patch.completed_at = new Date().toISOString();
+      patch.completed_by = employee?.id || null;
+    } else if (target.status === 'done') {
+      patch.completed_at = null; patch.completed_by = null;
+    }
+    if (statusNotes !== undefined) patch.status_notes = statusNotes || null;
+    const { error } = await supabase.from('assignment_targets').update(patch).eq('id', target.id);
+    setBusy(false);
+    if (error) { alert('Could not update: ' + error.message); return; }
+    setStatusModal(null);
+    load();
+    if (onUpdate) onUpdate();
+  };
+
+  if (!loaded) return <div className="text-center py-8 text-stone-400 text-xs">Loading…</div>;
+  if (targets.length === 0) {
+    const empties = {
+      pending: 'No pending assignments.',
+      in_progress: 'No assignments are in progress.',
+      done: 'No completed assignments yet.'
+    };
+    return (
+      <div className="text-center py-8 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
+        {empties[statusFilter]}
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-2">
+      {targets.map(t => (
+        <AssignmentCard key={t.id} target={t} busy={busy} propertyId={propertyId}
+          onView={() => setOpened(t)}
+          onStart={() => updateStatus(t, 'in_progress')}
+          onDone={() => updateStatus(t, 'done')}
+          onReopen={() => updateStatus(t, 'pending')}
+          onBlocked={() => setStatusModal({ target: t })}
+          onReassign={() => setReassignTarget(t)} />
+      ))}
+
+      {opened && <AssignmentViewer target={opened} onClose={() => setOpened(null)} />}
+      {statusModal && (
+        <BlockedNoteModal target={statusModal.target}
+          onSave={(notes) => updateStatus(statusModal.target, 'blocked', notes)}
+          onClose={() => setStatusModal(null)}
+          busy={busy} />
+      )}
+      {reassignTarget && (
+        <ReassignModal target={reassignTarget} propertyId={propertyId}
+          onSaved={() => { setReassignTarget(null); load(); if (onUpdate) onUpdate(); }}
+          onClose={() => setReassignTarget(null)} />
+      )}
+    </div>
+  );
+}
+
+// ReassignModal — change unit/party for an assignment target
+function ReassignModal({ target, propertyId, onSaved, onClose }) {
+  const [units, setUnits] = useState([]);
+  const [unitId, setUnitId] = useState(target.unit_id || '');
+  const [partyId, setPartyId] = useState(target.party_id || '');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => { (async () => {
+    const { data } = await supabase.from('units')
+      .select('*, parties(id, label, full_name, active, sort_order)')
+      .eq('customer_id', propertyId).eq('active', true)
+      .order('sort_order').order('label');
+    setUnits((data || []).slice().sort((a, b) => naturalCompare(a.label, b.label)));
+  })(); }, [propertyId]);
+
+  const parties = (units.find(u => u.id === unitId)?.parties || [])
+    .filter(p => p.active).sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0));
+
+  const save = async () => {
+    if (!unitId || !partyId) { setError('Pick a unit and a party.'); return; }
+    setBusy(true);
+    const { error: e } = await supabase.from('assignment_targets')
+      .update({ unit_id: unitId, party_id: partyId })
+      .eq('id', target.id);
+    setBusy(false);
+    if (e) { setError(e.message); return; }
+    onSaved();
+  };
+
+  return (
+    <div className="fixed inset-0 bg-stone-900/80 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
+      <div className="bg-stone-50 w-full sm:max-w-md sm:rounded-3xl rounded-t-3xl flex flex-col">
+        <div className="flex items-center justify-between p-5 border-b border-stone-200">
+          <div>
+            <div className="font-serif text-xl text-stone-900">Reassign</div>
+            <div className="text-xs text-stone-500 font-mono mt-0.5 truncate">{target.assignment?.title}</div>
+          </div>
+          <button onClick={onClose} className="p-2 rounded-full hover:bg-stone-100">
+            <X size={20} className="text-stone-600" />
+          </button>
+        </div>
+        <div className="p-5 space-y-4">
+          <p className="text-sm text-stone-600">
+            Currently assigned to <strong>{target.unit?.label || '?'}{target.party?.label && ` · ${target.party.label}`}</strong>. Pick where this should go instead:
+          </p>
+          <div>
+            <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Unit</label>
+            <select value={unitId} onChange={(e) => { setUnitId(e.target.value); setPartyId(''); }}
+              className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white">
+              <option value="">— Pick a unit —</option>
+              {units.map(u => <option key={u.id} value={u.id}>{u.label}</option>)}
+            </select>
+          </div>
+          {unitId && (
+            <div>
+              <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Party</label>
+              <select value={partyId} onChange={(e) => setPartyId(e.target.value)}
+                className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white">
+                <option value="">— Pick a party —</option>
+                {parties.map(p => <option key={p.id} value={p.id}>{p.label}{p.full_name ? ` (${p.full_name})` : ''}</option>)}
+              </select>
+            </div>
+          )}
+          {error && (
+            <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-red-700 text-sm flex items-start gap-2">
+              <AlertCircle size={16} className="flex-shrink-0 mt-0.5" /><span>{error}</span>
+            </div>
+          )}
+        </div>
+        <div className="p-5 border-t border-stone-200 flex gap-2">
+          <button onClick={onClose} disabled={busy}
+            className="flex-1 py-3 rounded-2xl bg-stone-100 text-stone-700 font-medium">Cancel</button>
+          <button onClick={save} disabled={busy}
+            className="flex-1 py-3 rounded-2xl bg-stone-900 text-stone-50 font-medium disabled:opacity-50">
+            {busy ? 'Saving…' : 'Reassign'}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -5194,6 +5607,107 @@ function BlockedNoteModal({ target, onSave, onClose, busy }) {
             className="flex-1 py-3 rounded-2xl bg-red-600 text-white font-medium disabled:opacity-50">
             {busy ? 'Saving…' : 'Mark blocked'}
           </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// =================================================================
+// LIVE CLEANERS SHEET — bottom sheet shown when manager taps
+// "On the clock" stat card. Lists all active shifts with what each
+// cleaner is doing right now.
+// =================================================================
+function LiveCleanersSheet({ onClose, onOpenShift }) {
+  const [shifts, setShifts] = useState([]);
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      const { data } = await supabase
+        .from('shifts')
+        .select('*, employee:employees(id, name), customer:customers(id, name), work_blocks(id, start_time, end_time, unit:units(label), party:parties(label))')
+        .is('end_time', null)
+        .order('start_time', { ascending: true });
+      if (cancelled) return;
+      setShifts(data || []);
+      setLoaded(true);
+    };
+    load();
+    // Refresh every 15 seconds to keep the durations live
+    const id = setInterval(load, 15000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, []);
+
+  useTick(true);
+
+  return (
+    <div className="fixed inset-0 bg-stone-900/80 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
+      <div className="bg-stone-50 w-full sm:max-w-md sm:rounded-3xl rounded-t-3xl max-h-[85vh] flex flex-col">
+        <div className="flex items-center justify-between p-5 border-b border-stone-200">
+          <div>
+            <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">Live</div>
+            <div className="font-serif text-xl text-stone-900">On the clock right now</div>
+          </div>
+          <button onClick={onClose} className="p-2 rounded-full hover:bg-stone-100">
+            <X size={20} className="text-stone-600" />
+          </button>
+        </div>
+        <div className="flex-1 overflow-y-auto p-5">
+          {!loaded ? (
+            <div className="text-center py-12 text-stone-400 text-sm">Loading…</div>
+          ) : shifts.length === 0 ? (
+            <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
+              Nobody on the clock right now.
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {shifts.map(s => {
+                const shiftDur = Date.now() - new Date(s.start_time).getTime();
+                // Find current active work block (no end_time)
+                const activeBlock = (s.work_blocks || []).find(b => !b.end_time);
+                const blockDur = activeBlock ? Date.now() - new Date(activeBlock.start_time).getTime() : 0;
+                const completedBlocks = (s.work_blocks || []).filter(b => b.end_time).length;
+                return (
+                  <button key={s.id} onClick={() => onOpenShift(s)}
+                    className="w-full text-left p-4 rounded-2xl bg-white border border-stone-200 hover:border-stone-400 transition-colors">
+                    <div className="flex items-start justify-between mb-2 gap-2">
+                      <div className="flex items-center gap-2 min-w-0 flex-1">
+                        <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse flex-shrink-0" />
+                        <span className="font-serif text-lg text-stone-900 truncate">{s.employee?.name}</span>
+                      </div>
+                      <span className="text-xs font-mono text-stone-500 flex-shrink-0">
+                        {fmtTimeShort(shiftDur)}
+                      </span>
+                    </div>
+                    {s.customer && (
+                      <div className="text-xs text-amber-700 font-mono mb-1 flex items-center gap-1.5">
+                        <Building2 size={11} /> {s.customer.name}
+                      </div>
+                    )}
+                    {activeBlock ? (
+                      <div className="text-xs text-stone-700 font-mono flex items-center gap-1.5 flex-wrap">
+                        <span className="px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 text-[10px] uppercase tracking-wider">
+                          Cleaning
+                        </span>
+                        <span>{activeBlock.unit?.label}{activeBlock.party?.label && ` · ${activeBlock.party.label}`}</span>
+                        <span className="text-stone-500">· {fmtTimeShort(blockDur)}</span>
+                      </div>
+                    ) : (
+                      <div className="text-xs text-stone-500 font-mono">
+                        At property
+                        {completedBlocks > 0 && ` · ${completedBlocks} ${completedBlocks === 1 ? 'apt cleaned' : 'apts cleaned'}`}
+                      </div>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+        <div className="p-3 text-center text-[10px] font-mono text-stone-400 border-t border-stone-200">
+          Auto-refreshes every 15 seconds · tap a cleaner to see their shift
         </div>
       </div>
     </div>

@@ -4831,7 +4831,7 @@ function AssignmentForm({ property, employee, onCancel, onSaved }) {
   };
 
   return (
-    <div className="min-h-screen bg-stone-50 pb-48">
+    <div className="min-h-screen bg-stone-50 pb-24">
       <div className="flex items-center gap-3 px-5 py-4 border-b border-stone-200 sticky top-0 bg-stone-50 z-10">
         <button onClick={onCancel} className="p-2 -ml-2 rounded-full hover:bg-stone-100">
           <ArrowLeft size={20} className="text-stone-700" />
@@ -5005,19 +5005,17 @@ function AssignmentForm({ property, employee, onCancel, onSaved }) {
             );
           })}
         </div>
-      </div>
 
-      {/* Sticky footer with submit */}
-      {rows.length > 0 && (
-        <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-stone-200 p-4 z-30">
-          <div className="max-w-md mx-auto">
+        {/* Inline submit area at bottom of the page (NOT fixed — avoids overlap with the manager nav bar) */}
+        {rows.length > 0 && (
+          <div className="mt-6 space-y-3">
             {error && (
-              <div className="mb-3 p-3 rounded-xl bg-red-50 border border-red-200 text-red-700 text-sm flex items-start gap-2">
+              <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-red-700 text-sm flex items-start gap-2">
                 <AlertCircle size={16} className="flex-shrink-0 mt-0.5" /><span>{error}</span>
               </div>
             )}
             {busy && progress && (
-              <div className="mb-3 p-3 rounded-xl bg-stone-100 text-stone-700 text-sm font-mono flex items-center gap-3">
+              <div className="p-3 rounded-xl bg-stone-100 text-stone-700 text-sm font-mono flex items-center gap-3">
                 <div className="w-4 h-4 border-2 border-stone-700 border-t-transparent rounded-full animate-spin flex-shrink-0" />
                 {progress}
               </div>
@@ -5027,8 +5025,8 @@ function AssignmentForm({ property, employee, onCancel, onSaved }) {
               {busy ? 'Uploading…' : `Save ${rows.length} assignment${rows.length === 1 ? '' : 's'}`}
             </button>
           </div>
-        </div>
-      )}
+        )}
+      </div>
     </div>
   );
 }
@@ -5046,10 +5044,11 @@ function AssignmentDetail({ property, assignment: assignmentInit, employee, onBa
   const reload = async () => {
     const { data: a } = await supabase.from('assignments').select('*').eq('id', assignmentInit.id).maybeSingle();
     if (a) setAssignment(a);
-    const { data: ts } = await supabase
+    const { data: ts, error: tErr } = await supabase
       .from('assignment_targets')
-      .select('*, unit:units(label), party:parties(label, full_name), completer:employees!assignment_targets_completed_by_fkey(name)')
+      .select('*, unit:units(label), party:parties(label, full_name), completer:employees!completed_by(name)')
       .eq('assignment_id', assignmentInit.id);
+    if (tErr) console.error('[AssignmentDetail] targets load error:', tErr);
     setTargets(ts || []);
     setLoaded(true);
   };
@@ -5198,7 +5197,7 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
   const load = async () => {
     let q = supabase
       .from('assignment_targets')
-      .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active), unit:units(id, label), party:parties(id, label), starter:employees!assignment_targets_started_by_fkey(name), completer:employees!assignment_targets_completed_by_fkey(name)');
+      .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active), unit:units(id, label), party:parties(id, label), starter:employees!started_by(name), completer:employees!completed_by(name)');
 
     if (!showDone) q = q.neq('status', 'done');
 
@@ -5210,7 +5209,10 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
       q = q.is('unit_id', null).is('party_id', null);
     }
 
-    const { data } = await q;
+    const { data, error } = await q;
+    if (error) {
+      console.error('[AssignmentBanner] load error:', error);
+    }
     const filtered = (data || []).filter(t => t.assignment?.customer_id === propertyId && t.assignment?.active);
     setTargets(filtered);
     setLoaded(true);
@@ -5434,11 +5436,20 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate }) 
   const [reassignTarget, setReassignTarget] = useState(null);
   const [busy, setBusy] = useState(false);
 
+  const [loadError, setLoadError] = useState(null);
+
   const load = async () => {
-    const { data } = await supabase
+    setLoadError(null);
+    const { data, error } = await supabase
       .from('assignment_targets')
-      .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active), unit:units(id, label), party:parties(id, label), starter:employees!assignment_targets_started_by_fkey(name), completer:employees!assignment_targets_completed_by_fkey(name)')
+      .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active), unit:units(id, label), party:parties(id, label), starter:employees!started_by(name), completer:employees!completed_by(name)')
       .eq('status', statusFilter);
+    if (error) {
+      console.error('[Assignments] load error:', error);
+      setLoadError(error.message);
+      setTargets([]); setLoaded(true);
+      return;
+    }
     const filtered = (data || []).filter(t => t.assignment?.customer_id === propertyId && t.assignment?.active);
     if (statusFilter === 'done') {
       filtered.sort((a, b) => new Date(b.completed_at || 0) - new Date(a.completed_at || 0));
@@ -5473,6 +5484,17 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate }) 
   };
 
   if (!loaded) return <div className="text-center py-8 text-stone-400 text-xs">Loading…</div>;
+  if (loadError) {
+    return (
+      <div className="p-4 rounded-2xl bg-red-50 border border-red-200 text-red-700 text-sm">
+        <div className="flex items-start gap-2 mb-1">
+          <AlertCircle size={16} className="flex-shrink-0 mt-0.5" />
+          <span className="font-medium">Couldn't load assignments</span>
+        </div>
+        <div className="text-xs font-mono mt-2">{loadError}</div>
+      </div>
+    );
+  }
   if (targets.length === 0) {
     const empties = {
       pending: 'No pending assignments.',

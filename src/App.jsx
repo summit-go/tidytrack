@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { createClient } from '@supabase/supabase-js';
 import {
   Clock, Camera, LogOut, ChevronRight, ChevronLeft, Plus, Pause, Play, Check,
@@ -196,13 +196,15 @@ function SignIn({ onSignIn }) {
     <div className="min-h-screen bg-stone-50 flex flex-col">
       <div className="flex-1 flex flex-col justify-center items-center px-6 max-w-sm mx-auto w-full">
         <div className="mb-10 text-center">
-          <div className="w-12 h-12 mx-auto rounded-2xl bg-stone-900 flex items-center justify-center mb-6">
-            <div className="w-5 h-5 rounded-full bg-stone-50" />
-          </div>
+          <img
+            src="https://static.wixstatic.com/media/624bf3_95d4fd7f040e465f9202c44136b01edf~mv2.png/v1/fill/w_98,h_98,al_c,q_85,usm_0.66_1.00_0.01,enc_avif,quality_auto/Summit_Clean_NoSnowFlakes_NoWords.png"
+            alt="Summit Clean"
+            className="w-16 h-16 mx-auto mb-6 object-contain"
+          />
           <h1 className="text-4xl font-light text-stone-900 tracking-tight leading-none mb-2">
             Tidy<span className="font-serif italic text-amber-700">Track</span>
           </h1>
-          <p className="text-stone-500 text-sm">Enter your 4-digit PIN</p>
+          <p className="text-stone-500 text-sm font-mono">Summit Clean · Enter your 4-digit PIN</p>
         </div>
         <div className="flex gap-3 mb-2">
           {[0,1,2,3].map(i => (
@@ -372,7 +374,7 @@ function EmployeeApp({ employee, onSignOut }) {
       .select('*, unit:units(*), party:parties(*), tasks(*, photos(*))').single();
     setBusy(false);
     if (error) { alert('Could not start work block: ' + error.message); return; }
-    setWorkBlocks([...workBlocks, data]);
+    setWorkBlocks(prev => [...prev, data]);
     setActiveBlock(data); setTasks(data.tasks || []); setBlockStartFlow(null);
   };
 
@@ -383,7 +385,7 @@ function EmployeeApp({ employee, onSignOut }) {
     const ts = new Date().toISOString();
     await supabase.from('work_blocks').update({ end_time: ts }).eq('id', activeBlock.id);
     const updated = { ...activeBlock, end_time: ts, tasks };
-    setWorkBlocks(workBlocks.map(b => b.id === activeBlock.id ? updated : b));
+    setWorkBlocks(prev => prev.map(b => b.id === activeBlock.id ? updated : b));
     setActiveBlock(null); setTasks([]); setActiveTask(null);
     setBusy(false);
   };
@@ -394,7 +396,7 @@ function EmployeeApp({ employee, onSignOut }) {
     const { data: blockTasks } = await supabase.from('tasks').select('*, photos(*)')
       .eq('work_block_id', block.id).order('start_time');
     const updated = { ...block, end_time: null, tasks: blockTasks || [] };
-    setWorkBlocks(workBlocks.map(b => b.id === block.id ? updated : b));
+    setWorkBlocks(prev => prev.map(b => b.id === block.id ? updated : b));
     setActiveBlock(updated); setTasks(blockTasks || []);
     setBusy(false);
   };
@@ -407,20 +409,20 @@ function EmployeeApp({ employee, onSignOut }) {
     if (activeBlock) insert.work_block_id = activeBlock.id;
     const { data, error } = await supabase.from('tasks').insert(insert).select('*, photos(*)').single();
     if (error) { alert('Could not start task: ' + error.message); return; }
-    setTasks([...tasks, data]); setActiveTask(data.id); setNewTaskName('');
+    setTasks(prev => [...prev, data]); setActiveTask(data.id); setNewTaskName('');
   };
 
   const stopTask = async (taskId, refetch = true) => {
     const ts = new Date().toISOString();
     await supabase.from('tasks').update({ end_time: ts }).eq('id', taskId);
-    if (refetch) setTasks(tasks.map(t => t.id === taskId ? { ...t, end_time: ts } : t));
+    if (refetch) setTasks(prev => prev.map(t => t.id === taskId ? { ...t, end_time: ts } : t));
     if (activeTask === taskId) setActiveTask(null);
   };
 
   const resumeTask = async (taskId) => {
     if (activeTask) await stopTask(activeTask, false);
     await supabase.from('tasks').update({ end_time: null }).eq('id', taskId);
-    setTasks(tasks.map(t => t.id === taskId ? { ...t, end_time: null } : t));
+    setTasks(prev => prev.map(t => t.id === taskId ? { ...t, end_time: null } : t));
     setActiveTask(taskId);
   };
 
@@ -433,7 +435,7 @@ function EmployeeApp({ employee, onSignOut }) {
     const { data: photo, error: pErr } = await supabase.from('photos')
       .insert({ task_id: taskId, kind, storage_path: path, public_url: publicUrl }).select().single();
     if (pErr) { alert('Could not save photo: ' + pErr.message); return; }
-    setTasks(tasks.map(t => t.id === taskId ? { ...t, photos: [...(t.photos || []), photo] } : t));
+    setTasks(prev => prev.map(t => t.id === taskId ? { ...t, photos: [...(t.photos || []), photo] } : t));
   };
 
   if (!loaded) return <Splash text="Loading…" />;
@@ -1010,13 +1012,15 @@ function TaskCard({ task, isActive, onStop, onResume, onAddPhoto }) {
   const elapsed = task.end_time
     ? new Date(task.end_time).getTime() - new Date(task.start_time).getTime()
     : Date.now() - new Date(task.start_time).getTime();
-  const before = (task.photos || []).filter(p => p.kind === 'before');
-  const after  = (task.photos || []).filter(p => p.kind === 'after');
-  const damage = (task.photos || []).filter(p => p.kind === 'damage');
+  const photos = task.photos || [];
+  const before = photos.filter(p => p.kind === 'before');
+  const after  = photos.filter(p => p.kind === 'after');
+  const damage = photos.filter(p => p.kind === 'damage');
   const isDone = !!task.end_time;
   return (
-    <div className={`rounded-2xl p-4 border-2 transition-all ${isActive ? 'border-amber-300 bg-amber-50/50' : 'border-stone-200 bg-white'}`}>
-      <div className="flex items-start justify-between mb-3">
+    <div className={`rounded-2xl p-4 border-2 transition-all ${isActive ? 'border-amber-300 bg-amber-50/50' : 'border-stone-200 bg-white'}`}
+      style={{ touchAction: 'manipulation' }}>
+      <div className="flex items-start justify-between mb-4">
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 mb-1">
             {isDone && <Check size={14} className="text-emerald-600 flex-shrink-0" />}
@@ -1033,26 +1037,34 @@ function TaskCard({ task, isActive, onStop, onResume, onAddPhoto }) {
           </div>
         </div>
         {isDone ? (
-          <button onClick={onResume} className="ml-2 p-2 rounded-full bg-stone-100 text-stone-600 active:scale-95 transition-transform">
+          <button onClick={onResume}
+            style={{ touchAction: 'manipulation' }}
+            className="ml-2 p-3 rounded-full bg-stone-100 text-stone-600 active:scale-95 transition-transform">
             <Play size={14} />
           </button>
         ) : (
-          <button onClick={onStop} className="ml-2 px-3 py-1.5 rounded-full bg-stone-900 text-stone-50 text-xs font-medium flex items-center gap-1 active:scale-95 transition-transform">
-            <Pause size={12} /> Done
+          <button onClick={onStop}
+            style={{ touchAction: 'manipulation' }}
+            className="ml-2 px-4 py-2.5 rounded-full bg-stone-900 text-stone-50 text-sm font-medium flex items-center gap-1 active:scale-95 transition-transform">
+            <Pause size={14} /> Done
           </button>
         )}
       </div>
-      <div className="grid grid-cols-3 gap-2">
+      {/* Spacer so the Done button is well-separated from the photo grid below — prevents ghost taps on iOS */}
+      <div className="grid grid-cols-3 gap-2 mt-2">
         <button onClick={() => onAddPhoto('before')}
-          className="px-2 py-2.5 rounded-xl bg-stone-100 hover:bg-stone-200 text-stone-700 text-xs font-medium flex items-center justify-center gap-1.5 active:scale-95 transition-transform">
+          style={{ touchAction: 'manipulation' }}
+          className="px-2 py-3 rounded-xl bg-stone-100 hover:bg-stone-200 text-stone-700 text-xs font-medium flex items-center justify-center gap-1.5 active:scale-95 transition-transform">
           <Camera size={13} /> Before {before.length > 0 && <span className="text-amber-700 font-mono">({before.length})</span>}
         </button>
         <button onClick={() => onAddPhoto('after')}
-          className="px-2 py-2.5 rounded-xl bg-stone-100 hover:bg-stone-200 text-stone-700 text-xs font-medium flex items-center justify-center gap-1.5 active:scale-95 transition-transform">
+          style={{ touchAction: 'manipulation' }}
+          className="px-2 py-3 rounded-xl bg-stone-100 hover:bg-stone-200 text-stone-700 text-xs font-medium flex items-center justify-center gap-1.5 active:scale-95 transition-transform">
           <Camera size={13} /> After {after.length > 0 && <span className="text-amber-700 font-mono">({after.length})</span>}
         </button>
         <button onClick={() => onAddPhoto('damage')}
-          className="px-2 py-2.5 rounded-xl bg-red-50 hover:bg-red-100 text-red-700 text-xs font-medium flex items-center justify-center gap-1.5 active:scale-95 transition-transform">
+          style={{ touchAction: 'manipulation' }}
+          className="px-2 py-3 rounded-xl bg-red-50 hover:bg-red-100 text-red-700 text-xs font-medium flex items-center justify-center gap-1.5 active:scale-95 transition-transform">
           <Camera size={13} /> Damage {damage.length > 0 && <span className="font-mono">({damage.length})</span>}
         </button>
       </div>
@@ -1062,27 +1074,56 @@ function TaskCard({ task, isActive, onStop, onResume, onAddPhoto }) {
 
 function PhotoModal({ kind, taskName, existing, onUpload, onClose }) {
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const inputRef = useRef(null);
+  const existingPhotos = Array.isArray(existing) ? existing : [];
+
   const handleFile = async (e) => {
-    const file = e.target.files?.[0]; if (!file) return;
-    setBusy(true); await onUpload(file); setBusy(false);
+    const file = e.target.files?.[0];
+    // Reset the input so picking the same file twice still triggers
+    if (inputRef.current) inputRef.current.value = '';
+    if (!file) return;
+    setBusy(true);
+    setError('');
+    try {
+      await onUpload(file);
+    } catch (err) {
+      setError(err?.message || 'Upload failed. Try again.');
+    } finally {
+      setBusy(false);
+    }
   };
+
   return (
-    <div className="fixed inset-0 bg-stone-900/80 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
-      <div className="bg-stone-50 w-full sm:max-w-md sm:rounded-3xl rounded-t-3xl max-h-[85vh] flex flex-col">
+    <div className="fixed inset-0 bg-stone-900/80 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4"
+      onClick={(e) => { if (e.target === e.currentTarget && !busy) onClose(); }}>
+      <div className="bg-stone-50 w-full sm:max-w-md sm:rounded-3xl rounded-t-3xl max-h-[85vh] flex flex-col"
+        style={{ touchAction: 'manipulation' }}>
         <div className="flex items-center justify-between p-5 border-b border-stone-200">
           <div>
             <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">{kind} photo</div>
             <div className="font-serif text-xl text-stone-900">{taskName}</div>
           </div>
-          <button onClick={onClose} className="p-2 rounded-full hover:bg-stone-100"><X size={20} className="text-stone-600" /></button>
+          <button onClick={onClose} disabled={busy}
+            className="p-2 rounded-full hover:bg-stone-100 disabled:opacity-50">
+            <X size={20} className="text-stone-600" />
+          </button>
         </div>
         <div className="flex-1 overflow-y-auto p-5">
-          {existing.length > 0 && (
+          {existingPhotos.length > 0 && (
             <div className="grid grid-cols-2 gap-2 mb-4">
-              {existing.map(p => <img key={p.id} src={p.public_url} alt="" className="w-full aspect-square object-cover rounded-xl" />)}
+              {existingPhotos.map(p => (
+                <img key={p.id} src={p.public_url} alt="" loading="lazy"
+                  className="w-full aspect-square object-cover rounded-xl" />
+              ))}
             </div>
           )}
-          <label className={`block w-full p-8 border-2 border-dashed rounded-2xl text-center cursor-pointer transition-colors ${busy ? 'border-amber-300 bg-amber-50' : 'border-stone-300 hover:border-stone-900'}`}>
+          {error && (
+            <div className="mb-3 p-3 rounded-xl bg-red-50 border border-red-200 text-red-700 text-sm flex items-start gap-2">
+              <AlertCircle size={16} className="flex-shrink-0 mt-0.5" /><span>{error}</span>
+            </div>
+          )}
+          <label className={`block w-full p-8 border-2 border-dashed rounded-2xl text-center cursor-pointer transition-colors ${busy ? 'border-amber-300 bg-amber-50 pointer-events-none' : 'border-stone-300 hover:border-stone-900'}`}>
             {busy ? (
               <>
                 <div className="w-8 h-8 mx-auto mb-3 border-2 border-amber-600 border-t-transparent rounded-full animate-spin" />
@@ -1095,11 +1136,15 @@ function PhotoModal({ kind, taskName, existing, onUpload, onClose }) {
                 <div className="text-xs text-stone-500">Tap to open camera</div>
               </>
             )}
-            <input type="file" accept="image/*" capture="environment" onChange={handleFile} disabled={busy} className="hidden" />
+            <input ref={inputRef} type="file" accept="image/*" capture="environment"
+              onChange={handleFile} disabled={busy} className="hidden" />
           </label>
         </div>
         <div className="p-5 border-t border-stone-200">
-          <button onClick={onClose} className="w-full py-3.5 rounded-2xl bg-stone-900 text-stone-50 font-medium active:scale-98 transition-transform">Done</button>
+          <button onClick={onClose} disabled={busy}
+            className="w-full py-3.5 rounded-2xl bg-stone-900 text-stone-50 font-medium active:scale-98 transition-transform disabled:opacity-50">
+            Done
+          </button>
         </div>
       </div>
     </div>
@@ -1197,9 +1242,11 @@ function Header({ name, onSignOut, role }) {
   return (
     <div className="flex items-center justify-between px-5 py-4 bg-stone-50 border-b border-stone-200">
       <div className="flex items-center gap-2.5">
-        <div className="w-8 h-8 rounded-xl bg-stone-900 flex items-center justify-center">
-          <div className="w-3 h-3 rounded-full bg-stone-50" />
-        </div>
+        <img
+          src="https://static.wixstatic.com/media/624bf3_95d4fd7f040e465f9202c44136b01edf~mv2.png/v1/fill/w_98,h_98,al_c,q_85,usm_0.66_1.00_0.01,enc_avif,quality_auto/Summit_Clean_NoSnowFlakes_NoWords.png"
+          alt="Summit Clean"
+          className="w-10 h-10 object-contain"
+        />
         <div>
           <div className="font-serif text-base text-stone-900 leading-none">
             Tidy<span className="italic text-amber-700">Track</span>
@@ -2051,7 +2098,7 @@ function PhotoColumn({ label, photos, highlight }) {
           {photos.slice(0, 4).map((p, i) => (
             <button key={p.id} onClick={() => setZoom(p.public_url)}
               className={`aspect-square rounded overflow-hidden relative ${isDamage ? 'ring-2 ring-red-400' : ''}`}>
-              <img src={p.public_url} alt="" className="w-full h-full object-cover" />
+              <img loading="lazy" src={p.public_url} alt="" className="w-full h-full object-cover" />
               {/* If we hide some, show a "+N" overlay on the last visible thumbnail */}
               {i === 3 && photos.length > 4 && (
                 <div className="absolute inset-0 bg-stone-900/70 flex items-center justify-center text-stone-50 font-mono text-sm">
@@ -2084,7 +2131,7 @@ function PhotoZoomViewer({ photos, initialUrl, onClose }) {
       <div className="absolute top-4 left-4 px-3 py-1.5 rounded-full bg-stone-800 text-stone-50 text-xs font-mono z-10">
         {idx + 1} / {photos.length}
       </div>
-      <img src={photo.public_url} alt="" className="max-w-full max-h-[85vh] rounded-xl" />
+      <img loading="lazy" src={photo.public_url} alt="" className="max-w-full max-h-[85vh] rounded-xl" />
       {photos.length > 1 && (
         <div className="mt-4 flex items-center gap-3">
           <button onClick={() => setIdx((idx - 1 + photos.length) % photos.length)}
@@ -3989,7 +4036,7 @@ function PortalPhotoSection({ label, photos, highlight, description }) {
         {photos.map(p => (
           <button key={p.id} onClick={() => setZoom(p)}
             className={`aspect-square rounded-lg overflow-hidden ${isDamage ? 'ring-2 ring-red-400' : ''}`}>
-            <img src={p.public_url} alt="" className="w-full h-full object-cover" />
+            <img loading="lazy" src={p.public_url} alt="" className="w-full h-full object-cover" />
           </button>
         ))}
       </div>
@@ -4059,39 +4106,63 @@ function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox }) {
   }, []);
   const inboxTotal = inboxCounts.pendingAssignments + inboxCounts.newPhotos;
 
-  useEffect(() => { (async () => {
-    setLoaded(false);
-    // Pull all shifts in this month (and a buffer so leading/trailing days work)
-    const start = new Date(viewMonth.getFullYear(), viewMonth.getMonth() - 1, 1).toISOString();
-    const end   = new Date(viewMonth.getFullYear(), viewMonth.getMonth() + 2, 1).toISOString();
-    const { data: shifts } = await supabase
-      .from('shifts')
-      .select('id, start_time, customer_id, customer:customers(name), tasks(photos(kind)), work_blocks(tasks(photos(kind)))')
-      .gte('start_time', start)
-      .lt('start_time', end);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setLoaded(false);
+      // Pull just shift summary for this month (3-month buffer)
+      const start = new Date(viewMonth.getFullYear(), viewMonth.getMonth() - 1, 1).toISOString();
+      const end   = new Date(viewMonth.getFullYear(), viewMonth.getMonth() + 2, 1).toISOString();
 
-    const map = {};
-    (shifts || []).forEach(s => {
-      const key = toDateKey(new Date(s.start_time));
-      if (!map[key]) map[key] = { shiftCount: 0, properties: new Set(), hasDamage: false };
-      map[key].shiftCount++;
-      if (s.customer_id) map[key].properties.add(s.customer_id);
-      // Check tasks (simple property)
-      (s.tasks || []).forEach(t => (t.photos || []).forEach(p => {
-        if (p.kind === 'damage') map[key].hasDamage = true;
-      }));
-      // Check work_blocks tasks (multi-unit)
-      (s.work_blocks || []).forEach(b => (b.tasks || []).forEach(t => (t.photos || []).forEach(p => {
-        if (p.kind === 'damage') map[key].hasDamage = true;
-      })));
-    });
-    // Convert sets to counts for rendering
-    const final = {};
-    Object.entries(map).forEach(([k, v]) => {
-      final[k] = { shiftCount: v.shiftCount, propertyCount: v.properties.size, hasDamage: v.hasDamage };
-    });
-    setActivity(final); setLoaded(true);
-  })(); }, [viewMonth]);
+      // Lightweight: just shift IDs, start, property — no nested rows
+      const { data: shifts, error: sErr } = await supabase
+        .from('shifts')
+        .select('id, start_time, customer_id')
+        .gte('start_time', start)
+        .lt('start_time', end);
+      if (sErr) { console.error('[DailyCalendar] shifts error:', sErr); }
+      if (cancelled) return;
+
+      // Separately: which days in this window have damage photos? One query, ID-only.
+      // We get all damage photos created in the window, then map their task → shift → date.
+      // This is far lighter than nesting on the main shifts query.
+      const { data: damagePhotos } = await supabase
+        .from('photos')
+        .select('task_id, tasks!inner(shift_id, work_block_id, shifts(start_time), work_blocks(shift_id, shifts(start_time)))')
+        .eq('kind', 'damage');
+      if (cancelled) return;
+
+      // Build a set of date keys that have at least one damage photo
+      const damageDays = new Set();
+      (damagePhotos || []).forEach(p => {
+        const startTime = p.tasks?.shifts?.start_time
+          || p.tasks?.work_blocks?.shifts?.start_time;
+        if (startTime) damageDays.add(toDateKey(new Date(startTime)));
+      });
+
+      // Build per-day counts from shifts alone
+      const map = {};
+      (shifts || []).forEach(s => {
+        const key = toDateKey(new Date(s.start_time));
+        if (!map[key]) map[key] = { shiftCount: 0, properties: new Set() };
+        map[key].shiftCount++;
+        if (s.customer_id) map[key].properties.add(s.customer_id);
+      });
+
+      const final = {};
+      Object.entries(map).forEach(([k, v]) => {
+        final[k] = {
+          shiftCount: v.shiftCount,
+          propertyCount: v.properties.size,
+          hasDamage: damageDays.has(k)
+        };
+      });
+      if (cancelled) return;
+      setActivity(final);
+      setLoaded(true);
+    })();
+    return () => { cancelled = true; };
+  }, [viewMonth]);
 
   // Build the calendar grid
   const year = viewMonth.getFullYear();
@@ -5210,7 +5281,7 @@ function AssignmentDetail({ property, assignment: assignmentInit, employee, onBa
             </div>
           </div>
           {assignment.file_kind === 'image' && (
-            <img src={assignment.file_url} alt="" className="w-full rounded-xl mb-3" />
+            <img loading="lazy" src={assignment.file_url} alt="" className="w-full rounded-xl mb-3" />
           )}
           <a href={assignment.file_url} target="_blank" rel="noreferrer"
             className="w-full inline-flex items-center justify-center gap-2 py-2.5 rounded-xl bg-stone-900 text-stone-50 text-sm font-medium">
@@ -5758,7 +5829,7 @@ function AssignmentViewer({ target, onClose }) {
       </div>
       <div className="flex-1 overflow-auto bg-stone-100">
         {a.file_kind === 'image' ? (
-          <img src={a.file_url} alt="" className="w-full" />
+          <img loading="lazy" src={a.file_url} alt="" className="w-full" />
         ) : (
           <iframe src={a.file_url} className="w-full h-full" title={a.title} />
         )}
@@ -6275,7 +6346,7 @@ function PortalPhotoUploadTab({ property }) {
                 <div className="flex gap-3">
                   <button onClick={() => setZoomPhoto(p)}
                     className="flex-shrink-0 w-20 h-20 rounded-xl overflow-hidden bg-stone-100">
-                    <img src={p.photo_url} alt={p.title || ''} className="w-full h-full object-cover" />
+                    <img loading="lazy" src={p.photo_url} alt={p.title || ''} className="w-full h-full object-cover" />
                   </button>
                   <div className="flex-1 min-w-0">
                     {p.title && (
@@ -6313,7 +6384,7 @@ function PortalPhotoUploadTab({ property }) {
             </button>
           </div>
           <div className="flex-1 overflow-auto p-4">
-            <img src={zoomPhoto.photo_url} alt="" className="w-full h-auto rounded-xl" />
+            <img loading="lazy" src={zoomPhoto.photo_url} alt="" className="w-full h-auto rounded-xl" />
             {zoomPhoto.notes && (
               <div className="mt-3 p-3 rounded-xl bg-stone-800 text-stone-200 text-sm whitespace-pre-wrap">
                 {zoomPhoto.notes}
@@ -6773,7 +6844,7 @@ function PortalAssignmentDetail({ property, assignment, onBack, onEdit }) {
               </div>
             </div>
             {assignment.file_kind === 'image' && (
-              <img src={assignment.file_url} alt="" className="w-full rounded-xl mb-3" />
+              <img loading="lazy" src={assignment.file_url} alt="" className="w-full rounded-xl mb-3" />
             )}
             <a href={assignment.file_url} target="_blank" rel="noreferrer"
               className="w-full inline-flex items-center justify-center gap-2 py-2.5 rounded-xl bg-stone-900 text-stone-50 text-sm font-medium">
@@ -6983,7 +7054,7 @@ function InboxView({ employee, onBack }) {
                   {p.title && <div className="font-serif text-base text-stone-900 mb-1">{p.title}</div>}
                   {p.notes && <div className="text-sm text-stone-700 mb-2 whitespace-pre-wrap">{p.notes}</div>}
                   <button onClick={() => setReviewPhoto(p)} className="block w-full rounded-xl overflow-hidden bg-stone-100 mb-3">
-                    <img src={p.photo_url} alt={p.title || ''} className="w-full max-h-96 object-contain" />
+                    <img loading="lazy" src={p.photo_url} alt={p.title || ''} className="w-full max-h-96 object-contain" />
                   </button>
                   <div className="text-[10px] text-stone-400 font-mono mb-3">
                     Sent {fmtDate(p.created_at)}
@@ -7061,7 +7132,7 @@ function InboxView({ employee, onBack }) {
                         <div key={p.id} className="relative">
                           <button onClick={() => setReviewPhoto(p)}
                             className="block w-full aspect-square rounded-xl overflow-hidden bg-stone-100">
-                            <img src={p.photo_url} alt={p.title || ''} className="w-full h-full object-cover" />
+                            <img loading="lazy" src={p.photo_url} alt={p.title || ''} className="w-full h-full object-cover" />
                           </button>
                           <div className="absolute bottom-1 left-1 right-1 flex items-center justify-between">
                             <span className={`text-[9px] uppercase tracking-wider font-mono px-1.5 py-0.5 rounded-full ${p.status === 'seen' ? 'bg-emerald-600 text-white' : 'bg-stone-700 text-white'}`}>
@@ -7106,7 +7177,7 @@ function InboxView({ employee, onBack }) {
             </button>
           </div>
           <div className="flex-1 overflow-auto p-4">
-            <img src={reviewPhoto.photo_url} alt="" className="w-full h-auto rounded-xl" />
+            <img loading="lazy" src={reviewPhoto.photo_url} alt="" className="w-full h-auto rounded-xl" />
             {reviewPhoto.notes && (
               <div className="mt-3 p-3 rounded-xl bg-stone-800 text-stone-200 text-sm whitespace-pre-wrap">
                 {reviewPhoto.notes}
@@ -7178,7 +7249,7 @@ function ReviewAssignmentModal({ assignment, employee, onDone, onClose }) {
           {assignment.file_url && (
             <div>
               {assignment.file_kind === 'image' ? (
-                <img src={assignment.file_url} alt="" className="w-full rounded-xl" />
+                <img loading="lazy" src={assignment.file_url} alt="" className="w-full rounded-xl" />
               ) : (
                 <a href={assignment.file_url} target="_blank" rel="noreferrer"
                   className="block p-4 rounded-xl bg-white border border-stone-200 hover:border-stone-400">

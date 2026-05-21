@@ -14,7 +14,6 @@ import {
 const SUPABASE_URL = "https://bbaynvqnbkjyqhzhhypr.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJiYXludnFuYmtqeXFoemhoeXByIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc0NzQ2MTMsImV4cCI6MjA5MzA1MDYxM30.ZXUoHFj_IwMe6rX8RxK8Dj4kAB9AS7X9xZAhQ84wDEk";
 
-
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 const PHOTO_BUCKET = 'task-photos';
 const ASSIGNMENT_BUCKET = 'assignments';
@@ -162,6 +161,72 @@ function StaffApp() {
 
 function Splash({ text }) {
   return <div className="min-h-screen bg-stone-50 flex items-center justify-center text-stone-400 text-sm">{text}</div>;
+}
+
+// Reusable searchable unit picker — drop-in replacement for <select> when there are
+// many units. Shows the current pick as a button; tapping opens a dropdown with a
+// search box at the top. Type "B3" to narrow to Building 3, etc.
+function SearchableUnitPicker({ units, value, onChange, placeholder = '— Pick a unit —', disabled }) {
+  const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState('');
+  const selected = units.find(u => u.id === value);
+  const ref = useRef(null);
+
+  // Close when clicking outside
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e) => {
+      if (ref.current && !ref.current.contains(e.target)) setOpen(false);
+    };
+    document.addEventListener('mousedown', handler);
+    document.addEventListener('touchstart', handler);
+    return () => {
+      document.removeEventListener('mousedown', handler);
+      document.removeEventListener('touchstart', handler);
+    };
+  }, [open]);
+
+  const q = search.trim().toLowerCase();
+  const filtered = q
+    ? units.filter(u => u.label.toLowerCase().includes(q))
+    : units;
+
+  return (
+    <div className="relative" ref={ref}>
+      <button type="button" disabled={disabled}
+        onClick={() => { setOpen(!open); setSearch(''); }}
+        className={`w-full px-4 py-3 rounded-xl border border-stone-300 bg-white text-left flex items-center justify-between disabled:opacity-50 ${disabled ? '' : 'hover:border-stone-900'}`}>
+        <span className={selected ? 'text-stone-900' : 'text-stone-400'}>
+          {selected ? selected.label : placeholder}
+        </span>
+        <ChevronRight size={16} className={`text-stone-400 transition-transform ${open ? 'rotate-90' : ''}`} />
+      </button>
+      {open && (
+        <div className="absolute z-30 left-0 right-0 mt-1 bg-white border border-stone-300 rounded-xl shadow-lg max-h-72 flex flex-col overflow-hidden">
+          <div className="p-2 border-b border-stone-200 bg-stone-50">
+            <input
+              autoFocus
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder={`Search ${units.length} units…`}
+              className="w-full px-3 py-2 rounded-lg border border-stone-300 bg-white text-sm" />
+          </div>
+          <div className="flex-1 overflow-y-auto">
+            {filtered.length === 0 ? (
+              <div className="p-4 text-center text-sm text-stone-400">No units match "{q}".</div>
+            ) : filtered.map(u => (
+              <button key={u.id} type="button"
+                onClick={() => { onChange(u.id); setOpen(false); }}
+                className={`w-full text-left px-4 py-2.5 hover:bg-stone-50 text-sm ${u.id === value ? 'bg-amber-50 text-amber-800 font-medium' : 'text-stone-700'}`}>
+                {u.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 
 function ConfigError() {
@@ -450,6 +515,71 @@ function EmployeeApp({ employee, onSignOut }) {
     setBusy(false);
   };
 
+  // Jump straight to a bedroom's work block from an assignment card.
+  // - If same bedroom is already active → just open it
+  // - If a different block is active → confirm switch (close current, start new)
+  // - If a coworker has an open block at this bedroom → join (open the existing one)
+  // - Else create a new block
+  const goToBedroomForTarget = async (target) => {
+    if (!target.unit_id || !target.party_id) {
+      alert('This assignment isn\'t tied to a specific bedroom.');
+      return;
+    }
+
+    // Already on this bedroom? Just open it.
+    if (activeBlock && activeBlock.unit_id === target.unit_id && activeBlock.party_id === target.party_id && !activeBlock.end_time) {
+      return; // already there
+    }
+
+    // Active block but on a different bedroom — ask before switching
+    if (activeBlock && !activeBlock.end_time) {
+      const switchMsg = `You're already cleaning ${activeBlock.unit?.label || ''} · ${activeBlock.party?.label || ''}. Switch to ${target.unit?.label || ''} · ${target.party?.label || ''}?`;
+      if (!confirm(switchMsg)) return;
+      setBusy(true);
+      if (activeTask) await stopTask(activeTask, false);
+      const ts = new Date().toISOString();
+      await supabase.from('work_blocks').update({ end_time: ts }).eq('id', activeBlock.id);
+      const updated = { ...activeBlock, end_time: ts, tasks };
+      setWorkBlocks(prev => prev.map(b => b.id === activeBlock.id ? updated : b));
+      setActiveBlock(null); setTasks([]); setActiveTask(null);
+      // fall through to open/create logic
+    } else {
+      setBusy(true);
+    }
+
+    // Try to find an existing open block at this bedroom (within this shift, or by another cleaner)
+    // Within THIS shift first (most likely scenario after switching)
+    const myOpen = workBlocks.find(b => !b.end_time && b.unit_id === target.unit_id && b.party_id === target.party_id);
+    if (myOpen) {
+      // Re-fetch the block with tasks so we have fresh data
+      const { data: refreshed } = await supabase.from('work_blocks')
+        .select('*, unit:units(*), party:parties(*), tasks(*, photos(*))')
+        .eq('id', myOpen.id).single();
+      if (refreshed) {
+        setWorkBlocks(prev => prev.map(b => b.id === myOpen.id ? refreshed : b));
+        setActiveBlock(refreshed);
+        setTasks(refreshed.tasks || []);
+      }
+      setBusy(false);
+      return;
+    }
+
+    // Else create a new work block for this cleaner at this bedroom
+    const { data, error } = await supabase.from('work_blocks')
+      .insert({
+        shift_id: shift.id,
+        unit_id: target.unit_id,
+        party_id: target.party_id,
+        bill_rate_at_work: shift.customer?.bill_rate_hourly || null
+      })
+      .select('*, unit:units(*), party:parties(*), tasks(*, photos(*))').single();
+    setBusy(false);
+    if (error) { alert('Could not start work block: ' + error.message); return; }
+    setWorkBlocks(prev => [...prev, data]);
+    setActiveBlock(data);
+    setTasks(data.tasks || []);
+  };
+
   // Tasks
   const startTask = async () => {
     if (!newTaskName.trim()) return;
@@ -530,7 +660,7 @@ function EmployeeApp({ employee, onSignOut }) {
   if (isMulti && !activeBlock) {
     return <PropertyHub shift={shift} workBlocks={workBlocks} employeeName={employee.name} employee={employee}
       onSignOut={onSignOut} onClockOut={clockOut} onSwitchProperty={switchProperty}
-      onStartNew={startNewBlock} onReopen={reopenBlock} busy={busy} />;
+      onStartNew={startNewBlock} onReopen={reopenBlock} onGoToBedroom={goToBedroomForTarget} busy={busy} />;
   }
   if (isMulti && activeBlock) {
     return <BlockView shift={shift} block={activeBlock} tasks={tasks} activeTask={activeTask}
@@ -555,7 +685,7 @@ function EmployeeApp({ employee, onSignOut }) {
 // =================================================================
 // PROPERTY HUB (multi-unit, between work blocks)
 // =================================================================
-function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onClockOut, onSwitchProperty, onStartNew, onReopen, busy }) {
+function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onClockOut, onSwitchProperty, onStartNew, onReopen, onGoToBedroom, busy }) {
   useTick(true);
   const elapsed = Date.now() - new Date(shift.start_time).getTime();
 
@@ -587,7 +717,7 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
         </div>
       </div>
 
-      <AssignmentsPanel propertyId={shift.customer_id} employee={employee} />
+      <AssignmentsPanel propertyId={shift.customer_id} employee={employee} onGoToBedroom={onGoToBedroom} />
 
       <div className="px-4 pt-6">
         <button onClick={onStartNew} disabled={busy}
@@ -5563,10 +5693,11 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
 }
 
 // Reusable card for one assignment target, used in banner + panel
-function AssignmentCard({ target, busy, onView, onStart, onDone, onReopen, onBlocked, onReassign, propertyId }) {
+function AssignmentCard({ target, busy, onView, onStart, onDone, onReopen, onBlocked, onReassign, onGoToBedroom, propertyId }) {
   const t = target;
   const s = ASSIGNMENT_STATUSES[t.status] || ASSIGNMENT_STATUSES.pending;
   const isDone = t.status === 'done';
+  const canGo = onGoToBedroom && t.unit_id && t.party_id && !isDone;
   const [activeCleaners, setActiveCleaners] = useState([]);
 
   // Pull who's currently working at this target's unit+party (active work blocks today)
@@ -5662,13 +5793,19 @@ function AssignmentCard({ target, busy, onView, onStart, onDone, onReopen, onBlo
           </button>
         )}
       </div>
+      {canGo && (
+        <button onClick={onGoToBedroom} disabled={busy}
+          className="mt-2 w-full px-3 py-2.5 rounded-lg bg-stone-900 hover:bg-stone-800 text-stone-50 text-sm font-medium flex items-center justify-center gap-2 disabled:opacity-50">
+          Go to this bedroom <ChevronRight size={14} />
+        </button>
+      )}
     </div>
   );
 }
 
 // AssignmentsPanel — full tabbed view for the property hub.
 // Tabs: Pending | In Progress | Done
-function AssignmentsPanel({ propertyId, employee, refreshKey }) {
+function AssignmentsPanel({ propertyId, employee, refreshKey, onGoToBedroom }) {
   const [tab, setTab] = useState('pending');
   const [counts, setCounts] = useState({ pending: 0, in_progress: 0, done: 0, blocked: 0 });
 
@@ -5704,12 +5841,12 @@ function AssignmentsPanel({ propertyId, employee, refreshKey }) {
         </button>
       </div>
       <AssignmentTabContent propertyId={propertyId} employee={employee} statusFilter={tab}
-        onUpdate={loadCounts} />
+        onUpdate={loadCounts} onGoToBedroom={onGoToBedroom} />
     </div>
   );
 }
 
-function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate }) {
+function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, onGoToBedroom }) {
   const [targets, setTargets] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [opened, setOpened] = useState(null);
@@ -5856,7 +5993,8 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate }) 
                       onDone={() => updateStatus(t, 'done')}
                       onReopen={() => updateStatus(t, 'pending')}
                       onBlocked={() => setStatusModal({ target: t })}
-                      onReassign={() => setReassignTarget(t)} />
+                      onReassign={() => setReassignTarget(t)}
+                      onGoToBedroom={onGoToBedroom ? () => onGoToBedroom(t) : null} />
                   ))}
                 </div>
               )}
@@ -6423,19 +6561,24 @@ function PortalPhotoUploadTab({ property }) {
         <>
           <div>
             <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Unit (optional)</label>
-            <select value={unitId} onChange={(e) => {
-                const newUnitId = e.target.value;
+            <SearchableUnitPicker
+              units={units}
+              value={unitId}
+              placeholder="— Whole property —"
+              onChange={(newUnitId) => {
                 setUnitId(newUnitId); setPartyId('');
                 const u = units.find(x => x.id === newUnitId);
                 if (u) {
                   const stripped = title.replace(/^[^—]+ — /, '');
                   setTitle(`${u.label} — ${stripped}`);
                 }
-              }}
-              className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white">
-              <option value="">— Whole property —</option>
-              {units.map(u => <option key={u.id} value={u.id}>{u.label}</option>)}
-            </select>
+              }} />
+            {unitId && (
+              <button type="button" onClick={() => { setUnitId(''); setPartyId(''); }}
+                className="text-xs font-mono text-stone-500 mt-1 hover:text-stone-900">
+                ← Clear (apply to whole property)
+              </button>
+            )}
           </div>
           {unitId && parties.length > 0 && (
             <div>
@@ -6892,20 +7035,18 @@ function PortalAssignmentForm({ property, assignment, onCancel, onSaved }) {
               <>
                 <div>
                   <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Unit</label>
-                  <select value={unitId} onChange={(e) => {
-                      const newUnitId = e.target.value;
+                  <SearchableUnitPicker
+                    units={units}
+                    value={unitId}
+                    placeholder="— Pick a unit —"
+                    onChange={(newUnitId) => {
                       setUnitId(newUnitId); setPartyId('');
                       const u = units.find(x => x.id === newUnitId);
                       if (u) {
-                        // strip any existing prefix from title, then add new one
                         const stripped = title.replace(/^[^—]+ — /, '');
                         setTitle(`${u.label} — ${stripped}`);
                       }
-                    }}
-                    className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white">
-                    <option value="">— Pick a unit —</option>
-                    {units.map(u => <option key={u.id} value={u.id}>{u.label}</option>)}
-                  </select>
+                    }} />
                 </div>
                 {unitId && (
                   <div>

@@ -11,7 +11,7 @@ import {
 // =================================================================
 // 🔧 PASTE YOUR SUPABASE KEYS HERE
 // =================================================================
-const SUPABASE_URL = "https://bbaynvqnbkjyqhzhhypr.supabase.co";
+const SUPABASE_URL = "tidytrack-ten.vercel.app";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJiYXludnFuYmtqeXFoemhoeXByIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc0NzQ2MTMsImV4cCI6MjA5MzA1MDYxM30.ZXUoHFj_IwMe6rX8RxK8Dj4kAB9AS7X9xZAhQ84wDEk";
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
@@ -96,8 +96,8 @@ const sessionStore = {
 // Top-level App
 // =================================================================
 export default function App() {
-  // Hash-based routing so we can have a portal at #/portal without
-  // setting up react-router. Simple and works fine for two routes.
+  // Hash-based routing so we can have different routes (#/portal, #/staff, etc.)
+  // without setting up react-router.
   const [route, setRoute] = useState(() => window.location.hash || '');
 
   useEffect(() => {
@@ -106,26 +106,63 @@ export default function App() {
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
 
-  // Portal is a totally separate flow — different login, different view, no PIN
+  // Portal route — explicit URL, preserves any existing PM bookmarks
   if (route.startsWith('#/portal') || route.startsWith('#portal')) {
     return <PortalApp />;
   }
 
-  return <StaffApp />;
+  // Staff route — explicit URL, skips landing
+  if (route.startsWith('#/staff') || route.startsWith('#staff')) {
+    return <StaffApp />;
+  }
+
+  // Root URL — show landing UNLESS the device remembers a previous staff sign-in,
+  // in which case skip straight to staff sign-in (staff use this app constantly).
+  return <RootRouter />;
+}
+
+// Decides between LandingPage and StaffApp at the root URL based on remembered choice.
+function RootRouter() {
+  const [view, setView] = useState(null); // 'staff' | 'landing'
+
+  useEffect(() => {
+    try {
+      const choice = localStorage.getItem('tt_role_choice');
+      if (choice === 'staff') {
+        setView('staff');
+      } else {
+        setView('landing');
+      }
+    } catch {
+      setView('landing');
+    }
+  }, []);
+
+  if (view === null) return <Splash text="" />;
+  if (view === 'staff') return <StaffApp />;
+
+  // Landing page — let user pick
+  return (
+    <LandingPage
+      onPickStaff={() => {
+        try { localStorage.setItem('tt_role_choice', 'staff'); } catch {}
+        setView('staff');
+      }}
+      onPickPortal={() => {
+        // We don't remember the portal choice (PMs use it rarely, often shared devices).
+        // Just navigate to the portal route.
+        window.location.hash = '#/portal';
+      }}
+    />
+  );
 }
 
 function StaffApp() {
   const [session, setSession] = useState(null);
   const [loaded, setLoaded] = useState(false);
   const [configError, setConfigError] = useState(false);
-  const [isPortal, setIsPortal] = useState(false);
 
   useEffect(() => {
-    // Detect portal route
-    const path = window.location.pathname;
-    const hash = window.location.hash;
-    setIsPortal(path.includes('/portal') || hash.includes('portal'));
-
     if (SUPABASE_URL.includes('PASTE_') || SUPABASE_ANON_KEY.includes('PASTE_')) {
       setConfigError(true); setLoaded(true); return;
     }
@@ -143,11 +180,10 @@ function StaffApp() {
   if (!loaded) return <Splash text="Loading…" />;
   if (configError) return <ConfigError />;
 
-  // Portal route — completely separate from staff app
-  if (isPortal) return <PortalApp />;
-
   if (!session) {
     return <SignIn onSignIn={async (employee) => {
+      // Remember they chose staff (in case localStorage was cleared)
+      try { localStorage.setItem('tt_role_choice', 'staff'); } catch {}
       await sessionStore.set({ employeeId: employee.id });
       setSession({ employee });
     }} />;
@@ -161,6 +197,66 @@ function StaffApp() {
 
 function Splash({ text }) {
   return <div className="min-h-screen bg-stone-50 flex items-center justify-center text-stone-400 text-sm">{text}</div>;
+}
+
+// Landing page shown when someone hits the root URL and hasn't logged in before.
+// Two big buttons: staff (PIN sign-in) or property manager (access code sign-in).
+function LandingPage({ onPickStaff, onPickPortal }) {
+  return (
+    <div className="min-h-screen bg-stone-50 flex flex-col">
+      {/* Dark brand header band */}
+      <div className="flex flex-col items-center pt-12 pb-10 bg-stone-900">
+        <img
+          src="https://bbaynvqnbkjyqhzhhypr.supabase.co/storage/v1/object/public/brand/unnamed%20(2).png"
+          alt="Summit Clean"
+          className="w-44 h-auto mx-auto"
+        />
+      </div>
+
+      <div className="flex-1 flex flex-col justify-center items-center px-6 max-w-sm mx-auto w-full pt-10 pb-12">
+        <div className="text-center mb-10">
+          <p className="text-xs uppercase tracking-[0.25em] font-mono text-stone-500">
+            Welcome
+          </p>
+          <h2 className="font-serif text-2xl mt-2 text-stone-900">
+            Who are you?
+          </h2>
+        </div>
+
+        <div className="w-full space-y-3">
+          <button onClick={onPickStaff}
+            style={{ touchAction: 'manipulation' }}
+            className="w-full p-5 rounded-2xl bg-stone-900 text-stone-50 text-left active:scale-98 transition-transform">
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="font-serif text-xl">Summit Clean team</div>
+                <div className="text-xs text-stone-300 font-mono mt-0.5">Cleaners, managers, owners</div>
+              </div>
+              <ChevronRight size={20} className="text-stone-300" />
+            </div>
+          </button>
+
+          <button onClick={onPickPortal}
+            style={{ touchAction: 'manipulation' }}
+            className="w-full p-5 rounded-2xl bg-white border-2 border-stone-300 text-stone-900 text-left active:scale-98 transition-transform hover:border-stone-900">
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="font-serif text-xl">Property manager</div>
+                <div className="text-xs text-stone-500 font-mono mt-0.5">View cleanings & send photos</div>
+              </div>
+              <ChevronRight size={20} className="text-stone-400" />
+            </div>
+          </button>
+        </div>
+      </div>
+
+      <div className="text-center pb-6">
+        <div className="text-xs font-mono text-stone-400">
+          Summit Clean · Cleaning operations
+        </div>
+      </div>
+    </div>
+  );
 }
 
 // Reusable searchable unit picker — drop-in replacement for <select> when there are
@@ -342,8 +438,18 @@ function SignIn({ onSignIn }) {
       </div>
 
       {/* Footer */}
-      <div className="text-center pb-6 text-xs font-mono" style={{ color: MUTED }}>
-        Summit Clean · Cleaning operations
+      <div className="text-center pb-6 space-y-2">
+        <button onClick={() => {
+            try { localStorage.removeItem('tt_role_choice'); } catch {}
+            window.location.hash = '';
+            window.location.reload();
+          }}
+          className="text-xs font-mono hover:underline" style={{ color: MUTED }}>
+          Not staff? Sign in as a property manager →
+        </button>
+        <div className="text-xs font-mono" style={{ color: MUTED }}>
+          Summit Clean · Cleaning operations
+        </div>
       </div>
     </div>
   );
@@ -3834,7 +3940,14 @@ function PortalSignIn({ onSignIn }) {
         </div>
       </div>
       <div className="text-center pb-6 text-xs text-stone-400 font-mono">
-        <a href="#/" className="hover:text-stone-600">← Staff sign in</a>
+        <button onClick={() => {
+            // Clear any remembered choice so they get to the landing page
+            try { localStorage.removeItem('tt_role_choice'); } catch {}
+            window.location.hash = '';
+          }}
+          className="hover:text-stone-600">
+          ← Back
+        </button>
       </div>
     </div>
   );

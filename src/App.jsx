@@ -11,7 +11,7 @@ import {
 // =================================================================
 // 🔧 PASTE YOUR SUPABASE KEYS HERE
 // =================================================================
-const SUPABASE_URL = "https://bbaynvqnbkjyqhzhhypr.supabase.co/storage/v1/object/public/brand/unnamed%20(2).png";
+const SUPABASE_URL = "https://bbaynvqnbkjyqhzhhypr.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJiYXludnFuYmtqeXFoemhoeXByIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc0NzQ2MTMsImV4cCI6MjA5MzA1MDYxM30.ZXUoHFj_IwMe6rX8RxK8Dj4kAB9AS7X9xZAhQ84wDEk";
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
@@ -1280,29 +1280,27 @@ async function deletePmFile(path) {
 
 function Header({ name, onSignOut, role }) {
   return (
-    <div className="flex items-center justify-between px-5 py-4 bg-stone-50 border-b border-stone-200">
-      <div className="flex items-center gap-2.5">
+    <div className="flex items-center justify-between px-5 py-3 bg-stone-900 border-b border-stone-900">
+      <div className="flex items-center gap-3">
         <img
-          src="https://static.wixstatic.com/media/624bf3_95d4fd7f040e465f9202c44136b01edf~mv2.png/v1/fill/w_98,h_98,al_c,q_85,usm_0.66_1.00_0.01,enc_avif,quality_auto/Summit_Clean_NoSnowFlakes_NoWords.png"
+          src="https://bbaynvqnbkjyqhzhhypr.supabase.co/storage/v1/object/public/brand/unnamed%20(2).png"
           alt="Summit Clean"
-          className="w-10 h-10 object-contain"
+          className="h-10 w-auto object-contain"
         />
-        <div>
-          <div className="font-serif text-base text-stone-900 leading-none">
-            Tidy<span className="italic text-amber-700">Track</span>
-          </div>
-          <div className="text-xs text-stone-500 font-mono flex items-center gap-1.5">
+        <div className="text-stone-50">
+          <div className="text-xs font-mono flex items-center gap-1.5" style={{ color: '#FAF8F4' }}>
             {name}
             {role === 'owner' && (
-              <span className="text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-800">Owner</span>
+              <span className="text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-amber-500 text-stone-900">Owner</span>
             )}
             {role === 'manager' && (
-              <span className="text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-stone-200 text-stone-700">Manager</span>
+              <span className="text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-stone-700 text-stone-50">Manager</span>
             )}
           </div>
+          <div className="text-[10px] font-mono opacity-60">TidyTrack</div>
         </div>
       </div>
-      <button onClick={onSignOut} className="text-xs text-stone-500 font-mono hover:text-stone-900">Sign out</button>
+      <button onClick={onSignOut} className="text-xs text-stone-300 font-mono hover:text-stone-50">Sign out</button>
     </div>
   );
 }
@@ -3654,15 +3652,23 @@ function PortalSignIn({ onSignIn }) {
 
   return (
     <div className="min-h-screen bg-stone-50 flex flex-col">
-      <div className="flex-1 flex flex-col justify-center items-center px-6 max-w-sm mx-auto w-full">
-        <div className="mb-10 text-center">
-          <div className="w-12 h-12 mx-auto rounded-2xl bg-stone-900 flex items-center justify-center mb-6">
-            <div className="w-5 h-5 rounded-full bg-stone-50" />
-          </div>
-          <h1 className="text-4xl font-light text-stone-900 tracking-tight leading-none mb-2">
-            Tidy<span className="font-serif italic text-amber-700">Track</span>
-          </h1>
-          <p className="text-stone-500 text-sm">Property manager portal</p>
+      {/* Dark brand header band */}
+      <div className="flex flex-col items-center pt-12 pb-10 bg-stone-900">
+        <img
+          src="https://bbaynvqnbkjyqhzhhypr.supabase.co/storage/v1/object/public/brand/unnamed%20(2).png"
+          alt="Summit Clean"
+          className="w-44 h-auto mx-auto"
+        />
+      </div>
+
+      <div className="flex-1 flex flex-col justify-center items-center px-6 max-w-sm mx-auto w-full pt-10">
+        <div className="mb-8 text-center">
+          <p className="text-xs uppercase tracking-[0.25em] font-mono text-stone-500">
+            Welcome
+          </p>
+          <h2 className="font-serif text-2xl mt-2 text-stone-900">
+            Property manager portal
+          </h2>
         </div>
 
         <div className="w-full">
@@ -3684,7 +3690,7 @@ function PortalSignIn({ onSignIn }) {
           </button>
 
           <p className="text-xs text-stone-500 mt-6 text-center">
-            Don't have a code? Ask your cleaning company.
+            Don't have a code? Ask Summit Clean for access.
           </p>
         </div>
       </div>
@@ -3777,15 +3783,15 @@ function PortalHome({ property, onSignOut, onOpenUnitDay }) {
     <div className="min-h-screen bg-stone-50 pb-12">
       <div className="bg-stone-900 text-stone-50 px-5 pt-5 pb-6">
         <div className="flex items-center justify-between mb-4">
-          <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-xl bg-stone-50 flex items-center justify-center">
-              <div className="w-3 h-3 rounded-full bg-stone-900" />
-            </div>
+          <div className="flex items-center gap-3">
+            <img
+              src="https://bbaynvqnbkjyqhzhhypr.supabase.co/storage/v1/object/public/brand/unnamed%20(2).png"
+              alt="Summit Clean"
+              className="h-10 w-auto object-contain"
+            />
             <div>
-              <div className="font-serif text-base text-stone-50 leading-none">
-                Tidy<span className="italic text-amber-400">Track</span>
-              </div>
-              <div className="text-xs text-stone-400 font-mono">Property portal</div>
+              <div className="text-xs text-stone-400 font-mono uppercase tracking-wider">Property portal</div>
+              <div className="text-[10px] text-stone-500 font-mono opacity-60">TidyTrack</div>
             </div>
           </div>
           <button onClick={onSignOut} className="text-xs text-stone-400 font-mono hover:text-stone-50">Sign out</button>

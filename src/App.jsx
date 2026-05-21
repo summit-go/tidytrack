@@ -14,6 +14,7 @@ import {
 const SUPABASE_URL = "https://bbaynvqnbkjyqhzhhypr.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJiYXludnFuYmtqeXFoemhoeXByIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc0NzQ2MTMsImV4cCI6MjA5MzA1MDYxM30.ZXUoHFj_IwMe6rX8RxK8Dj4kAB9AS7X9xZAhQ84wDEk";
 
+
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 const PHOTO_BUCKET = 'task-photos';
 const ASSIGNMENT_BUCKET = 'assignments';
@@ -73,6 +74,14 @@ function naturalCompare(a, b) {
     }
   }
   return 0;
+}
+
+// Extract the building prefix from a unit label like "B3-205" → "B3"
+// Falls back to first non-numeric prefix, or null if no match.
+function buildingFromLabel(label) {
+  if (!label) return null;
+  const m = String(label).match(/^([A-Za-z]+\d+)/);
+  return m ? m[1] : null;
 }
 
 const sessionStore = {
@@ -583,7 +592,7 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
       <div className="px-4 pt-6">
         <button onClick={onStartNew} disabled={busy}
           className="w-full py-5 rounded-2xl bg-stone-900 text-stone-50 font-medium text-lg flex items-center justify-center gap-3 active:scale-98 transition-transform disabled:opacity-50 shadow-md">
-          <Plus size={22} /> Start cleaning a party
+          <Plus size={22} /> Start cleaning a bedroom
         </button>
 
         <div className="mt-8">
@@ -592,7 +601,7 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
           </div>
           {workBlocks.length === 0 ? (
             <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
-              No work yet. Tap "Start cleaning a party" above.
+              No work yet. Tap "Start cleaning a bedroom" above.
             </div>
           ) : (
             <div className="space-y-2">
@@ -2822,7 +2831,7 @@ function UnitForm({ property, unit, onCancel, onSaved }) {
       if (e) { setBusy(false); setError(e.message); return; }
       if (partyCount > 0) {
         const parties = Array.from({ length: partyCount }, (_, i) => ({
-          unit_id: created.id, label: `Person ${i + 1}`, sort_order: i + 1
+          unit_id: created.id, label: `Bedroom ${i + 1}`, sort_order: i + 1
         }));
         await supabase.from('parties').insert(parties);
       }
@@ -2981,7 +2990,7 @@ function BulkCreateUnits({ property, onCancel, onSaved }) {
         for (let p = 1; p <= partiesPerUnit; p++) {
           partyRows.push({
             unit_id: u.id,
-            label: `Person ${p}`,
+            label: `Bedroom ${p}`,
             sort_order: p,
             active: true
           });
@@ -3050,7 +3059,7 @@ function BulkCreateUnits({ property, onCancel, onSaved }) {
             ))}
           </div>
           <p className="text-xs text-stone-500 mt-2">
-            Each unit gets "Person 1" through "Person N". You can rename them later.
+            Each unit gets "Bedroom 1" through "Bedroom N". You can rename them later.
           </p>
         </div>
 
@@ -3201,7 +3210,7 @@ function PartyForm({ property, unit, party, onCancel, onSaved }) {
         <div>
           <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Label</label>
           <input type="text" value={label} onChange={(e) => setLabel(e.target.value)}
-            placeholder="e.g. Person 1, Student 3"
+            placeholder="e.g. Bedroom 1, Student 3"
             className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white focus:outline-none focus:border-stone-900 text-stone-900" />
         </div>
         <div>
@@ -3425,7 +3434,7 @@ function InvoicePreview({ invoice, showZeros, setShowZeros, onBack, onPrint }) {
                   <table className="w-full text-sm">
                     <thead>
                       <tr className="text-[10px] uppercase tracking-wider font-mono text-stone-500 text-left">
-                        <th className="font-normal pb-2">Party</th>
+                        <th className="font-normal pb-2">Bedroom</th>
                         <th className="font-normal pb-2 text-right">Hours</th>
                         <th className="font-normal pb-2 text-right">Rate</th>
                         <th className="font-normal pb-2 text-right">Amount</th>
@@ -4005,7 +4014,22 @@ function PortalUnitDay({ property, unitId, date, onBack }) {
           {new Date(date + 'T12:00:00').toLocaleDateString('en-US', { weekday:'long', month:'long', day:'numeric', year:'numeric' })}
         </div>
         <h1 className="font-serif text-3xl text-stone-900 mb-1">{unit?.label || property.name}</h1>
-        <div className="text-sm text-stone-600">{property.name}</div>
+        <div className="text-sm text-stone-600 mb-2">{property.name}</div>
+        {(() => {
+          // List of distinct bedrooms/parties cleaned on this day
+          const partyLabels = [...new Set(blocks.map(b => b.party?.label).filter(Boolean))];
+          if (partyLabels.length === 0) return null;
+          return (
+            <div className="flex items-center flex-wrap gap-1.5 mt-3">
+              <span className="text-xs uppercase tracking-wider font-mono text-stone-500">Cleaned:</span>
+              {partyLabels.map(label => (
+                <span key={label} className="text-xs font-mono px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200">
+                  {label}
+                </span>
+              ))}
+            </div>
+          );
+        })()}
       </div>
 
       <div className="px-5 pt-6 space-y-6">
@@ -4953,6 +4977,27 @@ function AssignmentForm({ property, employee, onCancel, onSaved }) {
     setRows(prev => prev.filter(r => r.id !== id));
   };
 
+  // Auto-build a title prefix from the target selection, e.g. "B3-205 · Bedroom 2 — "
+  // Called when unit/party changes on a row. Replaces any existing auto-prefix but
+  // keeps anything the user manually typed after it.
+  const autoPrefixFor = (rowId, unitIdNew, partyIdNew) => {
+    setRows(prev => prev.map(r => {
+      if (r.id !== rowId) return r;
+      const units = unitsByProperty[r.propertyId] || [];
+      const unit = units.find(u => u.id === unitIdNew);
+      const party = (unit?.parties || []).find(p => p.id === partyIdNew);
+      const prefix = unit
+        ? `${unit.label}${party ? ` · ${party.label}` : ''} — `
+        : '';
+      // Strip the OLD prefix off the title if it was previously set, so we replace cleanly.
+      // The old prefix looks like "<unit> · <party> — " — match it generically.
+      let manualPart = r.title;
+      const oldPrefixMatch = manualPart.match(/^[^—]+ — /);
+      if (oldPrefixMatch) manualPart = manualPart.slice(oldPrefixMatch[0].length);
+      return { ...r, unitId: unitIdNew, partyId: partyIdNew, title: prefix + manualPart };
+    }));
+  };
+
   // When the property on a row changes, reset its scope/targets
   const changeRowProperty = (id, newPropId) => {
     const isMulti = allProperties.find(p => p.id === newPropId)?.property_type === 'multi_unit';
@@ -5157,12 +5202,12 @@ function AssignmentForm({ property, employee, onCancel, onSaved }) {
 
                       {row.scope === 'specific' && (
                         <div className="grid grid-cols-2 gap-2">
-                          <select value={row.unitId} onChange={(e) => updateRow(row.id, { unitId: e.target.value, partyId: '' })}
+                          <select value={row.unitId} onChange={(e) => autoPrefixFor(row.id, e.target.value, '')}
                             className="px-3 py-2 rounded-lg border border-stone-300 bg-white text-sm">
                             <option value="">Unit…</option>
                             {units.map(u => <option key={u.id} value={u.id}>{u.label}</option>)}
                           </select>
-                          <select value={row.partyId} onChange={(e) => updateRow(row.id, { partyId: e.target.value })}
+                          <select value={row.partyId} onChange={(e) => autoPrefixFor(row.id, row.unitId, e.target.value)}
                             disabled={!row.unitId}
                             className="px-3 py-2 rounded-lg border border-stone-300 bg-white text-sm disabled:opacity-50">
                             <option value="">Party…</option>
@@ -5671,6 +5716,8 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate }) 
   const [statusModal, setStatusModal] = useState(null);
   const [reassignTarget, setReassignTarget] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [buildingFilter, setBuildingFilter] = useState('all'); // 'all' or a building prefix like 'B3'
+  const [collapsedBuildings, setCollapsedBuildings] = useState({}); // { B3: true } = collapsed
 
   const [loadError, setLoadError] = useState(null);
 
@@ -5749,17 +5796,74 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate }) 
     );
   }
 
+  // Group targets by building, derived from the unit label (e.g. "B3-205" -> "B3")
+  // Targets without a unit go into a "No unit" bucket
+  const buildings = {};
+  targets.forEach(t => {
+    const b = buildingFromLabel(t.unit?.label) || '—';
+    if (!buildings[b]) buildings[b] = [];
+    buildings[b].push(t);
+  });
+  const buildingKeys = Object.keys(buildings).sort(naturalCompare);
+  const visibleBuildings = buildingFilter === 'all' ? buildingKeys : buildingKeys.filter(k => k === buildingFilter);
+  const toggleCollapse = (b) => setCollapsedBuildings(prev => ({ ...prev, [b]: !prev[b] }));
+
   return (
-    <div className="space-y-2">
-      {targets.map(t => (
-        <AssignmentCard key={t.id} target={t} busy={busy} propertyId={propertyId}
-          onView={() => setOpened(t)}
-          onStart={() => updateStatus(t, 'in_progress')}
-          onDone={() => updateStatus(t, 'done')}
-          onReopen={() => updateStatus(t, 'pending')}
-          onBlocked={() => setStatusModal({ target: t })}
-          onReassign={() => setReassignTarget(t)} />
-      ))}
+    <div>
+      {/* Building filter pills — only show if there's more than 1 building */}
+      {buildingKeys.length > 1 && (
+        <div className="flex gap-1.5 mb-3 overflow-x-auto pb-1 -mx-1 px-1">
+          <button onClick={() => setBuildingFilter('all')}
+            className={`px-3 py-1 rounded-full text-xs font-mono whitespace-nowrap ${buildingFilter === 'all' ? 'bg-stone-900 text-stone-50' : 'bg-stone-100 text-stone-600'}`}>
+            All ({targets.length})
+          </button>
+          {buildingKeys.map(b => (
+            <button key={b} onClick={() => setBuildingFilter(b)}
+              className={`px-3 py-1 rounded-full text-xs font-mono whitespace-nowrap ${buildingFilter === b ? 'bg-stone-900 text-stone-50' : 'bg-stone-100 text-stone-600'}`}>
+              {b} ({buildings[b].length})
+            </button>
+          ))}
+        </div>
+      )}
+
+      <div className="space-y-4">
+        {visibleBuildings.map(b => {
+          const items = buildings[b];
+          const collapsed = !!collapsedBuildings[b];
+          // Only show group header if there's more than 1 building total
+          const showHeader = buildingKeys.length > 1;
+          return (
+            <div key={b}>
+              {showHeader && (
+                <button onClick={() => toggleCollapse(b)}
+                  className="w-full flex items-center justify-between mb-2 px-1 py-1 hover:bg-stone-50 rounded">
+                  <div className="flex items-center gap-2">
+                    <Building2 size={14} className="text-stone-500" />
+                    <span className="text-xs uppercase tracking-wider font-mono text-stone-600">
+                      {b === '—' ? 'No unit' : `Building ${b.replace(/^B/i, '')}`}
+                    </span>
+                    <span className="text-xs font-mono text-stone-400">({items.length})</span>
+                  </div>
+                  <ChevronRight size={14} className={`text-stone-400 transition-transform ${collapsed ? '' : 'rotate-90'}`} />
+                </button>
+              )}
+              {!collapsed && (
+                <div className="space-y-2">
+                  {items.map(t => (
+                    <AssignmentCard key={t.id} target={t} busy={busy} propertyId={propertyId}
+                      onView={() => setOpened(t)}
+                      onStart={() => updateStatus(t, 'in_progress')}
+                      onDone={() => updateStatus(t, 'done')}
+                      onReopen={() => updateStatus(t, 'pending')}
+                      onBlocked={() => setStatusModal({ target: t })}
+                      onReassign={() => setReassignTarget(t)} />
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
 
       {opened && <AssignmentViewer target={opened} onClose={() => setOpened(null)} />}
       {statusModal && (
@@ -5833,10 +5937,10 @@ function ReassignModal({ target, propertyId, onSaved, onClose }) {
           </div>
           {unitId && (
             <div>
-              <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Party</label>
+              <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Bedroom</label>
               <select value={partyId} onChange={(e) => setPartyId(e.target.value)}
                 className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white">
-                <option value="">— Pick a party —</option>
+                <option value="">— Pick a bedroom —</option>
                 {parties.map(p => <option key={p.id} value={p.id}>{p.label}{p.full_name ? ` (${p.full_name})` : ''}</option>)}
               </select>
             </div>
@@ -6319,7 +6423,15 @@ function PortalPhotoUploadTab({ property }) {
         <>
           <div>
             <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Unit (optional)</label>
-            <select value={unitId} onChange={(e) => { setUnitId(e.target.value); setPartyId(''); }}
+            <select value={unitId} onChange={(e) => {
+                const newUnitId = e.target.value;
+                setUnitId(newUnitId); setPartyId('');
+                const u = units.find(x => x.id === newUnitId);
+                if (u) {
+                  const stripped = title.replace(/^[^—]+ — /, '');
+                  setTitle(`${u.label} — ${stripped}`);
+                }
+              }}
               className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white">
               <option value="">— Whole property —</option>
               {units.map(u => <option key={u.id} value={u.id}>{u.label}</option>)}
@@ -6327,8 +6439,17 @@ function PortalPhotoUploadTab({ property }) {
           </div>
           {unitId && parties.length > 0 && (
             <div>
-              <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Party (optional)</label>
-              <select value={partyId} onChange={(e) => setPartyId(e.target.value)}
+              <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Bedroom (optional)</label>
+              <select value={partyId} onChange={(e) => {
+                  const newPartyId = e.target.value;
+                  setPartyId(newPartyId);
+                  const u = units.find(x => x.id === unitId);
+                  const p = (u?.parties || []).find(x => x.id === newPartyId);
+                  if (u) {
+                    const stripped = title.replace(/^[^—]+ — /, '');
+                    setTitle(`${u.label}${p ? ` · ${p.label}` : ''} — ${stripped}`);
+                  }
+                }}
                 className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white">
                 <option value="">— Any —</option>
                 {parties.map(p => <option key={p.id} value={p.id}>{p.label}{p.full_name ? ` (${p.full_name})` : ''}</option>)}
@@ -6771,7 +6892,16 @@ function PortalAssignmentForm({ property, assignment, onCancel, onSaved }) {
               <>
                 <div>
                   <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Unit</label>
-                  <select value={unitId} onChange={(e) => { setUnitId(e.target.value); setPartyId(''); }}
+                  <select value={unitId} onChange={(e) => {
+                      const newUnitId = e.target.value;
+                      setUnitId(newUnitId); setPartyId('');
+                      const u = units.find(x => x.id === newUnitId);
+                      if (u) {
+                        // strip any existing prefix from title, then add new one
+                        const stripped = title.replace(/^[^—]+ — /, '');
+                        setTitle(`${u.label} — ${stripped}`);
+                      }
+                    }}
                     className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white">
                     <option value="">— Pick a unit —</option>
                     {units.map(u => <option key={u.id} value={u.id}>{u.label}</option>)}
@@ -6779,10 +6909,19 @@ function PortalAssignmentForm({ property, assignment, onCancel, onSaved }) {
                 </div>
                 {unitId && (
                   <div>
-                    <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Party</label>
-                    <select value={partyId} onChange={(e) => setPartyId(e.target.value)}
+                    <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Bedroom</label>
+                    <select value={partyId} onChange={(e) => {
+                        const newPartyId = e.target.value;
+                        setPartyId(newPartyId);
+                        const u = units.find(x => x.id === unitId);
+                        const p = (u?.parties || []).find(x => x.id === newPartyId);
+                        if (u) {
+                          const stripped = title.replace(/^[^—]+ — /, '');
+                          setTitle(`${u.label}${p ? ` · ${p.label}` : ''} — ${stripped}`);
+                        }
+                      }}
                       className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white">
-                      <option value="">— Pick a party —</option>
+                      <option value="">— Pick a bedroom —</option>
                       {parties.map(p => <option key={p.id} value={p.id}>{p.label}{p.full_name ? ` (${p.full_name})` : ''}</option>)}
                     </select>
                   </div>

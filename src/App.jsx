@@ -11,7 +11,7 @@ import {
 // =================================================================
 // 🔧 PASTE YOUR SUPABASE KEYS HERE
 // =================================================================
-const SUPABASE_URL = "https://bbaynvqnbkjyqhzhhypr.supabase.co/";
+const SUPABASE_URL = "https://bbaynvqnbkjyqhzhhypr.supabase.co/storage/v1/object/public/brand/unnamed%20(2).png";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJiYXludnFuYmtqeXFoemhoeXByIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc0NzQ2MTMsImV4cCI6MjA5MzA1MDYxM30.ZXUoHFj_IwMe6rX8RxK8Dj4kAB9AS7X9xZAhQ84wDEk";
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
@@ -192,45 +192,85 @@ function SignIn({ onSignIn }) {
     }
     onSignIn(data);
   };
+
+  // Summit Clean palette — applied inline here for the sample.
+  // Gold: #C99B5C  ·  Black: #0A0A0A  ·  Cream: #FAF8F4  ·  Warm grey: #6B6258  ·  Border: #E8E3DA
+  const GOLD = '#C99B5C';
+  const BLACK = '#0A0A0A';
+  const CREAM = '#FAF8F4';
+  const BORDER = '#E8E3DA';
+  const MUTED = '#6B6258';
+
   return (
-    <div className="min-h-screen bg-stone-50 flex flex-col">
-      <div className="flex-1 flex flex-col justify-center items-center px-6 max-w-sm mx-auto w-full">
-        <div className="mb-10 text-center">
-          <img
-            src="https://static.wixstatic.com/media/624bf3_95d4fd7f040e465f9202c44136b01edf~mv2.png/v1/fill/w_98,h_98,al_c,q_85,usm_0.66_1.00_0.01,enc_avif,quality_auto/Summit_Clean_NoSnowFlakes_NoWords.png"
-            alt="Summit Clean"
-            className="w-16 h-16 mx-auto mb-6 object-contain"
-          />
-          <h1 className="text-4xl font-light text-stone-900 tracking-tight leading-none mb-2">
-            Tidy<span className="font-serif italic text-amber-700">Track</span>
-          </h1>
-          <p className="text-stone-500 text-sm font-mono">Summit Clean · Enter your 4-digit PIN</p>
+    <div className="min-h-screen flex flex-col" style={{ backgroundColor: CREAM }}>
+      {/* Dark brand header band */}
+      <div className="flex flex-col items-center pt-12 pb-10" style={{ backgroundColor: BLACK }}>
+        <img
+          src="https://bbaynvqnbkjyqhzhhypr.supabase.co/storage/v1/object/public/brand/unnamed%20(2).png"
+          alt="Summit Clean"
+          className="w-44 h-auto mx-auto"
+        />
+      </div>
+
+      {/* PIN entry section */}
+      <div className="flex-1 flex flex-col justify-center items-center px-6 max-w-sm mx-auto w-full pt-10">
+        <div className="text-center mb-8">
+          <p className="text-xs uppercase tracking-[0.25em] font-mono" style={{ color: MUTED, letterSpacing: '0.25em' }}>
+            Welcome back
+          </p>
+          <h2 className="font-serif text-2xl mt-2" style={{ color: BLACK }}>
+            Enter your 4-digit PIN
+          </h2>
         </div>
+
+        {/* PIN dots */}
         <div className="flex gap-3 mb-2">
           {[0,1,2,3].map(i => (
-            <div key={i} className={`w-4 h-4 rounded-full border-2 transition-all ${
-              pin.length > i ? error ? 'bg-red-500 border-red-500' : 'bg-stone-900 border-stone-900' : 'border-stone-300'
-            }`} />
+            <div key={i}
+              className="w-4 h-4 rounded-full border-2 transition-all"
+              style={{
+                backgroundColor: pin.length > i ? (error ? '#B23A3A' : GOLD) : 'transparent',
+                borderColor: pin.length > i ? (error ? '#B23A3A' : GOLD) : BORDER
+              }} />
           ))}
         </div>
-        <div className="h-6 mb-6 text-xs text-red-600 font-mono">{error}</div>
+        <div className="h-6 mb-6 text-xs font-mono" style={{ color: '#B23A3A' }}>{error}</div>
+
+        {/* Numpad */}
         <div className="grid grid-cols-3 gap-3 w-full max-w-xs">
           {[1,2,3,4,5,6,7,8,9].map(n => (
             <button key={n} onClick={() => press(n)} disabled={busy}
-              className="aspect-square rounded-2xl bg-white border border-stone-200 text-2xl font-light text-stone-900 active:bg-stone-100 active:scale-95 transition-all">
+              style={{
+                backgroundColor: '#FFFFFF',
+                borderColor: BORDER,
+                color: BLACK,
+                touchAction: 'manipulation'
+              }}
+              className="aspect-square rounded-2xl border text-2xl font-light active:scale-95 transition-all">
               {n}
             </button>
           ))}
           <div />
           <button onClick={() => press(0)} disabled={busy}
-            className="aspect-square rounded-2xl bg-white border border-stone-200 text-2xl font-light text-stone-900 active:bg-stone-100 active:scale-95 transition-all">0</button>
+            style={{
+              backgroundColor: '#FFFFFF',
+              borderColor: BORDER,
+              color: BLACK,
+              touchAction: 'manipulation'
+            }}
+            className="aspect-square rounded-2xl border text-2xl font-light active:scale-95 transition-all">0</button>
           <button onClick={back} disabled={busy}
-            className="aspect-square rounded-2xl flex items-center justify-center text-stone-500 active:bg-stone-100 active:scale-95 transition-all">
+            style={{ color: MUTED, touchAction: 'manipulation' }}
+            className="aspect-square rounded-2xl flex items-center justify-center active:scale-95 transition-all">
             <Delete size={20} />
           </button>
         </div>
       </div>
-      <div className="text-center pb-6 text-xs text-stone-400 font-mono">v6 · roles &amp; damage</div>
+
+      {/* Footer */}
+      <div className="text-center pb-6 text-xs font-mono" style={{ color: MUTED }}>
+        Summit Clean · Cleaning operations
+      </div>
     </div>
   );
 }

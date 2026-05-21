@@ -2720,7 +2720,7 @@ function PropertyForm({ property, currentUserRole, onCancel, onSaved, onManageAs
             <button onClick={() => setType('multi_unit')} type="button"
               className={`p-3 rounded-xl border-2 text-left ${type === 'multi_unit' ? 'border-stone-900 bg-white' : 'border-stone-200 bg-white/50'}`}>
               <div className="font-medium text-stone-900 text-sm">Multi-unit</div>
-              <div className="text-xs text-stone-500">Apartments with parties</div>
+              <div className="text-xs text-stone-500">Apartments with bedrooms</div>
             </button>
           </div>
         </div>
@@ -3080,7 +3080,7 @@ function BulkCreateUnits({ property, onCancel, onSaved }) {
 
   const create = async () => {
     if (totalUnits === 0) return;
-    if (!confirm(`Create ${totalUnits} units and ${totalParties} parties under "${property.name}"? This can't be undone in bulk — you'd have to delete units one-by-one or delete the whole property.`)) return;
+    if (!confirm(`Create ${totalUnits} units and ${totalParties} bedrooms under "${property.name}"? This can't be undone in bulk — you'd have to delete units one-by-one or delete the whole property.`)) return;
 
     setBusy(true); setError(''); setProgress('Creating units…');
 
@@ -3177,9 +3177,9 @@ function BulkCreateUnits({ property, onCancel, onSaved }) {
         </div>
 
         <div>
-          <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Parties per unit</label>
-          <div className="grid grid-cols-5 gap-2">
-            {[0, 2, 3, 4, 5].map(n => (
+          <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Bedrooms per unit</label>
+          <div className="grid grid-cols-4 gap-2">
+            {[0, 2, 3, 4, 5, 6, 7, 8].map(n => (
               <button key={n} onClick={() => setPartiesPerUnit(n)} type="button"
                 className={`py-3 rounded-xl border-2 font-mono text-sm transition-all ${
                   partiesPerUnit === n ? 'border-stone-900 bg-stone-900 text-stone-50' : 'border-stone-200 bg-white text-stone-700'
@@ -3201,7 +3201,7 @@ function BulkCreateUnits({ property, onCancel, onSaved }) {
               <span className="text-stone-900 font-medium">{totalUnits}</span>
               <span className="text-stone-500"> units · </span>
               <span className="text-stone-900 font-medium">{totalParties}</span>
-              <span className="text-stone-500"> parties</span>
+              <span className="text-stone-500"> bedrooms</span>
             </div>
           </div>
           <div className="font-mono text-sm text-stone-700 space-y-0.5 max-h-48 overflow-y-auto">
@@ -3232,7 +3232,7 @@ function BulkCreateUnits({ property, onCancel, onSaved }) {
 
         <button onClick={create} disabled={busy || totalUnits === 0}
           className="w-full py-4 rounded-2xl bg-stone-900 text-stone-50 font-medium active:scale-98 disabled:opacity-50 flex items-center justify-center gap-2">
-          {busy ? 'Creating…' : <>Create {totalUnits} units &amp; {totalParties} parties</>}
+          {busy ? 'Creating…' : <>Create {totalUnits} units &amp; {totalParties} bedrooms</>}
         </button>
 
         <p className="text-xs text-stone-500 text-center">

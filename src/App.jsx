@@ -477,6 +477,7 @@ function EmployeeApp({ employee, onSignOut }) {
   const [newTaskName, setNewTaskName] = useState('');
   const [loaded, setLoaded] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [showMessages, setShowMessages] = useState(false);
 
   useTick(!!shift && !shift.end_time);
   useEffect(() => { reload(); /* eslint-disable-next-line */ }, []);
@@ -727,6 +728,11 @@ function EmployeeApp({ employee, onSignOut }) {
 
   if (!loaded) return <Splash text="Loading…" />;
 
+  // Messages overlay — takes over the screen, regardless of where cleaner was
+  if (showMessages) {
+    return <StaffMessagesTab employee={employee} onClose={() => setShowMessages(false)} />;
+  }
+
   if (!shift && clockInFlow?.step === 'property') {
     return <PropertyPicker onPick={onPickProperty} onCancel={() => setClockInFlow(null)} busy={busy} />;
   }
@@ -742,7 +748,8 @@ function EmployeeApp({ employee, onSignOut }) {
   if (!shift) {
     return (
       <div className="min-h-screen bg-stone-50 flex flex-col">
-        <Header name={employee.name} onSignOut={onSignOut} />
+        <Header name={employee.name} onSignOut={onSignOut} role={employee.role}
+          employee={employee} onOpenMessages={() => setShowMessages(true)} />
         <div className="flex-1 flex flex-col justify-center items-center px-6">
           <div className="text-center mb-12">
             <div className="text-xs uppercase tracking-widest text-stone-400 font-mono mb-3">
@@ -768,7 +775,8 @@ function EmployeeApp({ employee, onSignOut }) {
   if (isMulti && !activeBlock) {
     return <PropertyHub shift={shift} workBlocks={workBlocks} employeeName={employee.name} employee={employee}
       onSignOut={onSignOut} onClockOut={clockOut} onSwitchProperty={switchProperty}
-      onStartNew={startNewBlock} onReopen={reopenBlock} onGoToBedroom={goToBedroomForTarget} busy={busy} />;
+      onStartNew={startNewBlock} onReopen={reopenBlock} onGoToBedroom={goToBedroomForTarget}
+      onOpenMessages={() => setShowMessages(true)} busy={busy} />;
   }
   if (isMulti && activeBlock) {
     return <BlockView shift={shift} block={activeBlock} tasks={tasks} activeTask={activeTask}
@@ -778,7 +786,8 @@ function EmployeeApp({ employee, onSignOut }) {
       onStartTask={startTask} onStopTask={stopTask} onResumeTask={resumeTask}
       onAddPhoto={(taskId, kind) => setPhotoModal({ taskId, kind })}
       photoModal={photoModal} onClosePhotoModal={() => setPhotoModal(null)}
-      onUploadPhoto={uploadPhoto} busy={busy} />;
+      onUploadPhoto={uploadPhoto}
+      onOpenMessages={() => setShowMessages(true)} busy={busy} />;
   }
   return <SimpleShiftView shift={shift} tasks={tasks} activeTask={activeTask}
     employeeName={employee.name} employee={employee} onSignOut={onSignOut} onClockOut={clockOut}
@@ -787,19 +796,20 @@ function EmployeeApp({ employee, onSignOut }) {
     onStartTask={startTask} onStopTask={stopTask} onResumeTask={resumeTask}
     onAddPhoto={(taskId, kind) => setPhotoModal({ taskId, kind })}
     photoModal={photoModal} onClosePhotoModal={() => setPhotoModal(null)}
-    onUploadPhoto={uploadPhoto} busy={busy} />;
+    onUploadPhoto={uploadPhoto}
+    onOpenMessages={() => setShowMessages(true)} busy={busy} />;
 }
 
 // =================================================================
 // PROPERTY HUB (multi-unit, between work blocks)
 // =================================================================
-function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onClockOut, onSwitchProperty, onStartNew, onReopen, onGoToBedroom, busy }) {
+function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onClockOut, onSwitchProperty, onStartNew, onReopen, onGoToBedroom, onOpenMessages, busy }) {
   useTick(true);
   const elapsed = Date.now() - new Date(shift.start_time).getTime();
 
   return (
     <div className="min-h-screen bg-stone-50 pb-24">
-      <Header name={employeeName} onSignOut={onSignOut} />
+      <Header name={employeeName} onSignOut={onSignOut} role={employee?.role} employee={employee} onOpenMessages={onOpenMessages} />
       <div className="bg-stone-900 text-stone-50 px-5 py-5 sticky top-0 z-10 shadow-md">
         <div className="flex items-start justify-between mb-3 gap-2">
           <div>
@@ -888,14 +898,14 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
 // =================================================================
 function BlockView({ shift, block, tasks, activeTask, employeeName, employee, onSignOut, onFinish, onPause,
   newTaskName, setNewTaskName, onStartTask, onStopTask, onResumeTask, onAddPhoto,
-  photoModal, onClosePhotoModal, onUploadPhoto, busy }) {
+  photoModal, onClosePhotoModal, onUploadPhoto, onOpenMessages, busy }) {
   useTick(true);
   const blockElapsed = Date.now() - new Date(block.start_time).getTime();
   const activeTaskObj = tasks.find(t => t.id === activeTask);
 
   return (
     <div className="min-h-screen bg-stone-50 pb-24">
-      <Header name={employeeName} onSignOut={onSignOut} />
+      <Header name={employeeName} onSignOut={onSignOut} role={employee?.role} employee={employee} onOpenMessages={onOpenMessages} />
       <div className="bg-stone-900 text-stone-50 px-5 py-5 sticky top-0 z-10 shadow-md">
         <div className="flex items-center justify-between mb-3">
           <button onClick={onPause}
@@ -980,14 +990,14 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
 // =================================================================
 function SimpleShiftView({ shift, tasks, activeTask, employeeName, employee, onSignOut, onClockOut, onSwitchProperty,
   newTaskName, setNewTaskName, onStartTask, onStopTask, onResumeTask, onAddPhoto,
-  photoModal, onClosePhotoModal, onUploadPhoto, busy }) {
+  photoModal, onClosePhotoModal, onUploadPhoto, onOpenMessages, busy }) {
   useTick(true);
   const elapsed = Date.now() - new Date(shift.start_time).getTime();
   const activeTaskObj = tasks.find(t => t.id === activeTask);
 
   return (
     <div className="min-h-screen bg-stone-50 pb-24">
-      <Header name={employeeName} onSignOut={onSignOut} />
+      <Header name={employeeName} onSignOut={onSignOut} role={employee?.role} employee={employee} onOpenMessages={onOpenMessages} />
       <div className="bg-stone-900 text-stone-50 px-5 py-5 sticky top-0 z-10 shadow-md">
         <div className="flex items-start justify-between mb-3 gap-2">
           <div>
@@ -1545,7 +1555,10 @@ async function deleteMessagePhoto(path) {
   try { await supabase.storage.from(MESSAGE_BUCKET).remove([path]); } catch {}
 }
 
-function Header({ name, onSignOut, role }) {
+function Header({ name, onSignOut, role, employee, onOpenMessages }) {
+  // Cleaners get a messages icon in the header (managers/owners have the Messages tab in bottom nav)
+  const showMessagesIcon = onOpenMessages && employee && role !== 'owner' && role !== 'manager';
+  const unread = useUnreadCount({ employee: showMessagesIcon ? employee : null });
   return (
     <div className="flex items-center justify-between px-5 py-3 bg-stone-900 border-b border-stone-900">
       <div className="flex items-center gap-3">
@@ -1567,7 +1580,20 @@ function Header({ name, onSignOut, role }) {
           <div className="text-[10px] font-mono opacity-60">TidyTrack</div>
         </div>
       </div>
-      <button onClick={onSignOut} className="text-xs text-stone-300 font-mono hover:text-stone-50">Sign out</button>
+      <div className="flex items-center gap-2">
+        {showMessagesIcon && (
+          <button onClick={onOpenMessages}
+            className="relative p-2 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-50">
+            <MessageCircle size={18} />
+            {unread > 0 && (
+              <span className="absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1 rounded-full bg-amber-600 text-white text-[10px] font-mono font-bold flex items-center justify-center border-2 border-stone-900">
+                {unread > 99 ? '99+' : unread}
+              </span>
+            )}
+          </button>
+        )}
+        <button onClick={onSignOut} className="text-xs text-stone-300 font-mono hover:text-stone-50">Sign out</button>
+      </div>
     </div>
   );
 }
@@ -7979,7 +8005,7 @@ function useUnreadCount({ employee = null, customer = null, refreshKey = 0 }) {
 
 
 // ---- Main Messages tab (staff side) ----
-function StaffMessagesTab({ employee }) {
+function StaffMessagesTab({ employee, onClose }) {
   const [view, setView] = useState({ kind: 'list' });
 
   if (view.kind === 'thread') {
@@ -8001,10 +8027,11 @@ function StaffMessagesTab({ employee }) {
 
   return <ConversationList employee={employee}
     onOpen={(c) => setView({ kind: 'thread', ...c })}
-    onNewDm={() => setView({ kind: 'new-dm' })} />;
+    onNewDm={() => setView({ kind: 'new-dm' })}
+    onClose={onClose} />;
 }
 
-function ConversationList({ employee, onOpen, onNewDm }) {
+function ConversationList({ employee, onOpen, onNewDm, onClose }) {
   const [dms, setDms] = useState([]);
   const [threads, setThreads] = useState([]);
   const [loaded, setLoaded] = useState(false);
@@ -8084,12 +8111,21 @@ function ConversationList({ employee, onOpen, onNewDm }) {
 
   return (
     <div className="pb-24">
-      <Header name={employee.name} onSignOut={() => {}} role={employee.role} />
+      {onClose ? (
+        <div className="flex items-center gap-3 px-5 py-4 border-b border-stone-200 bg-white">
+          <button onClick={onClose} className="p-2 -ml-2 rounded-full hover:bg-stone-100">
+            <ArrowLeft size={20} className="text-stone-700" />
+          </button>
+          <div className="font-serif text-xl text-stone-900">Messages</div>
+        </div>
+      ) : (
+        <Header name={employee.name} onSignOut={() => {}} role={employee.role} />
+      )}
       <div className="px-5 pt-6">
         <div className="flex items-center justify-between mb-4">
-          <h2 className="font-serif text-2xl text-stone-900">Messages</h2>
+          {!onClose && <h2 className="font-serif text-2xl text-stone-900">Messages</h2>}
           <button onClick={onNewDm}
-            className="px-3 py-2 rounded-full bg-stone-900 text-stone-50 text-xs font-mono flex items-center gap-1.5">
+            className={`px-3 py-2 rounded-full bg-stone-900 text-stone-50 text-xs font-mono flex items-center gap-1.5 ${onClose ? 'ml-auto' : ''}`}>
             <Plus size={14} /> New
           </button>
         </div>

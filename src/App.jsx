@@ -5461,11 +5461,8 @@ function AssignmentForm({ property, employee, onCancel, onSaved }) {
       const prop = allProperties.find(p => p.id === r.propertyId);
       const isMulti = prop?.property_type === 'multi_unit';
       if (isMulti) {
-        if (r.scope === 'specific' && (!r.unitId || !r.partyId)) {
-          return `"${r.title}" needs a unit and party.`;
-        }
-        if (r.scope === 'multiple' && r.multipleTargets.length === 0) {
-          return `"${r.title}" needs at least one selected unit/party.`;
+        if (!r.unitId || !r.partyId) {
+          return `"${r.title}" needs a unit and bedroom.`;
         }
       }
     }
@@ -5498,16 +5495,10 @@ function AssignmentForm({ property, employee, onCancel, onSaved }) {
 
         const prop = allProperties.find(p => p.id === r.propertyId);
         const isMulti = prop?.property_type === 'multi_unit';
-        let targetRows = [];
-        if (!isMulti || r.scope === 'property') {
-          targetRows = [{ assignment_id: created.id, unit_id: null, party_id: null, status: 'pending' }];
-        } else if (r.scope === 'specific') {
-          targetRows = [{ assignment_id: created.id, unit_id: r.unitId, party_id: r.partyId, status: 'pending' }];
-        } else if (r.scope === 'multiple') {
-          targetRows = r.multipleTargets.map(t => ({
-            assignment_id: created.id, unit_id: t.unitId, party_id: t.partyId, status: 'pending'
-          }));
-        }
+        // Single target only: either the picked unit+bedroom, or the whole property for simple
+        const targetRows = isMulti
+          ? [{ assignment_id: created.id, unit_id: r.unitId, party_id: r.partyId, status: 'pending' }]
+          : [{ assignment_id: created.id, unit_id: null, party_id: null, status: 'pending' }];
         const { error: te } = await supabase.from('assignment_targets').insert(targetRows);
         if (te) throw te;
       }
@@ -5601,94 +5592,23 @@ function AssignmentForm({ property, employee, onCancel, onSaved }) {
 
                   {isMulti && (
                     <div>
-                      <label className="text-[10px] uppercase tracking-wider text-stone-500 font-mono mb-1 block">Scope</label>
-                      <div className="grid grid-cols-2 gap-2 mb-2">
-                        <button type="button" onClick={() => updateRow(row.id, { scope: 'specific', multipleTargets: [] })}
-                          className={`p-2 rounded-lg border-2 text-xs ${row.scope === 'specific' ? 'border-stone-900 bg-white' : 'border-stone-200 bg-white/50'}`}>
-                          One party
-                        </button>
-                        <button type="button" onClick={() => updateRow(row.id, { scope: 'multiple', unitId: '', partyId: '' })}
-                          className={`p-2 rounded-lg border-2 text-xs ${row.scope === 'multiple' ? 'border-stone-900 bg-white' : 'border-stone-200 bg-white/50'}`}>
-                          Multiple
-                        </button>
+                      <label className="text-[10px] uppercase tracking-wider text-stone-500 font-mono mb-1 block">Bedroom</label>
+                      <div className="grid grid-cols-2 gap-2">
+                        <SearchableUnitPicker
+                          units={units}
+                          value={row.unitId}
+                          placeholder="Pick a unit…"
+                          onChange={(newUnitId) => autoPrefixFor(row.id, newUnitId, '')} />
+                        <select value={row.partyId} onChange={(e) => autoPrefixFor(row.id, row.unitId, e.target.value)}
+                          disabled={!row.unitId}
+                          className="px-3 py-2 rounded-lg border border-stone-300 bg-white text-sm disabled:opacity-50">
+                          <option value="">Bedroom…</option>
+                          {rowParties.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}
+                        </select>
                       </div>
-
-                      {row.scope === 'specific' && (
-                        <div className="grid grid-cols-2 gap-2">
-                          <select value={row.unitId} onChange={(e) => autoPrefixFor(row.id, e.target.value, '')}
-                            className="px-3 py-2 rounded-lg border border-stone-300 bg-white text-sm">
-                            <option value="">Unit…</option>
-                            {units.map(u => <option key={u.id} value={u.id}>{u.label}</option>)}
-                          </select>
-                          <select value={row.partyId} onChange={(e) => autoPrefixFor(row.id, row.unitId, e.target.value)}
-                            disabled={!row.unitId}
-                            className="px-3 py-2 rounded-lg border border-stone-300 bg-white text-sm disabled:opacity-50">
-                            <option value="">Party…</option>
-                            {rowParties.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}
-                          </select>
-                        </div>
-                      )}
-
-                      {row.scope === 'multiple' && (
-                        <div>
-                          <div className="flex items-baseline justify-between mb-2">
-                            <div className="text-xs text-stone-500 font-mono">{row.multipleTargets.length} selected</div>
-                            {row.multipleTargets.length > 0 && (
-                              <button type="button" onClick={() => updateRow(row.id, { multipleTargets: [] })}
-                                className="text-xs font-mono text-stone-500 hover:text-stone-900">Clear all</button>
-                            )}
-                          </div>
-                          <input type="text"
-                            value={unitSearches[row.id] || ''}
-                            onChange={(e) => setUnitSearch(row.id, e.target.value)}
-                            placeholder={`Search ${units.length} units (e.g. "B3" or "B10-2")…`}
-                            className="w-full px-3 py-2 rounded-lg border border-stone-300 bg-white text-sm mb-2" />
-                          <div className="border border-stone-200 rounded-lg bg-white max-h-72 overflow-y-auto">
-                            {(() => {
-                              const q = (unitSearches[row.id] || '').trim().toLowerCase();
-                              const filteredUnits = q
-                                ? units.filter(u => u.label.toLowerCase().includes(q))
-                                : units;
-                              if (filteredUnits.length === 0) {
-                                return <div className="p-4 text-center text-sm text-stone-400">No units match "{q}".</div>;
-                              }
-                              return filteredUnits.map(u => {
-                                const ap = (u.parties || []).filter(p => p.active).sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0));
-                                const allSelected = ap.length > 0 && ap.every(p => row.multipleTargets.some(t => t.unitId === u.id && (t.partyId || null) === p.id));
-                                const someSelected = !allSelected && ap.some(p => row.multipleTargets.some(t => t.unitId === u.id && (t.partyId || null) === p.id));
-                                return (
-                                  <div key={u.id} className="border-b border-stone-100 last:border-b-0">
-                                    <button type="button"
-                                      onClick={() => toggleAllInUnit(row.id, u)}
-                                      className="w-full flex items-center justify-between px-3 py-2 bg-stone-50 hover:bg-stone-100 text-left">
-                                      <span className="font-mono text-xs text-stone-700">{u.label}</span>
-                                      <span className={`text-[10px] font-mono uppercase tracking-wider ${allSelected ? 'text-emerald-700' : someSelected ? 'text-amber-700' : 'text-stone-400'}`}>
-                                        {allSelected ? '✓ all selected' : someSelected ? 'some' : `tap for all (${ap.length})`}
-                                      </span>
-                                    </button>
-                                    <div className="pl-5 py-1">
-                                      {ap.map(p => {
-                                        const selected = row.multipleTargets.some(t => t.unitId === u.id && (t.partyId || null) === p.id);
-                                        return (
-                                          <label key={p.id} className="flex items-center gap-2 py-1 text-xs cursor-pointer">
-                                            <input type="checkbox" checked={selected}
-                                              onChange={() => toggleTarget(row.id, u.id, p.id)}
-                                              className="w-3.5 h-3.5 rounded accent-stone-900" />
-                                            <span className="text-stone-700">{p.label}</span>
-                                            {p.full_name && <span className="text-stone-500">({p.full_name})</span>}
-                                          </label>
-                                        );
-                                      })}
-                                    </div>
-                                  </div>
-                                );
-                              });
-                            })()}
-                          </div>
-                        </div>
-                      )}
                     </div>
                   )}
+
                 </div>
               </div>
             );
@@ -6228,6 +6148,73 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
   const visibleBuildings = buildingFilter === 'all' ? buildingKeys : buildingKeys.filter(k => k === buildingFilter);
   const toggleCollapse = (b) => setCollapsedBuildings(prev => ({ ...prev, [b]: !prev[b] }));
 
+  // For Done tab: bucket by age — Recent (<24hr), Older (24hr–1 week), Archived (>1 week)
+  // These nest INSIDE building groups when there are multiple buildings.
+  const now = Date.now();
+  const HOUR = 60 * 60 * 1000;
+  const DAY = 24 * HOUR;
+  const bucketByAge = (items) => {
+    const buckets = { recent: [], older: [], archived: [] };
+    items.forEach(t => {
+      const ts = t.completed_at ? new Date(t.completed_at).getTime() : 0;
+      const age = now - ts;
+      if (age < DAY) buckets.recent.push(t);
+      else if (age < 7 * DAY) buckets.older.push(t);
+      else buckets.archived.push(t);
+    });
+    return buckets;
+  };
+
+  const renderAssignmentList = (items) => (
+    <div className="space-y-2">
+      {items.map(t => (
+        <AssignmentCard key={t.id} target={t} busy={busy} propertyId={propertyId}
+          onView={() => setOpened(t)}
+          onStart={() => updateStatus(t, 'in_progress')}
+          onDone={() => updateStatus(t, 'done')}
+          onReopen={() => updateStatus(t, 'pending')}
+          onBlocked={() => setStatusModal({ target: t })}
+          onReassign={() => setReassignTarget(t)}
+          onGoToBedroom={onGoToBedroom ? () => onGoToBedroom(t) : null} />
+      ))}
+    </div>
+  );
+
+  // For Done: collapsed by default for Older and Archived
+  const renderDoneBuckets = (items) => {
+    const buckets = bucketByAge(items);
+    const sections = [
+      { id: 'recent', label: 'Recent', subtitle: 'Last 24 hours', items: buckets.recent, defaultCollapsed: false },
+      { id: 'older', label: 'Older', subtitle: '1–7 days ago', items: buckets.older, defaultCollapsed: true },
+      { id: 'archived', label: 'Archived', subtitle: 'More than 1 week ago', items: buckets.archived, defaultCollapsed: true },
+    ];
+    return (
+      <div className="space-y-3">
+        {sections.map(s => {
+          if (s.items.length === 0) return null;
+          const key = `done-${s.id}`;
+          // Use collapsedBuildings state to track these too (separate keys)
+          const collapsed = collapsedBuildings[key] === undefined ? s.defaultCollapsed : collapsedBuildings[key];
+          return (
+            <div key={s.id}>
+              <button onClick={() => setCollapsedBuildings(prev => ({ ...prev, [key]: !collapsed }))}
+                className="w-full flex items-center justify-between mb-2 px-1 py-1 hover:bg-stone-50 rounded">
+                <div className="flex items-center gap-2">
+                  <Check size={14} className="text-stone-500" />
+                  <span className="text-xs uppercase tracking-wider font-mono text-stone-600">{s.label}</span>
+                  <span className="text-[10px] font-mono text-stone-400">{s.subtitle}</span>
+                  <span className="text-xs font-mono text-stone-400">({s.items.length})</span>
+                </div>
+                <ChevronRight size={14} className={`text-stone-400 transition-transform ${collapsed ? '' : 'rotate-90'}`} />
+              </button>
+              {!collapsed && renderAssignmentList(s.items)}
+            </div>
+          );
+        })}
+      </div>
+    );
+  };
+
   return (
     <div>
       {/* Building filter pills — only show if there's more than 1 building */}
@@ -6268,18 +6255,9 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                 </button>
               )}
               {!collapsed && (
-                <div className="space-y-2">
-                  {items.map(t => (
-                    <AssignmentCard key={t.id} target={t} busy={busy} propertyId={propertyId}
-                      onView={() => setOpened(t)}
-                      onStart={() => updateStatus(t, 'in_progress')}
-                      onDone={() => updateStatus(t, 'done')}
-                      onReopen={() => updateStatus(t, 'pending')}
-                      onBlocked={() => setStatusModal({ target: t })}
-                      onReassign={() => setReassignTarget(t)}
-                      onGoToBedroom={onGoToBedroom ? () => onGoToBedroom(t) : null} />
-                  ))}
-                </div>
+                statusFilter === 'done'
+                  ? renderDoneBuckets(items)
+                  : renderAssignmentList(items)
               )}
             </div>
           );
@@ -6658,6 +6636,19 @@ function AllOpenAssignments({ employee, onBack, onOpenAssignment }) {
             {data.map(group => {
               const filtered = group.assignments.filter(filterMatch);
               if (filtered.length === 0) return null;
+
+              // Sub-group filtered assignments by building (derived from first target's unit label)
+              const isMulti = group.property.property_type === 'multi_unit';
+              const buildings = {};
+              filtered.forEach(a => {
+                const firstUnit = (a.targets || []).find(t => t.unit?.label)?.unit?.label;
+                const b = isMulti ? (buildingFromLabel(firstUnit) || '—') : '—';
+                if (!buildings[b]) buildings[b] = [];
+                buildings[b].push(a);
+              });
+              const buildingKeys = Object.keys(buildings).sort(naturalCompare);
+              const showSubGroups = isMulti && buildingKeys.length > 1;
+
               return (
                 <div key={group.property.id}>
                   <div className="flex items-baseline justify-between mb-3 pb-2 border-b border-stone-200">
@@ -6668,50 +6659,65 @@ function AllOpenAssignments({ employee, onBack, onOpenAssignment }) {
                       {filtered.length} {filtered.length === 1 ? 'open' : 'open'}
                     </span>
                   </div>
-                  <div className="space-y-2">
-                    {filtered.map(a => {
-                      const openTargets = (a.targets || []).filter(t => t.status !== 'done');
-                      const inProgressBy = openTargets
-                        .filter(t => t.status === 'in_progress' && t.starter?.name)
-                        .map(t => t.starter.name);
-                      const uniqStarters = [...new Set(inProgressBy)];
-                      const hasBlocked = a.counts.blocked > 0;
-                      return (
-                        <button key={a.id} onClick={() => onOpenAssignment(group.property, a)}
-                          className={`w-full text-left p-4 rounded-2xl border transition-colors ${hasBlocked ? 'bg-red-50/50 border-red-200 hover:border-red-400' : 'bg-white border-stone-200 hover:border-stone-400'}`}>
-                          <div className="flex items-start justify-between gap-2">
-                            <div className="flex-1 min-w-0">
-                              <div className="flex items-center gap-2 mb-1 flex-wrap">
-                                {a.file_kind === 'pdf'
-                                  ? <FileText size={13} className="text-stone-500 flex-shrink-0" />
-                                  : <ImageIcon size={13} className="text-stone-500 flex-shrink-0" />}
-                                <span className="font-serif text-base text-stone-900 truncate">{a.title}</span>
-                                {hasBlocked && (
-                                  <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-red-100 text-red-700">
-                                    ⚠ Blocked
-                                  </span>
-                                )}
-                              </div>
-                              <div className="text-xs text-stone-500 font-mono">
-                                {a.counts.done}/{a.targets?.length || 0} done
-                                {a.counts.in_progress > 0 && ` · ${a.counts.in_progress} in progress`}
-                                {a.counts.pending > 0 && ` · ${a.counts.pending} pending`}
-                                {a.counts.blocked > 0 && ` · ${a.counts.blocked} blocked`}
-                              </div>
-                              {uniqStarters.length > 0 && (
-                                <div className="text-xs text-amber-700 mt-1">
-                                  {uniqStarters.length === 1
-                                    ? `${uniqStarters[0]} is working on this`
-                                    : `${uniqStarters.length} cleaners: ${uniqStarters.join(', ')}`}
-                                </div>
-                              )}
-                            </div>
-                            <ChevronRight size={16} className="text-stone-400 flex-shrink-0" />
+
+                  {buildingKeys.map(b => {
+                    const items = buildings[b];
+                    return (
+                      <div key={b} className="mb-4">
+                        {showSubGroups && (
+                          <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-2 px-1 flex items-center gap-1.5">
+                            <Building2 size={11} />
+                            {b === '—' ? 'No unit' : `Building ${b.replace(/^B/i, '')}`}
+                            <span className="text-stone-400">({items.length})</span>
                           </div>
-                        </button>
-                      );
-                    })}
-                  </div>
+                        )}
+                        <div className="space-y-2">
+                          {items.map(a => {
+                            const openTargets = (a.targets || []).filter(t => t.status !== 'done');
+                            const inProgressBy = openTargets
+                              .filter(t => t.status === 'in_progress' && t.starter?.name)
+                              .map(t => t.starter.name);
+                            const uniqStarters = [...new Set(inProgressBy)];
+                            const hasBlocked = a.counts.blocked > 0;
+                            return (
+                              <button key={a.id} onClick={() => onOpenAssignment(group.property, a)}
+                                className={`w-full text-left p-4 rounded-2xl border transition-colors ${hasBlocked ? 'bg-red-50/50 border-red-200 hover:border-red-400' : 'bg-white border-stone-200 hover:border-stone-400'}`}>
+                                <div className="flex items-start justify-between gap-2">
+                                  <div className="flex-1 min-w-0">
+                                    <div className="flex items-center gap-2 mb-1 flex-wrap">
+                                      {a.file_kind === 'pdf'
+                                        ? <FileText size={13} className="text-stone-500 flex-shrink-0" />
+                                        : <ImageIcon size={13} className="text-stone-500 flex-shrink-0" />}
+                                      <span className="font-serif text-base text-stone-900 truncate">{a.title}</span>
+                                      {hasBlocked && (
+                                        <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-red-100 text-red-700">
+                                          ⚠ Blocked
+                                        </span>
+                                      )}
+                                    </div>
+                                    <div className="text-xs text-stone-500 font-mono">
+                                      {a.counts.done}/{a.targets?.length || 0} done
+                                      {a.counts.in_progress > 0 && ` · ${a.counts.in_progress} in progress`}
+                                      {a.counts.pending > 0 && ` · ${a.counts.pending} pending`}
+                                      {a.counts.blocked > 0 && ` · ${a.counts.blocked} blocked`}
+                                    </div>
+                                    {uniqStarters.length > 0 && (
+                                      <div className="text-xs text-amber-700 mt-1">
+                                        {uniqStarters.length === 1
+                                          ? `${uniqStarters[0]} is working on this`
+                                          : `${uniqStarters.length} cleaners: ${uniqStarters.join(', ')}`}
+                                      </div>
+                                    )}
+                                  </div>
+                                  <ChevronRight size={16} className="text-stone-400 flex-shrink-0" />
+                                </div>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
               );
             })}

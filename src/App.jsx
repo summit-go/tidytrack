@@ -5,7 +5,8 @@ import {
   ArrowLeft, Users, Image as ImageIcon, Download, X, MapPin,
   Briefcase, Delete, AlertCircle, UserPlus, Building2,
   Trash2, Eye, EyeOff, LayoutDashboard, FileText, DollarSign,
-  Home, Layers, User, Edit2, Copy, Printer, Calendar, HelpCircle
+  Home, Layers, User, Edit2, Copy, Printer, Calendar, HelpCircle,
+  MessageCircle, Settings
 } from 'lucide-react';
 
 // =================================================================
@@ -18,6 +19,7 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 const PHOTO_BUCKET = 'task-photos';
 const ASSIGNMENT_BUCKET = 'assignments';
 const PM_UPLOAD_BUCKET = 'pm-uploads';
+const MESSAGE_BUCKET = 'messages';
 const ASSIGNMENT_MAX_SIZE_MB = 20; // sanity cap on upload size
 
 // =================================================================
@@ -1523,6 +1525,26 @@ async function deletePmFile(path) {
   await supabase.storage.from(PM_UPLOAD_BUCKET).remove([path]);
 }
 
+// Upload a photo attachment for a message. Returns { path, publicUrl }.
+async function uploadMessagePhoto(file, conversationId) {
+  if (file.size > ASSIGNMENT_MAX_SIZE_MB * 1024 * 1024) {
+    throw new Error(`Photo too large. Max ${ASSIGNMENT_MAX_SIZE_MB}MB.`);
+  }
+  if (!file.type.startsWith('image/')) throw new Error('Only images can be attached.');
+  const compressed = await compressImage(file);
+  const path = `${conversationId}/${Date.now()}_${Math.random().toString(36).slice(2, 8)}.jpg`;
+  const { error: upErr } = await supabase.storage.from(MESSAGE_BUCKET)
+    .upload(path, compressed, { contentType: 'image/jpeg' });
+  if (upErr) throw upErr;
+  const { data: { publicUrl } } = supabase.storage.from(MESSAGE_BUCKET).getPublicUrl(path);
+  return { path, publicUrl };
+}
+
+async function deleteMessagePhoto(path) {
+  if (!path) return;
+  try { await supabase.storage.from(MESSAGE_BUCKET).remove([path]); } catch {}
+}
+
 function Header({ name, onSignOut, role }) {
   return (
     <div className="flex items-center justify-between px-5 py-3 bg-stone-900 border-b border-stone-900">
@@ -1557,11 +1579,14 @@ function Header({ name, onSignOut, role }) {
 function ManagerShell({ employee, onSignOut }) {
   const [tab, setTab] = useState('daily');
   const showMoneyTabs = canSeeMoney(employee); // owner only
+  const unread = useUnreadCount({ employee });
 
   // If a manager somehow lands on a money tab (e.g. via stale state), bounce them home
   useEffect(() => {
     if (!showMoneyTabs && (tab === 'invoice' || tab === 'payroll')) setTab('daily');
   }, [showMoneyTabs, tab]);
+
+  const colCount = (showMoneyTabs ? 6 : 4) + 1; // +1 for messages
 
   return (
     <div className="min-h-screen bg-stone-50">
@@ -1569,13 +1594,15 @@ function ManagerShell({ employee, onSignOut }) {
       {tab === 'dashboard' && <ManagerDashboard employee={employee} onSignOut={onSignOut} />}
       {tab === 'team'      && <EmployeeAdmin   employee={employee} onSignOut={onSignOut} />}
       {tab === 'props'     && <PropertyAdmin   employee={employee} onSignOut={onSignOut} />}
+      {tab === 'messages'  && <StaffMessagesTab employee={employee} />}
       {showMoneyTabs && tab === 'invoice'   && <InvoiceView     employee={employee} onSignOut={onSignOut} />}
       {showMoneyTabs && tab === 'payroll'   && <ExportView      employee={employee} onSignOut={onSignOut} />}
 
       <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-stone-200 px-1 py-2 z-30">
-        <div className={`max-w-md mx-auto grid gap-0.5 ${showMoneyTabs ? 'grid-cols-6' : 'grid-cols-4'}`}>
+        <div className="max-w-md mx-auto grid gap-0.5" style={{ gridTemplateColumns: `repeat(${colCount}, minmax(0, 1fr))` }}>
           <TabButton active={tab==='daily'}     onClick={() => setTab('daily')}     icon={<Calendar size={18} />} label="Daily" />
           <TabButton active={tab==='dashboard'} onClick={() => setTab('dashboard')} icon={<LayoutDashboard size={18} />} label="Shifts" />
+          <TabButton active={tab==='messages'}  onClick={() => setTab('messages')}  icon={<MessageCircle size={18} />} label="Messages" badge={unread} />
           <TabButton active={tab==='team'}      onClick={() => setTab('team')}      icon={<Users size={18} />} label="Team" />
           <TabButton active={tab==='props'}     onClick={() => setTab('props')}     icon={<Building2 size={18} />} label="Properties" />
           {showMoneyTabs && <TabButton active={tab==='invoice'} onClick={() => setTab('invoice')} icon={<FileText size={18} />} label="Invoices" />}
@@ -1586,12 +1613,17 @@ function ManagerShell({ employee, onSignOut }) {
   );
 }
 
-function TabButton({ active, onClick, icon, label }) {
+function TabButton({ active, onClick, icon, label, badge }) {
   return (
     <button onClick={onClick}
-      className={`flex flex-col items-center gap-0.5 py-1.5 px-1 rounded-xl transition-colors ${active ? 'bg-stone-900 text-stone-50' : 'text-stone-500 hover:text-stone-900'}`}>
+      className={`relative flex flex-col items-center gap-0.5 py-1.5 px-1 rounded-xl transition-colors ${active ? 'bg-stone-900 text-stone-50' : 'text-stone-500 hover:text-stone-900'}`}>
       {icon}
       <span className="text-[9px] font-mono uppercase tracking-wider">{label}</span>
+      {badge > 0 && (
+        <span className="absolute top-0 right-1 min-w-[16px] h-4 px-1 rounded-full bg-amber-600 text-white text-[9px] font-mono font-bold flex items-center justify-center">
+          {badge > 99 ? '99+' : badge}
+        </span>
+      )}
     </button>
   );
 }
@@ -4041,11 +4073,12 @@ function PortalDashboard({ property, onSignOut }) {
 }
 
 function PortalHome({ property, onSignOut, onOpenUnitDay }) {
-  const [tab, setTab] = useState('history'); // 'history' | 'upload-photo' | 'assignments'
+  const [tab, setTab] = useState('history'); // 'history' | 'messages' | 'upload-photo' | 'assignments'
   const [groups, setGroups] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [filter, setFilter] = useState('30d');
   const [showWelcome, setShowWelcome] = useState(false);
+  const pmUnread = useUnreadCount({ customer: property });
 
   // Show welcome modal on first sign-in for this property.
   // We track per-property since one PM might manage multiple properties.
@@ -4163,9 +4196,18 @@ function PortalHome({ property, onSignOut, onOpenUnitDay }) {
             className={`flex-1 py-2 px-2 rounded-lg text-xs font-medium ${tab === 'history' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
             History
           </button>
+          <button onClick={() => setTab('messages')}
+            className={`flex-1 py-2 px-2 rounded-lg text-xs font-medium relative ${tab === 'messages' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+            Messages
+            {pmUnread > 0 && (
+              <span className="absolute -top-1 -right-1 min-w-[16px] h-4 px-1 rounded-full bg-amber-600 text-white text-[9px] font-mono font-bold flex items-center justify-center">
+                {pmUnread > 99 ? '99+' : pmUnread}
+              </span>
+            )}
+          </button>
           <button onClick={() => setTab('upload-photo')}
             className={`flex-1 py-2 px-2 rounded-lg text-xs font-medium ${tab === 'upload-photo' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
-            Upload photo
+            Upload
           </button>
           <button onClick={() => setTab('assignments')}
             className={`flex-1 py-2 px-2 rounded-lg text-xs font-medium ${tab === 'assignments' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
@@ -4177,6 +4219,9 @@ function PortalHome({ property, onSignOut, onOpenUnitDay }) {
       {tab === 'history' && (
         <PortalHistoryTab property={property} groups={groups} loaded={loaded}
           filter={filter} setFilter={setFilter} onOpenUnitDay={onOpenUnitDay} />
+      )}
+      {tab === 'messages' && (
+        <PortalMessagesTab property={property} onPropertyRefresh={() => setTab('history')} />
       )}
       {tab === 'upload-photo' && (
         <PortalPhotoUploadTab property={property} />
@@ -7846,4 +7891,615 @@ function ReviewAssignmentModal({ assignment, employee, onDone, onClose }) {
       </div>
     </div>
   );
+}
+
+// =================================================================
+// MESSAGING — Deploy 1
+//
+// - Staff DMs (1-to-1 between staff)
+// - Property threads (PM ↔ owners/managers, one per portal-enabled property)
+// - Photo attachments
+// - Realtime delivery via Supabase Realtime
+// - Owners can read any DM for oversight; managers cannot
+// =================================================================
+
+// ---- Hook: unread message count ----
+function useUnreadCount({ employee = null, customer = null, refreshKey = 0 }) {
+  const [count, setCount] = useState(0);
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        if (employee) {
+          // Staff: count unread across all conversations they're in
+          // For owners: also include property threads (they implicitly see all)
+          // For everyone: count DMs they're a participant in
+          const { data: parts } = await supabase
+            .from('conversation_participants')
+            .select('conversation_id, last_read_at')
+            .eq('employee_id', employee.id);
+          if (!parts || cancelled) return;
+          let unread = 0;
+          for (const p of parts) {
+            const since = p.last_read_at || '1970-01-01';
+            const { count: c } = await supabase
+              .from('messages')
+              .select('id', { count: 'exact', head: true })
+              .eq('conversation_id', p.conversation_id)
+              .gt('created_at', since)
+              .neq('sender_employee_id', employee.id);
+            unread += c || 0;
+          }
+          // For owners and managers, also count unread property threads
+          if (employee.role === 'owner' || employee.role === 'manager') {
+            const { data: convs } = await supabase
+              .from('conversations')
+              .select('id, last_message_at')
+              .eq('kind', 'property_thread');
+            const since = (await supabase.from('employees').select('messages_last_read_at').eq('id', employee.id).maybeSingle()).data?.messages_last_read_at || '1970-01-01';
+            for (const c of (convs || [])) {
+              if (c.last_message_at && c.last_message_at > since) {
+                const { count: cc } = await supabase
+                  .from('messages')
+                  .select('id', { count: 'exact', head: true })
+                  .eq('conversation_id', c.id)
+                  .gt('created_at', since)
+                  .eq('sender_is_pm', true);
+                unread += cc || 0;
+              }
+            }
+          }
+          if (!cancelled) setCount(unread);
+        } else if (customer) {
+          // PM: their property thread
+          const { data: conv } = await supabase
+            .from('conversations')
+            .select('id, last_message_at')
+            .eq('customer_id', customer.id)
+            .eq('kind', 'property_thread')
+            .maybeSingle();
+          if (!conv) { if (!cancelled) setCount(0); return; }
+          const since = customer.pm_last_read_at || '1970-01-01';
+          const { count: c } = await supabase
+            .from('messages')
+            .select('id', { count: 'exact', head: true })
+            .eq('conversation_id', conv.id)
+            .gt('created_at', since)
+            .eq('sender_is_pm', false);
+          if (!cancelled) setCount(c || 0);
+        }
+      } catch (e) { console.error('[unread]', e); }
+    };
+    load();
+    const interval = setInterval(load, 20000); // poll every 20s as a backup to realtime
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [employee?.id, customer?.id, refreshKey]);
+  return count;
+}
+
+
+// ---- Main Messages tab (staff side) ----
+function StaffMessagesTab({ employee }) {
+  const [view, setView] = useState({ kind: 'list' });
+
+  if (view.kind === 'thread') {
+    return <MessageThread
+      conversationId={view.conversationId}
+      otherName={view.otherName}
+      asEmployee={employee}
+      isPropertyThread={view.isPropertyThread}
+      propertyName={view.propertyName}
+      onBack={() => setView({ kind: 'list' })} />;
+  }
+
+  if (view.kind === 'new-dm') {
+    return <NewDmPicker employee={employee}
+      onBack={() => setView({ kind: 'list' })}
+      onPicked={(conversationId, otherName) =>
+        setView({ kind: 'thread', conversationId, otherName, isPropertyThread: false })} />;
+  }
+
+  return <ConversationList employee={employee}
+    onOpen={(c) => setView({ kind: 'thread', ...c })}
+    onNewDm={() => setView({ kind: 'new-dm' })} />;
+}
+
+function ConversationList({ employee, onOpen, onNewDm }) {
+  const [dms, setDms] = useState([]);
+  const [threads, setThreads] = useState([]);
+  const [loaded, setLoaded] = useState(false);
+  const canSeeThreads = employee.role === 'owner' || employee.role === 'manager';
+
+  const load = async () => {
+    setLoaded(false);
+    // DMs the employee is a participant in
+    const { data: parts } = await supabase
+      .from('conversation_participants')
+      .select('conversation_id, last_read_at, conversation:conversations!inner(id, kind, last_message_at, last_message_preview)')
+      .eq('employee_id', employee.id);
+    const dmConvs = (parts || []).filter(p => p.conversation?.kind === 'staff_dm');
+    // For each, find the OTHER participant's name
+    const dmList = [];
+    for (const p of dmConvs) {
+      const { data: others } = await supabase
+        .from('conversation_participants')
+        .select('employee:employees(id, name)')
+        .eq('conversation_id', p.conversation_id)
+        .neq('employee_id', employee.id);
+      const other = others?.[0]?.employee;
+      if (other) {
+        // Compute unread for this convo
+        const since = p.last_read_at || '1970-01-01';
+        const { count: unread } = await supabase
+          .from('messages')
+          .select('id', { count: 'exact', head: true })
+          .eq('conversation_id', p.conversation_id)
+          .gt('created_at', since)
+          .neq('sender_employee_id', employee.id);
+        dmList.push({
+          conversationId: p.conversation_id,
+          otherId: other.id,
+          otherName: other.name,
+          lastMessageAt: p.conversation.last_message_at,
+          preview: p.conversation.last_message_preview,
+          unread: unread || 0
+        });
+      }
+    }
+    dmList.sort((a, b) => (b.lastMessageAt || '').localeCompare(a.lastMessageAt || ''));
+    setDms(dmList);
+
+    // Property threads (only owners/managers see these)
+    if (canSeeThreads) {
+      const { data: convs } = await supabase
+        .from('conversations')
+        .select('id, customer_id, last_message_at, last_message_preview, customer:customers(name)')
+        .eq('kind', 'property_thread')
+        .order('last_message_at', { ascending: false, nullsFirst: false });
+      // For unread, we use employee.messages_last_read_at — but as a simple v1,
+      // we'll just always show a "new" dot if the last message is from a PM and recent.
+      // (Per-employee read state on property threads can come in Deploy 2.)
+      const threadList = (convs || []).map(c => ({
+        conversationId: c.id,
+        customerId: c.customer_id,
+        propertyName: c.customer?.name || 'Unknown',
+        lastMessageAt: c.last_message_at,
+        preview: c.last_message_preview
+      }));
+      setThreads(threadList);
+    }
+    setLoaded(true);
+  };
+
+  useEffect(() => { load(); }, [employee.id]);
+
+  // Realtime: refresh on any new message
+  useEffect(() => {
+    const channel = supabase.channel('msg-list-' + employee.id)
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages' }, () => load())
+      .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'messages' }, () => load())
+      .subscribe();
+    return () => { supabase.removeChannel(channel); };
+  }, [employee.id]);
+
+  return (
+    <div className="pb-24">
+      <Header name={employee.name} onSignOut={() => {}} role={employee.role} />
+      <div className="px-5 pt-6">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="font-serif text-2xl text-stone-900">Messages</h2>
+          <button onClick={onNewDm}
+            className="px-3 py-2 rounded-full bg-stone-900 text-stone-50 text-xs font-mono flex items-center gap-1.5">
+            <Plus size={14} /> New
+          </button>
+        </div>
+
+        {!loaded ? <Splash text="Loading…" /> : (
+          <>
+            {canSeeThreads && threads.length > 0 && (
+              <div className="mb-6">
+                <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-2">
+                  Property threads
+                </div>
+                <div className="space-y-2">
+                  {threads.map(t => (
+                    <button key={t.conversationId}
+                      onClick={() => onOpen({ conversationId: t.conversationId, otherName: t.propertyName, isPropertyThread: true, propertyName: t.propertyName })}
+                      className="w-full text-left p-3 rounded-2xl bg-white border border-stone-200 hover:border-stone-400 transition-colors">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2">
+                            <Building2 size={14} className="text-amber-700 flex-shrink-0" />
+                            <span className="font-serif text-base text-stone-900 truncate">{t.propertyName}</span>
+                          </div>
+                          {t.preview && (
+                            <div className="text-xs text-stone-600 truncate mt-1">{t.preview}</div>
+                          )}
+                          {t.lastMessageAt && (
+                            <div className="text-[10px] font-mono text-stone-400 mt-0.5">{fmtDate(t.lastMessageAt)}</div>
+                          )}
+                        </div>
+                        <ChevronRight size={14} className="text-stone-400 flex-shrink-0" />
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div>
+              <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-2">
+                Direct messages
+              </div>
+              {dms.length === 0 ? (
+                <div className="text-center py-10 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
+                  No direct messages yet. Tap "New" to start one.
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {dms.map(d => (
+                    <button key={d.conversationId}
+                      onClick={() => onOpen({ conversationId: d.conversationId, otherName: d.otherName, isPropertyThread: false })}
+                      className={`w-full text-left p-3 rounded-2xl border transition-colors ${d.unread > 0 ? 'bg-amber-50 border-amber-200 hover:border-amber-500' : 'bg-white border-stone-200 hover:border-stone-400'}`}>
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2">
+                            <User size={14} className="text-stone-500 flex-shrink-0" />
+                            <span className="font-serif text-base text-stone-900 truncate">{d.otherName}</span>
+                            {d.unread > 0 && (
+                              <span className="text-[10px] font-mono px-1.5 py-0.5 rounded-full bg-amber-600 text-white">
+                                {d.unread}
+                              </span>
+                            )}
+                          </div>
+                          {d.preview && (
+                            <div className="text-xs text-stone-600 truncate mt-1">{d.preview}</div>
+                          )}
+                          {d.lastMessageAt && (
+                            <div className="text-[10px] font-mono text-stone-400 mt-0.5">{fmtDate(d.lastMessageAt)}</div>
+                          )}
+                        </div>
+                        <ChevronRight size={14} className="text-stone-400 flex-shrink-0" />
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function NewDmPicker({ employee, onBack, onPicked }) {
+  const [staff, setStaff] = useState([]);
+  const [search, setSearch] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      const { data } = await supabase.from('employees')
+        .select('id, name, role, active')
+        .eq('active', true)
+        .neq('id', employee.id)
+        .order('name');
+      setStaff(data || []);
+    })();
+  }, [employee.id]);
+
+  const startDm = async (other) => {
+    setBusy(true);
+    try {
+      // See if a DM already exists between these two
+      const { data: myParts } = await supabase.from('conversation_participants')
+        .select('conversation_id, conversation:conversations!inner(kind)')
+        .eq('employee_id', employee.id);
+      const myDmConvIds = (myParts || []).filter(p => p.conversation?.kind === 'staff_dm').map(p => p.conversation_id);
+      let foundConvId = null;
+      if (myDmConvIds.length > 0) {
+        const { data: theirParts } = await supabase.from('conversation_participants')
+          .select('conversation_id')
+          .eq('employee_id', other.id)
+          .in('conversation_id', myDmConvIds);
+        if (theirParts && theirParts.length > 0) foundConvId = theirParts[0].conversation_id;
+      }
+      if (foundConvId) {
+        onPicked(foundConvId, other.name);
+        return;
+      }
+      // Create a new conversation
+      const { data: conv, error } = await supabase.from('conversations')
+        .insert({ kind: 'staff_dm' })
+        .select().single();
+      if (error) throw error;
+      await supabase.from('conversation_participants').insert([
+        { conversation_id: conv.id, employee_id: employee.id },
+        { conversation_id: conv.id, employee_id: other.id }
+      ]);
+      onPicked(conv.id, other.name);
+    } catch (e) {
+      alert('Could not start DM: ' + e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const filtered = search
+    ? staff.filter(s => s.name.toLowerCase().includes(search.toLowerCase()))
+    : staff;
+
+  return (
+    <div className="pb-24">
+      <div className="flex items-center gap-3 px-5 py-4 border-b border-stone-200">
+        <button onClick={onBack} className="p-2 -ml-2 rounded-full hover:bg-stone-100">
+          <ArrowLeft size={20} className="text-stone-700" />
+        </button>
+        <div className="font-serif text-xl text-stone-900">New direct message</div>
+      </div>
+      <div className="px-5 pt-4">
+        <input type="text" value={search} onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search staff…"
+          className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white mb-4" />
+        <div className="space-y-1">
+          {filtered.map(s => (
+            <button key={s.id} disabled={busy} onClick={() => startDm(s)}
+              className="w-full text-left px-4 py-3 rounded-xl hover:bg-stone-50 flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="w-9 h-9 rounded-full bg-stone-100 flex items-center justify-center text-sm font-medium text-stone-700">
+                  {s.name.charAt(0).toUpperCase()}
+                </div>
+                <div>
+                  <div className="font-medium text-stone-900">{s.name}</div>
+                  <div className="text-xs text-stone-500 font-mono uppercase tracking-wider">{s.role}</div>
+                </div>
+              </div>
+              <ChevronRight size={16} className="text-stone-400" />
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+// ---- The conversation/thread view ----
+function MessageThread({ conversationId, otherName, asEmployee = null, asPmCustomer = null, isPropertyThread = false, propertyName, onBack }) {
+  const [messages, setMessages] = useState([]);
+  const [loaded, setLoaded] = useState(false);
+  const [text, setText] = useState('');
+  const [photoFile, setPhotoFile] = useState(null);
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState('');
+  const [zoomPhoto, setZoomPhoto] = useState(null);
+  const scrollRef = useRef(null);
+
+  const load = async () => {
+    const { data } = await supabase.from('messages')
+      .select('*, sender:employees(id, name)')
+      .eq('conversation_id', conversationId)
+      .order('created_at', { ascending: true });
+    setMessages(data || []);
+    setLoaded(true);
+    // Mark conversation as read for this person
+    if (asEmployee) {
+      await supabase.from('conversation_participants')
+        .update({ last_read_at: new Date().toISOString() })
+        .eq('conversation_id', conversationId)
+        .eq('employee_id', asEmployee.id);
+    } else if (asPmCustomer) {
+      await supabase.from('customers')
+        .update({ pm_last_read_at: new Date().toISOString() })
+        .eq('id', asPmCustomer.id);
+    }
+    setTimeout(() => scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' }), 50);
+  };
+
+  useEffect(() => { load(); }, [conversationId]);
+
+  // Realtime subscription for new messages in this conversation
+  useEffect(() => {
+    const channel = supabase.channel('msg-' + conversationId)
+      .on('postgres_changes', {
+        event: 'INSERT', schema: 'public', table: 'messages',
+        filter: `conversation_id=eq.${conversationId}`
+      }, () => load())
+      .on('postgres_changes', {
+        event: 'DELETE', schema: 'public', table: 'messages',
+        filter: `conversation_id=eq.${conversationId}`
+      }, () => load())
+      .subscribe();
+    return () => { supabase.removeChannel(channel); };
+  }, [conversationId]);
+
+  const send = async () => {
+    if (sending) return;
+    if (!text.trim() && !photoFile) { setError('Type a message or attach a photo.'); return; }
+    setError('');
+    setSending(true);
+    try {
+      let photoUrl = null, photoPath = null;
+      if (photoFile) {
+        const r = await uploadMessagePhoto(photoFile, conversationId);
+        photoUrl = r.publicUrl; photoPath = r.path;
+      }
+      const insert = {
+        conversation_id: conversationId,
+        content: text.trim() || null,
+        photo_url: photoUrl,
+        photo_path: photoPath,
+      };
+      if (asEmployee) {
+        insert.sender_employee_id = asEmployee.id;
+        insert.sender_is_pm = false;
+      } else {
+        insert.sender_employee_id = null;
+        insert.sender_is_pm = true;
+      }
+      const { error: e } = await supabase.from('messages').insert(insert);
+      if (e) throw e;
+      setText(''); setPhotoFile(null);
+      // load() will be triggered by realtime, but call it anyway for instant response
+      load();
+    } catch (e) {
+      setError(e.message || String(e));
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const deleteMessage = async (m) => {
+    if (!confirm('Delete this message? This cannot be undone.')) return;
+    if (m.photo_path) await deleteMessagePhoto(m.photo_path);
+    await supabase.from('messages').delete().eq('id', m.id);
+    // Realtime will refresh
+  };
+
+  // Decide who counts as "me" for bubble alignment
+  const isMine = (m) => {
+    if (asEmployee) return m.sender_employee_id === asEmployee.id;
+    if (asPmCustomer) return m.sender_is_pm === true;
+    return false;
+  };
+
+  // Decide the displayed sender name
+  const senderName = (m) => {
+    if (m.sender_is_pm) return 'Property manager';
+    if (!isPropertyThread) return m.sender?.name || 'Unknown';
+    // Property thread + staff sender → show as Summit Clean to the PM
+    if (asPmCustomer) return 'Summit Clean';
+    // Property thread + viewing as staff → show real name
+    return m.sender?.name || 'Summit Clean';
+  };
+
+  return (
+    <div className="min-h-screen flex flex-col bg-stone-50">
+      <div className="flex items-center gap-3 px-5 py-4 border-b border-stone-200 bg-white">
+        <button onClick={onBack} className="p-2 -ml-2 rounded-full hover:bg-stone-100">
+          <ArrowLeft size={20} className="text-stone-700" />
+        </button>
+        <div className="flex-1 min-w-0">
+          {isPropertyThread && <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">Property thread</div>}
+          <div className="font-serif text-xl text-stone-900 truncate">{otherName}</div>
+        </div>
+      </div>
+
+      <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-4 space-y-2" style={{ minHeight: 0 }}>
+        {!loaded ? <div className="text-center text-stone-400 text-sm">Loading…</div> : messages.length === 0 ? (
+          <div className="text-center text-stone-400 text-sm py-12">No messages yet. Say hi!</div>
+        ) : messages.map(m => {
+          const mine = isMine(m);
+          return (
+            <div key={m.id} className={`flex ${mine ? 'justify-end' : 'justify-start'}`}>
+              <div className={`max-w-[80%] ${mine ? 'items-end' : 'items-start'} flex flex-col`}>
+                {!mine && (
+                  <div className="text-[10px] font-mono text-stone-500 mb-0.5 px-1">{senderName(m)}</div>
+                )}
+                <div className={`px-3 py-2 rounded-2xl ${mine ? 'bg-stone-900 text-stone-50' : 'bg-white border border-stone-200 text-stone-900'}`}>
+                  {m.photo_url && (
+                    <button onClick={() => setZoomPhoto(m.photo_url)} className="block mb-1">
+                      <img src={m.photo_url} alt="" loading="lazy"
+                        className="rounded-xl max-w-full max-h-60 object-cover" />
+                    </button>
+                  )}
+                  {m.content && <div className="text-sm whitespace-pre-wrap break-words">{m.content}</div>}
+                </div>
+                <div className="flex items-center gap-2 mt-0.5 px-1">
+                  <div className="text-[10px] font-mono text-stone-400">{fmtClock(m.created_at)}</div>
+                  {mine && (
+                    <button onClick={() => deleteMessage(m)}
+                      className="text-[10px] font-mono text-stone-400 hover:text-red-600">
+                      Delete
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {error && (
+        <div className="px-4 py-2 bg-red-50 border-t border-red-200 text-red-700 text-sm flex items-center gap-2">
+          <AlertCircle size={16} /><span>{error}</span>
+        </div>
+      )}
+
+      {photoFile && (
+        <div className="px-4 py-2 bg-stone-100 border-t border-stone-200 flex items-center gap-2">
+          <ImageIcon size={16} className="text-stone-600" />
+          <span className="text-xs text-stone-700 flex-1 truncate">{photoFile.name}</span>
+          <button onClick={() => setPhotoFile(null)} className="p-1 rounded-full hover:bg-stone-200">
+            <X size={14} className="text-stone-600" />
+          </button>
+        </div>
+      )}
+
+      <div className="px-4 py-3 border-t border-stone-200 bg-white flex items-end gap-2" style={{ paddingBottom: 'max(0.75rem, env(safe-area-inset-bottom))' }}>
+        <label className="p-2 rounded-full hover:bg-stone-100 cursor-pointer flex-shrink-0">
+          <Camera size={20} className="text-stone-600" />
+          <input type="file" accept="image/*" className="hidden"
+            onChange={(e) => { const f = e.target.files?.[0]; if (f) setPhotoFile(f); }} />
+        </label>
+        <textarea value={text} onChange={(e) => setText(e.target.value)} rows={1}
+          placeholder="Type a message…" disabled={sending}
+          onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }}
+          className="flex-1 px-3 py-2 rounded-xl border border-stone-300 bg-white text-sm resize-none max-h-32" />
+        <button onClick={send} disabled={sending || (!text.trim() && !photoFile)}
+          className="p-2.5 rounded-full bg-stone-900 text-stone-50 disabled:opacity-40 flex-shrink-0">
+          {sending ? <div className="w-4 h-4 border-2 border-stone-50 border-t-transparent rounded-full animate-spin" /> : <ChevronRight size={16} />}
+        </button>
+      </div>
+
+      {zoomPhoto && (
+        <div className="fixed inset-0 bg-stone-900/95 z-50 flex flex-col" onClick={() => setZoomPhoto(null)}>
+          <div className="flex justify-end p-4">
+            <button className="p-2 rounded-full bg-stone-800">
+              <X size={20} className="text-stone-50" />
+            </button>
+          </div>
+          <div className="flex-1 overflow-auto p-4">
+            <img src={zoomPhoto} alt="" className="w-full h-auto rounded-xl" />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+// ---- PM-side Messages tab ----
+function PortalMessagesTab({ property, onPropertyRefresh }) {
+  const [conversationId, setConversationId] = useState(null);
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      // Find or create the property thread for this property
+      const { data: existing } = await supabase.from('conversations')
+        .select('id').eq('customer_id', property.id).eq('kind', 'property_thread').maybeSingle();
+      if (existing) {
+        setConversationId(existing.id);
+      } else {
+        const { data: created } = await supabase.from('conversations')
+          .insert({ kind: 'property_thread', customer_id: property.id })
+          .select().single();
+        if (created) setConversationId(created.id);
+      }
+      setLoaded(true);
+    })();
+  }, [property.id]);
+
+  if (!loaded) return <div className="px-5 pt-6"><Splash text="Loading…" /></div>;
+  if (!conversationId) return <div className="px-5 pt-6 text-stone-400">Could not load messages.</div>;
+
+  return <MessageThread
+    conversationId={conversationId}
+    otherName="Summit Clean team"
+    asPmCustomer={property}
+    isPropertyThread={true}
+    propertyName={property.name}
+    onBack={() => onPropertyRefresh && onPropertyRefresh()} />;
 }

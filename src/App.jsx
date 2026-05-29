@@ -5,7 +5,7 @@ import {
   ArrowLeft, Users, Image as ImageIcon, Download, X, MapPin,
   Briefcase, Delete, AlertCircle, UserPlus, Building2,
   Trash2, Eye, EyeOff, LayoutDashboard, FileText, DollarSign,
-  Home, Layers, User, Edit2, Copy, Printer, Calendar
+  Home, Layers, User, Edit2, Copy, Printer, Calendar, HelpCircle
 } from 'lucide-react';
 
 // =================================================================
@@ -3837,6 +3837,80 @@ function ExportView({ employee, onSignOut }) {
 }
 
 // =================================================================
+// =================================================================
+// PM WELCOME MODAL — shown on first sign-in and from the "How this works" button
+// =================================================================
+function WelcomeModal({ propertyName, onClose }) {
+  return (
+    <div className="fixed inset-0 bg-stone-900/80 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
+      <div className="bg-stone-50 w-full sm:max-w-lg sm:rounded-3xl rounded-t-3xl max-h-[90vh] flex flex-col">
+        <div className="flex items-center justify-between p-5 border-b border-stone-200">
+          <div className="flex-1 min-w-0">
+            <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">Welcome to Summit Clean</div>
+            <div className="font-serif text-2xl text-stone-900 truncate">How this works</div>
+          </div>
+          <button onClick={onClose} className="p-2 rounded-full hover:bg-stone-100 flex-shrink-0">
+            <X size={20} className="text-stone-600" />
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-5 space-y-5">
+          <div className="text-stone-700 leading-relaxed">
+            We're so glad to have you on board! Summit Clean is excited to be cleaning <span className="font-medium text-stone-900">{propertyName}</span> for you. This portal is your way to stay involved — see what's been cleaned, send us photos when something needs attention, and request assignments for the team.
+          </div>
+
+          <div className="space-y-4">
+            <div className="flex gap-3">
+              <div className="flex-shrink-0 w-9 h-9 rounded-xl bg-stone-900 text-stone-50 flex items-center justify-center font-mono text-sm font-bold">
+                1
+              </div>
+              <div>
+                <div className="font-serif text-lg text-stone-900 leading-tight">History</div>
+                <div className="text-sm text-stone-600 mt-0.5">See every cleaning, with photos and damage reports. Tap any day or unit to see the details.</div>
+              </div>
+            </div>
+
+            <div className="flex gap-3">
+              <div className="flex-shrink-0 w-9 h-9 rounded-xl bg-stone-900 text-stone-50 flex items-center justify-center font-mono text-sm font-bold">
+                2
+              </div>
+              <div>
+                <div className="font-serif text-lg text-stone-900 leading-tight">Upload photo</div>
+                <div className="text-sm text-stone-600 mt-0.5">Send us photos of damage, items left behind, or anything else worth flagging. We see them right away.</div>
+              </div>
+            </div>
+
+            <div className="flex gap-3">
+              <div className="flex-shrink-0 w-9 h-9 rounded-xl bg-stone-900 text-stone-50 flex items-center justify-center font-mono text-sm font-bold">
+                3
+              </div>
+              <div>
+                <div className="font-serif text-lg text-stone-900 leading-tight">Assignments</div>
+                <div className="text-sm text-stone-600 mt-0.5">Request specific work — like a deep clean on a particular bedroom. Submit it for approval, and once Summit Clean approves it, the team sees it on their next visit.</div>
+              </div>
+            </div>
+          </div>
+
+          <div className="p-4 rounded-2xl bg-amber-50 border border-amber-200">
+            <div className="text-xs uppercase tracking-wider font-mono text-amber-700 mb-1">A quick note</div>
+            <div className="text-sm text-stone-800">
+              Assignments you create start as <span className="font-medium">drafts</span>. Once you submit one, Summit Clean reviews and approves it before the cleaning team sees it. You can always come back to this overview by tapping <span className="font-mono">"How this works"</span> at the top.
+            </div>
+          </div>
+        </div>
+
+        <div className="p-5 border-t border-stone-200">
+          <button onClick={onClose}
+            className="w-full py-4 rounded-2xl bg-stone-900 text-stone-50 font-medium active:scale-98 transition-transform">
+            Got it — let's go
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// =================================================================
 // PORTAL APP — separate flow for property managers (clients)
 // They sign in with a per-property code. They see only that property's
 // photos, dates, and units. No cleaner names, no $ amounts.
@@ -3971,6 +4045,21 @@ function PortalHome({ property, onSignOut, onOpenUnitDay }) {
   const [groups, setGroups] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [filter, setFilter] = useState('30d');
+  const [showWelcome, setShowWelcome] = useState(false);
+
+  // Show welcome modal on first sign-in for this property.
+  // We track per-property since one PM might manage multiple properties.
+  useEffect(() => {
+    try {
+      const key = `tt_pm_welcomed_${property.id}`;
+      if (!localStorage.getItem(key)) setShowWelcome(true);
+    } catch {}
+  }, [property.id]);
+
+  const dismissWelcome = () => {
+    try { localStorage.setItem(`tt_pm_welcomed_${property.id}`, '1'); } catch {}
+    setShowWelcome(false);
+  };
 
   useEffect(() => { (async () => {
     if (tab !== 'history') return;
@@ -4046,7 +4135,13 @@ function PortalHome({ property, onSignOut, onOpenUnitDay }) {
               <div className="text-[10px] text-stone-500 font-mono opacity-60">TidyTrack</div>
             </div>
           </div>
-          <button onClick={onSignOut} className="text-xs text-stone-400 font-mono hover:text-stone-50">Sign out</button>
+          <div className="flex items-center gap-2">
+            <button onClick={() => setShowWelcome(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-50 text-xs font-mono active:scale-95 transition-all">
+              <HelpCircle size={14} /> How this works
+            </button>
+            <button onClick={onSignOut} className="text-xs text-stone-400 font-mono hover:text-stone-50">Sign out</button>
+          </div>
         </div>
         <h1 className="text-3xl font-light tracking-tight mt-2">{property.name}</h1>
         {property.address && (
@@ -4088,6 +4183,10 @@ function PortalHome({ property, onSignOut, onOpenUnitDay }) {
       )}
       {tab === 'assignments' && (
         <PortalAssignmentsTab property={property} />
+      )}
+
+      {showWelcome && (
+        <WelcomeModal propertyName={property.name} onClose={dismissWelcome} />
       )}
     </div>
   );

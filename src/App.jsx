@@ -2807,6 +2807,7 @@ function PropertyForm({ property, currentUserRole, onCancel, onSaved, onManageAs
   const [hourlyRate, setHourlyRate] = useState(property?.bill_rate_hourly?.toString() || '');
   const [flatAmount, setFlatAmount] = useState(property?.flat_rate_amount?.toString() || '');
   const [portalCode, setPortalCode] = useState(property?.portal_code || '');
+  const [staffPortalCode, setStaffPortalCode] = useState(property?.staff_portal_code || '');
   const [portalStartDate, setPortalStartDate] = useState(property?.portal_start_date || '');
   const [active, setActive] = useState(property?.active ?? true);
   const [busy, setBusy] = useState(false);
@@ -2823,16 +2824,30 @@ function PropertyForm({ property, currentUserRole, onCancel, onSaved, onManageAs
     const n = String(Math.floor(1000 + Math.random() * 9000));
     setPortalCode(`${w}${n}`);
   };
+  const generateStaffCode = () => {
+    const words = ['team','crew','squad','help','support','assist','field','site','staff','group'];
+    const w = words[Math.floor(Math.random() * words.length)];
+    const n = String(Math.floor(1000 + Math.random() * 9000));
+    setStaffPortalCode(`${w}${n}`);
+  };
   const save = async () => {
     setError('');
     if (!name.trim()) { setError('Name is required'); return; }
+    const cleanPortal = portalCode.trim().toLowerCase() || null;
+    const cleanStaff = staffPortalCode.trim().toLowerCase() || null;
+    // Sanity: codes can't equal each other on the same property
+    if (cleanPortal && cleanStaff && cleanPortal === cleanStaff) {
+      setError('PM code and staff code must be different.');
+      return;
+    }
     setBusy(true);
     const payload = {
       name: name.trim(), address: address.trim() || null, notes: notes.trim() || null,
       property_type: type, bill_mode: billMode,
       bill_rate_hourly: billMode === 'hourly' && hourlyRate ? parseFloat(hourlyRate) : null,
       flat_rate_amount: billMode === 'flat' && flatAmount ? parseFloat(flatAmount) : null,
-      portal_code: portalCode.trim() || null,
+      portal_code: cleanPortal,
+      staff_portal_code: cleanStaff,
       portal_start_date: portalStartDate || null,
       active
     };
@@ -2841,8 +2856,8 @@ function PropertyForm({ property, currentUserRole, onCancel, onSaved, onManageAs
       : await supabase.from('customers').update(payload).eq('id', property.id);
     setBusy(false);
     if (e) {
-      setError(e.message.includes('duplicate') && e.message.includes('portal_code')
-        ? 'That portal code is already in use by another property — pick another.'
+      setError(e.message.includes('duplicate') && (e.message.includes('portal_code') || e.message.includes('staff_portal_code'))
+        ? 'That code is already in use by another property — pick another.'
         : e.message);
       return;
     }
@@ -2964,6 +2979,26 @@ function PropertyForm({ property, currentUserRole, onCancel, onSaved, onManageAs
                 {portalStartDate
                   ? <>The property manager will only see cleanings from <strong>{new Date(portalStartDate + 'T12:00:00').toLocaleDateString('en-US', { month:'long', day:'numeric', year:'numeric' })}</strong> forward.</>
                   : <>If set, only cleanings from this date forward will be visible to the property manager. Useful for hiding old test data or starting fresh with a new client.</>}
+              </p>
+            </div>
+          )}
+
+          {/* PM staff code — separate sign-in for the PM's assistants */}
+          {portalCode && (
+            <div className="mt-4 pt-4 border-t border-stone-200">
+              <div className="flex items-baseline justify-between mb-2">
+                <label className="text-xs uppercase tracking-wider text-stone-500 font-mono">PM staff code (optional)</label>
+                <button type="button" onClick={generateStaffCode}
+                  className="text-xs font-mono text-amber-700 hover:text-amber-800">Generate</button>
+              </div>
+              <input type="text" value={staffPortalCode}
+                onChange={(e) => setStaffPortalCode(e.target.value.toLowerCase().replace(/[^a-z0-9]/g, ''))}
+                placeholder="e.g. team1234 (lowercase letters & numbers only)"
+                className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white focus:outline-none focus:border-stone-900 text-stone-900 font-mono" />
+              <p className="text-xs text-stone-500 mt-2">
+                {staffPortalCode
+                  ? <>Share this with the PM's staff/assistants. They sign in the same way but their actions are tagged "PM staff" in your inbox.</>
+                  : <>Optional. If set, the PM's assistants can sign in to the same property portal with this separate code. Their actions are tagged "PM staff" so you can tell who did what.</>}
               </p>
             </div>
           )}
@@ -3969,12 +4004,144 @@ function WelcomeModal({ propertyName, onClose }) {
 }
 
 // =================================================================
+// CHANGE PORTAL CODE MODAL — PM-only
+// Lets the main PM change their own portal code. Logs the change.
+// =================================================================
+function ChangePortalCodeModal({ property, onClose, onSaved }) {
+  const [oldCode, setOldCode] = useState('');
+  const [newCode, setNewCode] = useState('');
+  const [confirmCode, setConfirmCode] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  const validateCode = (c) => {
+    if (c.length < 6) return 'Code must be at least 6 characters.';
+    if (!/[a-z]/i.test(c)) return 'Code must contain at least one letter.';
+    if (!/\d/.test(c)) return 'Code must contain at least one number.';
+    return null;
+  };
+
+  const save = async () => {
+    setError('');
+    if (oldCode.trim().toLowerCase() !== (property.portal_code || '').toLowerCase()) {
+      setError('Old code is incorrect.');
+      return;
+    }
+    const cleanNew = newCode.trim().toLowerCase();
+    const v = validateCode(cleanNew);
+    if (v) { setError(v); return; }
+    if (cleanNew !== confirmCode.trim().toLowerCase()) {
+      setError('New codes don\'t match.');
+      return;
+    }
+    if (cleanNew === oldCode.trim().toLowerCase()) {
+      setError('New code must be different from the old code.');
+      return;
+    }
+    setBusy(true);
+    // Check it's not already in use as a portal_code OR staff_portal_code on another property
+    const { data: dupePortal } = await supabase.from('customers')
+      .select('id').eq('portal_code', cleanNew).neq('id', property.id).maybeSingle();
+    const { data: dupeStaff } = await supabase.from('customers')
+      .select('id').eq('staff_portal_code', cleanNew).maybeSingle();
+    if (dupePortal || dupeStaff) {
+      setBusy(false);
+      setError('That code is already used by another property. Try a different one.');
+      return;
+    }
+    // Update the code
+    const { error: upErr } = await supabase.from('customers')
+      .update({ portal_code: cleanNew }).eq('id', property.id);
+    if (upErr) {
+      setBusy(false);
+      setError('Could not save: ' + upErr.message);
+      return;
+    }
+    // Audit log
+    await supabase.from('portal_audit_log').insert({
+      customer_id: property.id,
+      event_kind: 'code_changed',
+      actor_kind: 'pm',
+      old_value: oldCode.trim().toLowerCase(),
+      new_value: cleanNew,
+      notes: 'PM changed their own portal code'
+    });
+    // Update local portal session so the new code is remembered
+    try {
+      const stored = localStorage.getItem('tidytrack_portal');
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        parsed.code = cleanNew;
+        localStorage.setItem('tidytrack_portal', JSON.stringify(parsed));
+      }
+    } catch {}
+    setBusy(false);
+    alert('Code updated. Use your new code next time you sign in.');
+    onSaved();
+  };
+
+  return (
+    <div className="fixed inset-0 bg-stone-900/80 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
+      <div className="bg-stone-50 w-full sm:max-w-md sm:rounded-3xl rounded-t-3xl max-h-[90vh] flex flex-col">
+        <div className="flex items-center justify-between p-5 border-b border-stone-200">
+          <div>
+            <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">Account</div>
+            <div className="font-serif text-xl text-stone-900">Change my access code</div>
+          </div>
+          <button onClick={onClose} className="p-2 rounded-full hover:bg-stone-100">
+            <X size={20} className="text-stone-600" />
+          </button>
+        </div>
+        <div className="flex-1 overflow-y-auto p-5 space-y-4">
+          <p className="text-sm text-stone-600">
+            Pick a new code that's at least 6 characters long with both letters and numbers.
+            You'll use this code the next time you sign in.
+          </p>
+          <div>
+            <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-1 block">Current code</label>
+            <input type="text" value={oldCode} onChange={(e) => setOldCode(e.target.value)} autoComplete="off"
+              className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white font-mono" />
+          </div>
+          <div>
+            <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-1 block">New code</label>
+            <input type="text" value={newCode} onChange={(e) => setNewCode(e.target.value)} autoComplete="off"
+              placeholder="At least 6 chars, with letters + numbers"
+              className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white font-mono" />
+          </div>
+          <div>
+            <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-1 block">Confirm new code</label>
+            <input type="text" value={confirmCode} onChange={(e) => setConfirmCode(e.target.value)} autoComplete="off"
+              className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white font-mono" />
+          </div>
+          {error && (
+            <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-red-700 text-sm flex items-start gap-2">
+              <AlertCircle size={16} className="flex-shrink-0 mt-0.5" /><span>{error}</span>
+            </div>
+          )}
+        </div>
+        <div className="p-5 border-t border-stone-200 space-y-2">
+          <button onClick={save} disabled={busy}
+            className="w-full py-3 rounded-2xl bg-stone-900 text-stone-50 font-medium disabled:opacity-50">
+            {busy ? 'Saving…' : 'Save new code'}
+          </button>
+          <button onClick={onClose} disabled={busy}
+            className="w-full py-2 rounded-2xl text-stone-600 text-sm font-medium">
+            Cancel
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// =================================================================
 // PORTAL APP — separate flow for property managers (clients)
 // They sign in with a per-property code. They see only that property's
 // photos, dates, and units. No cleaner names, no $ amounts.
 // =================================================================
 function PortalApp() {
   const [property, setProperty] = useState(null);
+  const [portalKind, setPortalKind] = useState(null); // 'pm' | 'pm_staff'
   const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
@@ -3983,30 +4150,46 @@ function PortalApp() {
       try {
         const stored = localStorage.getItem('tidytrack_portal');
         if (stored) {
-          const { propertyId, code } = JSON.parse(stored);
+          const { propertyId, code, kind } = JSON.parse(stored);
+          // Try matching against whichever column we expect
+          const col = kind === 'pm_staff' ? 'staff_portal_code' : 'portal_code';
           const { data } = await supabase.from('customers')
-            .select('*').eq('id', propertyId).eq('portal_code', code).maybeSingle();
-          if (data) setProperty(data);
-          else localStorage.removeItem('tidytrack_portal');
+            .select('*').eq('id', propertyId).eq(col, code).maybeSingle();
+          if (data) {
+            setProperty(data);
+            setPortalKind(kind || 'pm');
+          } else {
+            localStorage.removeItem('tidytrack_portal');
+          }
         }
       } catch {}
       setLoaded(true);
     })();
   }, []);
 
-  const onSignIn = async (prop) => {
-    localStorage.setItem('tidytrack_portal', JSON.stringify({ propertyId: prop.id, code: prop.portal_code }));
+  const onSignIn = async (prop, kind) => {
+    const code = kind === 'pm_staff' ? prop.staff_portal_code : prop.portal_code;
+    localStorage.setItem('tidytrack_portal', JSON.stringify({ propertyId: prop.id, code, kind }));
     setProperty(prop);
+    setPortalKind(kind);
   };
 
   const onSignOut = () => {
     localStorage.removeItem('tidytrack_portal');
     setProperty(null);
+    setPortalKind(null);
+  };
+
+  // Refresh the property record (e.g. after a code change)
+  const refreshProperty = async () => {
+    if (!property) return;
+    const { data } = await supabase.from('customers').select('*').eq('id', property.id).maybeSingle();
+    if (data) setProperty(data);
   };
 
   if (!loaded) return <Splash text="Loading…" />;
   if (!property) return <PortalSignIn onSignIn={onSignIn} />;
-  return <PortalDashboard property={property} onSignOut={onSignOut} />;
+  return <PortalDashboard property={property} portalKind={portalKind} onSignOut={onSignOut} onRefreshProperty={refreshProperty} />;
 }
 
 function PortalSignIn({ onSignIn }) {
@@ -4017,14 +4200,24 @@ function PortalSignIn({ onSignIn }) {
   const tryLogin = async () => {
     if (!code.trim()) return;
     setError(''); setBusy(true);
-    const { data } = await supabase.from('customers')
-      .select('*').eq('portal_code', code.trim().toLowerCase()).eq('active', true).maybeSingle();
+    const trimmed = code.trim().toLowerCase();
+    // First try main PM portal_code
+    let { data } = await supabase.from('customers')
+      .select('*').eq('portal_code', trimmed).eq('active', true).maybeSingle();
+    if (data) {
+      setBusy(false);
+      onSignIn(data, 'pm');
+      return;
+    }
+    // Then try the staff_portal_code
+    ({ data } = await supabase.from('customers')
+      .select('*').eq('staff_portal_code', trimmed).eq('active', true).maybeSingle());
     setBusy(false);
     if (!data) {
       setError('That code didn\'t match any property. Check with your cleaning company.');
       return;
     }
-    onSignIn(data);
+    onSignIn(data, 'pm_staff');
   };
 
   return (
@@ -4085,7 +4278,7 @@ function PortalSignIn({ onSignIn }) {
   );
 }
 
-function PortalDashboard({ property, onSignOut }) {
+function PortalDashboard({ property, portalKind, onSignOut, onRefreshProperty }) {
   const [view, setView] = useState({ kind: 'home' });
   // 'home' (recent activity), 'unit-day' (drill into one unit's day), 'all-photos' (gallery)
 
@@ -4094,17 +4287,20 @@ function PortalDashboard({ property, onSignOut }) {
       onBack={() => setView({ kind: 'home' })} />;
   }
 
-  return <PortalHome property={property} onSignOut={onSignOut}
+  return <PortalHome property={property} portalKind={portalKind} onSignOut={onSignOut}
+    onRefreshProperty={onRefreshProperty}
     onOpenUnitDay={(unitId, date) => setView({ kind: 'unit-day', unitId, date })} />;
 }
 
-function PortalHome({ property, onSignOut, onOpenUnitDay }) {
+function PortalHome({ property, portalKind, onSignOut, onRefreshProperty, onOpenUnitDay }) {
   const [tab, setTab] = useState('history'); // 'history' | 'messages' | 'upload-photo' | 'assignments'
   const [groups, setGroups] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [filter, setFilter] = useState('30d');
   const [showWelcome, setShowWelcome] = useState(false);
+  const [showChangeCode, setShowChangeCode] = useState(false);
   const pmUnread = useUnreadCount({ customer: property });
+  const isPmStaff = portalKind === 'pm_staff';
 
   // Show welcome modal on first sign-in for this property.
   // We track per-property since one PM might manage multiple properties.
@@ -4190,7 +4386,12 @@ function PortalHome({ property, onSignOut, onOpenUnitDay }) {
               className="h-10 w-auto object-contain"
             />
             <div>
-              <div className="text-xs text-stone-400 font-mono uppercase tracking-wider">Property portal</div>
+              <div className="text-xs text-stone-400 font-mono uppercase tracking-wider flex items-center gap-1.5">
+                Property portal
+                {isPmStaff && (
+                  <span className="text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-stone-700 text-amber-400">PM staff</span>
+                )}
+              </div>
               <div className="text-[10px] text-stone-500 font-mono opacity-60">TidyTrack</div>
             </div>
           </div>
@@ -4199,6 +4400,13 @@ function PortalHome({ property, onSignOut, onOpenUnitDay }) {
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-50 text-xs font-mono active:scale-95 transition-all">
               <HelpCircle size={14} /> How this works
             </button>
+            {!isPmStaff && (
+              <button onClick={() => setShowChangeCode(true)}
+                className="p-2 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-50"
+                title="Change my code">
+                <Settings size={14} />
+              </button>
+            )}
             <button onClick={onSignOut} className="text-xs text-stone-400 font-mono hover:text-stone-50">Sign out</button>
           </div>
         </div>
@@ -4247,17 +4455,22 @@ function PortalHome({ property, onSignOut, onOpenUnitDay }) {
           filter={filter} setFilter={setFilter} onOpenUnitDay={onOpenUnitDay} />
       )}
       {tab === 'messages' && (
-        <PortalMessagesTab property={property} onPropertyRefresh={() => setTab('history')} />
+        <PortalMessagesTab property={property} portalKind={portalKind} onPropertyRefresh={() => setTab('history')} />
       )}
       {tab === 'upload-photo' && (
-        <PortalPhotoUploadTab property={property} />
+        <PortalPhotoUploadTab property={property} portalKind={portalKind} />
       )}
       {tab === 'assignments' && (
-        <PortalAssignmentsTab property={property} />
+        <PortalAssignmentsTab property={property} portalKind={portalKind} />
       )}
 
       {showWelcome && (
         <WelcomeModal propertyName={property.name} onClose={dismissWelcome} />
+      )}
+      {showChangeCode && (
+        <ChangePortalCodeModal property={property}
+          onClose={() => setShowChangeCode(false)}
+          onSaved={() => { setShowChangeCode(false); onRefreshProperty && onRefreshProperty(); }} />
       )}
     </div>
   );
@@ -6732,7 +6945,7 @@ function AllOpenAssignments({ employee, onBack, onOpenAssignment }) {
 // PORTAL — PM PHOTO UPLOAD TAB
 // Property manager uploads a photo (or set of photos) for owner review.
 // =================================================================
-function PortalPhotoUploadTab({ property }) {
+function PortalPhotoUploadTab({ property, portalKind }) {
   const isMulti = property.property_type === 'multi_unit';
   const [units, setUnits] = useState([]);
   const [unitId, setUnitId] = useState('');
@@ -6809,7 +7022,8 @@ function PortalPhotoUploadTab({ property }) {
         notes: notes.trim() || null,
         photo_url: publicUrl,
         photo_path: path,
-        status: 'new'
+        status: 'new',
+        actor_kind: portalKind || 'pm'
       });
       if (e) throw e;
       setSuccess(true);
@@ -7001,7 +7215,7 @@ function PortalPhotoUploadTab({ property }) {
 // Property manager creates/edits/submits assignment drafts; once
 // approved they become read-only.
 // =================================================================
-function PortalAssignmentsTab({ property }) {
+function PortalAssignmentsTab({ property, portalKind }) {
   const [assignments, setAssignments] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [view, setView] = useState({ kind: 'list' });
@@ -7018,12 +7232,12 @@ function PortalAssignmentsTab({ property }) {
   useEffect(() => { load(); }, [property.id]);
 
   if (view.kind === 'new') {
-    return <PortalAssignmentForm property={property}
+    return <PortalAssignmentForm property={property} portalKind={portalKind}
       onCancel={() => setView({ kind: 'list' })}
       onSaved={() => { setView({ kind: 'list' }); load(); }} />;
   }
   if (view.kind === 'edit') {
-    return <PortalAssignmentForm property={property} assignment={view.assignment}
+    return <PortalAssignmentForm property={property} assignment={view.assignment} portalKind={portalKind}
       onCancel={() => setView({ kind: 'list' })}
       onSaved={() => { setView({ kind: 'list' }); load(); }} />;
   }
@@ -7117,7 +7331,7 @@ function PortalAssignmentSection({ title, subtitle, items, color, onOpen }) {
 }
 
 // PM-side form for creating or editing an assignment
-function PortalAssignmentForm({ property, assignment, onCancel, onSaved }) {
+function PortalAssignmentForm({ property, assignment, portalKind, onCancel, onSaved }) {
   const isMulti = property.property_type === 'multi_unit';
   const isEdit = !!assignment;
   const [title, setTitle] = useState(assignment?.title || '');
@@ -7226,6 +7440,7 @@ function PortalAssignmentForm({ property, assignment, onCancel, onSaved }) {
           source: 'pm',
           pm_status: newStatus,
           active: true,
+          actor_kind: portalKind || 'pm',
           ...filePayload
         }).select().single();
         if (e1) throw e1;
@@ -7642,8 +7857,11 @@ function InboxView({ employee, onBack }) {
                           {a.targets[0].unit?.label}{a.targets[0].party?.label && ` · ${a.targets[0].party.label}`}
                         </div>
                       )}
-                      <div className="text-xs text-stone-400 font-mono mt-1">
+                      <div className="text-xs text-stone-400 font-mono mt-1 flex items-center gap-2">
                         Submitted {fmtDate(a.created_at)}
+                        {a.actor_kind === 'pm_staff' && (
+                          <span className="text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-stone-100 text-stone-600">PM staff</span>
+                        )}
                       </div>
                     </div>
                     <ChevronRight size={16} className="text-stone-400 flex-shrink-0" />
@@ -7671,8 +7889,11 @@ function InboxView({ employee, onBack }) {
                   <button onClick={() => setReviewPhoto(p)} className="block w-full rounded-xl overflow-hidden bg-stone-100 mb-3">
                     <img loading="lazy" src={p.photo_url} alt={p.title || ''} className="w-full max-h-96 object-contain" />
                   </button>
-                  <div className="text-[10px] text-stone-400 font-mono mb-3">
+                  <div className="text-[10px] text-stone-400 font-mono mb-3 flex items-center gap-2">
                     Sent {fmtDate(p.created_at)}
+                    {p.actor_kind === 'pm_staff' && (
+                      <span className="text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-stone-100 text-stone-600">PM staff</span>
+                    )}
                   </div>
                   <div className="flex gap-2">
                     <button onClick={() => markPhotoSeen(p)}
@@ -8308,7 +8529,7 @@ function NewDmPicker({ employee, onBack, onPicked }) {
 
 
 // ---- The conversation/thread view ----
-function MessageThread({ conversationId, otherName, asEmployee = null, asPmCustomer = null, isPropertyThread = false, propertyName, onBack }) {
+function MessageThread({ conversationId, otherName, asEmployee = null, asPmCustomer = null, pmActorKind = null, isPropertyThread = false, propertyName, onBack }) {
   const [messages, setMessages] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [text, setText] = useState('');
@@ -8379,6 +8600,7 @@ function MessageThread({ conversationId, otherName, asEmployee = null, asPmCusto
       } else {
         insert.sender_employee_id = null;
         insert.sender_is_pm = true;
+        insert.pm_actor_kind = pmActorKind || 'pm';
       }
       const { error: e } = await supabase.from('messages').insert(insert);
       if (e) throw e;
@@ -8408,7 +8630,9 @@ function MessageThread({ conversationId, otherName, asEmployee = null, asPmCusto
 
   // Decide the displayed sender name
   const senderName = (m) => {
-    if (m.sender_is_pm) return 'Property manager';
+    if (m.sender_is_pm) {
+      return m.pm_actor_kind === 'pm_staff' ? 'Property manager · staff' : 'Property manager';
+    }
     if (!isPropertyThread) return m.sender?.name || 'Unknown';
     // Property thread + staff sender → show as Summit Clean to the PM
     if (asPmCustomer) return 'Summit Clean';
@@ -8417,8 +8641,8 @@ function MessageThread({ conversationId, otherName, asEmployee = null, asPmCusto
   };
 
   return (
-    <div className="min-h-screen flex flex-col bg-stone-50">
-      <div className="flex items-center gap-3 px-5 py-4 border-b border-stone-200 bg-white">
+    <div className="flex flex-col bg-stone-50" style={{ height: '100dvh', maxHeight: '100dvh' }}>
+      <div className="flex items-center gap-3 px-5 py-4 border-b border-stone-200 bg-white flex-shrink-0">
         <button onClick={onBack} className="p-2 -ml-2 rounded-full hover:bg-stone-100">
           <ArrowLeft size={20} className="text-stone-700" />
         </button>
@@ -8464,13 +8688,13 @@ function MessageThread({ conversationId, otherName, asEmployee = null, asPmCusto
       </div>
 
       {error && (
-        <div className="px-4 py-2 bg-red-50 border-t border-red-200 text-red-700 text-sm flex items-center gap-2">
+        <div className="px-4 py-2 bg-red-50 border-t border-red-200 text-red-700 text-sm flex items-center gap-2 flex-shrink-0">
           <AlertCircle size={16} /><span>{error}</span>
         </div>
       )}
 
       {photoFile && (
-        <div className="px-4 py-2 bg-stone-100 border-t border-stone-200 flex items-center gap-2">
+        <div className="px-4 py-2 bg-stone-100 border-t border-stone-200 flex items-center gap-2 flex-shrink-0">
           <ImageIcon size={16} className="text-stone-600" />
           <span className="text-xs text-stone-700 flex-1 truncate">{photoFile.name}</span>
           <button onClick={() => setPhotoFile(null)} className="p-1 rounded-full hover:bg-stone-200">
@@ -8479,7 +8703,7 @@ function MessageThread({ conversationId, otherName, asEmployee = null, asPmCusto
         </div>
       )}
 
-      <div className="px-4 py-3 border-t border-stone-200 bg-white flex items-end gap-2" style={{ paddingBottom: 'max(0.75rem, env(safe-area-inset-bottom))' }}>
+      <div className="px-4 py-3 border-t border-stone-200 bg-white flex items-end gap-2 flex-shrink-0" style={{ paddingBottom: 'max(0.75rem, env(safe-area-inset-bottom))' }}>
         <label className="p-2 rounded-full hover:bg-stone-100 cursor-pointer flex-shrink-0">
           <Camera size={20} className="text-stone-600" />
           <input type="file" accept="image/*" className="hidden"
@@ -8488,7 +8712,12 @@ function MessageThread({ conversationId, otherName, asEmployee = null, asPmCusto
         <textarea value={text} onChange={(e) => setText(e.target.value)} rows={1}
           placeholder="Type a message…" disabled={sending}
           onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }}
-          className="flex-1 px-3 py-2 rounded-xl border border-stone-300 bg-white text-sm resize-none max-h-32" />
+          onFocus={(e) => {
+            // Scroll the input into view after the iOS keyboard animation
+            setTimeout(() => { try { e.target.scrollIntoView({ block: 'end', behavior: 'smooth' }); } catch {} }, 300);
+          }}
+          style={{ fontSize: 16 }}
+          className="flex-1 px-3 py-2 rounded-xl border border-stone-300 bg-white resize-none max-h-32" />
         <button onClick={send} disabled={sending || (!text.trim() && !photoFile)}
           className="p-2.5 rounded-full bg-stone-900 text-stone-50 disabled:opacity-40 flex-shrink-0">
           {sending ? <div className="w-4 h-4 border-2 border-stone-50 border-t-transparent rounded-full animate-spin" /> : <ChevronRight size={16} />}
@@ -8513,7 +8742,7 @@ function MessageThread({ conversationId, otherName, asEmployee = null, asPmCusto
 
 
 // ---- PM-side Messages tab ----
-function PortalMessagesTab({ property, onPropertyRefresh }) {
+function PortalMessagesTab({ property, portalKind, onPropertyRefresh }) {
   const [conversationId, setConversationId] = useState(null);
   const [loaded, setLoaded] = useState(false);
 
@@ -8541,6 +8770,7 @@ function PortalMessagesTab({ property, onPropertyRefresh }) {
     conversationId={conversationId}
     otherName="Summit Clean team"
     asPmCustomer={property}
+    pmActorKind={portalKind || 'pm'}
     isPropertyThread={true}
     propertyName={property.name}
     onBack={() => onPropertyRefresh && onPropertyRefresh()} />;

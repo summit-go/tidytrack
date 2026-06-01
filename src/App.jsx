@@ -6,7 +6,7 @@ import {
   Briefcase, Delete, AlertCircle, UserPlus, Building2,
   Trash2, Eye, EyeOff, LayoutDashboard, FileText, DollarSign,
   Home, Layers, User, Edit2, Copy, Printer, Calendar, HelpCircle,
-  MessageCircle, Settings
+  MessageCircle, Settings, Languages
 } from 'lucide-react';
 
 // =================================================================
@@ -15,15 +15,257 @@ import {
 const SUPABASE_URL = "https://bbaynvqnbkjyqhzhhypr.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJiYXludnFuYmtqeXFoemhoeXByIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc0NzQ2MTMsImV4cCI6MjA5MzA1MDYxM30.ZXUoHFj_IwMe6rX8RxK8Dj4kAB9AS7X9xZAhQ84wDEk";
 
+// =================================================================
+// 🌍 GOOGLE TRANSLATE API KEY (optional — for the Translate button)
+// Restrict the key to HTTP referrers app.gosummitclean.com + tidytrack-ten.vercel.app
+// and restrict to the Cloud Translation API only.
+// If empty, the Translate button is hidden.
+// =================================================================
+const GOOGLE_TRANSLATE_API_KEY = "AIzaSyD7ceHPryMzs45hWJOyFNBxtOzQOEmJcSA";
+
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 const PHOTO_BUCKET = 'task-photos';
 const ASSIGNMENT_BUCKET = 'assignments';
 const PM_UPLOAD_BUCKET = 'pm-uploads';
 const MESSAGE_BUCKET = 'messages';
 const ASSIGNMENT_MAX_SIZE_MB = 20; // sanity cap on upload size
-const GOOGLE_TRANSLATE_API_KEY = "AIzaSyD7ceHPryMzs45hWJOyFNBxtOzQOEmJcSA";// =================================================================
-// Utilities
+
+const SUPPORTED_TRANSLATE_LANGUAGES = [
+  { code: 'es', label: 'Spanish' },
+  { code: 'en', label: 'English' },
+  { code: 'pt', label: 'Portuguese' },
+  { code: 'fr', label: 'French' },
+  { code: 'zh', label: 'Chinese' },
+  { code: 'vi', label: 'Vietnamese' },
+  { code: 'tl', label: 'Tagalog' },
+  { code: 'ru', label: 'Russian' },
+  { code: 'ar', label: 'Arabic' },
+];
+
+const isTranslateConfigured = () =>
+  GOOGLE_TRANSLATE_API_KEY &&
+  GOOGLE_TRANSLATE_API_KEY !== 'PASTE_YOUR_GOOGLE_TRANSLATE_KEY_HERE' &&
+  GOOGLE_TRANSLATE_API_KEY.length > 10;
+
+// Translate one or more strings via Google Cloud Translation API v2.
+// Returns array of { translatedText, detectedSourceLanguage } in the same order.
+async function translateText(strings, targetLang) {
+  if (!isTranslateConfigured()) throw new Error('Translation is not configured.');
+  const inputs = (Array.isArray(strings) ? strings : [strings]).filter(s => s && s.trim());
+  if (inputs.length === 0) return [];
+  const url = `https://translation.googleapis.com/language/translate/v2?key=${GOOGLE_TRANSLATE_API_KEY}`;
+  const body = { q: inputs, target: targetLang, format: 'text' };
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err?.error?.message || `Translation failed (${res.status})`);
+  }
+  const data = await res.json();
+  return (data?.data?.translations || []).map(t => ({
+    translatedText: t.translatedText,
+    detectedSourceLanguage: t.detectedSourceLanguage,
+  }));
+}
+
 // =================================================================
+// useAssignmentSync — keep assignment views in sync.
+// Subscribes to realtime changes on assignment_targets and assignments,
+// and refreshes when the window/tab regains focus.
+// Pass it a load() function to call when something changes.
+// =================================================================
+function useAssignmentSync(load, channelKey = 'asgn-sync') {
+  const loadRef = useRef(load);
+  loadRef.current = load;
+  useEffect(() => {
+    const debouncedLoad = (() => {
+      let t = null;
+      return () => {
+        if (t) clearTimeout(t);
+        t = setTimeout(() => loadRef.current && loadRef.current(), 250);
+      };
+    })();
+    const channel = supabase.channel(channelKey + '-' + Math.random().toString(36).slice(2, 8))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'assignment_targets' }, debouncedLoad)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'assignments' }, debouncedLoad)
+      .subscribe();
+
+    const onFocus = () => debouncedLoad();
+    const onVisible = () => { if (!document.hidden) debouncedLoad(); };
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onVisible);
+
+    return () => {
+      supabase.removeChannel(channel);
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+    // eslint-disable-next-line
+  }, [channelKey]);
+}
+
+// =================================================================
+// IDLE DETECTOR — auto clock-out after 30 minutes of inactivity.
+// Shows a 5-minute warning at the 25-minute mark.
+//
+// Detects activity via pointer/keyboard/touch events. Debounces saves
+// of `last_activity_at` to the database to once per minute max.
+// When the app regains focus, checks if too much time has passed and
+// triggers auto-clock-out retroactively using the saved last_activity_at.
+//
+// Returns: { showWarning, dismissWarning } — caller renders the warning UI.
+// =================================================================
+const IDLE_WARN_MS = 25 * 60 * 1000;  // 25 minutes
+const IDLE_LIMIT_MS = 30 * 60 * 1000; // 30 minutes
+const ACTIVITY_SAVE_THROTTLE_MS = 60 * 1000; // save to DB at most once per minute
+
+function useIdleDetector({ shift, onAutoClockOut, enabled = true }) {
+  const [showWarning, setShowWarning] = useState(false);
+  const lastActivityRef = useRef(Date.now());
+  const lastSaveRef = useRef(0);
+  const idleStartRef = useRef(null); // timestamp when current idle interval started
+  const intervalRef = useRef(null);
+
+  // Save activity timestamp to DB (throttled)
+  const saveActivity = async (ts) => {
+    if (!shift?.id) return;
+    if (ts - lastSaveRef.current < ACTIVITY_SAVE_THROTTLE_MS) return;
+    lastSaveRef.current = ts;
+    try {
+      await supabase.from('shifts')
+        .update({ last_activity_at: new Date(ts).toISOString() })
+        .eq('id', shift.id);
+    } catch (e) { /* fail silent */ }
+  };
+
+  // Record an idle interval (when an idle gap is observed)
+  const recordIdleInterval = async (startTs, endTs) => {
+    if (!shift?.id) return;
+    const seconds = Math.floor((endTs - startTs) / 1000);
+    if (seconds < 60) return; // ignore gaps under 1 minute
+    try {
+      const { data: cur } = await supabase.from('shifts')
+        .select('idle_seconds, idle_intervals')
+        .eq('id', shift.id).maybeSingle();
+      const existing = cur?.idle_intervals || [];
+      const newIntervals = [...existing, {
+        start: new Date(startTs).toISOString(),
+        end: new Date(endTs).toISOString(),
+        seconds
+      }];
+      const totalSec = (cur?.idle_seconds || 0) + seconds;
+      await supabase.from('shifts').update({
+        idle_seconds: totalSec,
+        idle_intervals: newIntervals
+      }).eq('id', shift.id);
+    } catch (e) { /* fail silent */ }
+  };
+
+  // Activity marker
+  const markActive = () => {
+    const now = Date.now();
+    const wasIdling = idleStartRef.current !== null;
+    if (wasIdling) {
+      // We were idle — log the gap
+      const startedAt = idleStartRef.current;
+      idleStartRef.current = null;
+      // Only count it as a true idle gap if it exceeded the warn threshold (avoid noise)
+      if (now - startedAt > IDLE_WARN_MS) {
+        recordIdleInterval(startedAt, now);
+      }
+    }
+    lastActivityRef.current = now;
+    setShowWarning(false);
+    saveActivity(now);
+  };
+
+  // Wire up activity listeners
+  useEffect(() => {
+    if (!enabled || !shift) return;
+    const events = ['mousedown', 'touchstart', 'keydown', 'pointerdown'];
+    const handler = () => markActive();
+    events.forEach(e => window.addEventListener(e, handler, { passive: true }));
+    // Initial activity stamp on enable
+    markActive();
+    return () => {
+      events.forEach(e => window.removeEventListener(e, handler));
+    };
+    // eslint-disable-next-line
+  }, [enabled, shift?.id]);
+
+  // Tick: check idle status every 30 seconds
+  useEffect(() => {
+    if (!enabled || !shift) return;
+    const tick = async () => {
+      const now = Date.now();
+      const sinceActive = now - lastActivityRef.current;
+
+      if (sinceActive >= IDLE_LIMIT_MS) {
+        // Past the limit — auto clock out
+        if (intervalRef.current) clearInterval(intervalRef.current);
+        // Record the idle gap up to the last activity
+        if (idleStartRef.current === null) idleStartRef.current = lastActivityRef.current;
+        await recordIdleInterval(idleStartRef.current, lastActivityRef.current + IDLE_WARN_MS);
+        // Auto-clock-out via callback (caller handles UI + state cleanup)
+        if (onAutoClockOut) onAutoClockOut(lastActivityRef.current);
+        setShowWarning(false);
+      } else if (sinceActive >= IDLE_WARN_MS) {
+        // Warning zone — show the warning UI
+        if (idleStartRef.current === null) idleStartRef.current = lastActivityRef.current;
+        setShowWarning(true);
+      }
+    };
+    intervalRef.current = setInterval(tick, 30 * 1000);
+    return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
+    // eslint-disable-next-line
+  }, [enabled, shift?.id]);
+
+  // On focus / visibility return: check if we should retroactively clock out
+  useEffect(() => {
+    if (!enabled || !shift) return;
+    const check = async () => {
+      // Pull fresh last_activity_at from DB
+      const { data: s } = await supabase.from('shifts')
+        .select('last_activity_at, end_time')
+        .eq('id', shift.id).maybeSingle();
+      if (!s || s.end_time) return; // already ended
+      const lastTs = s.last_activity_at ? new Date(s.last_activity_at).getTime() : null;
+      if (!lastTs) return;
+      const now = Date.now();
+      if (now - lastTs >= IDLE_LIMIT_MS) {
+        // Retroactive clock-out
+        await recordIdleInterval(lastTs, lastTs + IDLE_WARN_MS);
+        if (onAutoClockOut) onAutoClockOut(lastTs);
+      } else if (now - lastTs >= IDLE_WARN_MS) {
+        setShowWarning(true);
+      }
+      lastActivityRef.current = lastTs; // reset local clock
+    };
+    const onFocus = () => check();
+    const onVis = () => { if (!document.hidden) check(); };
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onVis);
+    return () => {
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onVis);
+    };
+    // eslint-disable-next-line
+  }, [enabled, shift?.id]);
+
+  const dismissWarning = () => {
+    lastActivityRef.current = Date.now();
+    saveActivity(Date.now());
+    idleStartRef.current = null;
+    setShowWarning(false);
+  };
+
+  return { showWarning, dismissWarning };
+}
+
+
 const fmtTime = (ms) => {
   if (!ms || ms < 0) return '0:00:00';
   const total = Math.floor(ms / 1000);
@@ -45,7 +287,21 @@ const fmtMoney = (n) => {
 };
 const fmtDate = (ts) => new Date(ts).toLocaleDateString('en-US', { month:'short', day:'numeric' });
 const fmtDateLong = (ts) => new Date(ts).toLocaleDateString('en-US', { month:'long', day:'numeric', year:'numeric' });
+const fmtDateWithDay = (ts) => new Date(ts).toLocaleDateString('en-US', { weekday:'short', month:'short', day:'numeric' });
 const fmtClock = (ts) => new Date(ts).toLocaleTimeString('en-US', { hour:'numeric', minute:'2-digit' });
+
+// Compute billable milliseconds for a shift:
+//   raw clocked-in time − idle_seconds + manual_adjustment_seconds
+// Falls back to raw duration for shifts without these fields.
+const shiftBillableMs = (shift) => {
+  if (!shift?.start_time) return 0;
+  const rawMs = (shift.end_time ? new Date(shift.end_time) : new Date()) - new Date(shift.start_time);
+  const idleSec = shift.idle_seconds || 0;
+  const adjSec = shift.manual_adjustment_seconds || 0;
+  return Math.max(0, rawMs - idleSec * 1000 + adjSec * 1000);
+};
+const shiftBillableHours = (shift) => shiftBillableMs(shift) / (1000 * 60 * 60);
+
 
 function useTick(active) {
   const [, setT] = useState(0);
@@ -565,6 +821,29 @@ function EmployeeApp({ employee, onSignOut }) {
     setBusy(false);
   };
 
+  // Auto clock-out triggered by idle detector. endTs = the last activity time;
+  // we use that as the shift's end_time so billable time excludes the idle gap.
+  const autoClockOut = async (endTs) => {
+    if (!shift) return;
+    if (activeTask) await stopTask(activeTask, false);
+    if (activeBlock && !activeBlock.end_time) {
+      await supabase.from('work_blocks').update({ end_time: new Date(endTs).toISOString() }).eq('id', activeBlock.id);
+    }
+    await supabase.from('shifts').update({
+      end_time: new Date(endTs).toISOString(),
+      auto_clocked_out: true
+    }).eq('id', shift.id);
+    setShift(null); setWorkBlocks([]); setActiveBlock(null); setTasks([]); setActiveTask(null);
+    alert("You were clocked out automatically after 30 minutes of inactivity. Your time was adjusted to your last activity. Talk to your manager if this is a mistake.");
+  };
+
+  // Idle detector — only active while there's an open shift
+  const { showWarning: showIdleWarning, dismissWarning: dismissIdleWarning } = useIdleDetector({
+    shift,
+    onAutoClockOut: autoClockOut,
+    enabled: !!shift && !shift.end_time
+  });
+
   // Switch property = clock out current shift, then drop straight on the property picker.
   // Cleaner break than clock-out → home → clock-in.
   const switchProperty = async () => {
@@ -727,25 +1006,33 @@ function EmployeeApp({ employee, onSignOut }) {
 
   if (!loaded) return <Splash text="Loading…" />;
 
+  // Reusable wrapper: ensures the idle warning modal can overlay any view
+  const withIdleModal = (children) => (
+    <>
+      {children}
+      {showIdleWarning && <IdleWarningModal onStillActive={dismissIdleWarning} />}
+    </>
+  );
+
   // Messages overlay — takes over the screen, regardless of where cleaner was
   if (showMessages) {
-    return <StaffMessagesTab employee={employee} onClose={() => setShowMessages(false)} />;
+    return withIdleModal(<StaffMessagesTab employee={employee} onClose={() => setShowMessages(false)} />);
   }
 
   if (!shift && clockInFlow?.step === 'property') {
-    return <PropertyPicker onPick={onPickProperty} onCancel={() => setClockInFlow(null)} busy={busy} />;
+    return withIdleModal(<PropertyPicker onPick={onPickProperty} onCancel={() => setClockInFlow(null)} busy={busy} />);
   }
   if (shift && blockStartFlow?.step === 'unit') {
-    return <UnitPicker property={shift.customer} onPick={onPickBlockUnit}
-      onBack={() => setBlockStartFlow(null)} busy={busy} title="Which apartment?" />;
+    return withIdleModal(<UnitPicker property={shift.customer} onPick={onPickBlockUnit}
+      onBack={() => setBlockStartFlow(null)} busy={busy} title="Which apartment?" />);
   }
   if (shift && blockStartFlow?.step === 'party') {
-    return <PartyPicker property={shift.customer} unit={blockStartFlow.unit}
-      onPick={onPickBlockParty} onBack={() => setBlockStartFlow({ step: 'unit' })} busy={busy} />;
+    return withIdleModal(<PartyPicker property={shift.customer} unit={blockStartFlow.unit}
+      onPick={onPickBlockParty} onBack={() => setBlockStartFlow({ step: 'unit' })} busy={busy} />);
   }
 
   if (!shift) {
-    return (
+    return withIdleModal(
       <div className="min-h-screen bg-stone-50 flex flex-col">
         <Header name={employee.name} onSignOut={onSignOut} role={employee.role}
           employee={employee} onOpenMessages={() => setShowMessages(true)} />
@@ -772,13 +1059,13 @@ function EmployeeApp({ employee, onSignOut }) {
   const isMulti = shift.customer?.property_type === 'multi_unit';
 
   if (isMulti && !activeBlock) {
-    return <PropertyHub shift={shift} workBlocks={workBlocks} employeeName={employee.name} employee={employee}
+    return withIdleModal(<PropertyHub shift={shift} workBlocks={workBlocks} employeeName={employee.name} employee={employee}
       onSignOut={onSignOut} onClockOut={clockOut} onSwitchProperty={switchProperty}
       onStartNew={startNewBlock} onReopen={reopenBlock} onGoToBedroom={goToBedroomForTarget}
-      onOpenMessages={() => setShowMessages(true)} busy={busy} />;
+      onOpenMessages={() => setShowMessages(true)} busy={busy} />);
   }
   if (isMulti && activeBlock) {
-    return <BlockView shift={shift} block={activeBlock} tasks={tasks} activeTask={activeTask}
+    return withIdleModal(<BlockView shift={shift} block={activeBlock} tasks={tasks} activeTask={activeTask}
       employeeName={employee.name} employee={employee} onSignOut={onSignOut} onFinish={finishBlock}
       onPause={() => setActiveBlock(null)}
       newTaskName={newTaskName} setNewTaskName={setNewTaskName}
@@ -786,9 +1073,9 @@ function EmployeeApp({ employee, onSignOut }) {
       onAddPhoto={(taskId, kind) => setPhotoModal({ taskId, kind })}
       photoModal={photoModal} onClosePhotoModal={() => setPhotoModal(null)}
       onUploadPhoto={uploadPhoto}
-      onOpenMessages={() => setShowMessages(true)} busy={busy} />;
+      onOpenMessages={() => setShowMessages(true)} busy={busy} />);
   }
-  return <SimpleShiftView shift={shift} tasks={tasks} activeTask={activeTask}
+  return withIdleModal(<SimpleShiftView shift={shift} tasks={tasks} activeTask={activeTask}
     employeeName={employee.name} employee={employee} onSignOut={onSignOut} onClockOut={clockOut}
     onSwitchProperty={switchProperty}
     newTaskName={newTaskName} setNewTaskName={setNewTaskName}
@@ -796,7 +1083,7 @@ function EmployeeApp({ employee, onSignOut }) {
     onAddPhoto={(taskId, kind) => setPhotoModal({ taskId, kind })}
     photoModal={photoModal} onClosePhotoModal={() => setPhotoModal(null)}
     onUploadPhoto={uploadPhoto}
-    onOpenMessages={() => setShowMessages(true)} busy={busy} />;
+    onOpenMessages={() => setShowMessages(true)} busy={busy} />);
 }
 
 // =================================================================
@@ -1555,8 +1842,8 @@ async function deleteMessagePhoto(path) {
 }
 
 function Header({ name, onSignOut, role, employee, onOpenMessages }) {
-  // Cleaners get a messages icon in the header (managers/owners have the Messages tab in bottom nav)
-  const showMessagesIcon = onOpenMessages && employee && role !== 'owner' && role !== 'manager';
+  // Messages icon in header for all signed-in roles (cleaner/manager/owner)
+  const showMessagesIcon = !!(onOpenMessages && employee);
   const unread = useUnreadCount({ employee: showMessagesIcon ? employee : null });
   return (
     <div className="flex items-center justify-between px-5 py-3 bg-stone-900 border-b border-stone-900">
@@ -1603,31 +1890,35 @@ function Header({ name, onSignOut, role, employee, onOpenMessages }) {
 
 function ManagerShell({ employee, onSignOut }) {
   const [tab, setTab] = useState('daily');
+  const [showMessages, setShowMessages] = useState(false);
   const showMoneyTabs = canSeeMoney(employee); // owner only
-  const unread = useUnreadCount({ employee });
 
   // If a manager somehow lands on a money tab (e.g. via stale state), bounce them home
   useEffect(() => {
     if (!showMoneyTabs && (tab === 'invoice' || tab === 'payroll')) setTab('daily');
   }, [showMoneyTabs, tab]);
 
-  const colCount = (showMoneyTabs ? 6 : 4) + 1; // +1 for messages
+  const colCount = showMoneyTabs ? 6 : 4;
+  const openMessages = () => setShowMessages(true);
+
+  // Messages takes over the whole screen as an overlay
+  if (showMessages) {
+    return <StaffMessagesTab employee={employee} onClose={() => setShowMessages(false)} />;
+  }
 
   return (
     <div className="min-h-screen bg-stone-50">
-      {tab === 'daily'     && <DailyView        employee={employee} onSignOut={onSignOut} />}
-      {tab === 'dashboard' && <ManagerDashboard employee={employee} onSignOut={onSignOut} />}
-      {tab === 'team'      && <EmployeeAdmin   employee={employee} onSignOut={onSignOut} />}
-      {tab === 'props'     && <PropertyAdmin   employee={employee} onSignOut={onSignOut} />}
-      {tab === 'messages'  && <StaffMessagesTab employee={employee} />}
-      {showMoneyTabs && tab === 'invoice'   && <InvoiceView     employee={employee} onSignOut={onSignOut} />}
-      {showMoneyTabs && tab === 'payroll'   && <ExportView      employee={employee} onSignOut={onSignOut} />}
+      {tab === 'daily'     && <DailyView        employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} />}
+      {tab === 'dashboard' && <ManagerDashboard employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} />}
+      {tab === 'team'      && <EmployeeAdmin   employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} />}
+      {tab === 'props'     && <PropertyAdmin   employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} />}
+      {showMoneyTabs && tab === 'invoice'   && <InvoiceView     employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} />}
+      {showMoneyTabs && tab === 'payroll'   && <ExportView      employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} />}
 
       <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-stone-200 px-1 py-2 z-30">
         <div className="max-w-md mx-auto grid gap-0.5" style={{ gridTemplateColumns: `repeat(${colCount}, minmax(0, 1fr))` }}>
           <TabButton active={tab==='daily'}     onClick={() => setTab('daily')}     icon={<Calendar size={18} />} label="Daily" />
           <TabButton active={tab==='dashboard'} onClick={() => setTab('dashboard')} icon={<LayoutDashboard size={18} />} label="Shifts" />
-          <TabButton active={tab==='messages'}  onClick={() => setTab('messages')}  icon={<MessageCircle size={18} />} label="Messages" badge={unread} />
           <TabButton active={tab==='team'}      onClick={() => setTab('team')}      icon={<Users size={18} />} label="Team" />
           <TabButton active={tab==='props'}     onClick={() => setTab('props')}     icon={<Building2 size={18} />} label="Properties" />
           {showMoneyTabs && <TabButton active={tab==='invoice'} onClick={() => setTab('invoice')} icon={<FileText size={18} />} label="Invoices" />}
@@ -1656,7 +1947,7 @@ function TabButton({ active, onClick, icon, label, badge }) {
 // =================================================================
 // MANAGER DASHBOARD
 // =================================================================
-function ManagerDashboard({ employee, onSignOut }) {
+function ManagerDashboard({ employee, onSignOut, onOpenMessages }) {
   const [shifts, setShifts] = useState([]);
   const [view, setView] = useState('shifts');
   const [selectedShift, setSelectedShift] = useState(null);
@@ -1686,7 +1977,7 @@ function ManagerDashboard({ employee, onSignOut }) {
 
   const activeCount = shifts.filter(s => !s.end_time).length;
   const totalHours = shifts.filter(s => s.end_time)
-    .reduce((sum, s) => sum + (new Date(s.end_time) - new Date(s.start_time)), 0);
+    .reduce((sum, s) => sum + shiftBillableMs(s), 0);
   // Total billable across all shifts (only used if showMoney)
   let totalBillable = 0;
   if (showMoney) {
@@ -1699,7 +1990,8 @@ function ManagerDashboard({ employee, onSignOut }) {
           totalBillable += h * (b.bill_rate_at_work || s.customer?.bill_rate_hourly || 0);
         });
       } else if (s.bill_rate_at_work) {
-        const h = (new Date(s.end_time) - new Date(s.start_time)) / 1000 / 3600;
+        // Simple-property: bill against shift's billable time (idle/adjustments applied)
+        const h = shiftBillableHours(s);
         totalBillable += h * s.bill_rate_at_work;
       }
     });
@@ -1707,7 +1999,7 @@ function ManagerDashboard({ employee, onSignOut }) {
 
   return (
     <div className="pb-24">
-      <Header name={employee.name} onSignOut={onSignOut} role={employee.role} />
+      <Header name={employee.name} onSignOut={onSignOut} role={employee.role} employee={employee} onOpenMessages={onOpenMessages} />
       <div className="px-5 pt-6">
         <div className="text-xs uppercase tracking-widest text-stone-400 font-mono mb-3">
           {new Date().toLocaleDateString('en-US', { weekday:'long', month:'long', day:'numeric' })}
@@ -1776,7 +2068,9 @@ function ShiftList({ shifts, showMoney, onOpen }) {
       ) : (
         <div className="space-y-2">
           {shifts.map(s => {
-            const dur = (s.end_time ? new Date(s.end_time) : new Date()) - new Date(s.start_time);
+            const dur = s.end_time ? shiftBillableMs(s) : (new Date() - new Date(s.start_time));
+            const rawDur = (s.end_time ? new Date(s.end_time) : new Date()) - new Date(s.start_time);
+            const hasAdjustment = (s.idle_seconds || 0) > 0 || (s.manual_adjustment_seconds || 0) !== 0 || s.auto_clocked_out;
             const blockCount = s.work_blocks?.length || 0;
             // Per-shift billable
             let billable = 0;
@@ -1788,7 +2082,7 @@ function ShiftList({ shifts, showMoney, onOpen }) {
                   return sum + h * (b.bill_rate_at_work || s.customer?.bill_rate_hourly || 0);
                 }, 0);
               } else if (s.bill_rate_at_work) {
-                billable = (dur / 1000 / 3600) * s.bill_rate_at_work;
+                billable = shiftBillableHours(s) * s.bill_rate_at_work;
               }
             }
             return (
@@ -1808,7 +2102,12 @@ function ShiftList({ shifts, showMoney, onOpen }) {
                   </div>
                 )}
                 <div className="flex items-center justify-between text-xs text-stone-500 font-mono">
-                  <span>{fmtClock(s.start_time)} {s.end_time ? `— ${fmtClock(s.end_time)}` : '— active'} · {fmtTimeShort(dur)}</span>
+                  <span>
+                    {fmtClock(s.start_time)} {s.end_time ? `— ${fmtClock(s.end_time)}` : '— active'} · {fmtTimeShort(dur)}
+                    {hasAdjustment && s.end_time && (
+                      <span className="ml-1 text-amber-700" title={`Raw: ${fmtTimeShort(rawDur)}, billable shown after idle/adjustments`}>•</span>
+                    )}
+                  </span>
                   <span className="flex items-center gap-2">
                     {showMoney && billable > 0 && <span className="text-emerald-700 font-medium">{fmtMoney(billable)}</span>}
                     <ChevronRight size={14} />
@@ -2016,6 +2315,7 @@ function ShiftDetail({ shiftId, viewerRole, onBack }) {
   const [deletingShift, setDeletingShift] = useState(false);
   const [editingBlock, setEditingBlock] = useState(null); // block obj
   const [deletingBlock, setDeletingBlock] = useState(null); // block obj
+  const [editingAdjustment, setEditingAdjustment] = useState(false);
   const [busy, setBusy] = useState(false);
 
   const reload = async () => {
@@ -2047,6 +2347,16 @@ function ShiftDetail({ shiftId, viewerRole, onBack }) {
     setBusy(false);
     if (error) { alert('Could not save: ' + error.message); return; }
     setEditingShift(false);
+    reload();
+  };
+
+  const saveAdjustment = async (seconds, notes) => {
+    setBusy(true);
+    const { error } = await supabase.from('shifts')
+      .update({ manual_adjustment_seconds: seconds, adjustment_notes: notes || null })
+      .eq('id', shiftId);
+    setBusy(false);
+    if (error) { alert('Could not save: ' + error.message); return; }
     reload();
   };
 
@@ -2103,7 +2413,7 @@ function ShiftDetail({ shiftId, viewerRole, onBack }) {
         )}
         <div className="grid grid-cols-2 gap-3 text-sm mt-4">
           <div>
-            <div className="text-xs uppercase tracking-wider text-stone-400 font-mono mb-1">Total</div>
+            <div className="text-xs uppercase tracking-wider text-stone-400 font-mono mb-1">Clocked in</div>
             <div className="font-mono text-lg">{fmtTimeShort(dur)}</div>
           </div>
           <div>
@@ -2111,6 +2421,73 @@ function ShiftDetail({ shiftId, viewerRole, onBack }) {
             <div className="font-mono text-lg">{isMulti ? workBlocks.length : tasks.length}</div>
           </div>
         </div>
+
+        {/* Idle + adjustment breakdown */}
+        {(shift.idle_seconds > 0 || shift.manual_adjustment_seconds !== 0 || shift.auto_clocked_out) && (() => {
+          const idleSec = shift.idle_seconds || 0;
+          const adjSec = shift.manual_adjustment_seconds || 0;
+          const totalMs = (shift.end_time ? new Date(shift.end_time) : new Date()) - new Date(shift.start_time);
+          const billableMs = Math.max(0, totalMs - (idleSec * 1000) + (adjSec * 1000));
+          const intervals = shift.idle_intervals || [];
+          return (
+            <div className="mt-4 p-4 rounded-2xl bg-stone-800 border border-stone-700">
+              <div className="text-xs uppercase tracking-wider text-amber-400 font-mono mb-3">Time breakdown</div>
+              <div className="space-y-1.5 text-sm font-mono">
+                <div className="flex justify-between text-stone-300">
+                  <span>Clocked in</span>
+                  <span>{fmtTimeShort(totalMs)}</span>
+                </div>
+                {idleSec > 0 && (
+                  <div className="flex justify-between text-stone-400">
+                    <span>− Idle detected</span>
+                    <span>{fmtTimeShort(idleSec * 1000)}</span>
+                  </div>
+                )}
+                {adjSec !== 0 && (
+                  <div className="flex justify-between text-stone-400">
+                    <span>{adjSec >= 0 ? '+' : '−'} Manual adjustment</span>
+                    <span>{fmtTimeShort(Math.abs(adjSec) * 1000)}</span>
+                  </div>
+                )}
+                <div className="border-t border-stone-700 pt-1.5 flex justify-between text-stone-50 font-semibold">
+                  <span>= Billable</span>
+                  <span>{fmtTimeShort(billableMs)}</span>
+                </div>
+              </div>
+
+              {shift.auto_clocked_out && (
+                <div className="mt-3 text-[10px] text-amber-400 font-mono">
+                  ⚠ Auto-clocked out due to 30+ min inactivity
+                </div>
+              )}
+
+              {intervals.length > 0 && (
+                <div className="mt-3 pt-3 border-t border-stone-700">
+                  <div className="text-[10px] uppercase tracking-wider text-stone-500 font-mono mb-1">Idle gaps detected</div>
+                  {intervals.map((iv, i) => (
+                    <div key={i} className="text-[11px] text-stone-400 font-mono">
+                      {fmtClock(iv.start)} – {fmtClock(iv.end)} ({fmtTimeShort(iv.seconds * 1000)})
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {shift.adjustment_notes && (
+                <div className="mt-3 pt-3 border-t border-stone-700">
+                  <div className="text-[10px] uppercase tracking-wider text-stone-500 font-mono mb-1">Adjustment notes</div>
+                  <div className="text-xs text-stone-300 italic">"{shift.adjustment_notes}"</div>
+                </div>
+              )}
+
+              {canEdit && (
+                <button onClick={() => setEditingAdjustment(true)}
+                  className="mt-3 w-full py-2 rounded-xl bg-stone-700 hover:bg-stone-600 text-stone-50 text-xs font-mono flex items-center justify-center gap-2">
+                  <Edit2 size={12} /> Adjust billable time
+                </button>
+              )}
+            </div>
+          );
+        })()}
       </div>
       <div className="px-5 pt-6">
         {isMulti ? (
@@ -2146,6 +2523,11 @@ function ShiftDetail({ shiftId, viewerRole, onBack }) {
               className="w-full py-3 rounded-2xl bg-stone-100 hover:bg-stone-200 text-stone-800 text-sm font-medium flex items-center justify-center gap-2 disabled:opacity-50"
               disabled={busy}>
               <Edit2 size={14} /> Edit clock-in / clock-out times
+            </button>
+            <button onClick={() => setEditingAdjustment(true)}
+              className="w-full py-3 rounded-2xl bg-stone-100 hover:bg-stone-200 text-stone-800 text-sm font-medium flex items-center justify-center gap-2 disabled:opacity-50"
+              disabled={busy}>
+              <Clock size={14} /> Adjust billable time
             </button>
             <button onClick={() => setDeletingShift(true)}
               className="w-full py-3 rounded-2xl border-2 border-red-200 text-red-700 text-sm font-medium flex items-center justify-center gap-2 disabled:opacity-50"
@@ -2194,6 +2576,13 @@ function ShiftDetail({ shiftId, viewerRole, onBack }) {
           busy={busy}
           onConfirm={() => deleteBlock(deletingBlock)}
           onClose={() => setDeletingBlock(null)} />
+      )}
+      {editingAdjustment && shift && (
+        <AdjustmentModal
+          shift={shift}
+          busy={busy}
+          onSave={saveAdjustment}
+          onClose={() => setEditingAdjustment(false)} />
       )}
     </div>
   );
@@ -2331,6 +2720,93 @@ function DeleteConfirmModal({ title, description, itemSummary, busy, onConfirm, 
           <button onClick={onConfirm} disabled={busy || !matches}
             className="flex-1 py-3 rounded-2xl bg-red-600 text-white font-medium disabled:opacity-40 disabled:cursor-not-allowed">
             {busy ? 'Deleting…' : 'Delete forever'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// =================================================================
+// ADJUSTMENT MODAL — owner/manager edits the manual billable-time adjustment
+// =================================================================
+function AdjustmentModal({ shift, busy, onSave, onClose }) {
+  const cur = shift.manual_adjustment_seconds || 0;
+  const sign = cur >= 0 ? '+' : '−';
+  const [direction, setDirection] = useState(cur >= 0 ? 'add' : 'subtract');
+  const [minutes, setMinutes] = useState(String(Math.abs(Math.round(cur / 60))));
+  const [notes, setNotes] = useState(shift.adjustment_notes || '');
+
+  const handleSave = () => {
+    const mins = parseInt(minutes || '0', 10);
+    if (isNaN(mins) || mins < 0) {
+      alert('Minutes must be 0 or a positive number.');
+      return;
+    }
+    const seconds = (direction === 'add' ? 1 : -1) * mins * 60;
+    onSave(seconds, notes.trim());
+    onClose();
+  };
+
+  const totalMs = (shift.end_time ? new Date(shift.end_time) : new Date()) - new Date(shift.start_time);
+  const idleSec = shift.idle_seconds || 0;
+  const newAdjSec = (direction === 'add' ? 1 : -1) * (parseInt(minutes || '0', 10) || 0) * 60;
+  const previewBillableMs = Math.max(0, totalMs - idleSec * 1000 + newAdjSec * 1000);
+
+  return (
+    <div className="fixed inset-0 bg-stone-900/80 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
+      <div className="bg-stone-50 w-full sm:max-w-md sm:rounded-3xl rounded-t-3xl flex flex-col max-h-[90vh]">
+        <div className="flex items-center justify-between p-5 border-b border-stone-200">
+          <div>
+            <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">Shift adjustment</div>
+            <div className="font-serif text-xl text-stone-900">Adjust billable time</div>
+          </div>
+          <button onClick={onClose} className="p-2 rounded-full hover:bg-stone-100">
+            <X size={20} className="text-stone-600" />
+          </button>
+        </div>
+        <div className="flex-1 overflow-y-auto p-5 space-y-4">
+          <div className="p-3 rounded-xl bg-stone-100 text-sm text-stone-600">
+            Use this to add or subtract billable time. For example, if a cleaner forgot to clock out for lunch, subtract 30 min. If they did extra work after clocking out, add it back.
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <button onClick={() => setDirection('add')}
+              className={`py-3 rounded-xl border-2 text-sm font-medium ${direction === 'add' ? 'border-emerald-500 bg-emerald-50 text-emerald-700' : 'border-stone-200 bg-white text-stone-600'}`}>
+              + Add time
+            </button>
+            <button onClick={() => setDirection('subtract')}
+              className={`py-3 rounded-xl border-2 text-sm font-medium ${direction === 'subtract' ? 'border-red-500 bg-red-50 text-red-700' : 'border-stone-200 bg-white text-stone-600'}`}>
+              − Remove time
+            </button>
+          </div>
+          <div>
+            <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-1 block">Minutes</label>
+            <input type="number" min="0" value={minutes} onChange={(e) => setMinutes(e.target.value)}
+              style={{ fontSize: 16 }}
+              className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white font-mono" />
+          </div>
+          <div>
+            <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-1 block">Notes (optional)</label>
+            <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={2}
+              placeholder="Reason for adjustment…"
+              style={{ fontSize: 16 }}
+              className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white text-sm resize-none" />
+          </div>
+          <div className="p-3 rounded-xl bg-stone-900 text-stone-50 font-mono text-sm space-y-1">
+            <div className="flex justify-between"><span className="text-stone-400">Clocked in</span><span>{fmtTimeShort(totalMs)}</span></div>
+            {idleSec > 0 && <div className="flex justify-between"><span className="text-stone-400">− Idle</span><span>{fmtTimeShort(idleSec * 1000)}</span></div>}
+            {newAdjSec !== 0 && <div className="flex justify-between"><span className="text-stone-400">{newAdjSec >= 0 ? '+' : '−'} Adjustment</span><span>{fmtTimeShort(Math.abs(newAdjSec) * 1000)}</span></div>}
+            <div className="flex justify-between border-t border-stone-700 pt-1.5"><span className="text-amber-400">= Billable</span><span>{fmtTimeShort(previewBillableMs)}</span></div>
+          </div>
+        </div>
+        <div className="p-5 border-t border-stone-200 flex gap-2">
+          <button onClick={onClose} disabled={busy}
+            className="flex-1 py-3 rounded-2xl bg-stone-100 text-stone-700 font-medium disabled:opacity-50">
+            Cancel
+          </button>
+          <button onClick={handleSave} disabled={busy}
+            className="flex-1 py-3 rounded-2xl bg-stone-900 text-stone-50 font-medium disabled:opacity-50">
+            {busy ? 'Saving…' : 'Save'}
           </button>
         </div>
       </div>
@@ -2487,7 +2963,7 @@ function PhotoZoomViewer({ photos, initialUrl, onClose }) {
 // =================================================================
 // EMPLOYEE ADMIN
 // =================================================================
-function EmployeeAdmin({ employee, onSignOut }) {
+function EmployeeAdmin({ employee, onSignOut, onOpenMessages }) {
   const [employees, setEmployees] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [editing, setEditing] = useState(null);
@@ -2506,7 +2982,7 @@ function EmployeeAdmin({ employee, onSignOut }) {
   const activeCount = employees.filter(e => e.active).length;
   return (
     <div className="pb-24">
-      <Header name={employee.name} onSignOut={onSignOut} />
+      <Header name={employee.name} onSignOut={onSignOut} role={employee.role} employee={employee} onOpenMessages={onOpenMessages} />
       <div className="px-5 pt-6">
         <div className="text-xs uppercase tracking-widest text-stone-400 font-mono mb-3">Admin</div>
         <h1 className="text-4xl font-light text-stone-900 tracking-tight mb-2">
@@ -2657,7 +3133,7 @@ function EmployeeForm({ employee, currentUserId, currentUserRole, onCancel, onSa
 // =================================================================
 // PROPERTY ADMIN
 // =================================================================
-function PropertyAdmin({ employee, onSignOut }) {
+function PropertyAdmin({ employee, onSignOut, onOpenMessages }) {
   const [view, setView] = useState({ kind: 'list' });
   const [props, setProps] = useState([]);
   const [loaded, setLoaded] = useState(false);
@@ -2735,7 +3211,7 @@ function PropertyAdmin({ employee, onSignOut }) {
   const activeCount = props.filter(p => p.active).length;
   return (
     <div className="pb-24">
-      <Header name={employee.name} onSignOut={onSignOut} />
+      <Header name={employee.name} onSignOut={onSignOut} role={employee.role} employee={employee} onOpenMessages={onOpenMessages} />
       <div className="px-5 pt-6">
         <div className="text-xs uppercase tracking-widest text-stone-400 font-mono mb-3">Admin</div>
         <h1 className="text-4xl font-light text-stone-900 tracking-tight mb-2">
@@ -3588,7 +4064,7 @@ function PartyForm({ property, unit, party, onCancel, onSaved }) {
 // =================================================================
 // INVOICE VIEW (uses work blocks)
 // =================================================================
-function InvoiceView({ employee, onSignOut }) {
+function InvoiceView({ employee, onSignOut, onOpenMessages }) {
   const today = new Date().toISOString().split('T')[0];
   const twoWeeksAgo = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
   const [properties, setProperties] = useState([]);
@@ -3646,7 +4122,7 @@ function InvoiceView({ employee, onSignOut }) {
   }
   return (
     <div className="pb-24">
-      <Header name={employee.name} onSignOut={onSignOut} />
+      <Header name={employee.name} onSignOut={onSignOut} role={employee.role} employee={employee} onOpenMessages={onOpenMessages} />
       <div className="px-5 pt-6">
         <div className="text-xs uppercase tracking-widest text-stone-400 font-mono mb-3">Billing</div>
         <h1 className="text-4xl font-light text-stone-900 tracking-tight mb-6">
@@ -3809,7 +4285,7 @@ function InvoicePreview({ invoice, showZeros, setShowZeros, onBack, onPrint }) {
 // =================================================================
 // PAYROLL EXPORT
 // =================================================================
-function ExportView({ employee, onSignOut }) {
+function ExportView({ employee, onSignOut, onOpenMessages }) {
   const today = new Date().toISOString().split('T')[0];
   const twoWeeksAgo = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
   const [start, setStart] = useState(twoWeeksAgo);
@@ -3820,13 +4296,16 @@ function ExportView({ employee, onSignOut }) {
     setBusy(true);
     const { data } = await supabase
       .from('shifts')
-      .select('start_time, end_time, bill_rate_at_work, employee:employees(name), customer:customers(name, property_type, bill_rate_hourly), work_blocks(start_time, end_time, bill_rate_at_work)')
+      .select('start_time, end_time, bill_rate_at_work, idle_seconds, manual_adjustment_seconds, auto_clocked_out, adjustment_notes, employee:employees(name), customer:customers(name, property_type, bill_rate_hourly), work_blocks(start_time, end_time, bill_rate_at_work)')
       .gte('start_time', start + 'T00:00:00')
       .lte('start_time', end + 'T23:59:59')
       .not('end_time', 'is', null)
       .order('start_time');
     const rows = (data || []).map(s => {
-      const hours = (new Date(s.end_time) - new Date(s.start_time)) / 1000 / 3600;
+      const rawHours = (new Date(s.end_time) - new Date(s.start_time)) / 1000 / 3600;
+      const billableHrs = shiftBillableHours(s);
+      const idleHrs = (s.idle_seconds || 0) / 3600;
+      const adjHrs = (s.manual_adjustment_seconds || 0) / 3600;
       let billable = null;
       if (s.customer?.property_type === 'multi_unit') {
         billable = (s.work_blocks || []).reduce((sum, b) => {
@@ -3835,26 +4314,36 @@ function ExportView({ employee, onSignOut }) {
           return sum + h * (b.bill_rate_at_work || s.customer?.bill_rate_hourly || 0);
         }, 0);
       } else if (s.bill_rate_at_work) {
-        billable = hours * s.bill_rate_at_work;
+        billable = billableHrs * s.bill_rate_at_work;
       }
       return {
         employee: s.employee?.name || '',
         date: new Date(s.start_time).toLocaleDateString('en-US'),
         clock_in: new Date(s.start_time).toLocaleTimeString('en-US'),
         clock_out: new Date(s.end_time).toLocaleTimeString('en-US'),
-        hours: hours.toFixed(2),
+        raw_hours: rawHours.toFixed(2),
+        idle_hours: idleHrs.toFixed(2),
+        adjustment_hours: adjHrs.toFixed(2),
+        billable_hours: billableHrs.toFixed(2),
         property: s.customer?.name || '',
         billable: billable != null ? billable.toFixed(2) : '',
+        auto_clocked_out: s.auto_clocked_out ? 'yes' : '',
+        notes: s.adjustment_notes || '',
       };
     });
     setPreview(rows); setBusy(false);
   };
   const downloadCSV = () => {
     if (!preview || preview.length === 0) return;
-    const headers = ['Employee','Date','Clock In','Clock Out','Hours','Property','Billable'];
+    const headers = ['Employee','Date','Clock In','Clock Out','Raw Hours','Idle Hours','Adjustment Hours','Billable Hours','Property','Billable $','Auto Clock Out','Notes'];
     const csv = [
       headers.join(','),
-      ...preview.map(r => [`"${r.employee}"`, r.date, r.clock_in, r.clock_out, r.hours, `"${r.property}"`, r.billable].join(','))
+      ...preview.map(r => [
+        `"${r.employee}"`, r.date, r.clock_in, r.clock_out,
+        r.raw_hours, r.idle_hours, r.adjustment_hours, r.billable_hours,
+        `"${r.property}"`, r.billable,
+        r.auto_clocked_out, `"${(r.notes || '').replace(/"/g, '""')}"`
+      ].join(','))
     ].join('\n');
     const blob = new Blob([csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
@@ -3865,13 +4354,13 @@ function ExportView({ employee, onSignOut }) {
   const byEmployee = {};
   (preview || []).forEach(r => {
     if (!byEmployee[r.employee]) byEmployee[r.employee] = { hours: 0, shifts: 0, billable: 0 };
-    byEmployee[r.employee].hours += parseFloat(r.hours);
+    byEmployee[r.employee].hours += parseFloat(r.billable_hours);
     byEmployee[r.employee].shifts += 1;
     if (r.billable) byEmployee[r.employee].billable += parseFloat(r.billable);
   });
   return (
     <div className="pb-24">
-      <Header name={employee.name} onSignOut={onSignOut} />
+      <Header name={employee.name} onSignOut={onSignOut} role={employee.role} employee={employee} onOpenMessages={onOpenMessages} />
       <div className="px-5 pt-6">
         <div className="text-xs uppercase tracking-widest text-stone-400 font-mono mb-3">Payroll</div>
         <h1 className="text-4xl font-light text-stone-900 tracking-tight mb-6">
@@ -3932,6 +4421,102 @@ function ExportView({ employee, onSignOut }) {
 // =================================================================
 // PM WELCOME MODAL — shown on first sign-in and from the "How this works" button
 // =================================================================
+// =================================================================
+// TRANSLATE BUTTON — small UI for translating an assignment's text
+// Uses the Google Translate API key configured at the top of this file.
+// Hidden entirely if no key is configured.
+// =================================================================
+function TranslateButton({ texts, defaultTargetLang = 'es' }) {
+  const [open, setOpen] = useState(false);
+  const [targetLang, setTargetLang] = useState(() => {
+    try { return localStorage.getItem('tt_translate_target') || defaultTargetLang; } catch { return defaultTargetLang; }
+  });
+  const [translated, setTranslated] = useState(null); // array of { translatedText, detectedSourceLanguage }
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  if (!isTranslateConfigured()) return null;
+  const inputs = (Array.isArray(texts) ? texts : [texts]).filter(Boolean);
+  if (inputs.length === 0) return null;
+
+  const doTranslate = async (lang) => {
+    setBusy(true); setError('');
+    try {
+      const out = await translateText(inputs, lang);
+      setTranslated(out);
+      try { localStorage.setItem('tt_translate_target', lang); } catch {}
+    } catch (e) {
+      setError(e.message || String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const langLabel = SUPPORTED_TRANSLATE_LANGUAGES.find(l => l.code === targetLang)?.label || targetLang;
+
+  return (
+    <div className="mt-2">
+      {!translated ? (
+        <div className="flex items-center gap-2 flex-wrap">
+          <button onClick={() => { setOpen(true); doTranslate(targetLang); }}
+            disabled={busy}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-amber-100 hover:bg-amber-200 text-amber-900 text-xs font-mono active:scale-95 transition-all disabled:opacity-50">
+            <Languages size={12} />
+            {busy ? 'Translating…' : `Translate to ${langLabel}`}
+          </button>
+          {open && (
+            <select value={targetLang} onChange={(e) => { setTargetLang(e.target.value); doTranslate(e.target.value); }}
+              disabled={busy}
+              className="text-xs font-mono px-2 py-1 rounded-lg border border-stone-300 bg-white">
+              {SUPPORTED_TRANSLATE_LANGUAGES.map(l => (
+                <option key={l.code} value={l.code}>{l.label}</option>
+              ))}
+            </select>
+          )}
+        </div>
+      ) : (
+        <div className="mt-1 p-3 rounded-xl bg-amber-50 border border-amber-200">
+          <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider font-mono text-amber-800">
+              <Languages size={11} /> Translated to {langLabel}
+            </div>
+            <div className="flex items-center gap-2">
+              <select value={targetLang} onChange={(e) => { setTargetLang(e.target.value); doTranslate(e.target.value); }}
+                disabled={busy}
+                className="text-[10px] font-mono px-2 py-0.5 rounded border border-amber-300 bg-white">
+                {SUPPORTED_TRANSLATE_LANGUAGES.map(l => (
+                  <option key={l.code} value={l.code}>{l.label}</option>
+                ))}
+              </select>
+              <button onClick={() => setTranslated(null)}
+                className="text-[10px] font-mono text-stone-500 hover:text-stone-800">
+                Hide
+              </button>
+            </div>
+          </div>
+          {busy ? (
+            <div className="text-xs text-amber-700 italic">Translating…</div>
+          ) : (
+            <div className="space-y-2">
+              {translated.map((t, i) => (
+                <div key={i} className="text-sm text-stone-800 whitespace-pre-wrap">
+                  {t.translatedText}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+      {error && (
+        <div className="mt-1 text-xs text-red-600 flex items-center gap-1">
+          <AlertCircle size={12} /> {error}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
 function WelcomeModal({ propertyName, onClose }) {
   return (
     <div className="fixed inset-0 bg-stone-900/80 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
@@ -4006,6 +4591,32 @@ function WelcomeModal({ propertyName, onClose }) {
 // CHANGE PORTAL CODE MODAL — PM-only
 // Lets the main PM change their own portal code. Logs the change.
 // =================================================================
+// =================================================================
+// IDLE WARNING MODAL — pops at 25 min of inactivity, gives 5 min to respond
+// =================================================================
+function IdleWarningModal({ onStillActive }) {
+  return (
+    <div className="fixed inset-0 bg-stone-900/90 z-[60] flex items-center justify-center p-4">
+      <div className="bg-stone-50 rounded-3xl max-w-md w-full p-6 text-center">
+        <div className="w-16 h-16 rounded-full bg-amber-100 flex items-center justify-center mx-auto mb-4">
+          <Clock size={32} className="text-amber-700" />
+        </div>
+        <div className="font-serif text-2xl text-stone-900 mb-2">Still working?</div>
+        <div className="text-stone-600 mb-1">
+          We haven't seen any activity for 25 minutes.
+        </div>
+        <div className="text-sm text-stone-500 mb-6">
+          If you don't tap below in the next 5 minutes, we'll clock you out automatically and flag the idle time.
+        </div>
+        <button onClick={onStillActive}
+          className="w-full py-4 rounded-2xl bg-stone-900 text-stone-50 font-medium active:scale-98 transition-transform">
+          Yes, I'm still working
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function ChangePortalCodeModal({ property, onClose, onSaved }) {
   const [oldCode, setOldCode] = useState('');
   const [newCode, setNewCode] = useState('');
@@ -4292,12 +4903,13 @@ function PortalDashboard({ property, portalKind, onSignOut, onRefreshProperty })
 }
 
 function PortalHome({ property, portalKind, onSignOut, onRefreshProperty, onOpenUnitDay }) {
-  const [tab, setTab] = useState('history'); // 'history' | 'messages' | 'upload-photo' | 'assignments'
+  const [tab, setTab] = useState('history'); // 'history' | 'upload-photo' | 'assignments'
   const [groups, setGroups] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [filter, setFilter] = useState('30d');
   const [showWelcome, setShowWelcome] = useState(false);
   const [showChangeCode, setShowChangeCode] = useState(false);
+  const [showMessages, setShowMessages] = useState(false);
   const pmUnread = useUnreadCount({ customer: property });
   const isPmStaff = portalKind === 'pm_staff';
 
@@ -4374,6 +4986,12 @@ function PortalHome({ property, portalKind, onSignOut, onRefreshProperty, onOpen
     setLoaded(true);
   })(); }, [property.id, filter, tab]);
 
+  // Messages overlay — takes over the whole screen when active
+  if (showMessages) {
+    return <PortalMessagesTab property={property} portalKind={portalKind}
+      onClose={() => setShowMessages(false)} />;
+  }
+
   return (
     <div className="min-h-screen bg-stone-50 pb-12">
       <div className="bg-stone-900 text-stone-50 px-5 pt-5 pb-6">
@@ -4395,6 +5013,16 @@ function PortalHome({ property, portalKind, onSignOut, onRefreshProperty, onOpen
             </div>
           </div>
           <div className="flex items-center gap-2">
+            <button onClick={() => setShowMessages(true)}
+              className="relative p-2 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-50"
+              title="Messages">
+              <MessageCircle size={16} />
+              {pmUnread > 0 && (
+                <span className="absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1 rounded-full bg-amber-600 text-white text-[10px] font-mono font-bold flex items-center justify-center border-2 border-stone-900">
+                  {pmUnread > 99 ? '99+' : pmUnread}
+                </span>
+              )}
+            </button>
             <button onClick={() => setShowWelcome(true)}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-50 text-xs font-mono active:scale-95 transition-all">
               <HelpCircle size={14} /> How this works
@@ -4429,15 +5057,6 @@ function PortalHome({ property, portalKind, onSignOut, onRefreshProperty, onOpen
             className={`flex-1 py-2 px-2 rounded-lg text-xs font-medium ${tab === 'history' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
             History
           </button>
-          <button onClick={() => setTab('messages')}
-            className={`flex-1 py-2 px-2 rounded-lg text-xs font-medium relative ${tab === 'messages' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
-            Messages
-            {pmUnread > 0 && (
-              <span className="absolute -top-1 -right-1 min-w-[16px] h-4 px-1 rounded-full bg-amber-600 text-white text-[9px] font-mono font-bold flex items-center justify-center">
-                {pmUnread > 99 ? '99+' : pmUnread}
-              </span>
-            )}
-          </button>
           <button onClick={() => setTab('upload-photo')}
             className={`flex-1 py-2 px-2 rounded-lg text-xs font-medium ${tab === 'upload-photo' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
             Upload
@@ -4452,9 +5071,6 @@ function PortalHome({ property, portalKind, onSignOut, onRefreshProperty, onOpen
       {tab === 'history' && (
         <PortalHistoryTab property={property} groups={groups} loaded={loaded}
           filter={filter} setFilter={setFilter} onOpenUnitDay={onOpenUnitDay} />
-      )}
-      {tab === 'messages' && (
-        <PortalMessagesTab property={property} portalKind={portalKind} onPropertyRefresh={() => setTab('history')} />
       )}
       {tab === 'upload-photo' && (
         <PortalPhotoUploadTab property={property} portalKind={portalKind} />
@@ -4746,7 +5362,7 @@ function PortalPhotoSection({ label, photos, highlight, description }) {
 // DAILY VIEW — calendar-first drill-down
 // Calendar month → pick a date → see units cleaned that day → pick a unit → full detail
 // =================================================================
-function DailyView({ employee, onSignOut }) {
+function DailyView({ employee, onSignOut, onOpenMessages }) {
   const [view, setView] = useState({ kind: 'calendar' });
   const showMoney = canSeeMoney(employee);
 
@@ -4769,7 +5385,8 @@ function DailyView({ employee, onSignOut }) {
 
   return <DailyCalendar employee={employee} onSignOut={onSignOut}
     onPickDay={(date) => setView({ kind: 'day', date })}
-    onOpenInbox={() => setView({ kind: 'inbox' })} />;
+    onOpenInbox={() => setView({ kind: 'inbox' })}
+    onOpenMessages={onOpenMessages} />;
 }
 
 // Helpers — local-time YYYY-MM-DD (avoids UTC midnight bugs)
@@ -4780,7 +5397,7 @@ const toDateKey = (d) => {
   return `${yr}-${mo}-${dy}`;
 };
 
-function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox }) {
+function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenMessages }) {
   const today = new Date();
   const [viewMonth, setViewMonth] = useState(new Date(today.getFullYear(), today.getMonth(), 1));
   const [activity, setActivity] = useState({});
@@ -4886,7 +5503,7 @@ function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox }) {
 
   return (
     <div className="pb-24">
-      <Header name={employee.name} onSignOut={onSignOut} role={employee.role} />
+      <Header name={employee.name} onSignOut={onSignOut} role={employee.role} employee={employee} onOpenMessages={onOpenMessages} />
       <div className="px-5 pt-6">
         {inboxTotal > 0 && (
           <button onClick={onOpenInbox}
@@ -5441,6 +6058,7 @@ function AssignmentList({ property, employee, onBack, onNew, onOpen }) {
     setAssignments(data || []); setLoaded(true);
   };
   useEffect(() => { load(); }, [property.id]);
+  useAssignmentSync(load, 'asgn-list');
 
   // Aggregate status per assignment
   const decorated = (assignments || []).map(a => {
@@ -5874,6 +6492,7 @@ function AssignmentDetail({ property, assignment: assignmentInit, employee, onBa
     setLoaded(true);
   };
   useEffect(() => { reload(); /* eslint-disable-next-line */ }, []);
+  useAssignmentSync(reload, 'asgn-detail');
 
   const deleteAssignment = async () => {
     setBusy(true);
@@ -5904,7 +6523,10 @@ function AssignmentDetail({ property, assignment: assignmentInit, employee, onBa
           <div className="font-serif text-xl text-stone-900 truncate">{assignment.title}</div>
         </div>
       </div>
-      <div className="px-5 pt-6 space-y-5">
+      <div className="px-5 pt-4">
+        <TranslateButton texts={[assignment.title, assignment.notes].filter(Boolean)} />
+      </div>
+      <div className="px-5 pt-4 space-y-5">
         {/* Document preview/link */}
         <div className="p-4 rounded-2xl bg-white border border-stone-200">
           <div className="flex items-center gap-3 mb-3">
@@ -5959,7 +6581,7 @@ function AssignmentDetail({ property, assignment: assignmentInit, employee, onBa
                         )}
                         {t.completed_at && (
                           <div className="text-xs text-stone-500 font-mono mt-1">
-                            Done {fmtDate(t.completed_at)}{t.completer?.name && ` by ${t.completer.name}`}
+                            Done {fmtDateWithDay(t.completed_at)}{t.completer?.name && ` by ${t.completer.name}`}
                           </div>
                         )}
                       </div>
@@ -6044,9 +6666,34 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
     setLoaded(true);
   };
   useEffect(() => { load(); /* eslint-disable-next-line */ }, [propertyId, unitId, partyId, showDone]);
+  useAssignmentSync(load, 'asgn-banner');
 
   const updateStatus = async (target, newStatus, statusNotes) => {
     setBusy(true);
+    // Auto-handoff: if cleaner is starting a new assignment and they have an OTHER
+    // in_progress assignment on a different bedroom, mark that one done first.
+    if (newStatus === 'in_progress' && employee?.id) {
+      try {
+        const { data: otherActive } = await supabase
+          .from('assignment_targets')
+          .select('id, unit_id, party_id')
+          .eq('status', 'in_progress')
+          .eq('started_by', employee.id)
+          .neq('id', target.id);
+        const switching = (otherActive || []).filter(o =>
+          // Only auto-finish if it's on a DIFFERENT bedroom
+          o.unit_id !== target.unit_id || o.party_id !== target.party_id
+        );
+        if (switching.length > 0) {
+          const nowIso = new Date().toISOString();
+          await supabase.from('assignment_targets')
+            .update({ status: 'done', completed_at: nowIso, completed_by: employee.id })
+            .in('id', switching.map(s => s.id));
+        }
+      } catch (e) {
+        console.warn('[auto-handoff] failed', e);
+      }
+    }
     const patch = { status: newStatus };
     if (newStatus === 'in_progress') {
       if (!target.started_at) patch.started_at = new Date().toISOString();
@@ -6159,9 +6806,9 @@ function AssignmentCard({ target, busy, onView, onStart, onDone, onReopen, onBlo
               {activeCleaners.length === 1 ? `${activeCleaners[0]} is here` : `${activeCleaners.length} cleaners here: ${activeCleaners.join(', ')}`}
             </div>
           )}
-          {isDone && t.completer?.name && (
+          {isDone && t.completed_at && (
             <div className="text-xs text-emerald-700 font-mono mt-1">
-              Done by {t.completer.name}{t.completed_at && ` · ${fmtClock(t.completed_at)}`}
+              {t.completer?.name ? `Done by ${t.completer.name} · ` : 'Done '}{fmtDateWithDay(t.completed_at)} {fmtClock(t.completed_at)}
             </div>
           )}
           {t.status_notes && (
@@ -6270,6 +6917,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
   const [busy, setBusy] = useState(false);
   const [buildingFilter, setBuildingFilter] = useState('all'); // 'all' or a building prefix like 'B3'
   const [collapsedBuildings, setCollapsedBuildings] = useState({}); // { B3: true } = collapsed
+  const [doneSubTab, setDoneSubTab] = useState('recent'); // 'recent' | 'older' | 'archived'
 
   const [loadError, setLoadError] = useState(null);
 
@@ -6300,6 +6948,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
     setLoaded(true);
   };
   useEffect(() => { load(); /* eslint-disable-next-line */ }, [propertyId, statusFilter]);
+  useAssignmentSync(load, 'asgn-tab');
 
   const updateStatus = async (target, newStatus, statusNotes) => {
     setBusy(true);
@@ -6395,34 +7044,32 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
   // For Done: collapsed by default for Older and Archived
   const renderDoneBuckets = (items) => {
     const buckets = bucketByAge(items);
-    const sections = [
-      { id: 'recent', label: 'Recent', subtitle: 'Last 24 hours', items: buckets.recent, defaultCollapsed: false },
-      { id: 'older', label: 'Older', subtitle: '1–7 days ago', items: buckets.older, defaultCollapsed: true },
-      { id: 'archived', label: 'Archived', subtitle: 'More than 1 week ago', items: buckets.archived, defaultCollapsed: true },
+    const subTabs = [
+      { id: 'recent', label: 'Recent', subtitle: 'Last 24 hours', items: buckets.recent },
+      { id: 'older', label: 'Older', subtitle: '1–7 days ago', items: buckets.older },
+      { id: 'archived', label: 'Archived', subtitle: 'Over 1 week ago', items: buckets.archived },
     ];
+    const active = subTabs.find(s => s.id === doneSubTab) || subTabs[0];
     return (
-      <div className="space-y-3">
-        {sections.map(s => {
-          if (s.items.length === 0) return null;
-          const key = `done-${s.id}`;
-          // Use collapsedBuildings state to track these too (separate keys)
-          const collapsed = collapsedBuildings[key] === undefined ? s.defaultCollapsed : collapsedBuildings[key];
-          return (
-            <div key={s.id}>
-              <button onClick={() => setCollapsedBuildings(prev => ({ ...prev, [key]: !collapsed }))}
-                className="w-full flex items-center justify-between mb-2 px-1 py-1 hover:bg-stone-50 rounded">
-                <div className="flex items-center gap-2">
-                  <Check size={14} className="text-stone-500" />
-                  <span className="text-xs uppercase tracking-wider font-mono text-stone-600">{s.label}</span>
-                  <span className="text-[10px] font-mono text-stone-400">{s.subtitle}</span>
-                  <span className="text-xs font-mono text-stone-400">({s.items.length})</span>
-                </div>
-                <ChevronRight size={14} className={`text-stone-400 transition-transform ${collapsed ? '' : 'rotate-90'}`} />
-              </button>
-              {!collapsed && renderAssignmentList(s.items)}
-            </div>
-          );
-        })}
+      <div>
+        {/* Sub-tab pills */}
+        <div className="flex gap-1 mb-3 bg-stone-100 p-1 rounded-xl">
+          {subTabs.map(s => (
+            <button key={s.id} onClick={() => setDoneSubTab(s.id)}
+              className={`flex-1 py-1.5 px-2 rounded-lg text-[11px] font-medium transition-colors ${doneSubTab === s.id ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+              {s.label}
+              {s.items.length > 0 && <span className="ml-1 text-stone-400">({s.items.length})</span>}
+            </button>
+          ))}
+        </div>
+        <div className="text-[10px] uppercase tracking-wider font-mono text-stone-400 mb-2 px-1">
+          {active.subtitle}
+        </div>
+        {active.items.length === 0 ? (
+          <div className="text-center py-8 text-stone-400 text-xs border-2 border-dashed border-stone-200 rounded-2xl">
+            Nothing in this bucket.
+          </div>
+        ) : renderAssignmentList(active.items)}
       </div>
     );
   };
@@ -6577,16 +7224,20 @@ function ReassignModal({ target, propertyId, onSaved, onClose }) {
 
 function AssignmentViewer({ target, onClose }) {
   const a = target.assignment;
+  const translateTexts = [a.title, a.notes].filter(Boolean);
   return (
     <div className="fixed inset-0 bg-stone-900/95 z-50 flex flex-col">
-      <div className="flex items-center justify-between p-4 text-stone-50 bg-stone-900">
-        <div className="flex-1 min-w-0">
-          <div className="font-serif text-lg truncate">{a.title}</div>
-          {a.notes && <div className="text-xs text-stone-400 mt-0.5 line-clamp-1">{a.notes}</div>}
+      <div className="p-4 text-stone-50 bg-stone-900">
+        <div className="flex items-start justify-between gap-2">
+          <div className="flex-1 min-w-0">
+            <div className="font-serif text-lg truncate">{a.title}</div>
+            {a.notes && <div className="text-xs text-stone-400 mt-0.5 whitespace-pre-wrap break-words">{a.notes}</div>}
+          </div>
+          <button onClick={onClose} className="p-2 rounded-full bg-stone-800 flex-shrink-0">
+            <X size={20} />
+          </button>
         </div>
-        <button onClick={onClose} className="p-2 ml-2 rounded-full bg-stone-800">
-          <X size={20} />
-        </button>
+        <TranslateButton texts={translateTexts} />
       </div>
       <div className="flex-1 overflow-auto bg-stone-100">
         {a.file_kind === 'image' ? (
@@ -6786,6 +7437,7 @@ function AllOpenAssignments({ employee, onBack, onOpenAssignment }) {
     setLoaded(true);
   };
   useEffect(() => { load(); }, []);
+  useAssignmentSync(load, 'asgn-all-open');
 
   // Filter at the per-target level for the status filter (visual only)
   const filterMatch = (a) => {
@@ -7649,7 +8301,10 @@ function PortalAssignmentDetail({ property, assignment, onBack, onEdit }) {
           <div className="font-serif text-xl text-stone-900 truncate">{assignment.title}</div>
         </div>
       </div>
-      <div className="px-5 pt-6 space-y-5">
+      <div className="px-5 pt-4">
+        <TranslateButton texts={[assignment.title, assignment.notes].filter(Boolean)} />
+      </div>
+      <div className="px-5 pt-4 space-y-5">
         <div className={`p-3 rounded-xl text-sm flex items-center gap-2 ${s.color}`}>
           <Check size={14} /> {s.text}
         </div>
@@ -7769,6 +8424,7 @@ function InboxView({ employee, onBack }) {
     setLoaded(true);
   };
   useEffect(() => { load(); }, []);
+  useAssignmentSync(load, 'inbox-sync');
 
   const markPhotoSeen = async (photo) => {
     await supabase.from('pm_photos').update({
@@ -8182,15 +8838,24 @@ function useUnreadCount({ employee = null, customer = null, refreshKey = 0 }) {
               .neq('sender_employee_id', employee.id);
             unread += c || 0;
           }
-          // For owners and managers, also count unread property threads
+          // For owners and managers, also count unread property threads.
+          // Per-thread read state uses conversation_participants — if no row
+          // exists for this employee, treat the thread as fully unread.
           if (employee.role === 'owner' || employee.role === 'manager') {
             const { data: convs } = await supabase
               .from('conversations')
               .select('id, last_message_at')
               .eq('kind', 'property_thread');
-            const since = (await supabase.from('employees').select('messages_last_read_at').eq('id', employee.id).maybeSingle()).data?.messages_last_read_at || '1970-01-01';
             for (const c of (convs || [])) {
-              if (c.last_message_at && c.last_message_at > since) {
+              if (!c.last_message_at) continue;
+              const { data: myRead } = await supabase
+                .from('conversation_participants')
+                .select('last_read_at')
+                .eq('conversation_id', c.id)
+                .eq('employee_id', employee.id)
+                .maybeSingle();
+              const since = myRead?.last_read_at || '1970-01-01';
+              if (c.last_message_at > since) {
                 const { count: cc } = await supabase
                   .from('messages')
                   .select('id', { count: 'exact', head: true })
@@ -8299,7 +8964,11 @@ function ConversationList({ employee, onOpen, onNewDm, onClose }) {
         });
       }
     }
-    dmList.sort((a, b) => (b.lastMessageAt || '').localeCompare(a.lastMessageAt || ''));
+    // Sort: unread first (highest count), then by recency
+    dmList.sort((a, b) => {
+      if ((a.unread > 0) !== (b.unread > 0)) return a.unread > 0 ? -1 : 1;
+      return (b.lastMessageAt || '').localeCompare(a.lastMessageAt || '');
+    });
     setDms(dmList);
 
     // Property threads (only owners/managers see these)
@@ -8309,16 +8978,42 @@ function ConversationList({ employee, onOpen, onNewDm, onClose }) {
         .select('id, customer_id, last_message_at, last_message_preview, customer:customers(name)')
         .eq('kind', 'property_thread')
         .order('last_message_at', { ascending: false, nullsFirst: false });
-      // For unread, we use employee.messages_last_read_at — but as a simple v1,
-      // we'll just always show a "new" dot if the last message is from a PM and recent.
-      // (Per-employee read state on property threads can come in Deploy 2.)
-      const threadList = (convs || []).map(c => ({
-        conversationId: c.id,
-        customerId: c.customer_id,
-        propertyName: c.customer?.name || 'Unknown',
-        lastMessageAt: c.last_message_at,
-        preview: c.last_message_preview
-      }));
+      // Per-thread unread tracking via conversation_participants
+      const threadList = [];
+      for (const c of (convs || [])) {
+        let unread = 0;
+        if (c.last_message_at) {
+          const { data: myRead } = await supabase
+            .from('conversation_participants')
+            .select('last_read_at')
+            .eq('conversation_id', c.id)
+            .eq('employee_id', employee.id)
+            .maybeSingle();
+          const since = myRead?.last_read_at || '1970-01-01';
+          if (c.last_message_at > since) {
+            const { count: cc } = await supabase
+              .from('messages')
+              .select('id', { count: 'exact', head: true })
+              .eq('conversation_id', c.id)
+              .gt('created_at', since)
+              .eq('sender_is_pm', true);
+            unread = cc || 0;
+          }
+        }
+        threadList.push({
+          conversationId: c.id,
+          customerId: c.customer_id,
+          propertyName: c.customer?.name || 'Unknown',
+          lastMessageAt: c.last_message_at,
+          preview: c.last_message_preview,
+          unread
+        });
+      }
+      // Sort: unread first, then by recency
+      threadList.sort((a, b) => {
+        if ((a.unread > 0) !== (b.unread > 0)) return a.unread > 0 ? -1 : 1;
+        return (b.lastMessageAt || '').localeCompare(a.lastMessageAt || '');
+      });
       setThreads(threadList);
     }
     setLoaded(true);
@@ -8347,7 +9042,7 @@ function ConversationList({ employee, onOpen, onNewDm, onClose }) {
       ) : (
         <Header name={employee.name} onSignOut={() => {}} role={employee.role} />
       )}
-      <div className="px-5 pt-6">
+      <div className="px-5 pt-6 max-w-2xl mx-auto w-full">
         <div className="flex items-center justify-between mb-4">
           {!onClose && <h2 className="font-serif text-2xl text-stone-900">Messages</h2>}
           <button onClick={onNewDm}
@@ -8372,10 +9067,13 @@ function ConversationList({ employee, onOpen, onNewDm, onClose }) {
                         <div className="flex-1 min-w-0">
                           <div className="flex items-center gap-2">
                             <Building2 size={14} className="text-amber-700 flex-shrink-0" />
-                            <span className="font-serif text-base text-stone-900 truncate">{t.propertyName}</span>
+                            <span className={`font-serif text-base text-stone-900 truncate ${t.unread > 0 ? 'font-bold' : ''}`}>{t.propertyName}</span>
+                            {t.unread > 0 && (
+                              <span className="w-2 h-2 rounded-full bg-amber-600 flex-shrink-0" title={`${t.unread} unread`} />
+                            )}
                           </div>
                           {t.preview && (
-                            <div className="text-xs text-stone-600 truncate mt-1">{t.preview}</div>
+                            <div className={`text-xs truncate mt-1 ${t.unread > 0 ? 'text-stone-900 font-medium' : 'text-stone-600'}`}>{t.preview}</div>
                           )}
                           {t.lastMessageAt && (
                             <div className="text-[10px] font-mono text-stone-400 mt-0.5">{fmtDate(t.lastMessageAt)}</div>
@@ -8402,20 +9100,18 @@ function ConversationList({ employee, onOpen, onNewDm, onClose }) {
                   {dms.map(d => (
                     <button key={d.conversationId}
                       onClick={() => onOpen({ conversationId: d.conversationId, otherName: d.otherName, isPropertyThread: false })}
-                      className={`w-full text-left p-3 rounded-2xl border transition-colors ${d.unread > 0 ? 'bg-amber-50 border-amber-200 hover:border-amber-500' : 'bg-white border-stone-200 hover:border-stone-400'}`}>
+                      className="w-full text-left p-3 rounded-2xl bg-white border border-stone-200 hover:border-stone-400 transition-colors">
                       <div className="flex items-center justify-between gap-2">
                         <div className="flex-1 min-w-0">
                           <div className="flex items-center gap-2">
                             <User size={14} className="text-stone-500 flex-shrink-0" />
-                            <span className="font-serif text-base text-stone-900 truncate">{d.otherName}</span>
+                            <span className={`font-serif text-base text-stone-900 truncate ${d.unread > 0 ? 'font-bold' : ''}`}>{d.otherName}</span>
                             {d.unread > 0 && (
-                              <span className="text-[10px] font-mono px-1.5 py-0.5 rounded-full bg-amber-600 text-white">
-                                {d.unread}
-                              </span>
+                              <span className="w-2 h-2 rounded-full bg-amber-600 flex-shrink-0" title={`${d.unread} unread`} />
                             )}
                           </div>
                           {d.preview && (
-                            <div className="text-xs text-stone-600 truncate mt-1">{d.preview}</div>
+                            <div className={`text-xs truncate mt-1 ${d.unread > 0 ? 'text-stone-900 font-medium' : 'text-stone-600'}`}>{d.preview}</div>
                           )}
                           {d.lastMessageAt && (
                             <div className="text-[10px] font-mono text-stone-400 mt-0.5">{fmtDate(d.lastMessageAt)}</div>
@@ -8547,10 +9243,19 @@ function MessageThread({ conversationId, otherName, asEmployee = null, asPmCusto
     setLoaded(true);
     // Mark conversation as read for this person
     if (asEmployee) {
-      await supabase.from('conversation_participants')
-        .update({ last_read_at: new Date().toISOString() })
+      // For DMs they're already a participant. For property threads, owners/managers
+      // may not have a row yet — upsert so the read state actually persists.
+      const nowIso = new Date().toISOString();
+      const { error: updErr } = await supabase.from('conversation_participants')
+        .update({ last_read_at: nowIso })
         .eq('conversation_id', conversationId)
         .eq('employee_id', asEmployee.id);
+      // If no row was updated (property thread, first time opening), insert one
+      if (isPropertyThread) {
+        await supabase.from('conversation_participants')
+          .upsert({ conversation_id: conversationId, employee_id: asEmployee.id, last_read_at: nowIso },
+                  { onConflict: 'conversation_id,employee_id' });
+      }
     } else if (asPmCustomer) {
       await supabase.from('customers')
         .update({ pm_last_read_at: new Date().toISOString() })
@@ -8651,7 +9356,8 @@ function MessageThread({ conversationId, otherName, asEmployee = null, asPmCusto
         </div>
       </div>
 
-      <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-4 space-y-2" style={{ minHeight: 0 }}>
+      <div ref={scrollRef} className="flex-1 overflow-y-auto" style={{ minHeight: 0 }}>
+        <div className="max-w-2xl mx-auto px-4 py-4 space-y-2">
         {!loaded ? <div className="text-center text-stone-400 text-sm">Loading…</div> : messages.length === 0 ? (
           <div className="text-center text-stone-400 text-sm py-12">No messages yet. Say hi!</div>
         ) : messages.map(m => {
@@ -8684,6 +9390,7 @@ function MessageThread({ conversationId, otherName, asEmployee = null, asPmCusto
             </div>
           );
         })}
+        </div>
       </div>
 
       {error && (
@@ -8702,7 +9409,8 @@ function MessageThread({ conversationId, otherName, asEmployee = null, asPmCusto
         </div>
       )}
 
-      <div className="px-4 py-3 border-t border-stone-200 bg-white flex items-end gap-2 flex-shrink-0" style={{ paddingBottom: 'max(0.75rem, env(safe-area-inset-bottom))' }}>
+      <div className="border-t border-stone-200 bg-white flex-shrink-0" style={{ paddingBottom: 'max(0.75rem, env(safe-area-inset-bottom))' }}>
+        <div className="px-4 py-3 max-w-2xl mx-auto flex items-end gap-2">
         <label className="p-2 rounded-full hover:bg-stone-100 cursor-pointer flex-shrink-0">
           <Camera size={20} className="text-stone-600" />
           <input type="file" accept="image/*" className="hidden"
@@ -8721,6 +9429,7 @@ function MessageThread({ conversationId, otherName, asEmployee = null, asPmCusto
           className="p-2.5 rounded-full bg-stone-900 text-stone-50 disabled:opacity-40 flex-shrink-0">
           {sending ? <div className="w-4 h-4 border-2 border-stone-50 border-t-transparent rounded-full animate-spin" /> : <ChevronRight size={16} />}
         </button>
+        </div>
       </div>
 
       {zoomPhoto && (
@@ -8741,7 +9450,7 @@ function MessageThread({ conversationId, otherName, asEmployee = null, asPmCusto
 
 
 // ---- PM-side Messages tab ----
-function PortalMessagesTab({ property, portalKind, onPropertyRefresh }) {
+function PortalMessagesTab({ property, portalKind, onClose, onPropertyRefresh }) {
   const [conversationId, setConversationId] = useState(null);
   const [loaded, setLoaded] = useState(false);
 
@@ -8765,6 +9474,8 @@ function PortalMessagesTab({ property, portalKind, onPropertyRefresh }) {
   if (!loaded) return <div className="px-5 pt-6"><Splash text="Loading…" /></div>;
   if (!conversationId) return <div className="px-5 pt-6 text-stone-400">Could not load messages.</div>;
 
+  const handleBack = onClose || (() => onPropertyRefresh && onPropertyRefresh());
+
   return <MessageThread
     conversationId={conversationId}
     otherName="Summit Clean team"
@@ -8772,5 +9483,5 @@ function PortalMessagesTab({ property, portalKind, onPropertyRefresh }) {
     pmActorKind={portalKind || 'pm'}
     isPropertyThread={true}
     propertyName={property.name}
-    onBack={() => onPropertyRefresh && onPropertyRefresh()} />;
+    onBack={handleBack} />;
 }

@@ -42,7 +42,12 @@ const SUPPORTED_TRANSLATE_LANGUAGES = [
   { code: 'ar', label: 'Arabic' },
 ];
 
+// Translation is currently disabled while we figure out attachment handling.
+// Set this to true to re-enable the Translate button on assignments.
+const TRANSLATION_ENABLED = false;
+
 const isTranslateConfigured = () =>
+  TRANSLATION_ENABLED &&
   GOOGLE_TRANSLATE_API_KEY &&
   GOOGLE_TRANSLATE_API_KEY !== 'PASTE_YOUR_GOOGLE_TRANSLATE_KEY_HERE' &&
   GOOGLE_TRANSLATE_API_KEY.length > 10;
@@ -1189,9 +1194,14 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
   const blockElapsed = Date.now() - new Date(block.start_time).getTime();
   const activeTaskObj = tasks.find(t => t.id === activeTask);
 
+  // Logo tap: confirm before pausing the block + bouncing to PropertyHub
+  const handleLogoClick = () => {
+    if (confirm('Pause this work block and go back to property home?')) onPause();
+  };
+
   return (
     <div className="min-h-screen bg-stone-50 pb-24">
-      <Header name={employeeName} onSignOut={onSignOut} role={employee?.role} employee={employee} onOpenMessages={onOpenMessages} />
+      <Header name={employeeName} onSignOut={onSignOut} role={employee?.role} employee={employee} onOpenMessages={onOpenMessages} onLogoClick={handleLogoClick} />
       <div className="bg-stone-900 text-stone-50 px-5 py-5 sticky top-0 z-10 shadow-md">
         <div className="flex items-center justify-between mb-3">
           <button onClick={onPause}
@@ -1841,31 +1851,40 @@ async function deleteMessagePhoto(path) {
   try { await supabase.storage.from(MESSAGE_BUCKET).remove([path]); } catch {}
 }
 
-function Header({ name, onSignOut, role, employee, onOpenMessages }) {
+function Header({ name, onSignOut, role, employee, onOpenMessages, onLogoClick }) {
   // Messages icon in header for all signed-in roles (cleaner/manager/owner)
   const showMessagesIcon = !!(onOpenMessages && employee);
   const unread = useUnreadCount({ employee: showMessagesIcon ? employee : null });
+
+  const logoBlock = (
+    <div className="flex items-center gap-3">
+      <img
+        src="https://bbaynvqnbkjyqhzhhypr.supabase.co/storage/v1/object/public/brand/unnamed%20(2).png"
+        alt="Summit Clean"
+        className="h-10 w-auto object-contain"
+      />
+      <div className="text-stone-50">
+        <div className="text-xs font-mono flex items-center gap-1.5" style={{ color: '#FAF8F4' }}>
+          {name}
+          {role === 'owner' && (
+            <span className="text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-amber-500 text-stone-900">Owner</span>
+          )}
+          {role === 'manager' && (
+            <span className="text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-stone-700 text-stone-50">Manager</span>
+          )}
+        </div>
+        <div className="text-[10px] font-mono opacity-60">TidyTrack</div>
+      </div>
+    </div>
+  );
+
   return (
     <div className="flex items-center justify-between px-5 py-3 bg-stone-900 border-b border-stone-900">
-      <div className="flex items-center gap-3">
-        <img
-          src="https://bbaynvqnbkjyqhzhhypr.supabase.co/storage/v1/object/public/brand/unnamed%20(2).png"
-          alt="Summit Clean"
-          className="h-10 w-auto object-contain"
-        />
-        <div className="text-stone-50">
-          <div className="text-xs font-mono flex items-center gap-1.5" style={{ color: '#FAF8F4' }}>
-            {name}
-            {role === 'owner' && (
-              <span className="text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-amber-500 text-stone-900">Owner</span>
-            )}
-            {role === 'manager' && (
-              <span className="text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-stone-700 text-stone-50">Manager</span>
-            )}
-          </div>
-          <div className="text-[10px] font-mono opacity-60">TidyTrack</div>
-        </div>
-      </div>
+      {onLogoClick ? (
+        <button onClick={onLogoClick} className="active:scale-95 transition-transform" title="Home">
+          {logoBlock}
+        </button>
+      ) : logoBlock}
       <div className="flex items-center gap-2">
         {showMessagesIcon && (
           <button onClick={onOpenMessages}
@@ -1900,6 +1919,7 @@ function ManagerShell({ employee, onSignOut }) {
 
   const colCount = showMoneyTabs ? 6 : 4;
   const openMessages = () => setShowMessages(true);
+  const goHome = () => setTab('daily');
 
   // Messages takes over the whole screen as an overlay
   if (showMessages) {
@@ -1908,12 +1928,12 @@ function ManagerShell({ employee, onSignOut }) {
 
   return (
     <div className="min-h-screen bg-stone-50">
-      {tab === 'daily'     && <DailyView        employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} />}
-      {tab === 'dashboard' && <ManagerDashboard employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} />}
-      {tab === 'team'      && <EmployeeAdmin   employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} />}
-      {tab === 'props'     && <PropertyAdmin   employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} />}
-      {showMoneyTabs && tab === 'invoice'   && <InvoiceView     employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} />}
-      {showMoneyTabs && tab === 'payroll'   && <ExportView      employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} />}
+      {tab === 'daily'     && <DailyView        employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} onLogoClick={goHome} />}
+      {tab === 'dashboard' && <ManagerDashboard employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} onLogoClick={goHome} />}
+      {tab === 'team'      && <EmployeeAdmin   employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} onLogoClick={goHome} />}
+      {tab === 'props'     && <PropertyAdmin   employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} onLogoClick={goHome} />}
+      {showMoneyTabs && tab === 'invoice'   && <InvoiceView     employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} onLogoClick={goHome} />}
+      {showMoneyTabs && tab === 'payroll'   && <ExportView      employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} onLogoClick={goHome} />}
 
       <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-stone-200 px-1 py-2 z-30">
         <div className="max-w-md mx-auto grid gap-0.5" style={{ gridTemplateColumns: `repeat(${colCount}, minmax(0, 1fr))` }}>
@@ -1947,7 +1967,7 @@ function TabButton({ active, onClick, icon, label, badge }) {
 // =================================================================
 // MANAGER DASHBOARD
 // =================================================================
-function ManagerDashboard({ employee, onSignOut, onOpenMessages }) {
+function ManagerDashboard({ employee, onSignOut, onOpenMessages, onLogoClick }) {
   const [shifts, setShifts] = useState([]);
   const [view, setView] = useState('shifts');
   const [selectedShift, setSelectedShift] = useState(null);
@@ -1999,7 +2019,7 @@ function ManagerDashboard({ employee, onSignOut, onOpenMessages }) {
 
   return (
     <div className="pb-24">
-      <Header name={employee.name} onSignOut={onSignOut} role={employee.role} employee={employee} onOpenMessages={onOpenMessages} />
+      <Header name={employee.name} onSignOut={onSignOut} role={employee.role} employee={employee} onOpenMessages={onOpenMessages} onLogoClick={onLogoClick} />
       <div className="px-5 pt-6">
         <div className="text-xs uppercase tracking-widest text-stone-400 font-mono mb-3">
           {new Date().toLocaleDateString('en-US', { weekday:'long', month:'long', day:'numeric' })}
@@ -2963,7 +2983,7 @@ function PhotoZoomViewer({ photos, initialUrl, onClose }) {
 // =================================================================
 // EMPLOYEE ADMIN
 // =================================================================
-function EmployeeAdmin({ employee, onSignOut, onOpenMessages }) {
+function EmployeeAdmin({ employee, onSignOut, onOpenMessages, onLogoClick }) {
   const [employees, setEmployees] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [editing, setEditing] = useState(null);
@@ -2982,7 +3002,7 @@ function EmployeeAdmin({ employee, onSignOut, onOpenMessages }) {
   const activeCount = employees.filter(e => e.active).length;
   return (
     <div className="pb-24">
-      <Header name={employee.name} onSignOut={onSignOut} role={employee.role} employee={employee} onOpenMessages={onOpenMessages} />
+      <Header name={employee.name} onSignOut={onSignOut} role={employee.role} employee={employee} onOpenMessages={onOpenMessages} onLogoClick={onLogoClick} />
       <div className="px-5 pt-6">
         <div className="text-xs uppercase tracking-widest text-stone-400 font-mono mb-3">Admin</div>
         <h1 className="text-4xl font-light text-stone-900 tracking-tight mb-2">
@@ -3133,7 +3153,7 @@ function EmployeeForm({ employee, currentUserId, currentUserRole, onCancel, onSa
 // =================================================================
 // PROPERTY ADMIN
 // =================================================================
-function PropertyAdmin({ employee, onSignOut, onOpenMessages }) {
+function PropertyAdmin({ employee, onSignOut, onOpenMessages, onLogoClick }) {
   const [view, setView] = useState({ kind: 'list' });
   const [props, setProps] = useState([]);
   const [loaded, setLoaded] = useState(false);
@@ -3211,7 +3231,7 @@ function PropertyAdmin({ employee, onSignOut, onOpenMessages }) {
   const activeCount = props.filter(p => p.active).length;
   return (
     <div className="pb-24">
-      <Header name={employee.name} onSignOut={onSignOut} role={employee.role} employee={employee} onOpenMessages={onOpenMessages} />
+      <Header name={employee.name} onSignOut={onSignOut} role={employee.role} employee={employee} onOpenMessages={onOpenMessages} onLogoClick={onLogoClick} />
       <div className="px-5 pt-6">
         <div className="text-xs uppercase tracking-widest text-stone-400 font-mono mb-3">Admin</div>
         <h1 className="text-4xl font-light text-stone-900 tracking-tight mb-2">
@@ -4064,7 +4084,7 @@ function PartyForm({ property, unit, party, onCancel, onSaved }) {
 // =================================================================
 // INVOICE VIEW (uses work blocks)
 // =================================================================
-function InvoiceView({ employee, onSignOut, onOpenMessages }) {
+function InvoiceView({ employee, onSignOut, onOpenMessages, onLogoClick }) {
   const today = new Date().toISOString().split('T')[0];
   const twoWeeksAgo = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
   const [properties, setProperties] = useState([]);
@@ -4122,7 +4142,7 @@ function InvoiceView({ employee, onSignOut, onOpenMessages }) {
   }
   return (
     <div className="pb-24">
-      <Header name={employee.name} onSignOut={onSignOut} role={employee.role} employee={employee} onOpenMessages={onOpenMessages} />
+      <Header name={employee.name} onSignOut={onSignOut} role={employee.role} employee={employee} onOpenMessages={onOpenMessages} onLogoClick={onLogoClick} />
       <div className="px-5 pt-6">
         <div className="text-xs uppercase tracking-widest text-stone-400 font-mono mb-3">Billing</div>
         <h1 className="text-4xl font-light text-stone-900 tracking-tight mb-6">
@@ -4285,7 +4305,7 @@ function InvoicePreview({ invoice, showZeros, setShowZeros, onBack, onPrint }) {
 // =================================================================
 // PAYROLL EXPORT
 // =================================================================
-function ExportView({ employee, onSignOut, onOpenMessages }) {
+function ExportView({ employee, onSignOut, onOpenMessages, onLogoClick }) {
   const today = new Date().toISOString().split('T')[0];
   const twoWeeksAgo = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
   const [start, setStart] = useState(twoWeeksAgo);
@@ -4360,7 +4380,7 @@ function ExportView({ employee, onSignOut, onOpenMessages }) {
   });
   return (
     <div className="pb-24">
-      <Header name={employee.name} onSignOut={onSignOut} role={employee.role} employee={employee} onOpenMessages={onOpenMessages} />
+      <Header name={employee.name} onSignOut={onSignOut} role={employee.role} employee={employee} onOpenMessages={onOpenMessages} onLogoClick={onLogoClick} />
       <div className="px-5 pt-6">
         <div className="text-xs uppercase tracking-widest text-stone-400 font-mono mb-3">Payroll</div>
         <h1 className="text-4xl font-light text-stone-900 tracking-tight mb-6">
@@ -4996,7 +5016,7 @@ function PortalHome({ property, portalKind, onSignOut, onRefreshProperty, onOpen
     <div className="min-h-screen bg-stone-50 pb-12">
       <div className="bg-stone-900 text-stone-50 px-5 pt-5 pb-6">
         <div className="flex items-center justify-between mb-4">
-          <div className="flex items-center gap-3">
+          <button onClick={() => setTab('history')} className="flex items-center gap-3 active:scale-95 transition-transform" title="Home">
             <img
               src="https://bbaynvqnbkjyqhzhhypr.supabase.co/storage/v1/object/public/brand/unnamed%20(2).png"
               alt="Summit Clean"
@@ -5011,7 +5031,7 @@ function PortalHome({ property, portalKind, onSignOut, onRefreshProperty, onOpen
               </div>
               <div className="text-[10px] text-stone-500 font-mono opacity-60">TidyTrack</div>
             </div>
-          </div>
+          </button>
           <div className="flex items-center gap-2">
             <button onClick={() => setShowMessages(true)}
               className="relative p-2 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-50"
@@ -5362,7 +5382,7 @@ function PortalPhotoSection({ label, photos, highlight, description }) {
 // DAILY VIEW — calendar-first drill-down
 // Calendar month → pick a date → see units cleaned that day → pick a unit → full detail
 // =================================================================
-function DailyView({ employee, onSignOut, onOpenMessages }) {
+function DailyView({ employee, onSignOut, onOpenMessages, onLogoClick }) {
   const [view, setView] = useState({ kind: 'calendar' });
   const showMoney = canSeeMoney(employee);
 
@@ -5386,7 +5406,8 @@ function DailyView({ employee, onSignOut, onOpenMessages }) {
   return <DailyCalendar employee={employee} onSignOut={onSignOut}
     onPickDay={(date) => setView({ kind: 'day', date })}
     onOpenInbox={() => setView({ kind: 'inbox' })}
-    onOpenMessages={onOpenMessages} />;
+    onOpenMessages={onOpenMessages}
+    onLogoClick={onLogoClick} />;
 }
 
 // Helpers — local-time YYYY-MM-DD (avoids UTC midnight bugs)
@@ -5397,7 +5418,7 @@ const toDateKey = (d) => {
   return `${yr}-${mo}-${dy}`;
 };
 
-function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenMessages }) {
+function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenMessages, onLogoClick }) {
   const today = new Date();
   const [viewMonth, setViewMonth] = useState(new Date(today.getFullYear(), today.getMonth(), 1));
   const [activity, setActivity] = useState({});
@@ -5503,7 +5524,7 @@ function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenMess
 
   return (
     <div className="pb-24">
-      <Header name={employee.name} onSignOut={onSignOut} role={employee.role} employee={employee} onOpenMessages={onOpenMessages} />
+      <Header name={employee.name} onSignOut={onSignOut} role={employee.role} employee={employee} onOpenMessages={onOpenMessages} onLogoClick={onLogoClick} />
       <div className="px-5 pt-6">
         {inboxTotal > 0 && (
           <button onClick={onOpenInbox}
@@ -7019,7 +7040,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
     items.forEach(t => {
       const ts = t.completed_at ? new Date(t.completed_at).getTime() : 0;
       const age = now - ts;
-      if (age < DAY) buckets.recent.push(t);
+      if (age < 3 * DAY) buckets.recent.push(t);
       else if (age < 7 * DAY) buckets.older.push(t);
       else buckets.archived.push(t);
     });
@@ -7045,8 +7066,8 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
   const renderDoneBuckets = (items) => {
     const buckets = bucketByAge(items);
     const subTabs = [
-      { id: 'recent', label: 'Recent', subtitle: 'Last 24 hours', items: buckets.recent },
-      { id: 'older', label: 'Older', subtitle: '1–7 days ago', items: buckets.older },
+      { id: 'recent', label: 'Recent', subtitle: 'Last 72 hours', items: buckets.recent },
+      { id: 'older', label: 'Older', subtitle: '3–7 days ago', items: buckets.older },
       { id: 'archived', label: 'Archived', subtitle: 'Over 1 week ago', items: buckets.archived },
     ];
     const active = subTabs.find(s => s.id === doneSubTab) || subTabs[0];

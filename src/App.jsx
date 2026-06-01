@@ -21,8 +21,7 @@ const ASSIGNMENT_BUCKET = 'assignments';
 const PM_UPLOAD_BUCKET = 'pm-uploads';
 const MESSAGE_BUCKET = 'messages';
 const ASSIGNMENT_MAX_SIZE_MB = 20; // sanity cap on upload size
-AIzaSyAxtJT5zzPQhF-4aDAyUb_69No26_SucEg
-// =================================================================
+const GOOGLE_TRANSLATE_API_KEY = "AIzaSyD7ceHPryMzs45hWJOyFNBxtOzQOEmJcSA";// =================================================================
 // Utilities
 // =================================================================
 const fmtTime = (ms) => {

@@ -21,7 +21,7 @@ const ASSIGNMENT_BUCKET = 'assignments';
 const PM_UPLOAD_BUCKET = 'pm-uploads';
 const MESSAGE_BUCKET = 'messages';
 const ASSIGNMENT_MAX_SIZE_MB = 20; // sanity cap on upload size
-
+AIzaSyAxtJT5zzPQhF-4aDAyUb_69No26_SucEg
 // =================================================================
 // Utilities
 // =================================================================
@@ -46,7 +46,6 @@ const fmtMoney = (n) => {
 };
 const fmtDate = (ts) => new Date(ts).toLocaleDateString('en-US', { month:'short', day:'numeric' });
 const fmtDateLong = (ts) => new Date(ts).toLocaleDateString('en-US', { month:'long', day:'numeric', year:'numeric' });
-const fmtDateWithDay = (ts) => new Date(ts).toLocaleDateString('en-US', { weekday:'short', month:'short', day:'numeric' });
 const fmtClock = (ts) => new Date(ts).toLocaleTimeString('en-US', { hour:'numeric', minute:'2-digit' });
 
 function useTick(active) {
@@ -1557,8 +1556,8 @@ async function deleteMessagePhoto(path) {
 }
 
 function Header({ name, onSignOut, role, employee, onOpenMessages }) {
-  // Messages icon in header for all signed-in roles (cleaner/manager/owner)
-  const showMessagesIcon = !!(onOpenMessages && employee);
+  // Cleaners get a messages icon in the header (managers/owners have the Messages tab in bottom nav)
+  const showMessagesIcon = onOpenMessages && employee && role !== 'owner' && role !== 'manager';
   const unread = useUnreadCount({ employee: showMessagesIcon ? employee : null });
   return (
     <div className="flex items-center justify-between px-5 py-3 bg-stone-900 border-b border-stone-900">
@@ -1605,35 +1604,31 @@ function Header({ name, onSignOut, role, employee, onOpenMessages }) {
 
 function ManagerShell({ employee, onSignOut }) {
   const [tab, setTab] = useState('daily');
-  const [showMessages, setShowMessages] = useState(false);
   const showMoneyTabs = canSeeMoney(employee); // owner only
+  const unread = useUnreadCount({ employee });
 
   // If a manager somehow lands on a money tab (e.g. via stale state), bounce them home
   useEffect(() => {
     if (!showMoneyTabs && (tab === 'invoice' || tab === 'payroll')) setTab('daily');
   }, [showMoneyTabs, tab]);
 
-  const colCount = showMoneyTabs ? 6 : 4;
-  const openMessages = () => setShowMessages(true);
-
-  // Messages takes over the whole screen as an overlay
-  if (showMessages) {
-    return <StaffMessagesTab employee={employee} onClose={() => setShowMessages(false)} />;
-  }
+  const colCount = (showMoneyTabs ? 6 : 4) + 1; // +1 for messages
 
   return (
     <div className="min-h-screen bg-stone-50">
-      {tab === 'daily'     && <DailyView        employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} />}
-      {tab === 'dashboard' && <ManagerDashboard employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} />}
-      {tab === 'team'      && <EmployeeAdmin   employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} />}
-      {tab === 'props'     && <PropertyAdmin   employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} />}
-      {showMoneyTabs && tab === 'invoice'   && <InvoiceView     employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} />}
-      {showMoneyTabs && tab === 'payroll'   && <ExportView      employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} />}
+      {tab === 'daily'     && <DailyView        employee={employee} onSignOut={onSignOut} />}
+      {tab === 'dashboard' && <ManagerDashboard employee={employee} onSignOut={onSignOut} />}
+      {tab === 'team'      && <EmployeeAdmin   employee={employee} onSignOut={onSignOut} />}
+      {tab === 'props'     && <PropertyAdmin   employee={employee} onSignOut={onSignOut} />}
+      {tab === 'messages'  && <StaffMessagesTab employee={employee} />}
+      {showMoneyTabs && tab === 'invoice'   && <InvoiceView     employee={employee} onSignOut={onSignOut} />}
+      {showMoneyTabs && tab === 'payroll'   && <ExportView      employee={employee} onSignOut={onSignOut} />}
 
       <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-stone-200 px-1 py-2 z-30">
         <div className="max-w-md mx-auto grid gap-0.5" style={{ gridTemplateColumns: `repeat(${colCount}, minmax(0, 1fr))` }}>
           <TabButton active={tab==='daily'}     onClick={() => setTab('daily')}     icon={<Calendar size={18} />} label="Daily" />
           <TabButton active={tab==='dashboard'} onClick={() => setTab('dashboard')} icon={<LayoutDashboard size={18} />} label="Shifts" />
+          <TabButton active={tab==='messages'}  onClick={() => setTab('messages')}  icon={<MessageCircle size={18} />} label="Messages" badge={unread} />
           <TabButton active={tab==='team'}      onClick={() => setTab('team')}      icon={<Users size={18} />} label="Team" />
           <TabButton active={tab==='props'}     onClick={() => setTab('props')}     icon={<Building2 size={18} />} label="Properties" />
           {showMoneyTabs && <TabButton active={tab==='invoice'} onClick={() => setTab('invoice')} icon={<FileText size={18} />} label="Invoices" />}
@@ -1662,7 +1657,7 @@ function TabButton({ active, onClick, icon, label, badge }) {
 // =================================================================
 // MANAGER DASHBOARD
 // =================================================================
-function ManagerDashboard({ employee, onSignOut, onOpenMessages }) {
+function ManagerDashboard({ employee, onSignOut }) {
   const [shifts, setShifts] = useState([]);
   const [view, setView] = useState('shifts');
   const [selectedShift, setSelectedShift] = useState(null);
@@ -1713,7 +1708,7 @@ function ManagerDashboard({ employee, onSignOut, onOpenMessages }) {
 
   return (
     <div className="pb-24">
-      <Header name={employee.name} onSignOut={onSignOut} role={employee.role} employee={employee} onOpenMessages={onOpenMessages} />
+      <Header name={employee.name} onSignOut={onSignOut} role={employee.role} />
       <div className="px-5 pt-6">
         <div className="text-xs uppercase tracking-widest text-stone-400 font-mono mb-3">
           {new Date().toLocaleDateString('en-US', { weekday:'long', month:'long', day:'numeric' })}
@@ -2493,7 +2488,7 @@ function PhotoZoomViewer({ photos, initialUrl, onClose }) {
 // =================================================================
 // EMPLOYEE ADMIN
 // =================================================================
-function EmployeeAdmin({ employee, onSignOut, onOpenMessages }) {
+function EmployeeAdmin({ employee, onSignOut }) {
   const [employees, setEmployees] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [editing, setEditing] = useState(null);
@@ -2512,7 +2507,7 @@ function EmployeeAdmin({ employee, onSignOut, onOpenMessages }) {
   const activeCount = employees.filter(e => e.active).length;
   return (
     <div className="pb-24">
-      <Header name={employee.name} onSignOut={onSignOut} role={employee.role} employee={employee} onOpenMessages={onOpenMessages} />
+      <Header name={employee.name} onSignOut={onSignOut} />
       <div className="px-5 pt-6">
         <div className="text-xs uppercase tracking-widest text-stone-400 font-mono mb-3">Admin</div>
         <h1 className="text-4xl font-light text-stone-900 tracking-tight mb-2">
@@ -2663,7 +2658,7 @@ function EmployeeForm({ employee, currentUserId, currentUserRole, onCancel, onSa
 // =================================================================
 // PROPERTY ADMIN
 // =================================================================
-function PropertyAdmin({ employee, onSignOut, onOpenMessages }) {
+function PropertyAdmin({ employee, onSignOut }) {
   const [view, setView] = useState({ kind: 'list' });
   const [props, setProps] = useState([]);
   const [loaded, setLoaded] = useState(false);
@@ -2741,7 +2736,7 @@ function PropertyAdmin({ employee, onSignOut, onOpenMessages }) {
   const activeCount = props.filter(p => p.active).length;
   return (
     <div className="pb-24">
-      <Header name={employee.name} onSignOut={onSignOut} role={employee.role} employee={employee} onOpenMessages={onOpenMessages} />
+      <Header name={employee.name} onSignOut={onSignOut} />
       <div className="px-5 pt-6">
         <div className="text-xs uppercase tracking-widest text-stone-400 font-mono mb-3">Admin</div>
         <h1 className="text-4xl font-light text-stone-900 tracking-tight mb-2">
@@ -3594,7 +3589,7 @@ function PartyForm({ property, unit, party, onCancel, onSaved }) {
 // =================================================================
 // INVOICE VIEW (uses work blocks)
 // =================================================================
-function InvoiceView({ employee, onSignOut, onOpenMessages }) {
+function InvoiceView({ employee, onSignOut }) {
   const today = new Date().toISOString().split('T')[0];
   const twoWeeksAgo = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
   const [properties, setProperties] = useState([]);
@@ -3652,7 +3647,7 @@ function InvoiceView({ employee, onSignOut, onOpenMessages }) {
   }
   return (
     <div className="pb-24">
-      <Header name={employee.name} onSignOut={onSignOut} role={employee.role} employee={employee} onOpenMessages={onOpenMessages} />
+      <Header name={employee.name} onSignOut={onSignOut} />
       <div className="px-5 pt-6">
         <div className="text-xs uppercase tracking-widest text-stone-400 font-mono mb-3">Billing</div>
         <h1 className="text-4xl font-light text-stone-900 tracking-tight mb-6">
@@ -3815,7 +3810,7 @@ function InvoicePreview({ invoice, showZeros, setShowZeros, onBack, onPrint }) {
 // =================================================================
 // PAYROLL EXPORT
 // =================================================================
-function ExportView({ employee, onSignOut, onOpenMessages }) {
+function ExportView({ employee, onSignOut }) {
   const today = new Date().toISOString().split('T')[0];
   const twoWeeksAgo = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
   const [start, setStart] = useState(twoWeeksAgo);
@@ -3877,7 +3872,7 @@ function ExportView({ employee, onSignOut, onOpenMessages }) {
   });
   return (
     <div className="pb-24">
-      <Header name={employee.name} onSignOut={onSignOut} role={employee.role} employee={employee} onOpenMessages={onOpenMessages} />
+      <Header name={employee.name} onSignOut={onSignOut} />
       <div className="px-5 pt-6">
         <div className="text-xs uppercase tracking-widest text-stone-400 font-mono mb-3">Payroll</div>
         <h1 className="text-4xl font-light text-stone-900 tracking-tight mb-6">
@@ -4298,13 +4293,12 @@ function PortalDashboard({ property, portalKind, onSignOut, onRefreshProperty })
 }
 
 function PortalHome({ property, portalKind, onSignOut, onRefreshProperty, onOpenUnitDay }) {
-  const [tab, setTab] = useState('history'); // 'history' | 'upload-photo' | 'assignments'
+  const [tab, setTab] = useState('history'); // 'history' | 'messages' | 'upload-photo' | 'assignments'
   const [groups, setGroups] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [filter, setFilter] = useState('30d');
   const [showWelcome, setShowWelcome] = useState(false);
   const [showChangeCode, setShowChangeCode] = useState(false);
-  const [showMessages, setShowMessages] = useState(false);
   const pmUnread = useUnreadCount({ customer: property });
   const isPmStaff = portalKind === 'pm_staff';
 
@@ -4381,12 +4375,6 @@ function PortalHome({ property, portalKind, onSignOut, onRefreshProperty, onOpen
     setLoaded(true);
   })(); }, [property.id, filter, tab]);
 
-  // Messages overlay — takes over the whole screen when active
-  if (showMessages) {
-    return <PortalMessagesTab property={property} portalKind={portalKind}
-      onClose={() => setShowMessages(false)} />;
-  }
-
   return (
     <div className="min-h-screen bg-stone-50 pb-12">
       <div className="bg-stone-900 text-stone-50 px-5 pt-5 pb-6">
@@ -4408,16 +4396,6 @@ function PortalHome({ property, portalKind, onSignOut, onRefreshProperty, onOpen
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <button onClick={() => setShowMessages(true)}
-              className="relative p-2 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-50"
-              title="Messages">
-              <MessageCircle size={16} />
-              {pmUnread > 0 && (
-                <span className="absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1 rounded-full bg-amber-600 text-white text-[10px] font-mono font-bold flex items-center justify-center border-2 border-stone-900">
-                  {pmUnread > 99 ? '99+' : pmUnread}
-                </span>
-              )}
-            </button>
             <button onClick={() => setShowWelcome(true)}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-50 text-xs font-mono active:scale-95 transition-all">
               <HelpCircle size={14} /> How this works
@@ -4452,6 +4430,15 @@ function PortalHome({ property, portalKind, onSignOut, onRefreshProperty, onOpen
             className={`flex-1 py-2 px-2 rounded-lg text-xs font-medium ${tab === 'history' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
             History
           </button>
+          <button onClick={() => setTab('messages')}
+            className={`flex-1 py-2 px-2 rounded-lg text-xs font-medium relative ${tab === 'messages' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+            Messages
+            {pmUnread > 0 && (
+              <span className="absolute -top-1 -right-1 min-w-[16px] h-4 px-1 rounded-full bg-amber-600 text-white text-[9px] font-mono font-bold flex items-center justify-center">
+                {pmUnread > 99 ? '99+' : pmUnread}
+              </span>
+            )}
+          </button>
           <button onClick={() => setTab('upload-photo')}
             className={`flex-1 py-2 px-2 rounded-lg text-xs font-medium ${tab === 'upload-photo' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
             Upload
@@ -4466,6 +4453,9 @@ function PortalHome({ property, portalKind, onSignOut, onRefreshProperty, onOpen
       {tab === 'history' && (
         <PortalHistoryTab property={property} groups={groups} loaded={loaded}
           filter={filter} setFilter={setFilter} onOpenUnitDay={onOpenUnitDay} />
+      )}
+      {tab === 'messages' && (
+        <PortalMessagesTab property={property} portalKind={portalKind} onPropertyRefresh={() => setTab('history')} />
       )}
       {tab === 'upload-photo' && (
         <PortalPhotoUploadTab property={property} portalKind={portalKind} />
@@ -4757,7 +4747,7 @@ function PortalPhotoSection({ label, photos, highlight, description }) {
 // DAILY VIEW — calendar-first drill-down
 // Calendar month → pick a date → see units cleaned that day → pick a unit → full detail
 // =================================================================
-function DailyView({ employee, onSignOut, onOpenMessages }) {
+function DailyView({ employee, onSignOut }) {
   const [view, setView] = useState({ kind: 'calendar' });
   const showMoney = canSeeMoney(employee);
 
@@ -4780,8 +4770,7 @@ function DailyView({ employee, onSignOut, onOpenMessages }) {
 
   return <DailyCalendar employee={employee} onSignOut={onSignOut}
     onPickDay={(date) => setView({ kind: 'day', date })}
-    onOpenInbox={() => setView({ kind: 'inbox' })}
-    onOpenMessages={onOpenMessages} />;
+    onOpenInbox={() => setView({ kind: 'inbox' })} />;
 }
 
 // Helpers — local-time YYYY-MM-DD (avoids UTC midnight bugs)
@@ -4792,7 +4781,7 @@ const toDateKey = (d) => {
   return `${yr}-${mo}-${dy}`;
 };
 
-function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenMessages }) {
+function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox }) {
   const today = new Date();
   const [viewMonth, setViewMonth] = useState(new Date(today.getFullYear(), today.getMonth(), 1));
   const [activity, setActivity] = useState({});
@@ -4898,7 +4887,7 @@ function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenMess
 
   return (
     <div className="pb-24">
-      <Header name={employee.name} onSignOut={onSignOut} role={employee.role} employee={employee} onOpenMessages={onOpenMessages} />
+      <Header name={employee.name} onSignOut={onSignOut} role={employee.role} />
       <div className="px-5 pt-6">
         {inboxTotal > 0 && (
           <button onClick={onOpenInbox}
@@ -5971,7 +5960,7 @@ function AssignmentDetail({ property, assignment: assignmentInit, employee, onBa
                         )}
                         {t.completed_at && (
                           <div className="text-xs text-stone-500 font-mono mt-1">
-                            Done {fmtDateWithDay(t.completed_at)}{t.completer?.name && ` by ${t.completer.name}`}
+                            Done {fmtDate(t.completed_at)}{t.completer?.name && ` by ${t.completer.name}`}
                           </div>
                         )}
                       </div>
@@ -6171,9 +6160,9 @@ function AssignmentCard({ target, busy, onView, onStart, onDone, onReopen, onBlo
               {activeCleaners.length === 1 ? `${activeCleaners[0]} is here` : `${activeCleaners.length} cleaners here: ${activeCleaners.join(', ')}`}
             </div>
           )}
-          {isDone && t.completed_at && (
+          {isDone && t.completer?.name && (
             <div className="text-xs text-emerald-700 font-mono mt-1">
-              {t.completer?.name ? `Done by ${t.completer.name} · ` : 'Done '}{fmtDateWithDay(t.completed_at)} {fmtClock(t.completed_at)}
+              Done by {t.completer.name}{t.completed_at && ` · ${fmtClock(t.completed_at)}`}
             </div>
           )}
           {t.status_notes && (
@@ -8194,24 +8183,15 @@ function useUnreadCount({ employee = null, customer = null, refreshKey = 0 }) {
               .neq('sender_employee_id', employee.id);
             unread += c || 0;
           }
-          // For owners and managers, also count unread property threads.
-          // Per-thread read state uses conversation_participants — if no row
-          // exists for this employee, treat the thread as fully unread.
+          // For owners and managers, also count unread property threads
           if (employee.role === 'owner' || employee.role === 'manager') {
             const { data: convs } = await supabase
               .from('conversations')
               .select('id, last_message_at')
               .eq('kind', 'property_thread');
+            const since = (await supabase.from('employees').select('messages_last_read_at').eq('id', employee.id).maybeSingle()).data?.messages_last_read_at || '1970-01-01';
             for (const c of (convs || [])) {
-              if (!c.last_message_at) continue;
-              const { data: myRead } = await supabase
-                .from('conversation_participants')
-                .select('last_read_at')
-                .eq('conversation_id', c.id)
-                .eq('employee_id', employee.id)
-                .maybeSingle();
-              const since = myRead?.last_read_at || '1970-01-01';
-              if (c.last_message_at > since) {
+              if (c.last_message_at && c.last_message_at > since) {
                 const { count: cc } = await supabase
                   .from('messages')
                   .select('id', { count: 'exact', head: true })
@@ -8320,11 +8300,7 @@ function ConversationList({ employee, onOpen, onNewDm, onClose }) {
         });
       }
     }
-    // Sort: unread first (highest count), then by recency
-    dmList.sort((a, b) => {
-      if ((a.unread > 0) !== (b.unread > 0)) return a.unread > 0 ? -1 : 1;
-      return (b.lastMessageAt || '').localeCompare(a.lastMessageAt || '');
-    });
+    dmList.sort((a, b) => (b.lastMessageAt || '').localeCompare(a.lastMessageAt || ''));
     setDms(dmList);
 
     // Property threads (only owners/managers see these)
@@ -8334,42 +8310,16 @@ function ConversationList({ employee, onOpen, onNewDm, onClose }) {
         .select('id, customer_id, last_message_at, last_message_preview, customer:customers(name)')
         .eq('kind', 'property_thread')
         .order('last_message_at', { ascending: false, nullsFirst: false });
-      // Per-thread unread tracking via conversation_participants
-      const threadList = [];
-      for (const c of (convs || [])) {
-        let unread = 0;
-        if (c.last_message_at) {
-          const { data: myRead } = await supabase
-            .from('conversation_participants')
-            .select('last_read_at')
-            .eq('conversation_id', c.id)
-            .eq('employee_id', employee.id)
-            .maybeSingle();
-          const since = myRead?.last_read_at || '1970-01-01';
-          if (c.last_message_at > since) {
-            const { count: cc } = await supabase
-              .from('messages')
-              .select('id', { count: 'exact', head: true })
-              .eq('conversation_id', c.id)
-              .gt('created_at', since)
-              .eq('sender_is_pm', true);
-            unread = cc || 0;
-          }
-        }
-        threadList.push({
-          conversationId: c.id,
-          customerId: c.customer_id,
-          propertyName: c.customer?.name || 'Unknown',
-          lastMessageAt: c.last_message_at,
-          preview: c.last_message_preview,
-          unread
-        });
-      }
-      // Sort: unread first, then by recency
-      threadList.sort((a, b) => {
-        if ((a.unread > 0) !== (b.unread > 0)) return a.unread > 0 ? -1 : 1;
-        return (b.lastMessageAt || '').localeCompare(a.lastMessageAt || '');
-      });
+      // For unread, we use employee.messages_last_read_at — but as a simple v1,
+      // we'll just always show a "new" dot if the last message is from a PM and recent.
+      // (Per-employee read state on property threads can come in Deploy 2.)
+      const threadList = (convs || []).map(c => ({
+        conversationId: c.id,
+        customerId: c.customer_id,
+        propertyName: c.customer?.name || 'Unknown',
+        lastMessageAt: c.last_message_at,
+        preview: c.last_message_preview
+      }));
       setThreads(threadList);
     }
     setLoaded(true);
@@ -8398,7 +8348,7 @@ function ConversationList({ employee, onOpen, onNewDm, onClose }) {
       ) : (
         <Header name={employee.name} onSignOut={() => {}} role={employee.role} />
       )}
-      <div className="px-5 pt-6 max-w-2xl mx-auto w-full">
+      <div className="px-5 pt-6">
         <div className="flex items-center justify-between mb-4">
           {!onClose && <h2 className="font-serif text-2xl text-stone-900">Messages</h2>}
           <button onClick={onNewDm}
@@ -8423,13 +8373,10 @@ function ConversationList({ employee, onOpen, onNewDm, onClose }) {
                         <div className="flex-1 min-w-0">
                           <div className="flex items-center gap-2">
                             <Building2 size={14} className="text-amber-700 flex-shrink-0" />
-                            <span className={`font-serif text-base text-stone-900 truncate ${t.unread > 0 ? 'font-bold' : ''}`}>{t.propertyName}</span>
-                            {t.unread > 0 && (
-                              <span className="w-2 h-2 rounded-full bg-amber-600 flex-shrink-0" title={`${t.unread} unread`} />
-                            )}
+                            <span className="font-serif text-base text-stone-900 truncate">{t.propertyName}</span>
                           </div>
                           {t.preview && (
-                            <div className={`text-xs truncate mt-1 ${t.unread > 0 ? 'text-stone-900 font-medium' : 'text-stone-600'}`}>{t.preview}</div>
+                            <div className="text-xs text-stone-600 truncate mt-1">{t.preview}</div>
                           )}
                           {t.lastMessageAt && (
                             <div className="text-[10px] font-mono text-stone-400 mt-0.5">{fmtDate(t.lastMessageAt)}</div>
@@ -8456,18 +8403,20 @@ function ConversationList({ employee, onOpen, onNewDm, onClose }) {
                   {dms.map(d => (
                     <button key={d.conversationId}
                       onClick={() => onOpen({ conversationId: d.conversationId, otherName: d.otherName, isPropertyThread: false })}
-                      className="w-full text-left p-3 rounded-2xl bg-white border border-stone-200 hover:border-stone-400 transition-colors">
+                      className={`w-full text-left p-3 rounded-2xl border transition-colors ${d.unread > 0 ? 'bg-amber-50 border-amber-200 hover:border-amber-500' : 'bg-white border-stone-200 hover:border-stone-400'}`}>
                       <div className="flex items-center justify-between gap-2">
                         <div className="flex-1 min-w-0">
                           <div className="flex items-center gap-2">
                             <User size={14} className="text-stone-500 flex-shrink-0" />
-                            <span className={`font-serif text-base text-stone-900 truncate ${d.unread > 0 ? 'font-bold' : ''}`}>{d.otherName}</span>
+                            <span className="font-serif text-base text-stone-900 truncate">{d.otherName}</span>
                             {d.unread > 0 && (
-                              <span className="w-2 h-2 rounded-full bg-amber-600 flex-shrink-0" title={`${d.unread} unread`} />
+                              <span className="text-[10px] font-mono px-1.5 py-0.5 rounded-full bg-amber-600 text-white">
+                                {d.unread}
+                              </span>
                             )}
                           </div>
                           {d.preview && (
-                            <div className={`text-xs truncate mt-1 ${d.unread > 0 ? 'text-stone-900 font-medium' : 'text-stone-600'}`}>{d.preview}</div>
+                            <div className="text-xs text-stone-600 truncate mt-1">{d.preview}</div>
                           )}
                           {d.lastMessageAt && (
                             <div className="text-[10px] font-mono text-stone-400 mt-0.5">{fmtDate(d.lastMessageAt)}</div>
@@ -8599,19 +8548,10 @@ function MessageThread({ conversationId, otherName, asEmployee = null, asPmCusto
     setLoaded(true);
     // Mark conversation as read for this person
     if (asEmployee) {
-      // For DMs they're already a participant. For property threads, owners/managers
-      // may not have a row yet — upsert so the read state actually persists.
-      const nowIso = new Date().toISOString();
-      const { error: updErr } = await supabase.from('conversation_participants')
-        .update({ last_read_at: nowIso })
+      await supabase.from('conversation_participants')
+        .update({ last_read_at: new Date().toISOString() })
         .eq('conversation_id', conversationId)
         .eq('employee_id', asEmployee.id);
-      // If no row was updated (property thread, first time opening), insert one
-      if (isPropertyThread) {
-        await supabase.from('conversation_participants')
-          .upsert({ conversation_id: conversationId, employee_id: asEmployee.id, last_read_at: nowIso },
-                  { onConflict: 'conversation_id,employee_id' });
-      }
     } else if (asPmCustomer) {
       await supabase.from('customers')
         .update({ pm_last_read_at: new Date().toISOString() })
@@ -8712,8 +8652,7 @@ function MessageThread({ conversationId, otherName, asEmployee = null, asPmCusto
         </div>
       </div>
 
-      <div ref={scrollRef} className="flex-1 overflow-y-auto" style={{ minHeight: 0 }}>
-        <div className="max-w-2xl mx-auto px-4 py-4 space-y-2">
+      <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-4 space-y-2" style={{ minHeight: 0 }}>
         {!loaded ? <div className="text-center text-stone-400 text-sm">Loading…</div> : messages.length === 0 ? (
           <div className="text-center text-stone-400 text-sm py-12">No messages yet. Say hi!</div>
         ) : messages.map(m => {
@@ -8746,7 +8685,6 @@ function MessageThread({ conversationId, otherName, asEmployee = null, asPmCusto
             </div>
           );
         })}
-        </div>
       </div>
 
       {error && (
@@ -8765,8 +8703,7 @@ function MessageThread({ conversationId, otherName, asEmployee = null, asPmCusto
         </div>
       )}
 
-      <div className="border-t border-stone-200 bg-white flex-shrink-0" style={{ paddingBottom: 'max(0.75rem, env(safe-area-inset-bottom))' }}>
-        <div className="px-4 py-3 max-w-2xl mx-auto flex items-end gap-2">
+      <div className="px-4 py-3 border-t border-stone-200 bg-white flex items-end gap-2 flex-shrink-0" style={{ paddingBottom: 'max(0.75rem, env(safe-area-inset-bottom))' }}>
         <label className="p-2 rounded-full hover:bg-stone-100 cursor-pointer flex-shrink-0">
           <Camera size={20} className="text-stone-600" />
           <input type="file" accept="image/*" className="hidden"
@@ -8785,7 +8722,6 @@ function MessageThread({ conversationId, otherName, asEmployee = null, asPmCusto
           className="p-2.5 rounded-full bg-stone-900 text-stone-50 disabled:opacity-40 flex-shrink-0">
           {sending ? <div className="w-4 h-4 border-2 border-stone-50 border-t-transparent rounded-full animate-spin" /> : <ChevronRight size={16} />}
         </button>
-        </div>
       </div>
 
       {zoomPhoto && (
@@ -8806,7 +8742,7 @@ function MessageThread({ conversationId, otherName, asEmployee = null, asPmCusto
 
 
 // ---- PM-side Messages tab ----
-function PortalMessagesTab({ property, portalKind, onClose, onPropertyRefresh }) {
+function PortalMessagesTab({ property, portalKind, onPropertyRefresh }) {
   const [conversationId, setConversationId] = useState(null);
   const [loaded, setLoaded] = useState(false);
 
@@ -8830,8 +8766,6 @@ function PortalMessagesTab({ property, portalKind, onClose, onPropertyRefresh })
   if (!loaded) return <div className="px-5 pt-6"><Splash text="Loading…" /></div>;
   if (!conversationId) return <div className="px-5 pt-6 text-stone-400">Could not load messages.</div>;
 
-  const handleBack = onClose || (() => onPropertyRefresh && onPropertyRefresh());
-
   return <MessageThread
     conversationId={conversationId}
     otherName="Summit Clean team"
@@ -8839,5 +8773,5 @@ function PortalMessagesTab({ property, portalKind, onClose, onPropertyRefresh })
     pmActorKind={portalKind || 'pm'}
     isPropertyThread={true}
     propertyName={property.name}
-    onBack={handleBack} />;
+    onBack={() => onPropertyRefresh && onPropertyRefresh()} />;
 }

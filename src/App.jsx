@@ -7066,9 +7066,9 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
   const renderDoneBuckets = (items) => {
     const buckets = bucketByAge(items);
     const subTabs = [
-      { id: 'recent', label: 'Recent', subtitle: 'Last 72 hours', items: buckets.recent },
-      { id: 'older', label: 'Older', subtitle: '3–7 days ago', items: buckets.older },
-      { id: 'archived', label: 'Archived', subtitle: 'Over 1 week ago', items: buckets.archived },
+      { id: 'recent',   label: 'Recent',   hint: '< 72hr',  subtitle: 'Last 72 hours',     items: buckets.recent },
+      { id: 'older',    label: 'Older',    hint: '3–7d',    subtitle: '3–7 days ago',      items: buckets.older },
+      { id: 'archived', label: 'Archived', hint: '> 1wk',   subtitle: 'Over 1 week ago',   items: buckets.archived },
     ];
     const active = subTabs.find(s => s.id === doneSubTab) || subTabs[0];
     return (
@@ -7077,9 +7077,14 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
         <div className="flex gap-1 mb-3 bg-stone-100 p-1 rounded-xl">
           {subTabs.map(s => (
             <button key={s.id} onClick={() => setDoneSubTab(s.id)}
-              className={`flex-1 py-1.5 px-2 rounded-lg text-[11px] font-medium transition-colors ${doneSubTab === s.id ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
-              {s.label}
-              {s.items.length > 0 && <span className="ml-1 text-stone-400">({s.items.length})</span>}
+              className={`flex-1 py-1.5 px-2 rounded-lg transition-colors ${doneSubTab === s.id ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+              <div className="text-[11px] font-medium leading-tight">
+                {s.label}
+                {s.items.length > 0 && <span className="ml-1 text-stone-400">({s.items.length})</span>}
+              </div>
+              <div className={`text-[9px] font-mono leading-tight ${doneSubTab === s.id ? 'text-stone-500' : 'text-stone-400'}`}>
+                {s.hint}
+              </div>
             </button>
           ))}
         </div>

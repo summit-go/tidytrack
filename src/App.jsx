@@ -4780,7 +4780,8 @@ function DailyView({ employee, onSignOut, onOpenMessages }) {
 
   return <DailyCalendar employee={employee} onSignOut={onSignOut}
     onPickDay={(date) => setView({ kind: 'day', date })}
-    onOpenInbox={() => setView({ kind: 'inbox' })} />;
+    onOpenInbox={() => setView({ kind: 'inbox' })}
+    onOpenMessages={onOpenMessages} />;
 }
 
 // Helpers — local-time YYYY-MM-DD (avoids UTC midnight bugs)
@@ -4791,7 +4792,7 @@ const toDateKey = (d) => {
   return `${yr}-${mo}-${dy}`;
 };
 
-function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox }) {
+function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenMessages }) {
   const today = new Date();
   const [viewMonth, setViewMonth] = useState(new Date(today.getFullYear(), today.getMonth(), 1));
   const [activity, setActivity] = useState({});

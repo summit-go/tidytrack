@@ -725,7 +725,9 @@ const canSeeMoney = (e) => isOwner(e); // managers don't see $
 // =================================================================
 // EMPLOYEE APP — three-state machine
 // =================================================================
-function EmployeeApp({ employee, onSignOut }) {
+function EmployeeApp({ employee: employeeInit, onSignOut }) {
+  // Track the employee locally so PIN changes update the live session
+  const [employee, setEmployee] = useState(employeeInit);
   const [shift, setShift] = useState(null);
   const [workBlocks, setWorkBlocks] = useState([]);
   const [activeBlock, setActiveBlock] = useState(null);
@@ -738,6 +740,7 @@ function EmployeeApp({ employee, onSignOut }) {
   const [loaded, setLoaded] = useState(false);
   const [busy, setBusy] = useState(false);
   const [showMessages, setShowMessages] = useState(false);
+  const [showChangePin, setShowChangePin] = useState(false);
 
   useTick(!!shift && !shift.end_time);
   useEffect(() => { reload(); /* eslint-disable-next-line */ }, []);
@@ -1011,11 +1014,20 @@ function EmployeeApp({ employee, onSignOut }) {
 
   if (!loaded) return <Splash text="Loading…" />;
 
-  // Reusable wrapper: ensures the idle warning modal can overlay any view
+  // Reusable wrapper: overlays the idle warning + change-PIN modal regardless of view
   const withIdleModal = (children) => (
     <>
       {children}
       {showIdleWarning && <IdleWarningModal onStillActive={dismissIdleWarning} />}
+      {showChangePin && (
+        <ChangePinModal
+          employee={employee}
+          onClose={() => setShowChangePin(false)}
+          onSaved={(newPin) => {
+            setEmployee({ ...employee, pin: newPin });
+            setShowChangePin(false);
+          }} />
+      )}
     </>
   );
 
@@ -1067,7 +1079,8 @@ function EmployeeApp({ employee, onSignOut }) {
     return withIdleModal(<PropertyHub shift={shift} workBlocks={workBlocks} employeeName={employee.name} employee={employee}
       onSignOut={onSignOut} onClockOut={clockOut} onSwitchProperty={switchProperty}
       onStartNew={startNewBlock} onReopen={reopenBlock} onGoToBedroom={goToBedroomForTarget}
-      onOpenMessages={() => setShowMessages(true)} busy={busy} />);
+      onOpenMessages={() => setShowMessages(true)}
+      onOpenChangePin={() => setShowChangePin(true)} busy={busy} />);
   }
   if (isMulti && activeBlock) {
     return withIdleModal(<BlockView shift={shift} block={activeBlock} tasks={tasks} activeTask={activeTask}
@@ -1088,13 +1101,14 @@ function EmployeeApp({ employee, onSignOut }) {
     onAddPhoto={(taskId, kind) => setPhotoModal({ taskId, kind })}
     photoModal={photoModal} onClosePhotoModal={() => setPhotoModal(null)}
     onUploadPhoto={uploadPhoto}
-    onOpenMessages={() => setShowMessages(true)} busy={busy} />);
+    onOpenMessages={() => setShowMessages(true)}
+    onOpenChangePin={() => setShowChangePin(true)} busy={busy} />);
 }
 
 // =================================================================
 // PROPERTY HUB (multi-unit, between work blocks)
 // =================================================================
-function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onClockOut, onSwitchProperty, onStartNew, onReopen, onGoToBedroom, onOpenMessages, busy }) {
+function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onClockOut, onSwitchProperty, onStartNew, onReopen, onGoToBedroom, onOpenMessages, onOpenChangePin, busy }) {
   useTick(true);
   const elapsed = Date.now() - new Date(shift.start_time).getTime();
 
@@ -1112,10 +1126,19 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
               className="px-4 py-2.5 rounded-full bg-amber-700 text-stone-50 text-sm font-medium flex items-center gap-2 active:scale-95 transition-transform disabled:opacity-50">
               <LogOut size={14} /> Clock out
             </button>
-            <button onClick={onSwitchProperty} disabled={busy}
-              className="px-3 py-1.5 rounded-full bg-stone-700 hover:bg-stone-600 text-stone-50 text-xs font-medium flex items-center gap-1.5 disabled:opacity-50">
-              <Home size={11} /> Switch property
-            </button>
+            <div className="flex gap-1.5">
+              <button onClick={onSwitchProperty} disabled={busy}
+                className="px-3 py-1.5 rounded-full bg-stone-700 hover:bg-stone-600 text-stone-50 text-xs font-medium flex items-center gap-1.5 disabled:opacity-50">
+                <Home size={11} /> Switch property
+              </button>
+              {onOpenChangePin && (
+                <button onClick={onOpenChangePin} disabled={busy}
+                  className="px-3 py-1.5 rounded-full bg-stone-700 hover:bg-stone-600 text-stone-50 text-xs font-medium flex items-center gap-1.5 disabled:opacity-50"
+                  title="Change my PIN">
+                  <Settings size={11} /> PIN
+                </button>
+              )}
+            </div>
           </div>
         </div>
         <div className="flex items-center gap-1.5 text-xs text-amber-400 font-mono">
@@ -1286,7 +1309,7 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
 // =================================================================
 function SimpleShiftView({ shift, tasks, activeTask, employeeName, employee, onSignOut, onClockOut, onSwitchProperty,
   newTaskName, setNewTaskName, onStartTask, onStopTask, onResumeTask, onAddPhoto,
-  photoModal, onClosePhotoModal, onUploadPhoto, onOpenMessages, busy }) {
+  photoModal, onClosePhotoModal, onUploadPhoto, onOpenMessages, onOpenChangePin, busy }) {
   useTick(true);
   const elapsed = Date.now() - new Date(shift.start_time).getTime();
   const activeTaskObj = tasks.find(t => t.id === activeTask);
@@ -1305,12 +1328,21 @@ function SimpleShiftView({ shift, tasks, activeTask, employeeName, employee, onS
               className="px-4 py-2.5 rounded-full bg-amber-700 text-stone-50 text-sm font-medium flex items-center gap-2 active:scale-95 transition-transform disabled:opacity-50">
               <LogOut size={14} /> Clock out
             </button>
-            {shift.customer_id && (
-              <button onClick={onSwitchProperty} disabled={busy}
-                className="px-3 py-1.5 rounded-full bg-stone-700 hover:bg-stone-600 text-stone-50 text-xs font-medium flex items-center gap-1.5 disabled:opacity-50">
-                <Home size={11} /> Switch property
-              </button>
-            )}
+            <div className="flex gap-1.5">
+              {shift.customer_id && (
+                <button onClick={onSwitchProperty} disabled={busy}
+                  className="px-3 py-1.5 rounded-full bg-stone-700 hover:bg-stone-600 text-stone-50 text-xs font-medium flex items-center gap-1.5 disabled:opacity-50">
+                  <Home size={11} /> Switch property
+                </button>
+              )}
+              {onOpenChangePin && (
+                <button onClick={onOpenChangePin} disabled={busy}
+                  className="px-3 py-1.5 rounded-full bg-stone-700 hover:bg-stone-600 text-stone-50 text-xs font-medium flex items-center gap-1.5 disabled:opacity-50"
+                  title="Change my PIN">
+                  <Settings size={11} /> PIN
+                </button>
+              )}
+            </div>
           </div>
         </div>
         {shift.customer?.name && (
@@ -4632,6 +4664,166 @@ function IdleWarningModal({ onStillActive }) {
           className="w-full py-4 rounded-2xl bg-stone-900 text-stone-50 font-medium active:scale-98 transition-transform">
           Yes, I'm still working
         </button>
+      </div>
+    </div>
+  );
+}
+
+// =================================================================
+// CHANGE PIN MODAL — cleaner changes their own 4-digit PIN
+// Three steps: current PIN → new PIN → confirm new PIN.
+// Blocks obvious PINs, requires new ≠ current, checks uniqueness.
+// =================================================================
+const OBVIOUS_PINS = new Set([
+  '0000','1111','2222','3333','4444','5555','6666','7777','8888','9999',
+  '1234','4321','0123','3210','1212','2121','1010','0101','2580','6969',
+  '1004','2000','1313',
+]);
+
+function ChangePinModal({ employee, onClose, onSaved }) {
+  const [step, setStep] = useState('current'); // current | new | confirm
+  const [currentPin, setCurrentPin] = useState('');
+  const [newPin, setNewPin] = useState('');
+  const [confirmPin, setConfirmPin] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  const activePin =
+    step === 'current' ? currentPin :
+    step === 'new'     ? newPin :
+    confirmPin;
+
+  const setActivePin = (val) => {
+    setError('');
+    if (step === 'current') setCurrentPin(val);
+    else if (step === 'new') setNewPin(val);
+    else setConfirmPin(val);
+  };
+
+  const press = (n) => {
+    if (busy) return;
+    if (activePin.length >= 4) return;
+    setActivePin(activePin + String(n));
+  };
+  const backspace = () => {
+    if (busy) return;
+    setActivePin(activePin.slice(0, -1));
+  };
+
+  // Auto-advance when 4 digits entered
+  useEffect(() => {
+    if (activePin.length !== 4 || busy) return;
+    (async () => {
+      if (step === 'current') {
+        // Validate current PIN
+        if (activePin !== employee.pin) {
+          setError('That\'s not your current PIN.');
+          setCurrentPin('');
+          return;
+        }
+        setStep('new');
+      } else if (step === 'new') {
+        // Validate the new PIN
+        if (OBVIOUS_PINS.has(activePin)) {
+          setError('That PIN is too easy to guess. Try a less obvious one.');
+          setNewPin('');
+          return;
+        }
+        if (activePin === employee.pin) {
+          setError('Your new PIN must be different from your current PIN.');
+          setNewPin('');
+          return;
+        }
+        setStep('confirm');
+      } else {
+        // Confirm matches new
+        if (activePin !== newPin) {
+          setError('PINs don\'t match. Try again.');
+          setConfirmPin('');
+          return;
+        }
+        // Final save: check uniqueness then update
+        setBusy(true);
+        const { data: dup } = await supabase.from('employees')
+          .select('id').eq('pin', newPin).neq('id', employee.id).maybeSingle();
+        if (dup) {
+          setBusy(false);
+          setError('That PIN is already in use by another employee. Try a different one.');
+          setConfirmPin('');
+          setNewPin('');
+          setStep('new');
+          return;
+        }
+        const { error: upErr } = await supabase.from('employees')
+          .update({ pin: newPin }).eq('id', employee.id);
+        setBusy(false);
+        if (upErr) {
+          setError('Could not save: ' + upErr.message);
+          setConfirmPin('');
+          return;
+        }
+        alert('PIN updated! Use your new PIN next time you sign in.');
+        onSaved(newPin);
+      }
+    })();
+    // eslint-disable-next-line
+  }, [activePin, step]);
+
+  const titles = {
+    current: 'Enter your current PIN',
+    new: 'Choose a new 4-digit PIN',
+    confirm: 'Confirm your new PIN',
+  };
+  const subtitles = {
+    current: 'We need to verify it\'s really you.',
+    new: 'Pick something memorable but not obvious.',
+    confirm: 'Type it once more to make sure.',
+  };
+
+  return (
+    <div className="fixed inset-0 bg-stone-900/90 z-50 flex flex-col">
+      <div className="flex items-center justify-between p-4 text-stone-50">
+        <button onClick={onClose} className="text-stone-300 text-sm font-mono hover:text-stone-50 disabled:opacity-50" disabled={busy}>
+          Cancel
+        </button>
+        <div className="text-xs font-mono text-stone-400 uppercase tracking-wider">
+          Step {step === 'current' ? '1' : step === 'new' ? '2' : '3'} of 3
+        </div>
+        <div className="w-12" />
+      </div>
+      <div className="flex-1 flex flex-col items-center justify-center px-6 max-w-sm mx-auto w-full">
+        <div className="text-center mb-6">
+          <div className="font-serif text-2xl text-stone-50 mb-1">{titles[step]}</div>
+          <div className="text-sm text-stone-400">{subtitles[step]}</div>
+        </div>
+        <div className="flex gap-3 mb-2">
+          {[0,1,2,3].map(i => (
+            <div key={i}
+              className={`w-4 h-4 rounded-full border-2 transition-all ${
+                activePin.length > i
+                  ? (error ? 'bg-red-500 border-red-500' : 'bg-amber-500 border-amber-500')
+                  : 'bg-transparent border-stone-600'
+              }`} />
+          ))}
+        </div>
+        <div className="h-6 mb-6 text-xs font-mono text-red-400 text-center">{error}</div>
+        <div className="grid grid-cols-3 gap-3 w-full max-w-xs">
+          {[1,2,3,4,5,6,7,8,9].map(n => (
+            <button key={n} onClick={() => press(n)} disabled={busy}
+              className="aspect-square rounded-2xl bg-stone-800 hover:bg-stone-700 text-stone-50 text-2xl font-mono active:scale-95 transition-transform disabled:opacity-50">
+              {n}
+            </button>
+          ))}
+          <div />
+          <button onClick={() => press(0)} disabled={busy}
+            className="aspect-square rounded-2xl bg-stone-800 hover:bg-stone-700 text-stone-50 text-2xl font-mono active:scale-95 transition-transform disabled:opacity-50">
+            0
+          </button>
+          <button onClick={backspace} disabled={busy || activePin.length === 0}
+            className="aspect-square rounded-2xl bg-stone-800 hover:bg-stone-700 text-stone-50 flex items-center justify-center active:scale-95 transition-transform disabled:opacity-30">
+            <Delete size={22} />
+          </button>
+        </div>
       </div>
     </div>
   );

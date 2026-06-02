@@ -42,8 +42,10 @@ const SUPPORTED_TRANSLATE_LANGUAGES = [
   { code: 'ar', label: 'Arabic' },
 ];
 
-// Translation is enabled. Set to false to hide the Translate button + auto-translation.
-const TRANSLATION_ENABLED = true;
+// Translation is disabled — flip to `true` to re-enable the auto-translate
+// pipeline and the Translate button on assignments. When false, all translation
+// UI is hidden and no API calls are made (regardless of the API key).
+const TRANSLATION_ENABLED = false;
 
 const isTranslateConfigured = () =>
   TRANSLATION_ENABLED &&
@@ -4623,6 +4625,9 @@ function SpanishTranslationPanel({ assignment, viewerRole }) {
   const [expanded, setExpanded] = useState(false);
   const [retrying, setRetrying] = useState(false);
   if (!assignment) return null;
+  // Master kill switch: if translation feature is off, render nothing
+  // regardless of whether existing assignments have stored Spanish text.
+  if (!TRANSLATION_ENABLED) return null;
 
   const status = assignment.translation_status;
   const spanish = assignment.spanish_translation;

@@ -4627,9 +4627,9 @@ function SpanishTranslationPanel({ assignment, viewerRole }) {
   const status = assignment.translation_status;
   const spanish = assignment.spanish_translation;
   const hasSpanish = !!(spanish && spanish.trim());
-  // Staff = anyone uploading/reviewing assignments (owner, manager, PM)
-  // They get to see translation errors. Cleaners just see nothing on failure.
-  const isStaff = viewerRole === 'owner' || viewerRole === 'manager' || viewerRole === 'pm';
+  // Only owners and managers see translation pipeline errors / skipped notes.
+  // PMs and cleaners just see "in progress" or the final ES pill.
+  const isStaff = viewerRole === 'owner' || viewerRole === 'manager';
 
   const retry = async () => {
     if (!assignment.file_url) return;
@@ -4648,6 +4648,9 @@ function SpanishTranslationPanel({ assignment, viewerRole }) {
 
   // Show different states based on translation status
   if (status === 'processing' || status === 'pending') {
+    // Only show the "in progress" spinner to owners/managers — PMs and cleaners
+    // don't know about the auto-translation pipeline, no point exposing it.
+    if (!isStaff) return null;
     return (
       <div className="mt-2 px-3 py-1.5 rounded-full bg-stone-100 inline-flex items-center gap-1.5 text-xs font-mono text-stone-500">
         <div className="w-2 h-2 rounded-full border border-stone-400 border-t-transparent animate-spin" />

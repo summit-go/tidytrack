@@ -96,8 +96,13 @@ async function blobToBase64(blob) {
 async function extractTextFromAttachment(fileUrl, fileKind) {
   if (!isTranslateConfigured()) throw new Error('Translation is not configured.');
   // 1. Fetch the file as a Blob
-  const resp = await fetch(fileUrl);
-  if (!resp.ok) throw new Error(`Could not fetch attachment (${resp.status})`);
+  let resp;
+  try {
+    resp = await fetch(fileUrl);
+  } catch (e) {
+    throw new Error(`Could not fetch attachment from storage: ${e.message || 'network error'}`);
+  }
+  if (!resp.ok) throw new Error(`Could not fetch attachment (HTTP ${resp.status})`);
   const blob = await resp.blob();
   // Sanity cap — Cloud Vision has a 20MB limit for synchronous calls
   if (blob.size > 20 * 1024 * 1024) {
@@ -105,38 +110,76 @@ async function extractTextFromAttachment(fileUrl, fileKind) {
   }
   const base64 = await blobToBase64(blob);
 
-  // 2. Call Cloud Vision API. DOCUMENT_TEXT_DETECTION works for both images and PDFs.
-  const url = `https://vision.googleapis.com/v1/images:annotate?key=${GOOGLE_TRANSLATE_API_KEY}`;
-  const body = {
-    requests: [{
-      image: { content: base64 },
-      features: [{ type: 'DOCUMENT_TEXT_DETECTION', maxResults: 1 }],
-    }]
-  };
-  const apiResp = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  if (!apiResp.ok) {
-    const err = await apiResp.json().catch(() => ({}));
-    throw new Error(err?.error?.message || `Vision API failed (${apiResp.status})`);
+  const isPdf = fileKind === 'pdf' || blob.type === 'application/pdf';
+
+  if (isPdf) {
+    // PDFs use the files:annotate endpoint with mimeType
+    const url = `https://vision.googleapis.com/v1/files:annotate?key=${GOOGLE_TRANSLATE_API_KEY}`;
+    const body = {
+      requests: [{
+        inputConfig: {
+          content: base64,
+          mimeType: 'application/pdf',
+        },
+        features: [{ type: 'DOCUMENT_TEXT_DETECTION' }],
+        // Limit to first 5 pages to keep costs/time reasonable
+        pages: [1, 2, 3, 4, 5],
+      }]
+    };
+    const apiResp = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!apiResp.ok) {
+      const err = await apiResp.json().catch(() => ({}));
+      throw new Error(err?.error?.message || `Vision API (PDF) failed (HTTP ${apiResp.status})`);
+    }
+    const data = await apiResp.json();
+    // Response shape: data.responses[0].responses[] (one per page)
+    const pages = data?.responses?.[0]?.responses || [];
+    const allText = pages.map(p => p?.fullTextAnnotation?.text || '').filter(Boolean).join('\n\n');
+    return allText;
+  } else {
+    // Images use the simpler images:annotate endpoint
+    const url = `https://vision.googleapis.com/v1/images:annotate?key=${GOOGLE_TRANSLATE_API_KEY}`;
+    const body = {
+      requests: [{
+        image: { content: base64 },
+        features: [{ type: 'DOCUMENT_TEXT_DETECTION', maxResults: 1 }],
+      }]
+    };
+    const apiResp = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!apiResp.ok) {
+      const err = await apiResp.json().catch(() => ({}));
+      throw new Error(err?.error?.message || `Vision API failed (HTTP ${apiResp.status})`);
+    }
+    const data = await apiResp.json();
+    const annotation = data?.responses?.[0]?.fullTextAnnotation;
+    return annotation?.text || '';
   }
-  const data = await apiResp.json();
-  const annotation = data?.responses?.[0]?.fullTextAnnotation;
-  return annotation?.text || '';
 }
 
 // Run the full auto-translation pipeline for an uploaded assignment:
 //   fetch attachment → OCR → translate to Spanish → save back to DB.
 // Called fire-and-forget after upload; never blocks the UI.
 async function autoTranslateAssignment(assignmentId, fileUrl, fileKind) {
-  if (!isTranslateConfigured()) return;
+  if (!isTranslateConfigured()) {
+    console.warn('[auto-translate] skipped — translation not configured');
+    return;
+  }
+  console.log('[auto-translate] starting for', assignmentId, fileKind);
   try {
     await supabase.from('assignments')
       .update({ translation_status: 'processing' })
       .eq('id', assignmentId);
+    console.log('[auto-translate] OCR step…');
     const text = await extractTextFromAttachment(fileUrl, fileKind);
+    console.log('[auto-translate] OCR returned', text.length, 'chars');
     if (!text || text.trim().length < 3) {
       // Nothing readable in the attachment
       await supabase.from('assignments')
@@ -144,8 +187,10 @@ async function autoTranslateAssignment(assignmentId, fileUrl, fileKind) {
         .eq('id', assignmentId);
       return;
     }
+    console.log('[auto-translate] translation step…');
     const translations = await translateText([text], 'es');
     const spanish = translations?.[0]?.translatedText || '';
+    console.log('[auto-translate] saved Spanish version:', spanish.slice(0, 80) + '…');
     await supabase.from('assignments')
       .update({
         extracted_text: text,
@@ -155,7 +200,7 @@ async function autoTranslateAssignment(assignmentId, fileUrl, fileKind) {
       })
       .eq('id', assignmentId);
   } catch (e) {
-    console.warn('[auto-translate] failed for assignment', assignmentId, e);
+    console.error('[auto-translate] FAILED for assignment', assignmentId, e);
     try {
       await supabase.from('assignments')
         .update({
@@ -4574,13 +4619,32 @@ function ExportView({ employee, onSignOut, onOpenMessages, onLogoClick }) {
 // pill that expands to show the pre-computed Spanish translation of an
 // assignment's attachment. Only renders when there's actually a translation.
 // =================================================================
-function SpanishTranslationPanel({ assignment }) {
+function SpanishTranslationPanel({ assignment, viewerRole }) {
   const [expanded, setExpanded] = useState(false);
+  const [retrying, setRetrying] = useState(false);
   if (!assignment) return null;
 
   const status = assignment.translation_status;
   const spanish = assignment.spanish_translation;
   const hasSpanish = !!(spanish && spanish.trim());
+  // Staff = anyone uploading/reviewing assignments (owner, manager, PM)
+  // They get to see translation errors. Cleaners just see nothing on failure.
+  const isStaff = viewerRole === 'owner' || viewerRole === 'manager' || viewerRole === 'pm';
+
+  const retry = async () => {
+    if (!assignment.file_url) return;
+    setRetrying(true);
+    try {
+      await supabase.from('assignments').update({
+        translation_status: 'pending',
+        translation_error: null,
+      }).eq('id', assignment.id);
+      // Kick off auto-translate; fire-and-forget
+      autoTranslateAssignment(assignment.id, assignment.file_url, assignment.file_kind);
+    } finally {
+      setRetrying(false);
+    }
+  };
 
   // Show different states based on translation status
   if (status === 'processing' || status === 'pending') {
@@ -4592,10 +4656,40 @@ function SpanishTranslationPanel({ assignment }) {
     );
   }
   if (status === 'skipped') {
-    return null; // nothing to translate, no UI needed
+    // Nothing readable in attachment — quietly hide for cleaners, show small note to staff
+    if (!isStaff) return null;
+    return (
+      <div className="mt-2 px-3 py-1.5 rounded-full bg-stone-100 inline-flex items-center gap-1.5 text-xs font-mono text-stone-500">
+        No readable text in attachment — translation skipped.
+      </div>
+    );
   }
   if (status === 'failed' && !hasSpanish) {
-    return null; // failed, no fallback — stay quiet
+    // Failed — only show to staff so they can fix it; hide from cleaners
+    if (!isStaff) return null;
+    return (
+      <div className="mt-2 p-3 rounded-xl bg-red-50 border border-red-200">
+        <div className="flex items-start justify-between gap-2">
+          <div className="flex-1">
+            <div className="text-[10px] uppercase tracking-wider font-mono text-red-700 mb-1 flex items-center gap-1.5">
+              <AlertCircle size={11} /> Auto-translation failed
+            </div>
+            {assignment.translation_error && (
+              <div className="text-xs text-red-800 font-mono break-words">
+                {assignment.translation_error}
+              </div>
+            )}
+            <div className="text-[10px] text-red-700 mt-1">
+              Cleaners can't see this — only you. Common fixes: enable Cloud Vision API in Google Cloud Console, or add it to your API key's allowed API list.
+            </div>
+          </div>
+          <button onClick={retry} disabled={retrying}
+            className="px-3 py-1 rounded-full bg-red-700 text-white text-[11px] font-mono active:scale-95 disabled:opacity-50 flex-shrink-0">
+            {retrying ? 'Retrying…' : 'Retry'}
+          </button>
+        </div>
+      </div>
+    );
   }
   if (!hasSpanish) {
     return null;
@@ -4655,16 +4749,18 @@ function TranslateButton({ texts, defaultTargetLang = 'es' }) {
     <div className="mt-2">
       {!translated ? (
         <div className="flex items-center gap-2 flex-wrap">
-          <button onClick={() => { setOpen(true); doTranslate(targetLang); }}
+          <button onClick={() => setOpen(o => !o)}
             disabled={busy}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-amber-100 hover:bg-amber-200 text-amber-900 text-xs font-mono active:scale-95 transition-all disabled:opacity-50">
             <Languages size={12} />
-            {busy ? 'Translating…' : `Translate to ${langLabel}`}
+            {busy ? 'Translating…' : 'Translate'}
+            <ChevronRight size={10} className={`transition-transform ${open ? 'rotate-90' : ''}`} />
           </button>
           {open && (
-            <select value={targetLang} onChange={(e) => { setTargetLang(e.target.value); doTranslate(e.target.value); }}
+            <select autoFocus value="" onChange={(e) => { if (e.target.value) { setTargetLang(e.target.value); doTranslate(e.target.value); } }}
               disabled={busy}
-              className="text-xs font-mono px-2 py-1 rounded-lg border border-stone-300 bg-white">
+              className="text-xs font-mono px-2 py-1.5 rounded-lg border border-stone-300 bg-white">
+              <option value="" disabled>Choose language…</option>
               {SUPPORTED_TRANSLATE_LANGUAGES.map(l => (
                 <option key={l.code} value={l.code}>{l.label}</option>
               ))}
@@ -6885,7 +6981,7 @@ function AssignmentDetail({ property, assignment: assignmentInit, employee, onBa
         </div>
       </div>
       <div className="px-5 pt-4 space-y-2">
-        <SpanishTranslationPanel assignment={assignment} />
+        <SpanishTranslationPanel assignment={assignment} viewerRole={employee?.role} />
         <TranslateButton texts={
           assignment.extracted_text && assignment.extracted_text.trim()
             ? [assignment.title, assignment.notes, assignment.extracted_text].filter(Boolean)
@@ -6905,7 +7001,7 @@ function AssignmentDetail({ property, assignment: assignmentInit, employee, onBa
             </div>
           </div>
           {assignment.file_kind === 'image' && (
-            <img loading="lazy" src={assignment.file_url} alt="" className="w-full rounded-xl mb-3" />
+            <img loading="lazy" src={assignment.file_url} alt="" className="w-full max-h-[60vh] object-contain rounded-xl mb-3 bg-stone-100" />
           )}
           <a href={assignment.file_url} target="_blank" rel="noreferrer"
             className="w-full inline-flex items-center justify-center gap-2 py-2.5 rounded-xl bg-stone-900 text-stone-50 text-sm font-medium">
@@ -7593,6 +7689,28 @@ function ReassignModal({ target, propertyId, onSaved, onClose }) {
   );
 }
 
+// =================================================================
+// ZOOMABLE IMAGE — image viewer that fits the screen by default
+// and lets the user toggle to actual size for scroll/zoom inspection.
+// =================================================================
+function ZoomableImage({ src, alt }) {
+  const [zoomed, setZoomed] = useState(false);
+  return (
+    <div className="w-full h-full flex items-start justify-center p-2">
+      <img
+        loading="lazy"
+        src={src}
+        alt={alt || ''}
+        onClick={() => setZoomed(z => !z)}
+        className={zoomed
+          ? "cursor-zoom-out max-w-none"
+          : "cursor-zoom-in max-w-full max-h-[80vh] object-contain rounded-xl shadow-lg"}
+        style={zoomed ? { touchAction: 'pinch-zoom' } : {}}
+      />
+    </div>
+  );
+}
+
 function AssignmentViewer({ target, onClose }) {
   const a = target.assignment;
   // For "other language" translation: prefer extracted_text (the full OCR output)
@@ -7617,9 +7735,9 @@ function AssignmentViewer({ target, onClose }) {
       </div>
       <div className="flex-1 overflow-auto bg-stone-100">
         {a.file_kind === 'image' ? (
-          <img loading="lazy" src={a.file_url} alt="" className="w-full" />
+          <ZoomableImage src={a.file_url} alt={a.title} />
         ) : (
-          <iframe src={a.file_url} className="w-full h-full" title={a.title} />
+          <iframe src={a.file_url} className="w-full h-full min-h-[60vh]" title={a.title} />
         )}
       </div>
       <div className="p-4 bg-stone-900">
@@ -8692,7 +8810,7 @@ function PortalAssignmentDetail({ property, assignment, onBack, onEdit }) {
         </div>
       </div>
       <div className="px-5 pt-4 space-y-2">
-        <SpanishTranslationPanel assignment={assignment} />
+        <SpanishTranslationPanel assignment={assignment} viewerRole="pm" />
         <TranslateButton texts={
           assignment.extracted_text && assignment.extracted_text.trim()
             ? [assignment.title, assignment.notes, assignment.extracted_text].filter(Boolean)
@@ -8723,7 +8841,7 @@ function PortalAssignmentDetail({ property, assignment, onBack, onEdit }) {
               </div>
             </div>
             {assignment.file_kind === 'image' && (
-              <img loading="lazy" src={assignment.file_url} alt="" className="w-full rounded-xl mb-3" />
+              <img loading="lazy" src={assignment.file_url} alt="" className="w-full max-h-[60vh] object-contain rounded-xl mb-3 bg-stone-100" />
             )}
             <a href={assignment.file_url} target="_blank" rel="noreferrer"
               className="w-full inline-flex items-center justify-center gap-2 py-2.5 rounded-xl bg-stone-900 text-stone-50 text-sm font-medium">
@@ -9135,7 +9253,7 @@ function ReviewAssignmentModal({ assignment, employee, onDone, onClose }) {
           {assignment.file_url && (
             <div>
               {assignment.file_kind === 'image' ? (
-                <img loading="lazy" src={assignment.file_url} alt="" className="w-full rounded-xl" />
+                <img loading="lazy" src={assignment.file_url} alt="" className="w-full max-h-[60vh] object-contain rounded-xl bg-stone-100" />
               ) : (
                 <a href={assignment.file_url} target="_blank" rel="noreferrer"
                   className="block p-4 rounded-xl bg-white border border-stone-200 hover:border-stone-400">

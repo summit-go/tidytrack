@@ -42,9 +42,8 @@ const SUPPORTED_TRANSLATE_LANGUAGES = [
   { code: 'ar', label: 'Arabic' },
 ];
 
-// Translation is currently disabled while we figure out attachment handling.
-// Set this to true to re-enable the Translate button on assignments.
-const TRANSLATION_ENABLED = false;
+// Translation is enabled. Set to false to hide the Translate button + auto-translation.
+const TRANSLATION_ENABLED = true;
 
 const isTranslateConfigured = () =>
   TRANSLATION_ENABLED &&
@@ -74,6 +73,98 @@ async function translateText(strings, targetLang) {
     translatedText: t.translatedText,
     detectedSourceLanguage: t.detectedSourceLanguage,
   }));
+}
+
+// Convert a fetched Blob to base64 (strips the data: prefix).
+async function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => {
+      const result = r.result;
+      // result is "data:<mime>;base64,<actual-base64>"
+      const comma = result.indexOf(',');
+      resolve(comma >= 0 ? result.slice(comma + 1) : result);
+    };
+    r.onerror = () => reject(new Error('Could not read file'));
+    r.readAsDataURL(blob);
+  });
+}
+
+// OCR an attachment via Google Cloud Vision API.
+// Returns the extracted full text, or '' if nothing readable found.
+// Throws on hard errors (network, auth, etc) so callers can handle.
+async function extractTextFromAttachment(fileUrl, fileKind) {
+  if (!isTranslateConfigured()) throw new Error('Translation is not configured.');
+  // 1. Fetch the file as a Blob
+  const resp = await fetch(fileUrl);
+  if (!resp.ok) throw new Error(`Could not fetch attachment (${resp.status})`);
+  const blob = await resp.blob();
+  // Sanity cap — Cloud Vision has a 20MB limit for synchronous calls
+  if (blob.size > 20 * 1024 * 1024) {
+    throw new Error('Attachment too large for OCR (over 20MB).');
+  }
+  const base64 = await blobToBase64(blob);
+
+  // 2. Call Cloud Vision API. DOCUMENT_TEXT_DETECTION works for both images and PDFs.
+  const url = `https://vision.googleapis.com/v1/images:annotate?key=${GOOGLE_TRANSLATE_API_KEY}`;
+  const body = {
+    requests: [{
+      image: { content: base64 },
+      features: [{ type: 'DOCUMENT_TEXT_DETECTION', maxResults: 1 }],
+    }]
+  };
+  const apiResp = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!apiResp.ok) {
+    const err = await apiResp.json().catch(() => ({}));
+    throw new Error(err?.error?.message || `Vision API failed (${apiResp.status})`);
+  }
+  const data = await apiResp.json();
+  const annotation = data?.responses?.[0]?.fullTextAnnotation;
+  return annotation?.text || '';
+}
+
+// Run the full auto-translation pipeline for an uploaded assignment:
+//   fetch attachment → OCR → translate to Spanish → save back to DB.
+// Called fire-and-forget after upload; never blocks the UI.
+async function autoTranslateAssignment(assignmentId, fileUrl, fileKind) {
+  if (!isTranslateConfigured()) return;
+  try {
+    await supabase.from('assignments')
+      .update({ translation_status: 'processing' })
+      .eq('id', assignmentId);
+    const text = await extractTextFromAttachment(fileUrl, fileKind);
+    if (!text || text.trim().length < 3) {
+      // Nothing readable in the attachment
+      await supabase.from('assignments')
+        .update({ extracted_text: text || '', translation_status: 'skipped' })
+        .eq('id', assignmentId);
+      return;
+    }
+    const translations = await translateText([text], 'es');
+    const spanish = translations?.[0]?.translatedText || '';
+    await supabase.from('assignments')
+      .update({
+        extracted_text: text,
+        spanish_translation: spanish,
+        translation_status: 'done',
+        translation_error: null,
+      })
+      .eq('id', assignmentId);
+  } catch (e) {
+    console.warn('[auto-translate] failed for assignment', assignmentId, e);
+    try {
+      await supabase.from('assignments')
+        .update({
+          translation_status: 'failed',
+          translation_error: (e?.message || String(e)).slice(0, 500),
+        })
+        .eq('id', assignmentId);
+    } catch {}
+  }
 }
 
 // =================================================================
@@ -4478,6 +4569,60 @@ function ExportView({ employee, onSignOut, onOpenMessages, onLogoClick }) {
 // Uses the Google Translate API key configured at the top of this file.
 // Hidden entirely if no key is configured.
 // =================================================================
+// =================================================================
+// SPANISH TRANSLATION PANEL — collapsible "ES — Spanish version available"
+// pill that expands to show the pre-computed Spanish translation of an
+// assignment's attachment. Only renders when there's actually a translation.
+// =================================================================
+function SpanishTranslationPanel({ assignment }) {
+  const [expanded, setExpanded] = useState(false);
+  if (!assignment) return null;
+
+  const status = assignment.translation_status;
+  const spanish = assignment.spanish_translation;
+  const hasSpanish = !!(spanish && spanish.trim());
+
+  // Show different states based on translation status
+  if (status === 'processing' || status === 'pending') {
+    return (
+      <div className="mt-2 px-3 py-1.5 rounded-full bg-stone-100 inline-flex items-center gap-1.5 text-xs font-mono text-stone-500">
+        <div className="w-2 h-2 rounded-full border border-stone-400 border-t-transparent animate-spin" />
+        Spanish translation in progress…
+      </div>
+    );
+  }
+  if (status === 'skipped') {
+    return null; // nothing to translate, no UI needed
+  }
+  if (status === 'failed' && !hasSpanish) {
+    return null; // failed, no fallback — stay quiet
+  }
+  if (!hasSpanish) {
+    return null;
+  }
+
+  return (
+    <div className="mt-2">
+      <button onClick={() => setExpanded(e => !e)}
+        className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-mono active:scale-95 transition-all ${expanded ? 'bg-amber-200 text-amber-900' : 'bg-amber-100 hover:bg-amber-200 text-amber-900'}`}>
+        <span className="font-bold tracking-wider">ES</span>
+        <span>{expanded ? 'Hide Spanish version' : 'Spanish version available'}</span>
+        <ChevronRight size={11} className={`transition-transform ${expanded ? 'rotate-90' : ''}`} />
+      </button>
+      {expanded && (
+        <div className="mt-2 p-3 rounded-xl bg-amber-50 border border-amber-200">
+          <div className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider font-mono text-amber-800 mb-2">
+            <Languages size={11} /> Traducción al español
+          </div>
+          <div className="text-sm text-stone-800 whitespace-pre-wrap break-words">
+            {spanish}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function TranslateButton({ texts, defaultTargetLang = 'es' }) {
   const [open, setOpen] = useState(false);
   const [targetLang, setTargetLang] = useState(() => {
@@ -6536,6 +6681,9 @@ function AssignmentForm({ property, employee, onCancel, onSaved }) {
           }).select().single();
         if (e) throw e;
 
+        // Fire-and-forget auto-translation (does NOT block the upload flow)
+        autoTranslateAssignment(created.id, publicUrl, kind);
+
         const prop = allProperties.find(p => p.id === r.propertyId);
         const isMulti = prop?.property_type === 'multi_unit';
         // Single target only: either the picked unit+bedroom, or the whole property for simple
@@ -6736,8 +6884,13 @@ function AssignmentDetail({ property, assignment: assignmentInit, employee, onBa
           <div className="font-serif text-xl text-stone-900 truncate">{assignment.title}</div>
         </div>
       </div>
-      <div className="px-5 pt-4">
-        <TranslateButton texts={[assignment.title, assignment.notes].filter(Boolean)} />
+      <div className="px-5 pt-4 space-y-2">
+        <SpanishTranslationPanel assignment={assignment} />
+        <TranslateButton texts={
+          assignment.extracted_text && assignment.extracted_text.trim()
+            ? [assignment.title, assignment.notes, assignment.extracted_text].filter(Boolean)
+            : [assignment.title, assignment.notes].filter(Boolean)
+        } />
       </div>
       <div className="px-5 pt-4 space-y-5">
         {/* Document preview/link */}
@@ -6853,7 +7006,7 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
   const load = async () => {
     let q = supabase
       .from('assignment_targets')
-      .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status), unit:units(id, label), party:parties(id, label), starter:employees!started_by(name), completer:employees!completed_by(name)');
+      .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, extracted_text, spanish_translation, translation_status), unit:units(id, label), party:parties(id, label), starter:employees!started_by(name), completer:employees!completed_by(name)');
 
     if (!showDone) q = q.neq('status', 'done');
 
@@ -7138,7 +7291,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
     setLoadError(null);
     const { data, error } = await supabase
       .from('assignment_targets')
-      .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status), unit:units(id, label), party:parties(id, label), starter:employees!started_by(name), completer:employees!completed_by(name)')
+      .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, extracted_text, spanish_translation, translation_status), unit:units(id, label), party:parties(id, label), starter:employees!started_by(name), completer:employees!completed_by(name)')
       .eq('status', statusFilter);
     if (error) {
       console.error('[Assignments] load error:', error);
@@ -7442,7 +7595,11 @@ function ReassignModal({ target, propertyId, onSaved, onClose }) {
 
 function AssignmentViewer({ target, onClose }) {
   const a = target.assignment;
-  const translateTexts = [a.title, a.notes].filter(Boolean);
+  // For "other language" translation: prefer extracted_text (the full OCR output)
+  // if available, otherwise fall back to title + notes.
+  const translateTexts = a.extracted_text && a.extracted_text.trim()
+    ? [a.title, a.notes, a.extracted_text].filter(Boolean)
+    : [a.title, a.notes].filter(Boolean);
   return (
     <div className="fixed inset-0 bg-stone-900/95 z-50 flex flex-col">
       <div className="p-4 text-stone-50 bg-stone-900">
@@ -7455,6 +7612,7 @@ function AssignmentViewer({ target, onClose }) {
             <X size={20} />
           </button>
         </div>
+        <SpanishTranslationPanel assignment={a} />
         <TranslateButton texts={translateTexts} />
       </div>
       <div className="flex-1 overflow-auto bg-stone-100">
@@ -8286,9 +8444,19 @@ function PortalAssignmentForm({ property, assignment, portalKind, onCancel, onSa
           // delete the old file before replacing
           if (assignment.file_path) await deletePmFile(assignment.file_path);
           Object.assign(patch, filePayload);
+          // Reset translation status — we'll re-translate the new file
+          patch.translation_status = 'pending';
+          patch.extracted_text = null;
+          patch.spanish_translation = null;
+          patch.translation_error = null;
         }
         const { error: e1 } = await supabase.from('assignments').update(patch).eq('id', assignment.id);
         if (e1) throw e1;
+
+        // If the file was replaced, kick off auto-translation for the new file
+        if (filePayload?.file_url && filePayload?.file_kind) {
+          autoTranslateAssignment(assignment.id, filePayload.file_url, filePayload.file_kind);
+        }
 
         // Replace targets with the new selection
         await supabase.from('assignment_targets').delete().eq('assignment_id', assignment.id);
@@ -8313,6 +8481,10 @@ function PortalAssignmentForm({ property, assignment, portalKind, onCancel, onSa
           ...filePayload
         }).select().single();
         if (e1) throw e1;
+        // Fire-and-forget auto-translation if a file was uploaded
+        if (filePayload?.file_url && filePayload?.file_kind) {
+          autoTranslateAssignment(created.id, filePayload.file_url, filePayload.file_kind);
+        }
         const targetRow = {
           assignment_id: created.id,
           unit_id: !isMulti || scope === 'property' ? null : unitId,
@@ -8519,8 +8691,13 @@ function PortalAssignmentDetail({ property, assignment, onBack, onEdit }) {
           <div className="font-serif text-xl text-stone-900 truncate">{assignment.title}</div>
         </div>
       </div>
-      <div className="px-5 pt-4">
-        <TranslateButton texts={[assignment.title, assignment.notes].filter(Boolean)} />
+      <div className="px-5 pt-4 space-y-2">
+        <SpanishTranslationPanel assignment={assignment} />
+        <TranslateButton texts={
+          assignment.extracted_text && assignment.extracted_text.trim()
+            ? [assignment.title, assignment.notes, assignment.extracted_text].filter(Boolean)
+            : [assignment.title, assignment.notes].filter(Boolean)
+        } />
       </div>
       <div className="px-5 pt-4 space-y-5">
         <div className={`p-3 rounded-xl text-sm flex items-center gap-2 ${s.color}`}>

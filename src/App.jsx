@@ -9055,12 +9055,12 @@ function AssignmentsPanel({ propertyId, employee, refreshKey, onGoToBedroom, onO
         </button>
       </div>
       <AssignmentTabContent propertyId={propertyId} employee={employee} statusFilter={tab}
-        onUpdate={loadCounts} onGoToBedroom={onGoToBedroom} />
+        onUpdate={loadCounts} onGoToBedroom={onGoToBedroom} onOpenBedroomHistory={onOpenBedroomHistory} />
     </div>
   );
 }
 
-function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, onGoToBedroom }) {
+function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, onGoToBedroom, onOpenBedroomHistory }) {
   const [targets, setTargets] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [opened, setOpened] = useState(null);

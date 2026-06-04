@@ -2873,6 +2873,7 @@ function ShiftDetail({ shiftId, viewerRole, onBack }) {
   const [editingBlock, setEditingBlock] = useState(null); // block obj
   const [deletingBlock, setDeletingBlock] = useState(null); // block obj
   const [editingAdjustment, setEditingAdjustment] = useState(false);
+  const [bedroomHistory, setBedroomHistory] = useState(null); // params for history view
   const [busy, setBusy] = useState(false);
 
   const reload = async () => {
@@ -2948,6 +2949,17 @@ function ShiftDetail({ shiftId, viewerRole, onBack }) {
   };
 
   if (!shift) return <Splash text="Loading…" />;
+  if (bedroomHistory) {
+    return <BedroomHistoryView
+      propertyId={shift.customer_id}
+      propertyName={shift.customer?.name || ''}
+      unitId={bedroomHistory.unitId}
+      unitLabel={bedroomHistory.unitLabel}
+      partyId={bedroomHistory.partyId}
+      partyLabel={bedroomHistory.partyLabel}
+      employee={{ role: viewerRole }}
+      onBack={() => setBedroomHistory(null)} />;
+  }
   const dur = (shift.end_time ? new Date(shift.end_time) : new Date()) - new Date(shift.start_time);
   const isMulti = shift.customer?.property_type === 'multi_unit';
 
@@ -3056,8 +3068,10 @@ function ShiftDetail({ shiftId, viewerRole, onBack }) {
               <div className="space-y-3">
                 {workBlocks.map(b => <WorkBlockDetail key={b.id} block={b} rate={shift.customer?.bill_rate_hourly} showMoney={showMoney}
                   canEdit={canEdit}
+                  propertyId={shift.customer_id}
                   onEdit={() => setEditingBlock(b)}
-                  onDelete={() => setDeletingBlock(b)} />)}
+                  onDelete={() => setDeletingBlock(b)}
+                  onOpenBedroomHistory={setBedroomHistory} />)}
               </div>
             )}
           </>
@@ -3371,7 +3385,147 @@ function AdjustmentModal({ shift, busy, onSave, onClose }) {
   );
 }
 
-function WorkBlockDetail({ block, rate, showMoney, canEdit, onEdit, onDelete }) {
+// =================================================================
+// useAssignmentsForBedroomOnDate — find assignments tied to a bedroom
+// on a given date. Used by WorkBlockAssignmentLink and BedroomHistoryView.
+//
+// Matching strategy (date-aware):
+//   1) Targets where the assignment's scheduled_date matches the date,
+//      AND the target's unit/party (or null+null for property-wide) match
+//   2) If no exact-date matches, fall back to the most recent assignment
+//      at this bedroom that was active on or before this date
+// Returns: { sameDayTargets, fallbackTarget, loading }
+// =================================================================
+function useAssignmentsForBedroomOnDate({ propertyId, unitId, partyId, dateISO }) {
+  const [state, setState] = useState({ sameDayTargets: [], fallbackTarget: null, loading: true });
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!propertyId || !dateISO) {
+      setState({ sameDayTargets: [], fallbackTarget: null, loading: false });
+      return;
+    }
+    (async () => {
+      // The date as YYYY-MM-DD (local). dateISO may be a full timestamp.
+      const d = new Date(dateISO);
+      const yyyy = d.getFullYear();
+      const mm = String(d.getMonth() + 1).padStart(2, '0');
+      const dd = String(d.getDate()).padStart(2, '0');
+      const dayKey = `${yyyy}-${mm}-${dd}`;
+
+      // Build the bedroom filter: bedroom-specific OR property-wide
+      let q = supabase.from('assignment_targets')
+        .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, assignment_type, scheduled_date, created_at)')
+        .or(
+          (unitId && partyId)
+            ? `and(unit_id.eq.${unitId},party_id.eq.${partyId}),and(unit_id.is.null,party_id.is.null)`
+            : `unit_id.is.null,party_id.is.null`
+        );
+      const { data, error } = await q;
+      if (cancelled) return;
+      if (error) {
+        console.warn('[useAssignmentsForBedroomOnDate]', error);
+        setState({ sameDayTargets: [], fallbackTarget: null, loading: false });
+        return;
+      }
+      const all = (data || []).filter(t =>
+        t.assignment?.customer_id === propertyId &&
+        t.assignment?.active &&
+        (t.assignment?.source !== 'pm' || t.assignment?.pm_status === 'approved')
+      );
+
+      // Same-day match: scheduled_date matches, OR scheduled_date is null
+      // but created_at is on this day (we treat created_at as a proxy for the date)
+      const sameDay = all.filter(t => {
+        if (t.assignment?.scheduled_date) {
+          return t.assignment.scheduled_date === dayKey;
+        }
+        // Fall back to created_at date if no scheduled_date
+        const createdISO = t.assignment?.created_at;
+        if (!createdISO) return false;
+        const c = new Date(createdISO);
+        const cKey = `${c.getFullYear()}-${String(c.getMonth() + 1).padStart(2, '0')}-${String(c.getDate()).padStart(2, '0')}`;
+        return cKey === dayKey;
+      });
+
+      let fallback = null;
+      if (sameDay.length === 0 && all.length > 0) {
+        // Pick the most recent target by scheduled_date (or created_at)
+        const sorted = [...all].sort((a, b) => {
+          const aKey = a.assignment?.scheduled_date || a.assignment?.created_at || '';
+          const bKey = b.assignment?.scheduled_date || b.assignment?.created_at || '';
+          return bKey.localeCompare(aKey);
+        });
+        fallback = sorted[0];
+      }
+
+      setState({ sameDayTargets: sameDay, fallbackTarget: fallback, loading: false });
+    })();
+    return () => { cancelled = true; };
+  }, [propertyId, unitId, partyId, dateISO]);
+
+  return state;
+}
+
+// =================================================================
+// WORK BLOCK ASSIGNMENT LINK — Small button/indicator that surfaces
+// the assignment doc associated with a work block. Tappable to open
+// AssignmentViewer modal. Shows "no assignment doc" if nothing exists.
+// =================================================================
+function WorkBlockAssignmentLink({ block, propertyId, compact = false }) {
+  const date = block?.start_time || block?.end_time;
+  const unitId = block?.unit_id || block?.unit?.id || null;
+  const partyId = block?.party_id || block?.party?.id || null;
+  const { sameDayTargets, fallbackTarget, loading } =
+    useAssignmentsForBedroomOnDate({ propertyId, unitId, partyId, dateISO: date });
+  const [opened, setOpened] = useState(null);
+
+  if (loading) return null;
+
+  const targets = sameDayTargets.length > 0 ? sameDayTargets : (fallbackTarget ? [fallbackTarget] : []);
+  const targetsWithFiles = targets.filter(t => t.assignment?.file_url);
+
+  if (targets.length === 0) {
+    return (
+      <div className={`flex items-center gap-1.5 text-[10px] font-mono text-stone-400 ${compact ? '' : 'py-1'}`}>
+        <AlertCircle size={11} /> No assignment doc
+      </div>
+    );
+  }
+
+  const isFallback = sameDayTargets.length === 0 && fallbackTarget;
+
+  return (
+    <>
+      <div className="flex flex-wrap gap-1.5">
+        {targets.map(t => {
+          const a = t.assignment;
+          const hasFile = !!a.file_url;
+          return (
+            <button key={t.id}
+              onClick={hasFile ? () => setOpened(t) : undefined}
+              disabled={!hasFile}
+              className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-[11px] font-mono transition-colors ${
+                hasFile
+                  ? 'bg-stone-900 hover:bg-stone-700 text-stone-50 active:scale-95'
+                  : 'bg-stone-100 text-stone-400 cursor-not-allowed'
+              }`}
+              title={hasFile ? `Open ${a.title}` : `${a.title} — no file attached`}>
+              {a.file_kind === 'pdf' ? <FileText size={10} /> : <ImageIcon size={10} />}
+              <span className="truncate max-w-[140px]">{a.title}</span>
+              {isFallback && (
+                <span className="text-[9px] text-amber-400 ml-0.5">(from {a.scheduled_date ? fmtDate(a.scheduled_date) : 'earlier'})</span>
+              )}
+            </button>
+          );
+        })}
+      </div>
+      {opened && <AssignmentViewer target={opened} onClose={() => setOpened(null)} />}
+    </>
+  );
+}
+
+function WorkBlockDetail({ block, rate, showMoney, canEdit, onEdit, onDelete, propertyId, onOpenBedroomHistory }) {
   const dur = (block.end_time ? new Date(block.end_time) : new Date()) - new Date(block.start_time);
   const blockRate = block.bill_rate_at_work || rate || 0;
   const billable = block.end_time ? (dur / 1000 / 3600) * blockRate : 0;
@@ -3393,6 +3547,20 @@ function WorkBlockDetail({ block, rate, showMoney, canEdit, onEdit, onDelete }) 
           </div>
         )}
       </div>
+      {propertyId && (
+        <div className="mb-2 flex flex-wrap items-center gap-2">
+          <WorkBlockAssignmentLink block={block} propertyId={propertyId} compact />
+          {onOpenBedroomHistory && block.unit?.id && block.party?.id && (
+            <button onClick={() => onOpenBedroomHistory({
+                unitId: block.unit.id, unitLabel: block.unit.label,
+                partyId: block.party.id, partyLabel: block.party.label
+              })}
+              className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-stone-100 hover:bg-stone-200 text-stone-700 text-[11px] font-mono active:scale-95">
+              <Clock size={10} /> Bedroom history
+            </button>
+          )}
+        </div>
+      )}
       {block.work_notes && <div className="text-xs text-stone-600 italic mt-2">"{block.work_notes}"</div>}
       {block.tasks?.length > 0 && (
         <div className="mt-3 pt-3 border-t border-stone-100 space-y-3">
@@ -6897,6 +7065,8 @@ function DailyView({ employee, onSignOut, onOpenMessages, onLogoClick }) {
   const [view, setView] = useState({ kind: 'calendar' });
   const showMoney = canSeeMoney(employee);
 
+  const openBedroomHistory = (params) => setView({ kind: 'bedroom-history', ...params, from: view });
+
   if (view.kind === 'day') {
     return <DailyDayDetail date={view.date} employee={employee} showMoney={showMoney}
       onBack={() => setView({ kind: 'calendar' })}
@@ -6907,7 +7077,16 @@ function DailyView({ employee, onSignOut, onOpenMessages, onLogoClick }) {
     return <DailyUnitDayDetail date={view.date} propertyId={view.propertyId} unitId={view.unitId}
       unitLabel={view.unitLabel} propertyName={view.propertyName}
       employee={employee} showMoney={showMoney}
-      onBack={() => setView({ kind: 'day', date: view.date })} />;
+      onBack={() => setView({ kind: 'day', date: view.date })}
+      onOpenBedroomHistory={openBedroomHistory} />;
+  }
+  if (view.kind === 'bedroom-history') {
+    return <BedroomHistoryView
+      propertyId={view.propertyId} propertyName={view.propertyName}
+      unitId={view.unitId} unitLabel={view.unitLabel}
+      partyId={view.partyId} partyLabel={view.partyLabel}
+      employee={employee}
+      onBack={() => setView(view.from || { kind: 'calendar' })} />;
   }
   if (view.kind === 'inbox') {
     return <InboxView employee={employee}
@@ -7320,7 +7499,280 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit }) {
 }
 
 // Unit + day detail — full breakdown of who cleaned what at that unit on that date, with photos
-function DailyUnitDayDetail({ date, propertyId, unitId, unitLabel, propertyName, employee, showMoney, onBack }) {
+// =================================================================
+// BEDROOM HISTORY VIEW — Full timeline of activity at a single bedroom.
+// Shows past assignments, work blocks, photos, notes grouped by date.
+//
+// Access scoping:
+//   - Cleaners: limited to last 6 months (180 days)
+//   - Owners/managers: full lifetime
+//
+// Reached from "View bedroom history" buttons on DailyUnitDayDetail,
+// PartyList admin, and other bedroom-anchored views.
+// =================================================================
+function BedroomHistoryView({ propertyId, propertyName, unitId, unitLabel, partyId, partyLabel, employee, onBack }) {
+  const isStaff = employee?.role === 'owner' || employee?.role === 'manager';
+  const [data, setData] = useState({ days: [], loading: true });
+  const [openedAssignment, setOpenedAssignment] = useState(null);
+  const [filterDays, setFilterDays] = useState(30); // default last 30 days
+  const FILTER_OPTIONS = isStaff
+    ? [7, 30, 90, 365, 'all']
+    : [7, 30, 90, 180]; // cleaners capped at 180
+
+  const filterLabel = (d) => d === 'all' ? 'All time' : `Last ${d} days`;
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setData(d => ({ ...d, loading: true }));
+      // Date window
+      let sinceISO = null;
+      if (filterDays !== 'all') {
+        const since = new Date();
+        since.setDate(since.getDate() - Number(filterDays));
+        since.setHours(0, 0, 0, 0);
+        sinceISO = since.toISOString();
+      }
+      // For cleaners, hard cap to 180 days
+      if (!isStaff) {
+        const cap = new Date();
+        cap.setDate(cap.getDate() - 180);
+        cap.setHours(0, 0, 0, 0);
+        const capISO = cap.toISOString();
+        if (!sinceISO || sinceISO < capISO) sinceISO = capISO;
+      }
+
+      // Fetch work blocks at this bedroom in the window
+      let blocksQ = supabase.from('work_blocks')
+        .select('*, shift:shifts!inner(id, customer_id, employee:employees(id, name)), tasks(*, photos(*))')
+        .eq('unit_id', unitId)
+        .eq('party_id', partyId)
+        .order('start_time', { ascending: false });
+      if (sinceISO) blocksQ = blocksQ.gte('start_time', sinceISO);
+      const { data: blocksRaw } = await blocksQ;
+      const blocks = (blocksRaw || []).filter(b => b.shift?.customer_id === propertyId);
+
+      // Fetch assignment_targets at this bedroom (and property-wide) in the window
+      let targetsQ = supabase.from('assignment_targets')
+        .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, assignment_type, scheduled_date, created_at)')
+        .or(`and(unit_id.eq.${unitId},party_id.eq.${partyId}),and(unit_id.is.null,party_id.is.null)`)
+        .order('created_at', { ascending: false });
+      const { data: targetsRaw } = await targetsQ;
+      const targets = (targetsRaw || []).filter(t =>
+        t.assignment?.customer_id === propertyId &&
+        t.assignment?.active &&
+        (t.assignment?.source !== 'pm' || t.assignment?.pm_status === 'approved')
+      ).filter(t => {
+        if (!sinceISO) return true;
+        const dateStr = t.assignment?.scheduled_date || t.assignment?.created_at;
+        return !dateStr || dateStr >= sinceISO.slice(0, 10);
+      });
+
+      if (cancelled) return;
+
+      // Group by local date key (YYYY-MM-DD)
+      const dayMap = new Map();
+      const ensureDay = (key) => {
+        if (!dayMap.has(key)) {
+          dayMap.set(key, { key, blocks: [], targets: [], photos: [], totalMs: 0 });
+        }
+        return dayMap.get(key);
+      };
+
+      blocks.forEach(b => {
+        const d = new Date(b.start_time);
+        const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+        const day = ensureDay(key);
+        day.blocks.push(b);
+        const dur = (b.end_time ? new Date(b.end_time) : new Date()) - new Date(b.start_time);
+        day.totalMs += dur;
+        // Flatten photos
+        (b.tasks || []).forEach(t => {
+          (t.photos || []).forEach(p => {
+            day.photos.push({ ...p, taskName: t.name, cleanerName: b.shift?.employee?.name || 'Cleaner' });
+          });
+        });
+      });
+
+      targets.forEach(t => {
+        const dateStr = t.assignment?.scheduled_date || t.assignment?.created_at?.slice(0, 10);
+        if (!dateStr) return;
+        const day = ensureDay(dateStr);
+        day.targets.push(t);
+      });
+
+      const days = Array.from(dayMap.values()).sort((a, b) => b.key.localeCompare(a.key));
+      setData({ days, loading: false });
+    })();
+    return () => { cancelled = true; };
+  }, [propertyId, unitId, partyId, filterDays, isStaff]);
+
+  return (
+    <div className="pb-24 min-h-screen bg-stone-50">
+      <div className="flex items-center gap-3 px-5 py-4 border-b border-stone-200 bg-white">
+        <button onClick={onBack} className="p-2 -ml-2 rounded-full hover:bg-stone-100">
+          <ArrowLeft size={20} className="text-stone-700" />
+        </button>
+        <div className="flex-1 min-w-0">
+          <div className="text-xs uppercase tracking-wider text-stone-500 font-mono truncate">{propertyName}</div>
+          <h1 className="font-serif text-2xl text-stone-900 truncate">
+            {unitLabel}{partyLabel && <span className="italic text-amber-700"> · {partyLabel}</span>}
+          </h1>
+          <div className="text-xs text-stone-500 mt-0.5">Bedroom history</div>
+        </div>
+      </div>
+
+      <div className="px-5 pt-4">
+        <div className="flex gap-1.5 mb-4 overflow-x-auto pb-1">
+          {FILTER_OPTIONS.map(opt => (
+            <button key={opt} onClick={() => setFilterDays(opt)}
+              className={`px-3 py-1.5 rounded-full text-xs font-mono whitespace-nowrap ${
+                filterDays === opt
+                  ? 'bg-stone-900 text-stone-50'
+                  : 'bg-white border border-stone-200 text-stone-600 hover:border-stone-400'
+              }`}>
+              {filterLabel(opt)}
+            </button>
+          ))}
+        </div>
+        {!isStaff && (
+          <div className="text-[11px] text-stone-500 italic mb-3">
+            Cleaners can view up to 6 months of history.
+          </div>
+        )}
+
+        {data.loading ? (
+          <div className="text-center py-12 text-stone-400 text-sm">Loading history…</div>
+        ) : data.days.length === 0 ? (
+          <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
+            No activity for this bedroom in the selected window.
+          </div>
+        ) : (
+          <div className="space-y-6">
+            {data.days.map(day => (
+              <div key={day.key}>
+                <div className="sticky top-0 bg-stone-50 py-2 z-10 border-b border-stone-200 mb-3">
+                  <div className="font-serif text-lg text-stone-900">
+                    {fmtDateWithDay(day.key + 'T12:00:00')}
+                  </div>
+                  <div className="text-[11px] text-stone-500 font-mono">
+                    {day.blocks.length > 0 && `${day.blocks.length} work block${day.blocks.length === 1 ? '' : 's'}`}
+                    {day.targets.length > 0 && ` · ${day.targets.length} assignment${day.targets.length === 1 ? '' : 's'}`}
+                    {day.totalMs > 0 && ` · ${fmtTimeShort(day.totalMs)} total`}
+                  </div>
+                </div>
+
+                {day.targets.length > 0 && (
+                  <div className="mb-3 space-y-2">
+                    {day.targets.map(t => {
+                      const a = t.assignment;
+                      return (
+                        <div key={t.id} className="p-3 rounded-xl bg-amber-50 border border-amber-200">
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center gap-1.5 mb-1 flex-wrap">
+                                <span className="text-[10px] uppercase tracking-wider font-mono text-amber-900">Assignment</span>
+                                {a.assignment_type && (
+                                  <span className="text-[10px] font-mono px-1.5 py-0.5 rounded-full bg-amber-200 text-amber-900">
+                                    {assignmentTypeLabel(a.assignment_type)}
+                                  </span>
+                                )}
+                                <span className="text-[10px] font-mono text-stone-500">{t.status}</span>
+                              </div>
+                              <div className="text-sm font-medium text-stone-900 truncate">{a.title}</div>
+                              {a.notes && <div className="text-xs text-stone-600 mt-1 line-clamp-2">{a.notes}</div>}
+                            </div>
+                            {a.file_url && (
+                              <button onClick={() => setOpenedAssignment(t)}
+                                className="px-3 py-1.5 rounded-full bg-stone-900 hover:bg-stone-700 text-stone-50 text-xs font-mono flex items-center gap-1 flex-shrink-0 active:scale-95">
+                                {a.file_kind === 'pdf' ? <FileText size={11} /> : <ImageIcon size={11} />}
+                                View
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {day.blocks.length > 0 && (
+                  <div className="space-y-3 mb-3">
+                    {day.blocks.map(b => {
+                      const dur = (b.end_time ? new Date(b.end_time) : new Date()) - new Date(b.start_time);
+                      const cleaner = b.shift?.employee?.name || 'Cleaner';
+                      return (
+                        <div key={b.id} className="p-3 rounded-xl bg-white border border-stone-200">
+                          <div className="flex items-start justify-between gap-2 mb-2 flex-wrap">
+                            <div className="flex items-center gap-2 min-w-0">
+                              <User size={13} className="text-stone-400 flex-shrink-0" />
+                              <span className="font-medium text-sm text-stone-900 truncate">{cleaner}</span>
+                            </div>
+                            <div className="text-xs font-mono text-stone-500">
+                              {fmtClock(b.start_time)}{b.end_time && ` — ${fmtClock(b.end_time)}`} · {fmtTimeShort(dur)}
+                            </div>
+                          </div>
+                          {b.work_notes && (
+                            <div className="text-xs text-stone-600 italic pl-5 mb-2">"{b.work_notes}"</div>
+                          )}
+                          {b.tasks?.length > 0 && (
+                            <div className="pl-5 space-y-1.5">
+                              {b.tasks.map(t => (
+                                <div key={t.id} className="text-xs text-stone-700 flex items-start gap-1.5">
+                                  {t.end_time ? <Check size={11} className="text-emerald-600 mt-0.5 flex-shrink-0" /> : <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse mt-1 flex-shrink-0" />}
+                                  <span className="flex-1">{t.name}</span>
+                                  {t.photos?.length > 0 && (
+                                    <span className="text-[10px] font-mono text-stone-400">{t.photos.length} 📷</span>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {day.photos.length > 0 && (
+                  <div className="mb-3">
+                    <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-2">
+                      Photos ({day.photos.length})
+                    </div>
+                    <div className="grid grid-cols-4 gap-1.5">
+                      {day.photos.map(p => (
+                        <a key={p.id} href={p.photo_url} target="_blank" rel="noreferrer"
+                          className="relative aspect-square rounded-lg overflow-hidden bg-stone-200 active:opacity-80">
+                          <img src={p.photo_url} alt="" loading="lazy" className="w-full h-full object-cover" />
+                          {p.kind && (
+                            <div className="absolute top-1 left-1 px-1 py-0.5 rounded bg-black/70 text-white text-[8px] uppercase tracking-wider">
+                              {p.kind}
+                            </div>
+                          )}
+                          {isStaff && p.cleanerName && (
+                            <div className="absolute bottom-0 inset-x-0 bg-gradient-to-t from-black/80 to-transparent p-1">
+                              <div className="text-[8px] text-white font-mono leading-tight truncate">{p.cleanerName}</div>
+                            </div>
+                          )}
+                        </a>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {openedAssignment && (
+        <AssignmentViewer target={openedAssignment} onClose={() => setOpenedAssignment(null)} />
+      )}
+    </div>
+  );
+}
+
+function DailyUnitDayDetail({ date, propertyId, unitId, unitLabel, propertyName, employee, showMoney, onBack, onOpenBedroomHistory }) {
   const canEdit = employee?.role === 'owner' || employee?.role === 'manager';
   const [blocks, setBlocks] = useState([]);
   const [loaded, setLoaded] = useState(false);
@@ -7479,12 +7931,27 @@ function DailyUnitDayDetail({ date, propertyId, unitId, unitLabel, propertyName,
           </div>
         ) : (
           <div className="space-y-4">
-            {Object.values(partyGroups).map((pg, i) => (
+            {Object.values(partyGroups).map((pg, i) => {
+              // Use the first block in this party group to anchor the date-aware assignment query
+              const sampleBlock = pg.blocks[0];
+              return (
               <div key={i} className="p-4 rounded-2xl bg-white border border-stone-200">
                 {pg.party && (
-                  <div className="font-serif text-lg text-stone-900 mb-2">
-                    {pg.party.label}
-                    {pg.party.full_name && <span className="text-sm text-stone-500 ml-2">{pg.party.full_name}</span>}
+                  <div className="mb-3">
+                    <div className="font-serif text-lg text-stone-900 flex items-center gap-2 flex-wrap">
+                      {pg.party.label}
+                      {pg.party.full_name && <span className="text-sm text-stone-500">{pg.party.full_name}</span>}
+                    </div>
+                    <div className="mt-2 flex items-center gap-2 flex-wrap">
+                      <WorkBlockAssignmentLink block={sampleBlock} propertyId={propertyId} compact />
+                      <button onClick={() => onOpenBedroomHistory && onOpenBedroomHistory({
+                          propertyId, propertyName, unitId, unitLabel,
+                          partyId: pg.party.id, partyLabel: pg.party.label
+                        })}
+                        className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-stone-100 hover:bg-stone-200 text-stone-700 text-[11px] font-mono active:scale-95">
+                        <Clock size={10} /> View bedroom history
+                      </button>
+                    </div>
                   </div>
                 )}
                 <div className="space-y-3">
@@ -7535,7 +8002,8 @@ function DailyUnitDayDetail({ date, propertyId, unitId, unitLabel, propertyName,
                   })}
                 </div>
               </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>

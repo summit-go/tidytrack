@@ -12,7 +12,7 @@ import {
 // =================================================================
 // 🔧 PASTE YOUR SUPABASE KEYS HERE
 // =================================================================
-const SUPABASE_URL = "https://bbaynvqnbkjyqhzhhypr.supabase.co";
+const SUPABASE_URL = ""https://bbaynvqnbkjyqhzhhypr.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJiYXludnFuYmtqeXFoemhoeXByIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc0NzQ2MTMsImV4cCI6MjA5MzA1MDYxM30.ZXUoHFj_IwMe6rX8RxK8Dj4kAB9AS7X9xZAhQ84wDEk";
 
 // =================================================================
@@ -263,8 +263,8 @@ function useAssignmentSync(load, channelKey = 'asgn-sync') {
 }
 
 // =================================================================
-// IDLE DETECTOR — auto clock-out after 45 minutes of inactivity.
-// Shows a 5-minute warning at the 40-minute mark.
+// IDLE DETECTOR — auto clock-out after 5 hours of inactivity.
+// Shows a warning at the 2-hour mark giving them 3 hours to dismiss.
 //
 // Detects activity via pointer/keyboard/touch events. Debounces saves
 // of `last_activity_at` to the database to once per minute max.
@@ -273,8 +273,8 @@ function useAssignmentSync(load, channelKey = 'asgn-sync') {
 //
 // Returns: { showWarning, dismissWarning } — caller renders the warning UI.
 // =================================================================
-const IDLE_WARN_MS = 40 * 60 * 1000;  // 40 minutes
-const IDLE_LIMIT_MS = 45 * 60 * 1000; // 45 minutes
+const IDLE_WARN_MS = 2 * 60 * 60 * 1000;   // 2 hours
+const IDLE_LIMIT_MS = 5 * 60 * 60 * 1000;  // 5 hours
 const ACTIVITY_SAVE_THROTTLE_MS = 60 * 1000; // save to DB at most once per minute
 
 function useIdleDetector({ shift, onAutoClockOut, enabled = true }) {
@@ -992,7 +992,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut }) {
       auto_clocked_out: true
     }).eq('id', shift.id);
     setShift(null); setWorkBlocks([]); setActiveBlock(null); setTasks([]); setActiveTask(null);
-    alert("You were clocked out automatically after 45 minutes of inactivity. Your time was adjusted to your last activity. Talk to your manager if this is a mistake.");
+    alert("You were clocked out automatically after 5 hours of inactivity. Your time was adjusted to your last activity. Talk to your manager if this is a mistake.");
   };
 
   // Idle detector — only active while there's an open shift
@@ -1021,6 +1021,35 @@ function EmployeeApp({ employee: employeeInit, onSignOut }) {
   const startNewBlock = () => setBlockStartFlow({ step: 'unit' });
   const onPickBlockUnit = (unit) => setBlockStartFlow({ step: 'party', unit });
 
+  // When a cleaner starts work in a bedroom, automatically mark any pending
+  // assignments at that bedroom as in_progress so other cleaners can see
+  // that someone's on it. Matches both bedroom-specific and property-wide targets.
+  const autoStartAssignmentsAtBedroom = async (unitId, partyId) => {
+    if (!shift?.customer_id) return;
+    try {
+      // Find pending targets at this exact bedroom OR property-wide for this customer
+      const { data: targets } = await supabase
+        .from('assignment_targets')
+        .select('id, assignment:assignments!inner(id, customer_id, active, source, pm_status)')
+        .eq('status', 'pending')
+        .or(`and(unit_id.eq.${unitId},party_id.eq.${partyId}),and(unit_id.is.null,party_id.is.null)`);
+      const eligible = (targets || []).filter(t =>
+        t.assignment?.customer_id === shift.customer_id &&
+        t.assignment?.active &&
+        (t.assignment?.source !== 'pm' || t.assignment?.pm_status === 'approved')
+      );
+      if (eligible.length === 0) return;
+      const ids = eligible.map(t => t.id);
+      await supabase.from('assignment_targets').update({
+        status: 'in_progress',
+        started_at: new Date().toISOString(),
+        started_by: employee.id,
+      }).in('id', ids);
+    } catch (e) {
+      console.warn('[auto-start assignments] failed', e);
+    }
+  };
+
   const onPickBlockParty = async (party, workNotes) => {
     setBusy(true);
     const { unit } = blockStartFlow;
@@ -1035,6 +1064,8 @@ function EmployeeApp({ employee: employeeInit, onSignOut }) {
     if (error) { alert('Could not start work block: ' + error.message); return; }
     setWorkBlocks(prev => [...prev, data]);
     setActiveBlock(data); setTasks(data.tasks || []); setBlockStartFlow(null);
+    // Auto-start any pending assignments at this bedroom
+    autoStartAssignmentsAtBedroom(unit.id, party.id);
   };
 
   const finishBlock = async () => {
@@ -1123,6 +1154,8 @@ function EmployeeApp({ employee: employeeInit, onSignOut }) {
     setWorkBlocks(prev => [...prev, data]);
     setActiveBlock(data);
     setTasks(data.tasks || []);
+    // Auto-start any pending assignments at this bedroom
+    autoStartAssignmentsAtBedroom(target.unit_id, target.party_id);
   };
 
   // Tasks
@@ -1259,6 +1292,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut }) {
 // PROPERTY HUB (multi-unit, between work blocks)
 // =================================================================
 function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onClockOut, onSwitchProperty, onStartNew, onReopen, onGoToBedroom, onOpenMessages, onOpenChangePin, busy }) {
+  const [showMenu, setShowMenu] = useState(false);
   useTick(true);
   const elapsed = Date.now() - new Date(shift.start_time).getTime();
 
@@ -1276,19 +1310,10 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
               className="px-4 py-2.5 rounded-full bg-amber-700 text-stone-50 text-sm font-medium flex items-center gap-2 active:scale-95 transition-transform disabled:opacity-50">
               <LogOut size={14} /> Clock out
             </button>
-            <div className="flex gap-1.5">
-              <button onClick={onSwitchProperty} disabled={busy}
-                className="px-3 py-1.5 rounded-full bg-stone-700 hover:bg-stone-600 text-stone-50 text-xs font-medium flex items-center gap-1.5 disabled:opacity-50">
-                <Home size={11} /> Switch property
-              </button>
-              {onOpenChangePin && (
-                <button onClick={onOpenChangePin} disabled={busy}
-                  className="px-3 py-1.5 rounded-full bg-stone-700 hover:bg-stone-600 text-stone-50 text-xs font-medium flex items-center gap-1.5 disabled:opacity-50"
-                  title="Change my PIN">
-                  <Settings size={11} /> PIN
-                </button>
-              )}
-            </div>
+            <button onClick={() => setShowMenu(true)} disabled={busy}
+              className="px-3 py-1.5 rounded-full bg-stone-700 hover:bg-stone-600 text-stone-50 text-xs font-medium flex items-center gap-1.5 disabled:opacity-50">
+              <Menu size={12} /> More
+            </button>
           </div>
         </div>
         <div className="flex items-center gap-1.5 text-xs text-amber-400 font-mono">
@@ -1353,6 +1378,88 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
           )}
         </div>
       </div>
+      {showMenu && (
+        <CleanerMenuSheet
+          employee={employee}
+          shift={shift}
+          onClose={() => setShowMenu(false)}
+          onSwitchProperty={() => { setShowMenu(false); onSwitchProperty && onSwitchProperty(); }}
+          onChangePin={onOpenChangePin ? () => { setShowMenu(false); onOpenChangePin(); } : null}
+          onOpenMessages={onOpenMessages ? () => { setShowMenu(false); onOpenMessages(); } : null}
+          onSignOut={() => { setShowMenu(false); onSignOut && onSignOut(); }}
+        />
+      )}
+    </div>
+  );
+}
+
+// =================================================================
+// CLEANER MENU SHEET — slide-up panel from the "More" button in the
+// PropertyHub stats card. Holds secondary actions to keep the main
+// view uncluttered.
+// =================================================================
+function CleanerMenuSheet({ employee, shift, onClose, onSwitchProperty, onChangePin, onOpenMessages, onSignOut }) {
+  const Item = ({ icon: Icon, label, hint, onClick, danger }) => (
+    <button onClick={onClick}
+      className={`w-full px-4 py-4 flex items-center gap-3 active:bg-stone-100 text-left border-b border-stone-100 last:border-b-0 ${danger ? 'text-red-700' : 'text-stone-900'}`}>
+      <Icon size={18} className={danger ? 'text-red-600' : 'text-stone-500'} />
+      <div className="flex-1 min-w-0">
+        <div className="font-medium text-sm">{label}</div>
+        {hint && <div className="text-xs text-stone-500 truncate">{hint}</div>}
+      </div>
+      <ChevronRight size={16} className="text-stone-400" />
+    </button>
+  );
+
+  const roleBadge = employee?.role === 'owner'
+    ? <span className="text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-amber-500 text-stone-900">Owner</span>
+    : employee?.role === 'manager'
+    ? <span className="text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-stone-700 text-stone-50">Manager</span>
+    : null;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center">
+      <div className="absolute inset-0 bg-stone-900/60" onClick={onClose} />
+      <div className="relative bg-stone-50 w-full sm:max-w-md rounded-t-3xl sm:rounded-3xl overflow-hidden shadow-2xl">
+        {/* Header */}
+        <div className="px-5 py-4 border-b border-stone-200 bg-white">
+          <div className="text-[10px] uppercase tracking-wider font-mono text-amber-700">
+            Signed in as
+          </div>
+          <div className="font-serif text-lg text-stone-900 truncate flex items-center gap-2">
+            {employee?.name || 'Cleaner'}
+            {roleBadge}
+          </div>
+          {shift?.customer && (
+            <div className="mt-2 pt-2 border-t border-stone-100 text-xs text-stone-600 flex items-center gap-1.5">
+              <Building2 size={12} className="text-amber-700" />
+              Clocked in at: <span className="font-medium">{shift.customer.name}</span>
+            </div>
+          )}
+        </div>
+
+        {/* Menu items */}
+        <div className="bg-white">
+          {onOpenMessages && (
+            <Item icon={MessageCircle} label="Messages" hint="Chat with managers, owners, or property teams"
+              onClick={onOpenMessages} />
+          )}
+          {onSwitchProperty && (
+            <Item icon={Home} label="Switch property" hint="Clock out here and clock in somewhere else"
+              onClick={onSwitchProperty} />
+          )}
+          {onChangePin && (
+            <Item icon={Settings} label="Change my PIN" hint="Pick a new 4-digit PIN"
+              onClick={onChangePin} />
+          )}
+          <Item icon={LogOut} label="Sign out" hint="You'll need your PIN to sign back in" danger onClick={onSignOut} />
+        </div>
+
+        <button onClick={onClose}
+          className="w-full py-3 text-sm font-mono text-stone-500 hover:bg-stone-100 border-t border-stone-200">
+          Close
+        </button>
+      </div>
     </div>
   );
 }
@@ -1360,6 +1467,250 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
 // =================================================================
 // BLOCK VIEW (active work block, multi-unit)
 // =================================================================
+// =================================================================
+// OTHER CLEANERS ACTIVITY — Shows what other cleaners have done on
+// the same bedroom today: their photos, tasks completed, and whether
+// they're currently here. Lets cleaners see each other's contributions
+// since each cleaner's own work_block is scoped to their own shift.
+// =================================================================
+function OtherCleanersActivity({ block, myEmployeeId }) {
+  const [data, setData] = useState({ activeNow: [], pastBlocks: [], allPhotos: [], loading: true });
+
+  const load = async () => {
+    if (!block?.unit_id || !block?.party_id) return;
+    try {
+      // Today = midnight local time
+      const start = new Date();
+      start.setHours(0, 0, 0, 0);
+      const startIso = start.toISOString();
+
+      // Fetch all work_blocks at this bedroom started today, with their tasks/photos and the cleaner who did them
+      const { data: blocks } = await supabase
+        .from('work_blocks')
+        .select('id, start_time, end_time, shift:shifts!inner(id, employee:employees!inner(id, name)), tasks(*, photos(*))')
+        .eq('unit_id', block.unit_id)
+        .eq('party_id', block.party_id)
+        .gte('start_time', startIso)
+        .neq('id', block.id);
+
+      const all = blocks || [];
+      const activeNow = all.filter(b => !b.end_time);
+      const pastBlocks = all.filter(b => b.end_time);
+
+      // Flatten photos from all OTHER blocks, with attribution
+      const photos = [];
+      all.forEach(b => {
+        const cleanerName = b.shift?.employee?.name || 'A cleaner';
+        const cleanerId = b.shift?.employee?.id;
+        (b.tasks || []).forEach(t => {
+          (t.photos || []).forEach(p => {
+            photos.push({
+              ...p,
+              cleanerName,
+              cleanerId,
+              taskName: t.name,
+            });
+          });
+        });
+      });
+      // Sort newest first
+      photos.sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
+
+      setData({ activeNow, pastBlocks, allPhotos: photos, loading: false });
+    } catch (e) {
+      console.warn('[other cleaners] failed', e);
+      setData(d => ({ ...d, loading: false }));
+    }
+  };
+
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, [block?.id, block?.unit_id, block?.party_id]);
+
+  if (data.loading) return null;
+
+  const totalOthers = data.activeNow.length + data.pastBlocks.length;
+  if (totalOthers === 0) return null;
+
+  return (
+    <div className="mx-4 mt-4 rounded-2xl bg-blue-50 border border-blue-200 overflow-hidden">
+      <div className="px-4 py-3 bg-blue-100 flex items-center gap-2">
+        <Users size={14} className="text-blue-800" />
+        <div className="text-xs uppercase tracking-wider text-blue-900 font-mono flex-1">
+          Today's activity here
+        </div>
+      </div>
+
+      <div className="px-4 py-3 space-y-2">
+        {data.activeNow.length > 0 && (
+          <div className="flex items-start gap-2 text-sm">
+            <span className="w-2 h-2 rounded-full bg-green-500 mt-1.5 flex-shrink-0 animate-pulse" />
+            <div>
+              <span className="text-stone-800 font-medium">
+                {data.activeNow.map(b => b.shift?.employee?.name || 'Someone').join(', ')}
+              </span>
+              <span className="text-stone-600"> {data.activeNow.length === 1 ? 'is' : 'are'} here right now</span>
+            </div>
+          </div>
+        )}
+        {data.pastBlocks.length > 0 && (
+          <div className="flex items-start gap-2 text-sm">
+            <Clock size={12} className="text-stone-500 mt-1 flex-shrink-0" />
+            <div>
+              <span className="text-stone-800 font-medium">
+                {[...new Set(data.pastBlocks.map(b => b.shift?.employee?.name || 'Someone'))].join(', ')}
+              </span>
+              <span className="text-stone-600"> worked here earlier today</span>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {data.allPhotos.length > 0 && (
+        <div className="px-4 pb-4">
+          <div className="text-[10px] uppercase tracking-wider font-mono text-blue-900 mb-2">
+            Photos taken by others ({data.allPhotos.length})
+          </div>
+          <div className="grid grid-cols-3 gap-1.5">
+            {data.allPhotos.slice(0, 9).map(p => (
+              <a key={p.id} href={p.photo_url} target="_blank" rel="noreferrer"
+                className="relative aspect-square rounded-lg overflow-hidden bg-stone-200 active:opacity-80 transition-opacity">
+                <img src={p.photo_url} alt={p.taskName || ''} className="w-full h-full object-cover" loading="lazy" />
+                <div className="absolute bottom-0 inset-x-0 bg-gradient-to-t from-black/80 to-transparent p-1.5">
+                  <div className="text-[9px] text-white font-mono leading-tight truncate">
+                    {p.cleanerName}
+                  </div>
+                  {p.kind && (
+                    <div className="text-[8px] text-white/80 uppercase tracking-wider leading-tight">
+                      {p.kind}
+                    </div>
+                  )}
+                </div>
+              </a>
+            ))}
+          </div>
+          {data.allPhotos.length > 9 && (
+            <div className="text-[11px] text-stone-500 mt-2 text-center">
+              + {data.allPhotos.length - 9} more
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// =================================================================
+// CLEANER TASK ATTRIBUTION PANEL — Shows OTHER cleaners' tasks
+// completed/in-progress on this bedroom today, with attribution.
+// Sits below the OtherCleanersActivity blue panel as a separate
+// gold/amber section.
+// =================================================================
+function OtherCleanersTasksPanel({ block }) {
+  const [data, setData] = useState({ byCleaner: [], loading: true });
+
+  const load = async () => {
+    if (!block?.unit_id || !block?.party_id) return;
+    try {
+      const start = new Date();
+      start.setHours(0, 0, 0, 0);
+      const startIso = start.toISOString();
+
+      const { data: blocks } = await supabase
+        .from('work_blocks')
+        .select('id, start_time, end_time, shift:shifts!inner(id, employee:employees!inner(id, name)), tasks(id, name, start_time, end_time)')
+        .eq('unit_id', block.unit_id)
+        .eq('party_id', block.party_id)
+        .gte('start_time', startIso)
+        .neq('id', block.id);
+
+      // Group tasks by cleaner
+      const byCleanerMap = new Map();
+      (blocks || []).forEach(b => {
+        const cleanerId = b.shift?.employee?.id;
+        const cleanerName = b.shift?.employee?.name || 'A cleaner';
+        if (!cleanerId) return;
+        if (!byCleanerMap.has(cleanerId)) {
+          byCleanerMap.set(cleanerId, { id: cleanerId, name: cleanerName, tasks: [] });
+        }
+        const tasks = (b.tasks || []).map(t => ({
+          ...t,
+          completed: !!t.end_time,
+        }));
+        byCleanerMap.get(cleanerId).tasks.push(...tasks);
+      });
+
+      // For each cleaner: sort tasks (in-progress first, then completed by start_time)
+      const byCleaner = Array.from(byCleanerMap.values()).map(c => ({
+        ...c,
+        tasks: c.tasks.sort((a, b) => {
+          if (a.completed !== b.completed) return a.completed ? 1 : -1;
+          return new Date(a.start_time) - new Date(b.start_time);
+        })
+      })).filter(c => c.tasks.length > 0);
+
+      setData({ byCleaner, loading: false });
+    } catch (e) {
+      console.warn('[OtherCleanersTasksPanel] failed', e);
+      setData(d => ({ ...d, loading: false }));
+    }
+  };
+
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, [block?.id, block?.unit_id, block?.party_id]);
+
+  if (data.loading || data.byCleaner.length === 0) return null;
+
+  const totalTasks = data.byCleaner.reduce((sum, c) => sum + c.tasks.length, 0);
+
+  return (
+    <div className="mx-4 mt-3 rounded-2xl bg-amber-50 border border-amber-200 overflow-hidden">
+      <div className="px-4 py-3 bg-amber-100 flex items-center gap-2">
+        <Check size={14} className="text-amber-900" />
+        <div className="text-xs uppercase tracking-wider text-amber-900 font-mono flex-1">
+          Tasks others did today ({totalTasks})
+        </div>
+      </div>
+      <div className="px-4 py-3 space-y-3">
+        {data.byCleaner.map(c => (
+          <div key={c.id}>
+            <div className="text-[11px] uppercase tracking-wider font-mono text-amber-800 mb-1.5">
+              By {c.name}
+            </div>
+            <ul className="space-y-1">
+              {c.tasks.map(t => {
+                const dur = t.end_time ? (new Date(t.end_time) - new Date(t.start_time)) : null;
+                return (
+                  <li key={t.id} className="flex items-start gap-2 text-sm">
+                    {t.completed ? (
+                      <Check size={12} className="text-emerald-600 mt-1 flex-shrink-0" />
+                    ) : (
+                      <span className="w-1.5 h-1.5 rounded-full bg-amber-600 mt-2 flex-shrink-0 animate-pulse" />
+                    )}
+                    <div className="flex-1 min-w-0">
+                      <span className={t.completed ? 'text-stone-700' : 'text-stone-900 font-medium'}>
+                        {t.name}
+                      </span>
+                      {dur && (
+                        <span className="text-[10px] text-stone-500 font-mono ml-1.5">
+                          {fmtTimeShort(dur)}
+                        </span>
+                      )}
+                      {!t.completed && (
+                        <span className="text-[10px] text-amber-700 font-mono ml-1.5">in progress</span>
+                      )}
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        ))}
+      </div>
+      <div className="px-4 pb-3 text-[11px] text-amber-800/80 italic">
+        These are read-only. Add your own tasks below if you're doing more work here.
+      </div>
+    </div>
+  );
+}
+
 function BlockView({ shift, block, tasks, activeTask, employeeName, employee, onSignOut, onFinish, onPause,
   newTaskName, setNewTaskName, onStartTask, onStopTask, onResumeTask, onAddPhoto,
   photoModal, onClosePhotoModal, onUploadPhoto, onOpenMessages, busy }) {
@@ -1412,6 +1763,9 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
         </div>
       )}
 
+      <OtherCleanersActivity block={block} myEmployeeId={employee.id} />
+      <OtherCleanersTasksPanel block={block} />
+
       <div className="mx-4 mt-4">
         <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Start a new task</label>
         <div className="flex gap-2">
@@ -1460,6 +1814,7 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
 function SimpleShiftView({ shift, tasks, activeTask, employeeName, employee, onSignOut, onClockOut, onSwitchProperty,
   newTaskName, setNewTaskName, onStartTask, onStopTask, onResumeTask, onAddPhoto,
   photoModal, onClosePhotoModal, onUploadPhoto, onOpenMessages, onOpenChangePin, busy }) {
+  const [showMenu, setShowMenu] = useState(false);
   useTick(true);
   const elapsed = Date.now() - new Date(shift.start_time).getTime();
   const activeTaskObj = tasks.find(t => t.id === activeTask);
@@ -1478,21 +1833,10 @@ function SimpleShiftView({ shift, tasks, activeTask, employeeName, employee, onS
               className="px-4 py-2.5 rounded-full bg-amber-700 text-stone-50 text-sm font-medium flex items-center gap-2 active:scale-95 transition-transform disabled:opacity-50">
               <LogOut size={14} /> Clock out
             </button>
-            <div className="flex gap-1.5">
-              {shift.customer_id && (
-                <button onClick={onSwitchProperty} disabled={busy}
-                  className="px-3 py-1.5 rounded-full bg-stone-700 hover:bg-stone-600 text-stone-50 text-xs font-medium flex items-center gap-1.5 disabled:opacity-50">
-                  <Home size={11} /> Switch property
-                </button>
-              )}
-              {onOpenChangePin && (
-                <button onClick={onOpenChangePin} disabled={busy}
-                  className="px-3 py-1.5 rounded-full bg-stone-700 hover:bg-stone-600 text-stone-50 text-xs font-medium flex items-center gap-1.5 disabled:opacity-50"
-                  title="Change my PIN">
-                  <Settings size={11} /> PIN
-                </button>
-              )}
-            </div>
+            <button onClick={() => setShowMenu(true)} disabled={busy}
+              className="px-3 py-1.5 rounded-full bg-stone-700 hover:bg-stone-600 text-stone-50 text-xs font-medium flex items-center gap-1.5 disabled:opacity-50">
+              <Menu size={12} /> More
+            </button>
           </div>
         </div>
         {shift.customer?.name && (
@@ -1559,6 +1903,17 @@ function SimpleShiftView({ shift, tasks, activeTask, employeeName, employee, onS
           existing={(tasks.find(t => t.id === photoModal.taskId)?.photos || []).filter(p => p.kind === photoModal.kind)}
           onUpload={(file) => onUploadPhoto(photoModal.taskId, photoModal.kind, file)}
           onClose={onClosePhotoModal} />
+      )}
+      {showMenu && (
+        <CleanerMenuSheet
+          employee={employee}
+          shift={shift}
+          onClose={() => setShowMenu(false)}
+          onSwitchProperty={shift.customer_id ? () => { setShowMenu(false); onSwitchProperty && onSwitchProperty(); } : null}
+          onChangePin={onOpenChangePin ? () => { setShowMenu(false); onOpenChangePin(); } : null}
+          onOpenMessages={onOpenMessages ? () => { setShowMenu(false); onOpenMessages(); } : null}
+          onSignOut={() => { setShowMenu(false); onSignOut && onSignOut(); }}
+        />
       )}
     </div>
   );
@@ -5257,7 +5612,7 @@ function WelcomeModal({ propertyName, onClose }) {
 // Lets the main PM change their own portal code. Logs the change.
 // =================================================================
 // =================================================================
-// IDLE WARNING MODAL — pops at 25 min of inactivity, gives 5 min to respond
+// IDLE WARNING MODAL — pops at 2 hours of inactivity, gives 3 more hours to respond
 // =================================================================
 function IdleWarningModal({ onStillActive }) {
   return (
@@ -5268,10 +5623,10 @@ function IdleWarningModal({ onStillActive }) {
         </div>
         <div className="font-serif text-2xl text-stone-900 mb-2">Still working?</div>
         <div className="text-stone-600 mb-1">
-          We haven't seen any activity for 40 minutes.
+          We haven't seen any activity for 2 hours.
         </div>
         <div className="text-sm text-stone-500 mb-6">
-          If you don't tap below in the next 5 minutes, we'll clock you out automatically and flag the idle time.
+          If you don't tap below within 3 more hours, we'll clock you out automatically and flag the idle time.
         </div>
         <button onClick={onStillActive}
           className="w-full py-4 rounded-2xl bg-stone-900 text-stone-50 font-medium active:scale-98 transition-transform">
@@ -7835,6 +8190,7 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
   const [statusModal, setStatusModal] = useState(null);
   const [reassignTarget, setReassignTarget] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [collapsed, setCollapsed] = useState(false);
 
   const load = async () => {
     let q = supabase
@@ -7919,23 +8275,27 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
 
   return (
     <div className="mx-4 mt-4 p-4 rounded-2xl bg-blue-50 border-2 border-blue-200">
-      <div className="flex items-center gap-2 mb-3">
-        <FileText size={16} className="text-blue-700" />
-        <span className="text-xs uppercase tracking-wider text-blue-800 font-mono">
-          {targets.length} assignment{targets.length === 1 ? '' : 's'}
+      <button onClick={() => setCollapsed(c => !c)}
+        className={`w-full flex items-center gap-2 active:opacity-80 ${collapsed ? '' : 'mb-3'}`}>
+        <FileText size={16} className="text-blue-700 flex-shrink-0" />
+        <span className="text-xs uppercase tracking-wider text-blue-800 font-mono flex-1 text-left">
+          {targets.length} assignment{targets.length === 1 ? '' : 's'} for this bedroom
         </span>
-      </div>
-      <div className="space-y-2">
-        {targets.map(t => (
-          <AssignmentCard key={t.id} target={t} busy={busy} propertyId={propertyId}
-            onView={() => setOpened(t)}
-            onStart={() => updateStatus(t, 'in_progress')}
-            onDone={() => updateStatus(t, 'done')}
-            onReopen={() => updateStatus(t, 'pending')}
-            onBlocked={() => setStatusModal({ target: t })}
-            onReassign={() => setReassignTarget(t)} />
-        ))}
-      </div>
+        <ChevronRight size={14} className={`text-blue-700 transition-transform ${collapsed ? '' : 'rotate-90'}`} />
+      </button>
+      {!collapsed && (
+        <div className="space-y-2">
+          {targets.map(t => (
+            <AssignmentCard key={t.id} target={t} busy={busy} propertyId={propertyId}
+              onView={() => setOpened(t)}
+              onStart={() => updateStatus(t, 'in_progress')}
+              onDone={() => updateStatus(t, 'done')}
+              onReopen={() => updateStatus(t, 'pending')}
+              onBlocked={() => setStatusModal({ target: t })}
+              onReassign={() => setReassignTarget(t)} />
+          ))}
+        </div>
+      )}
 
       {opened && <AssignmentViewer target={opened} onClose={() => setOpened(null)} />}
       {statusModal && (

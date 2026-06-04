@@ -891,6 +891,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut }) {
   const [busy, setBusy] = useState(false);
   const [showMessages, setShowMessages] = useState(false);
   const [showChangePin, setShowChangePin] = useState(false);
+  const [bedroomHistory, setBedroomHistory] = useState(null); // params for BedroomHistoryView
 
   useTick(!!shift && !shift.end_time);
   useEffect(() => { reload(); /* eslint-disable-next-line */ }, []);
@@ -1258,12 +1259,25 @@ function EmployeeApp({ employee: employeeInit, onSignOut }) {
 
   const isMulti = shift.customer?.property_type === 'multi_unit';
 
+  if (bedroomHistory) {
+    return withIdleModal(<BedroomHistoryView
+      propertyId={shift.customer_id}
+      propertyName={shift.customer?.name || ''}
+      unitId={bedroomHistory.unitId}
+      unitLabel={bedroomHistory.unitLabel}
+      partyId={bedroomHistory.partyId}
+      partyLabel={bedroomHistory.partyLabel}
+      employee={employee}
+      onBack={() => setBedroomHistory(null)} />);
+  }
+
   if (isMulti && !activeBlock) {
     return withIdleModal(<PropertyHub shift={shift} workBlocks={workBlocks} employeeName={employee.name} employee={employee}
       onSignOut={onSignOut} onClockOut={clockOut} onSwitchProperty={switchProperty}
       onStartNew={startNewBlock} onReopen={reopenBlock} onGoToBedroom={goToBedroomForTarget}
       onOpenMessages={() => setShowMessages(true)}
-      onOpenChangePin={() => setShowChangePin(true)} busy={busy} />);
+      onOpenChangePin={() => setShowChangePin(true)}
+      onOpenBedroomHistory={setBedroomHistory} busy={busy} />);
   }
   if (isMulti && activeBlock) {
     return withIdleModal(<BlockView shift={shift} block={activeBlock} tasks={tasks} activeTask={activeTask}
@@ -1274,7 +1288,8 @@ function EmployeeApp({ employee: employeeInit, onSignOut }) {
       onAddPhoto={(taskId, kind) => setPhotoModal({ taskId, kind })}
       photoModal={photoModal} onClosePhotoModal={() => setPhotoModal(null)}
       onUploadPhoto={uploadPhoto}
-      onOpenMessages={() => setShowMessages(true)} busy={busy} />);
+      onOpenMessages={() => setShowMessages(true)}
+      onOpenBedroomHistory={setBedroomHistory} busy={busy} />);
   }
   return withIdleModal(<SimpleShiftView shift={shift} tasks={tasks} activeTask={activeTask}
     employeeName={employee.name} employee={employee} onSignOut={onSignOut} onClockOut={clockOut}
@@ -1291,7 +1306,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut }) {
 // =================================================================
 // PROPERTY HUB (multi-unit, between work blocks)
 // =================================================================
-function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onClockOut, onSwitchProperty, onStartNew, onReopen, onGoToBedroom, onOpenMessages, onOpenChangePin, busy }) {
+function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onClockOut, onSwitchProperty, onStartNew, onReopen, onGoToBedroom, onOpenMessages, onOpenChangePin, onOpenBedroomHistory, busy }) {
   const [showMenu, setShowMenu] = useState(false);
   useTick(true);
   const elapsed = Date.now() - new Date(shift.start_time).getTime();
@@ -1363,6 +1378,15 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
                           )}
                         </div>
                         {b.work_notes && <div className="text-xs text-stone-600 mt-1 italic">"{b.work_notes}"</div>}
+                        {onOpenBedroomHistory && b.unit?.id && b.party?.id && (
+                          <button onClick={(e) => { e.stopPropagation(); onOpenBedroomHistory({
+                              unitId: b.unit.id, unitLabel: b.unit.label,
+                              partyId: b.party.id, partyLabel: b.party.label
+                            }); }}
+                            className="mt-2 inline-flex items-center gap-1 px-2 py-1 rounded-full bg-stone-200 hover:bg-stone-300 text-stone-700 text-[11px] font-mono active:scale-95">
+                            <Clock size={10} /> Bedroom history
+                          </button>
+                        )}
                       </div>
                       {isDone && (
                         <button onClick={() => onReopen(b)} disabled={busy}
@@ -1571,9 +1595,9 @@ function OtherCleanersActivity({ block, myEmployeeId }) {
           </div>
           <div className="grid grid-cols-3 gap-1.5">
             {data.allPhotos.slice(0, 9).map(p => (
-              <a key={p.id} href={p.photo_url} target="_blank" rel="noreferrer"
+              <a key={p.id} href={p.public_url} target="_blank" rel="noreferrer"
                 className="relative aspect-square rounded-lg overflow-hidden bg-stone-200 active:opacity-80 transition-opacity">
-                <img src={p.photo_url} alt={p.taskName || ''} className="w-full h-full object-cover" loading="lazy" />
+                <img src={p.public_url} alt={p.taskName || ''} className="w-full h-full object-cover" loading="lazy" />
                 <div className="absolute bottom-0 inset-x-0 bg-gradient-to-t from-black/80 to-transparent p-1.5">
                   <div className="text-[9px] text-white font-mono leading-tight truncate">
                     {p.cleanerName}
@@ -1713,7 +1737,7 @@ function OtherCleanersTasksPanel({ block }) {
 
 function BlockView({ shift, block, tasks, activeTask, employeeName, employee, onSignOut, onFinish, onPause,
   newTaskName, setNewTaskName, onStartTask, onStopTask, onResumeTask, onAddPhoto,
-  photoModal, onClosePhotoModal, onUploadPhoto, onOpenMessages, busy }) {
+  photoModal, onClosePhotoModal, onUploadPhoto, onOpenMessages, onOpenBedroomHistory, busy }) {
   useTick(true);
   const blockElapsed = Date.now() - new Date(block.start_time).getTime();
   const activeTaskObj = tasks.find(t => t.id === activeTask);
@@ -1749,6 +1773,18 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
       </div>
 
       <AssignmentBanner propertyId={shift.customer_id} unitId={block.unit_id} partyId={block.party_id} employee={employee} />
+
+      {onOpenBedroomHistory && block.unit?.id && block.party?.id && (
+        <div className="px-4 mt-3">
+          <button onClick={() => onOpenBedroomHistory({
+              unitId: block.unit.id, unitLabel: block.unit.label,
+              partyId: block.party.id, partyLabel: block.party.label
+            })}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-stone-200 hover:bg-stone-300 text-stone-700 text-xs font-mono active:scale-95">
+            <Clock size={12} /> View this bedroom's history
+          </button>
+        </div>
+      )}
 
       {activeTaskObj && (
         <div className="mx-4 mt-4 p-4 rounded-2xl bg-amber-50 border-2 border-amber-200">
@@ -7741,9 +7777,9 @@ function BedroomHistoryView({ propertyId, propertyName, unitId, unitLabel, party
                     </div>
                     <div className="grid grid-cols-4 gap-1.5">
                       {day.photos.map(p => (
-                        <a key={p.id} href={p.photo_url} target="_blank" rel="noreferrer"
+                        <a key={p.id} href={p.public_url} target="_blank" rel="noreferrer"
                           className="relative aspect-square rounded-lg overflow-hidden bg-stone-200 active:opacity-80">
-                          <img src={p.photo_url} alt="" loading="lazy" className="w-full h-full object-cover" />
+                          <img src={p.public_url} alt="" loading="lazy" className="w-full h-full object-cover" />
                           {p.kind && (
                             <div className="absolute top-1 left-1 px-1 py-0.5 rounded bg-black/70 text-white text-[8px] uppercase tracking-wider">
                               {p.kind}

@@ -1339,7 +1339,7 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
         </div>
       </div>
 
-      <AssignmentsPanel propertyId={shift.customer_id} employee={employee} onGoToBedroom={onGoToBedroom} />
+      <AssignmentsPanel propertyId={shift.customer_id} employee={employee} onGoToBedroom={onGoToBedroom} onOpenBedroomHistory={onOpenBedroomHistory} />
 
       <div className="px-4 pt-6">
         <button onClick={onStartNew} disabled={busy}
@@ -1464,10 +1464,6 @@ function CleanerMenuSheet({ employee, shift, onClose, onSwitchProperty, onChange
 
         {/* Menu items */}
         <div className="bg-white">
-          {onOpenMessages && (
-            <Item icon={MessageCircle} label="Messages" hint="Chat with managers, owners, or property teams"
-              onClick={onOpenMessages} />
-          )}
           {onSwitchProperty && (
             <Item icon={Home} label="Switch property" hint="Clock out here and clock in somewhere else"
               onClick={onSwitchProperty} />
@@ -1537,8 +1533,14 @@ function OtherCleanersActivity({ block, myEmployeeId }) {
           });
         });
       });
-      // Sort newest first
-      photos.sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
+      // Sort: group by kind (before → after → damage → other), then oldest-first within each kind
+      const KIND_ORDER = { before: 0, after: 1, damage: 2 };
+      photos.sort((a, b) => {
+        const aOrder = KIND_ORDER[a.kind] ?? 99;
+        const bOrder = KIND_ORDER[b.kind] ?? 99;
+        if (aOrder !== bOrder) return aOrder - bOrder;
+        return new Date(a.created_at || 0) - new Date(b.created_at || 0);
+      });
 
       setData({ activeNow, pastBlocks, allPhotos: photos, loading: false });
     } catch (e) {
@@ -1772,7 +1774,7 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
         )}
       </div>
 
-      <AssignmentBanner propertyId={shift.customer_id} unitId={block.unit_id} partyId={block.party_id} employee={employee} />
+      <AssignmentBanner propertyId={shift.customer_id} unitId={block.unit_id} partyId={block.party_id} employee={employee} onOpenBedroomHistory={onOpenBedroomHistory} />
 
       {onOpenBedroomHistory && block.unit?.id && block.party?.id && (
         <div className="px-4 mt-3">
@@ -7546,6 +7548,105 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit }) {
 // Reached from "View bedroom history" buttons on DailyUnitDayDetail,
 // PartyList admin, and other bedroom-anchored views.
 // =================================================================
+// =================================================================
+// DAY PHOTO TABS — Tabbed photo grid for a single day in
+// BedroomHistoryView. Tabs: All / Before / After / Damage.
+// "All" shows photos grouped (before → after → damage → other);
+// each kind tab shows only that kind in time order.
+// =================================================================
+function DayPhotoTabs({ photos, isStaff }) {
+  const [activeTab, setActiveTab] = useState('all');
+
+  // Bucket photos by kind
+  const byKind = { before: [], after: [], damage: [], other: [] };
+  photos.forEach(p => {
+    const k = p.kind === 'before' || p.kind === 'after' || p.kind === 'damage' ? p.kind : 'other';
+    byKind[k].push(p);
+  });
+  // Sort each bucket oldest-first
+  Object.keys(byKind).forEach(k => byKind[k].sort((a, b) =>
+    new Date(a.created_at || 0) - new Date(b.created_at || 0)
+  ));
+
+  const TABS = [
+    { id: 'all',    label: 'All',    count: photos.length },
+    { id: 'before', label: 'Before', count: byKind.before.length },
+    { id: 'after',  label: 'After',  count: byKind.after.length },
+    { id: 'damage', label: 'Damage', count: byKind.damage.length },
+  ].filter(t => t.id === 'all' || t.count > 0); // hide kinds with no photos
+
+  // Build the visible list based on active tab
+  let visible;
+  if (activeTab === 'all') {
+    visible = [
+      ...byKind.before.map(p => ({ ...p, _kindLabel: 'Before' })),
+      ...byKind.after.map(p => ({ ...p, _kindLabel: 'After' })),
+      ...byKind.damage.map(p => ({ ...p, _kindLabel: 'Damage' })),
+      ...byKind.other.map(p => ({ ...p, _kindLabel: p.kind || 'Other' })),
+    ];
+  } else {
+    visible = byKind[activeTab] || [];
+  }
+
+  return (
+    <div className="mb-3">
+      <div className="flex items-center gap-1.5 mb-2 overflow-x-auto pb-1">
+        {TABS.map(tab => {
+          const isActive = activeTab === tab.id;
+          const colorClass = tab.id === 'damage'
+            ? (isActive ? 'bg-red-100 text-red-900 ring-1 ring-red-300' : 'text-red-700 hover:bg-red-50')
+            : tab.id === 'before'
+            ? (isActive ? 'bg-blue-100 text-blue-900 ring-1 ring-blue-300' : 'text-blue-700 hover:bg-blue-50')
+            : tab.id === 'after'
+            ? (isActive ? 'bg-emerald-100 text-emerald-900 ring-1 ring-emerald-300' : 'text-emerald-700 hover:bg-emerald-50')
+            : (isActive ? 'bg-stone-900 text-stone-50' : 'text-stone-600 hover:bg-stone-100');
+          return (
+            <button key={tab.id} onClick={() => setActiveTab(tab.id)}
+              className={`px-3 py-1.5 rounded-full text-[11px] font-mono whitespace-nowrap transition-colors ${colorClass}`}>
+              {tab.label} <span className="opacity-70">({tab.count})</span>
+            </button>
+          );
+        })}
+      </div>
+      <div className="grid grid-cols-4 gap-1.5">
+        {visible.map((p, i) => {
+          // Section header within "All": insert a kind separator before the first photo of each group
+          const prev = i > 0 ? visible[i - 1] : null;
+          const showSeparator = activeTab === 'all' && (!prev || prev._kindLabel !== p._kindLabel);
+          return (
+            <React.Fragment key={p.id}>
+              {showSeparator && (
+                <div className="col-span-4 text-[9px] uppercase tracking-wider font-mono text-stone-500 mt-1 pt-1 border-t border-stone-100 first:border-t-0 first:mt-0 first:pt-0">
+                  {p._kindLabel}
+                </div>
+              )}
+              <a href={p.public_url} target="_blank" rel="noreferrer"
+                className="relative aspect-square rounded-lg overflow-hidden bg-stone-200 active:opacity-80">
+                <img src={p.public_url} alt="" loading="lazy" className="w-full h-full object-cover" />
+                {p.kind && activeTab === 'all' && (
+                  <div className={`absolute top-1 left-1 px-1 py-0.5 rounded text-white text-[8px] uppercase tracking-wider ${
+                    p.kind === 'damage' ? 'bg-red-700/85' :
+                    p.kind === 'before' ? 'bg-blue-700/85' :
+                    p.kind === 'after' ? 'bg-emerald-700/85' :
+                    'bg-black/70'
+                  }`}>
+                    {p.kind}
+                  </div>
+                )}
+                {isStaff && p.cleanerName && (
+                  <div className="absolute bottom-0 inset-x-0 bg-gradient-to-t from-black/80 to-transparent p-1">
+                    <div className="text-[8px] text-white font-mono leading-tight truncate">{p.cleanerName}</div>
+                  </div>
+                )}
+              </a>
+            </React.Fragment>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function BedroomHistoryView({ propertyId, propertyName, unitId, unitLabel, partyId, partyLabel, employee, onBack }) {
   const isStaff = employee?.role === 'owner' || employee?.role === 'manager';
   const [data, setData] = useState({ days: [], loading: true });
@@ -7771,29 +7872,7 @@ function BedroomHistoryView({ propertyId, propertyName, unitId, unitLabel, party
                 )}
 
                 {day.photos.length > 0 && (
-                  <div className="mb-3">
-                    <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-2">
-                      Photos ({day.photos.length})
-                    </div>
-                    <div className="grid grid-cols-4 gap-1.5">
-                      {day.photos.map(p => (
-                        <a key={p.id} href={p.public_url} target="_blank" rel="noreferrer"
-                          className="relative aspect-square rounded-lg overflow-hidden bg-stone-200 active:opacity-80">
-                          <img src={p.public_url} alt="" loading="lazy" className="w-full h-full object-cover" />
-                          {p.kind && (
-                            <div className="absolute top-1 left-1 px-1 py-0.5 rounded bg-black/70 text-white text-[8px] uppercase tracking-wider">
-                              {p.kind}
-                            </div>
-                          )}
-                          {isStaff && p.cleanerName && (
-                            <div className="absolute bottom-0 inset-x-0 bg-gradient-to-t from-black/80 to-transparent p-1">
-                              <div className="text-[8px] text-white font-mono leading-tight truncate">{p.cleanerName}</div>
-                            </div>
-                          )}
-                        </a>
-                      ))}
-                    </div>
-                  </div>
+                  <DayPhotoTabs photos={day.photos} isStaff={isStaff} />
                 )}
               </div>
             ))}
@@ -8687,7 +8766,7 @@ function AssignmentDetail({ property, assignment: assignmentInit, employee, onBa
 //   employee — current user
 //   showDone — if true, includes done assignments
 //   onUpdate — called after any status change so parent can refresh
-function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = false, onUpdate }) {
+function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = false, onUpdate, onOpenBedroomHistory }) {
   const [targets, setTargets] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [opened, setOpened] = useState(null);
@@ -8796,7 +8875,8 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
               onDone={() => updateStatus(t, 'done')}
               onReopen={() => updateStatus(t, 'pending')}
               onBlocked={() => setStatusModal({ target: t })}
-              onReassign={() => setReassignTarget(t)} />
+              onReassign={() => setReassignTarget(t)}
+              onOpenBedroomHistory={onOpenBedroomHistory} />
           ))}
         </div>
       )}
@@ -8818,7 +8898,7 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
 }
 
 // Reusable card for one assignment target, used in banner + panel
-function AssignmentCard({ target, busy, onView, onStart, onDone, onReopen, onBlocked, onReassign, onGoToBedroom, propertyId }) {
+function AssignmentCard({ target, busy, onView, onStart, onDone, onReopen, onBlocked, onReassign, onGoToBedroom, onOpenBedroomHistory, propertyId }) {
   const t = target;
   const s = ASSIGNMENT_STATUSES[t.status] || ASSIGNMENT_STATUSES.pending;
   const isDone = t.status === 'done';
@@ -8917,6 +8997,15 @@ function AssignmentCard({ target, busy, onView, onStart, onDone, onReopen, onBlo
             <Edit2 size={12} /> Reassign
           </button>
         )}
+        {onOpenBedroomHistory && t.unit_id && t.party_id && (
+          <button onClick={() => onOpenBedroomHistory({
+              unitId: t.unit_id, unitLabel: t.unit?.label,
+              partyId: t.party_id, partyLabel: t.party?.label
+            })} disabled={busy}
+            className={`px-3 py-1.5 rounded-lg bg-stone-100 hover:bg-stone-200 text-stone-700 text-xs font-medium flex items-center gap-1 disabled:opacity-50 ${onReassign ? '' : 'ml-auto'}`}>
+            <Clock size={12} /> History
+          </button>
+        )}
       </div>
       {canGo && (
         <button onClick={onGoToBedroom} disabled={busy}
@@ -8930,7 +9019,7 @@ function AssignmentCard({ target, busy, onView, onStart, onDone, onReopen, onBlo
 
 // AssignmentsPanel — full tabbed view for the property hub.
 // Tabs: Pending | In Progress | Done
-function AssignmentsPanel({ propertyId, employee, refreshKey, onGoToBedroom }) {
+function AssignmentsPanel({ propertyId, employee, refreshKey, onGoToBedroom, onOpenBedroomHistory }) {
   const [tab, setTab] = useState('pending');
   const [counts, setCounts] = useState({ pending: 0, in_progress: 0, done: 0, blocked: 0 });
 
@@ -9099,7 +9188,8 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
           onReopen={() => updateStatus(t, 'pending')}
           onBlocked={() => setStatusModal({ target: t })}
           onReassign={() => setReassignTarget(t)}
-          onGoToBedroom={onGoToBedroom ? () => onGoToBedroom(t) : null} />
+          onGoToBedroom={onGoToBedroom ? () => onGoToBedroom(t) : null}
+          onOpenBedroomHistory={onOpenBedroomHistory} />
       ))}
     </div>
   );

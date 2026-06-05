@@ -898,6 +898,35 @@ const can = (employee, capabilityKey) => {
 };
 
 // =================================================================
+// ADDRESS LINK — tappable address chip. Opens the address in the
+// user's default maps app (native on phones, Google Maps in browser
+// on desktop). Always rendered as a <span> with stopPropagation so
+// it's safe to drop inside a parent <button> without nesting issues.
+// Props:
+//   address: the raw address string
+//   icon: 'pin' (default) | 'none'
+//   className: extra classes to apply
+// =================================================================
+function AddressLink({ address, icon = 'pin', className = '' }) {
+  if (!address) return null;
+  const mapsUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address)}`;
+  const openMaps = (e) => {
+    e.stopPropagation();
+    e.preventDefault();
+    window.open(mapsUrl, '_blank', 'noopener,noreferrer');
+  };
+  return (
+    <span onClick={openMaps} role="link" tabIndex={0}
+      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') openMaps(e); }}
+      className={`inline-flex items-center gap-1 cursor-pointer hover:underline active:opacity-60 ${className}`}
+      title="Open in maps">
+      {icon === 'pin' && <MapPin size={11} className="flex-shrink-0" />}
+      <span className="truncate">{address}</span>
+    </span>
+  );
+}
+
+// =================================================================
 // EMPLOYEE APP — three-state machine
 // =================================================================
 function EmployeeApp({ employee: employeeInit, onSignOut }) {
@@ -1477,6 +1506,11 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
         <div className="flex items-center gap-1.5 text-xs text-amber-400 font-mono">
           <Building2 size={11} /> {shift.customer?.name}
         </div>
+        {shift.customer?.address && (
+          <div className="mt-1 text-xs text-stone-300">
+            <AddressLink address={shift.customer.address} className="text-stone-300" />
+          </div>
+        )}
         <div className="mt-1 text-xs text-stone-400 font-mono">
           Started {fmtClock(shift.start_time)} · {workBlocks.length} {workBlocks.length === 1 ? 'apartment cleaned' : 'apartments cleaned'}
         </div>
@@ -2034,6 +2068,11 @@ function SimpleShiftView({ shift, tasks, activeTask, employeeName, employee, onS
             <Building2 size={11} /> {shift.customer.name}
           </div>
         )}
+        {shift.customer?.address && (
+          <div className="mt-1 text-xs text-stone-300">
+            <AddressLink address={shift.customer.address} className="text-stone-300" />
+          </div>
+        )}
         <div className="mt-1 text-xs text-stone-400 font-mono">
           Started {fmtClock(shift.start_time)} · {tasks.length} {tasks.length === 1 ? 'task' : 'tasks'}
         </div>
@@ -2149,8 +2188,8 @@ function PropertyPicker({ onPick, onCancel, busy, title, subtitle, viewOnly = fa
                           )}
                         </div>
                         {p.address && (
-                          <div className="text-xs text-stone-500 font-mono flex items-center gap-1">
-                            <MapPin size={11} /> {p.address}
+                          <div className="text-xs text-stone-500 font-mono">
+                            <AddressLink address={p.address} />
                           </div>
                         )}
                       </div>
@@ -2205,7 +2244,9 @@ function ViewOnlyDashboard({ employee, property, onSignOut, onEndViewing, onOpen
             <div className="text-[10px] uppercase tracking-wider font-mono text-stone-400">Viewing</div>
             <div className="font-serif text-2xl truncate">{property.name}</div>
             {property.address && (
-              <div className="text-xs text-stone-400 truncate mt-0.5">{property.address}</div>
+              <div className="text-xs text-stone-300 mt-1">
+                <AddressLink address={property.address} className="text-amber-400" />
+              </div>
             )}
           </div>
           <button onClick={() => setShowMenu(true)}
@@ -4826,8 +4867,8 @@ function PropertyAdmin({ employee, onSignOut, onOpenMessages, onLogoClick }) {
                     {!p.active && <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-200 text-stone-600">Inactive</span>}
                   </div>
                   {p.address && (
-                    <div className="text-xs text-stone-500 font-mono flex items-center gap-1">
-                      <MapPin size={11} /> {p.address}
+                    <div className="text-xs text-stone-500 font-mono">
+                      <AddressLink address={p.address} />
                     </div>
                   )}
                   {canSeeMoney(employee) && (
@@ -7425,7 +7466,9 @@ function PortalPropertyPicker({ portalUser, properties, onPick, onSignOut }) {
               <div className="flex-1 min-w-0">
                 <div className="font-serif text-lg text-stone-900 truncate">{p.name}</div>
                 {p.address && (
-                  <div className="text-xs text-stone-500 truncate">{p.address}</div>
+                  <div className="text-xs text-stone-500">
+                    <AddressLink address={p.address} />
+                  </div>
                 )}
               </div>
               <ChevronRight size={18} className="text-stone-400 flex-shrink-0" />
@@ -7584,8 +7627,8 @@ function PortalHome({ property, portalKind, portalUser, hasMultipleProperties, o
         </div>
         <h1 className="text-3xl font-light tracking-tight mt-2">{property.name}</h1>
         {property.address && (
-          <div className="text-sm text-stone-300 mt-1 flex items-center gap-1.5">
-            <MapPin size={13} /> {property.address}
+          <div className="text-sm text-stone-300 mt-1">
+            <AddressLink address={property.address} className="text-amber-400" />
           </div>
         )}
         {property.portal_start_date && (
@@ -12463,7 +12506,7 @@ function NewPropertyThreadPicker({ employee, onBack, onPicked }) {
                 <Building2 size={18} className="text-amber-700 flex-shrink-0" />
                 <div className="flex-1 min-w-0">
                   <div className="font-serif text-base text-stone-900 truncate">{p.name}</div>
-                  {p.address && <div className="text-xs text-stone-500 truncate">{p.address}</div>}
+                  {p.address && <div className="text-xs text-stone-500"><AddressLink address={p.address} /></div>}
                 </div>
                 <ChevronRight size={16} className="text-stone-400 flex-shrink-0" />
               </button>

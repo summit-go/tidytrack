@@ -870,7 +870,32 @@ function SignIn({ onSignIn }) {
 // Role helpers — keep this central so we never drift
 const isOwner   = (e) => e?.role === 'owner';
 const isManager = (e) => e?.role === 'manager' || e?.role === 'owner';
-const canSeeMoney = (e) => isOwner(e); // managers don't see $
+const canSeeMoney = (e) => isOwner(e) || can(e, 'view_pay_info'); // managers see $ if toggled on; owners always
+
+// =================================================================
+// CAPABILITIES — per-employee feature toggles.
+// Owners always have every capability. For others, the value comes
+// from employees.responsibilities jsonb. See v19 migration.
+// =================================================================
+const CAPABILITIES = [
+  { key: 'upload_assignments',       label: 'Upload assignments',         hint: 'Create assignments and upload PDFs or photos for cleaners.' },
+  { key: 'approve_pm_assignments',   label: 'Approve PM assignments',     hint: 'Accept or reject assignments submitted by property managers.' },
+  { key: 'edit_shift_times',         label: 'Edit shift times',           hint: 'Manually adjust clock-in/out and work block times.' },
+  { key: 'view_pay_info',            label: 'View pay info',              hint: 'See bill rates, money amounts, and invoices.' },
+  { key: 'manage_units',             label: 'Manage units & properties',  hint: 'Add or edit units, parties, properties, and bulk imports.' },
+  { key: 'manage_assignments_admin', label: 'Reassign & delete assignments', hint: 'Move assignments between bedrooms or delete them entirely.' },
+];
+
+// Returns true if the employee has the given capability key.
+// Owners always return true. Manager defaults are set at create time
+// in the EmployeeForm. Missing keys default to false.
+const can = (employee, capabilityKey) => {
+  if (!employee) return false;
+  if (employee.role === 'owner') return true;
+  const r = employee.responsibilities;
+  if (r && typeof r === 'object' && r[capabilityKey] === true) return true;
+  return false;
+};
 
 // =================================================================
 // EMPLOYEE APP — three-state machine
@@ -892,6 +917,8 @@ function EmployeeApp({ employee: employeeInit, onSignOut }) {
   const [showMessages, setShowMessages] = useState(false);
   const [showChangePin, setShowChangePin] = useState(false);
   const [bedroomHistory, setBedroomHistory] = useState(null); // params for BedroomHistoryView
+  const [viewOnlySession, setViewOnlySession] = useState(null); // { id, started_at } if viewing without clocking in
+  const [viewOnlyProperty, setViewOnlyProperty] = useState(null); // the property they picked to view
 
   useTick(!!shift && !shift.end_time);
   useEffect(() => { reload(); /* eslint-disable-next-line */ }, []);
@@ -964,6 +991,78 @@ function EmployeeApp({ employee: employeeInit, onSignOut }) {
     setBusy(false);
     if (error) { alert('Could not clock in: ' + error.message); return; }
     setShift(data); setWorkBlocks([]); setTasks([]); setClockInFlow(null);
+  };
+
+  // View-only: cleaner browses messages, properties, assignments
+  // without clocking in. Audited via view_only_sessions table.
+  const startViewOnly = () => setClockInFlow({ step: 'view-only-property' });
+
+  const onPickViewOnlyProperty = async (property) => {
+    setBusy(true);
+    // First, auto-close any of this employee's view-only sessions that don't have an end_time.
+    // This handles the case where they closed the browser without ending properly.
+    try {
+      const { data: open } = await supabase
+        .from('view_only_sessions')
+        .select('id, start_time')
+        .eq('employee_id', employee.id)
+        .is('end_time', null);
+      if (open && open.length > 0) {
+        await supabase.from('view_only_sessions')
+          .update({ end_time: new Date().toISOString() })
+          .eq('employee_id', employee.id)
+          .is('end_time', null);
+      }
+    } catch (e) {
+      console.warn('[view-only cleanup] failed', e);
+    }
+    const { data, error } = await supabase
+      .from('view_only_sessions')
+      .insert({
+        employee_id: employee.id,
+        customer_id: property?.id || null,
+      })
+      .select().single();
+    setBusy(false);
+    if (error) {
+      alert('Could not start view-only session: ' + error.message);
+      return;
+    }
+    setViewOnlySession(data);
+    setViewOnlyProperty(property);
+    setClockInFlow(null);
+  };
+
+  const logViewOnlyAction = async (action) => {
+    if (!viewOnlySession) return;
+    try {
+      // Append to views_logged jsonb array
+      const { data: current } = await supabase.from('view_only_sessions')
+        .select('views_logged').eq('id', viewOnlySession.id).maybeSingle();
+      const prior = Array.isArray(current?.views_logged) ? current.views_logged : [];
+      const next = [...prior, { action, at: new Date().toISOString() }].slice(-200); // cap at 200 events per session
+      await supabase.from('view_only_sessions')
+        .update({ views_logged: next }).eq('id', viewOnlySession.id);
+    } catch (e) {
+      console.warn('[view-only audit] failed', e);
+    }
+  };
+
+  const endViewOnly = async () => {
+    if (!viewOnlySession) {
+      setViewOnlySession(null);
+      setViewOnlyProperty(null);
+      return;
+    }
+    try {
+      await supabase.from('view_only_sessions')
+        .update({ end_time: new Date().toISOString() })
+        .eq('id', viewOnlySession.id);
+    } catch (e) {
+      console.warn('[view-only end] failed', e);
+    }
+    setViewOnlySession(null);
+    setViewOnlyProperty(null);
   };
 
   const clockOut = async () => {
@@ -1217,11 +1316,41 @@ function EmployeeApp({ employee: employeeInit, onSignOut }) {
 
   // Messages overlay — takes over the screen, regardless of where cleaner was
   if (showMessages) {
-    return withIdleModal(<StaffMessagesTab employee={employee} onClose={() => setShowMessages(false)} />);
+    return withIdleModal(<StaffMessagesTab employee={employee} onClose={() => { logViewOnlyAction('viewed_messages'); setShowMessages(false); }} />);
+  }
+
+  // View-only mode: cleaner is browsing without a real shift
+  if (viewOnlySession && bedroomHistory) {
+    return <BedroomHistoryView
+      propertyId={viewOnlyProperty?.id}
+      propertyName={viewOnlyProperty?.name || ''}
+      unitId={bedroomHistory.unitId}
+      unitLabel={bedroomHistory.unitLabel}
+      partyId={bedroomHistory.partyId}
+      partyLabel={bedroomHistory.partyLabel}
+      employee={employee}
+      onBack={() => setBedroomHistory(null)} />;
+  }
+  if (viewOnlySession) {
+    return <ViewOnlyDashboard
+      employee={employee}
+      property={viewOnlyProperty}
+      onSignOut={async () => { await endViewOnly(); onSignOut(); }}
+      onEndViewing={endViewOnly}
+      onOpenMessages={() => { logViewOnlyAction('opened_messages'); setShowMessages(true); }}
+      onOpenBedroomHistory={(params) => { logViewOnlyAction('opened_bedroom_history'); setBedroomHistory(params); }}
+      onSwitchProperty={async () => { await endViewOnly(); setClockInFlow({ step: 'view-only-property' }); }} />;
   }
 
   if (!shift && clockInFlow?.step === 'property') {
     return withIdleModal(<PropertyPicker onPick={onPickProperty} onCancel={() => setClockInFlow(null)} busy={busy} />);
+  }
+  if (!shift && clockInFlow?.step === 'view-only-property') {
+    return withIdleModal(<PropertyPicker onPick={onPickViewOnlyProperty}
+      onCancel={() => setClockInFlow(null)} busy={busy}
+      title="Which property do you want to look at?"
+      subtitle="View-only — no time will be tracked"
+      viewOnly={true} />);
   }
   if (shift && blockStartFlow?.step === 'unit') {
     return withIdleModal(<UnitPicker property={shift.customer} onPick={onPickBlockUnit}
@@ -1252,6 +1381,11 @@ function EmployeeApp({ employee: employeeInit, onSignOut }) {
             <Clock size={32} />
             <span>Clock In</span>
           </button>
+          <button onClick={startViewOnly} disabled={busy}
+            className="mt-6 px-5 py-2.5 rounded-full bg-white border border-stone-300 hover:border-stone-500 text-stone-700 text-sm font-medium flex items-center gap-2 active:scale-95 transition-transform disabled:opacity-50">
+            <Eye size={14} /> Just look around (no clock-in)
+          </button>
+          <p className="text-[11px] text-stone-400 mt-2">View messages, properties & assignments without tracking time.</p>
         </div>
       </div>
     );
@@ -1308,8 +1442,17 @@ function EmployeeApp({ employee: employeeInit, onSignOut }) {
 // =================================================================
 function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onClockOut, onSwitchProperty, onStartNew, onReopen, onGoToBedroom, onOpenMessages, onOpenChangePin, onOpenBedroomHistory, busy }) {
   const [showMenu, setShowMenu] = useState(false);
+  const [showAssignmentForm, setShowAssignmentForm] = useState(false);
   useTick(true);
   const elapsed = Date.now() - new Date(shift.start_time).getTime();
+
+  // If this cleaner has the upload_assignments capability and tapped the
+  // upload button, render the AssignmentForm as a full-screen overlay.
+  if (showAssignmentForm) {
+    return <AssignmentForm property={shift.customer} employee={employee}
+      onCancel={() => setShowAssignmentForm(false)}
+      onSaved={() => setShowAssignmentForm(false)} />;
+  }
 
   return (
     <div className="min-h-screen bg-stone-50 pb-24">
@@ -1340,6 +1483,15 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
       </div>
 
       <AssignmentsPanel propertyId={shift.customer_id} employee={employee} onGoToBedroom={onGoToBedroom} onOpenBedroomHistory={onOpenBedroomHistory} />
+
+      {can(employee, 'upload_assignments') && (
+        <div className="px-4 pt-3">
+          <button onClick={() => setShowAssignmentForm(true)} disabled={busy}
+            className="w-full py-3 rounded-2xl bg-white border-2 border-amber-300 hover:border-amber-500 text-amber-900 text-sm font-medium flex items-center justify-center gap-2 active:scale-98 transition-transform disabled:opacity-50">
+            <Plus size={16} /> Upload an assignment
+          </button>
+        </div>
+      )}
 
       <div className="px-4 pt-6">
         <button onClick={onStartNew} disabled={busy}
@@ -1960,7 +2112,7 @@ function SimpleShiftView({ shift, tasks, activeTask, employeeName, employee, onS
 // =================================================================
 // Pickers
 // =================================================================
-function PropertyPicker({ onPick, onCancel, busy }) {
+function PropertyPicker({ onPick, onCancel, busy, title, subtitle, viewOnly = false }) {
   const [properties, setProperties] = useState([]);
   const [loaded, setLoaded] = useState(false);
   useEffect(() => { (async () => {
@@ -1974,8 +2126,8 @@ function PropertyPicker({ onPick, onCancel, busy }) {
           <ArrowLeft size={20} className="text-stone-700" />
         </button>
         <div>
-          <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">Clock in</div>
-          <div className="font-serif text-xl text-stone-900">Pick a property</div>
+          <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">{subtitle || 'Clock in'}</div>
+          <div className="font-serif text-xl text-stone-900">{title || 'Pick a property'}</div>
         </div>
       </div>
       <div className="flex-1 px-5 py-6 overflow-y-auto">
@@ -2008,13 +2160,191 @@ function PropertyPicker({ onPick, onCancel, busy }) {
                 ))}
               </div>
             )}
-            <button onClick={() => onPick(null)} disabled={busy}
-              className="w-full p-4 rounded-2xl border-2 border-dashed border-stone-300 text-stone-600 text-sm hover:border-stone-500 disabled:opacity-50">
-              Skip — clock in without a property
-            </button>
+            {!viewOnly && (
+              <button onClick={() => onPick(null)} disabled={busy}
+                className="w-full p-4 rounded-2xl border-2 border-dashed border-stone-300 text-stone-600 text-sm hover:border-stone-500 disabled:opacity-50">
+                Skip — clock in without a property
+              </button>
+            )}
           </>
         )}
       </div>
+    </div>
+  );
+}
+
+// =================================================================
+// VIEW-ONLY DASHBOARD — cleaner browsing properties/assignments
+// without clocking in. Audited via view_only_sessions.
+// Shows assignments (read-only — no Start/Done buttons), messages
+// access, and bedroom history. No clock-in or work block actions.
+// =================================================================
+function ViewOnlyDashboard({ employee, property, onSignOut, onEndViewing, onOpenMessages, onOpenBedroomHistory, onSwitchProperty }) {
+  const [showMenu, setShowMenu] = useState(false);
+  if (!property) return null;
+  return (
+    <div className="min-h-screen bg-stone-50 pb-24">
+      <Header name={employee.name} onSignOut={onSignOut} role={employee.role} employee={employee} onOpenMessages={onOpenMessages} />
+
+      {/* View-only banner */}
+      <div className="bg-amber-50 border-y border-amber-200 px-5 py-3 flex items-center gap-2">
+        <Eye size={14} className="text-amber-700 flex-shrink-0" />
+        <div className="flex-1 min-w-0">
+          <div className="text-xs font-medium text-amber-900">View-only mode</div>
+          <div className="text-[11px] text-amber-700">No time is being tracked. To work, sign out and clock in.</div>
+        </div>
+        <button onClick={onEndViewing}
+          className="px-3 py-1.5 rounded-full bg-amber-700 hover:bg-amber-800 text-white text-xs font-medium flex-shrink-0">
+          End viewing
+        </button>
+      </div>
+
+      <div className="px-5 pt-6">
+        <div className="bg-stone-900 text-stone-50 px-5 py-5 rounded-2xl mb-4 flex items-center justify-between gap-3">
+          <div className="flex-1 min-w-0">
+            <div className="text-[10px] uppercase tracking-wider font-mono text-stone-400">Viewing</div>
+            <div className="font-serif text-2xl truncate">{property.name}</div>
+            {property.address && (
+              <div className="text-xs text-stone-400 truncate mt-0.5">{property.address}</div>
+            )}
+          </div>
+          <button onClick={() => setShowMenu(true)}
+            className="px-3 py-1.5 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-50 text-xs font-medium flex items-center gap-1.5 flex-shrink-0">
+            <Menu size={12} /> More
+          </button>
+        </div>
+
+        {/* Read-only assignments banner — no start/done buttons */}
+        <ViewOnlyAssignmentsPanel propertyId={property.id} employee={employee} onOpenBedroomHistory={onOpenBedroomHistory} />
+      </div>
+
+      {showMenu && (
+        <CleanerMenuSheet
+          employee={employee}
+          shift={{ customer: property }}
+          onClose={() => setShowMenu(false)}
+          onSwitchProperty={() => { setShowMenu(false); onSwitchProperty && onSwitchProperty(); }}
+          onChangePin={null}
+          onOpenMessages={null}
+          onSignOut={() => { setShowMenu(false); onSignOut && onSignOut(); }}
+        />
+      )}
+    </div>
+  );
+}
+
+// View-only version of AssignmentsPanel — no start/done buttons, just info
+function ViewOnlyAssignmentsPanel({ propertyId, employee, onOpenBedroomHistory }) {
+  const [targets, setTargets] = useState([]);
+  const [loaded, setLoaded] = useState(false);
+  const [opened, setOpened] = useState(null);
+  const [filter, setFilter] = useState('open'); // 'open' | 'done'
+
+  const load = async () => {
+    const { data, error } = await supabase
+      .from('assignment_targets')
+      .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, assignment_type, scheduled_date), unit:units(id, label), party:parties(id, label), starter:employees!started_by(name), completer:employees!completed_by(name)');
+    if (error) { console.warn(error); setLoaded(true); return; }
+    const filtered = (data || []).filter(t =>
+      t.assignment?.customer_id === propertyId &&
+      t.assignment?.active &&
+      (t.assignment?.source !== 'pm' || t.assignment?.pm_status === 'approved')
+    );
+    setTargets(filtered);
+    setLoaded(true);
+  };
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, [propertyId]);
+  useAssignmentSync(load, 'view-only-asgn');
+
+  const visible = filter === 'open'
+    ? targets.filter(t => t.status !== 'done')
+    : targets.filter(t => t.status === 'done').sort((a, b) =>
+        new Date(b.completed_at || 0) - new Date(a.completed_at || 0)
+      );
+
+  return (
+    <div>
+      <div className="flex items-center gap-2 mb-3">
+        <FileText size={14} className="text-stone-500" />
+        <span className="text-xs uppercase tracking-wider text-stone-500 font-mono">Assignments</span>
+      </div>
+      <div className="flex gap-1 mb-3 bg-stone-100 p-1 rounded-xl">
+        <button onClick={() => setFilter('open')}
+          className={`flex-1 py-2 px-3 rounded-lg text-xs font-medium ${filter === 'open' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+          Open ({targets.filter(t => t.status !== 'done').length})
+        </button>
+        <button onClick={() => setFilter('done')}
+          className={`flex-1 py-2 px-3 rounded-lg text-xs font-medium ${filter === 'done' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+          Done ({targets.filter(t => t.status === 'done').length})
+        </button>
+      </div>
+
+      {!loaded ? (
+        <Splash text="Loading…" />
+      ) : visible.length === 0 ? (
+        <div className="text-center py-10 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
+          No {filter === 'open' ? 'open' : 'done'} assignments.
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {visible.map(t => {
+            const a = t.assignment;
+            const s = ASSIGNMENT_STATUSES[t.status] || ASSIGNMENT_STATUSES.pending;
+            return (
+              <div key={t.id} className="p-3 rounded-xl bg-white border border-stone-200">
+                <div className="flex items-start justify-between gap-2 mb-2">
+                  <div className="flex-1 min-w-0">
+                    <div className="font-serif text-base text-stone-900 truncate">{a.title}</div>
+                    {(t.unit?.label || t.party?.label) && (
+                      <div className="text-xs font-mono text-stone-500 mt-0.5">
+                        {t.unit?.label}{t.party?.label && ` · ${t.party.label}`}
+                      </div>
+                    )}
+                    {a.notes && (
+                      <div className="text-xs text-stone-600 mt-1 line-clamp-2">{a.notes}</div>
+                    )}
+                    <div className="mt-2 flex items-center gap-1.5 flex-wrap">
+                      <span className={`text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full border ${s.color}`}>
+                        {s.label}
+                      </span>
+                      {a.assignment_type && (
+                        <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-amber-100 text-amber-900">
+                          {assignmentTypeLabel(a.assignment_type)}
+                        </span>
+                      )}
+                      {a.scheduled_date && (
+                        <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-stone-200 text-stone-700 flex items-center gap-1">
+                          <Calendar size={9} /> {fmtDateWithDay(a.scheduled_date)}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+                <div className="flex gap-2 flex-wrap mt-2">
+                  {a.file_url && (
+                    <button onClick={() => setOpened(t)}
+                      className="px-3 py-1.5 rounded-lg bg-stone-100 hover:bg-stone-200 text-stone-700 text-xs font-medium flex items-center gap-1">
+                      {a.file_kind === 'pdf' ? <FileText size={12} /> : <ImageIcon size={12} />}
+                      View
+                    </button>
+                  )}
+                  {onOpenBedroomHistory && t.unit_id && t.party_id && (
+                    <button onClick={() => onOpenBedroomHistory({
+                        unitId: t.unit_id, unitLabel: t.unit?.label,
+                        partyId: t.party_id, partyLabel: t.party?.label
+                      })}
+                      className="px-3 py-1.5 rounded-lg bg-stone-100 hover:bg-stone-200 text-stone-700 text-xs font-medium flex items-center gap-1">
+                      <Clock size={12} /> History
+                    </button>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {opened && <AssignmentViewer target={opened} onClose={() => setOpened(null)} />}
     </div>
   );
 }
@@ -2566,7 +2896,7 @@ function ManagerDashboard({ employee, onSignOut, onOpenMessages, onLogoClick }) 
 
   if (!loaded) return <Splash text="Loading dashboard…" />;
   if (view === 'detail' && selectedShift) {
-    return <ShiftDetail shiftId={selectedShift.id} viewerRole={employee.role}
+    return <ShiftDetail shiftId={selectedShift.id} viewerRole={employee.role} viewerEmployee={employee}
       onBack={() => { setView('shifts'); setSelectedShift(null); load(); }} />;
   }
 
@@ -2900,9 +3230,9 @@ function StatCard({ label, value, unit, highlight, accent, onClick }) {
 // =================================================================
 // SHIFT DETAIL (shows work blocks for multi-unit)
 // =================================================================
-function ShiftDetail({ shiftId, viewerRole, onBack }) {
-  const showMoney = viewerRole === 'owner';
-  const canEdit = viewerRole === 'owner' || viewerRole === 'manager';
+function ShiftDetail({ shiftId, viewerRole, viewerEmployee, onBack }) {
+  const showMoney = canSeeMoney(viewerEmployee);
+  const canEdit = can(viewerEmployee, 'edit_shift_times');
   const [shift, setShift] = useState(null);
   const [workBlocks, setWorkBlocks] = useState([]);
   const [tasks, setTasks] = useState([]);
@@ -3788,20 +4118,75 @@ function EmployeeAdmin({ employee, onSignOut, onOpenMessages, onLogoClick }) {
 
 function EmployeeForm({ employee, currentUserId, currentUserRole, onCancel, onSaved }) {
   const isNew = !employee;
+  // Build the initial responsibilities map: existing row's value, or defaults based on role.
+  const defaultRespForRole = (r) => {
+    const all = {};
+    CAPABILITIES.forEach(c => { all[c.key] = (r === 'manager' || r === 'owner'); });
+    return all;
+  };
+  const initialResp = (() => {
+    const existing = employee?.responsibilities || {};
+    const defaults = defaultRespForRole(employee?.role || 'employee');
+    return { ...defaults, ...existing };
+  })();
+
   const [name, setName] = useState(employee?.name || '');
   const [pin, setPin] = useState(employee?.pin || '');
   const [role, setRole] = useState(employee?.role || 'employee');
   const [active, setActive] = useState(employee?.active ?? true);
+  const [phone, setPhone] = useState(employee?.phone || '');
+  const [smsOptIn, setSmsOptIn] = useState(employee?.sms_opt_in || false);
+  const [notifyMessages, setNotifyMessages] = useState(
+    employee?.notification_prefs?.messages !== false
+  );
+  const [responsibilities, setResponsibilities] = useState(initialResp);
+  // Track whether the user manually edited any toggle, so we don't clobber
+  // their choices when they switch roles back and forth.
+  const [respDirty, setRespDirty] = useState(false);
+
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const isSelf = employee?.id === currentUserId;
   const canEditOwner = currentUserRole === 'owner';
+  // Only owners + managers benefit from notification settings (cleaners use the app directly)
+  const showNotificationSettings = role === 'owner' || role === 'manager';
+
+  // When role changes (and the user hasn't manually edited toggles yet),
+  // reset the responsibilities to the defaults for that role.
+  // Only kicks in on NEW employees or when the user hasn't touched the toggles.
+  useEffect(() => {
+    if (respDirty) return;
+    setResponsibilities(defaultRespForRole(role));
+    // eslint-disable-next-line
+  }, [role]);
+
+  const toggleResp = (key) => {
+    setRespDirty(true);
+    setResponsibilities(r => ({ ...r, [key]: !r[key] }));
+  };
+
   const save = async () => {
     setError('');
     if (!name.trim()) { setError('Name is required'); return; }
     if (!/^\d{4}$/.test(pin)) { setError('PIN must be exactly 4 digits'); return; }
+    // Phone validation: if SMS opt-in, phone is required and must look like a phone number
+    const cleanPhone = phone.trim();
+    if (smsOptIn && !cleanPhone) {
+      setError('Phone number is required to enable SMS notifications.');
+      return;
+    }
+    if (cleanPhone && !/^[\d\s\-\+\(\)\.]{7,20}$/.test(cleanPhone)) {
+      setError('Phone number format looks off. Use numbers, +, -, spaces, parens only.');
+      return;
+    }
     setBusy(true);
-    const payload = { name: name.trim(), pin, role, active };
+    const payload = {
+      name: name.trim(), pin, role, active,
+      phone: cleanPhone || null,
+      sms_opt_in: smsOptIn,
+      notification_prefs: { messages: notifyMessages },
+      responsibilities,
+    };
     const { error: e } = isNew
       ? await supabase.from('employees').insert(payload)
       : await supabase.from('employees').update(payload).eq('id', employee.id);
@@ -3863,6 +4248,85 @@ function EmployeeForm({ employee, currentUserId, currentUserRole, onCancel, onSa
             <p className="text-xs text-amber-700 mt-2">⚠ Owners have full admin access including bill rates and pay info.</p>
           )}
         </div>
+
+        <div className="p-4 rounded-2xl bg-white border border-stone-200 space-y-3">
+          <div className="flex items-center gap-2 mb-1">
+            <Settings size={14} className="text-stone-500" />
+            <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">Responsibilities</div>
+          </div>
+          {role === 'owner' ? (
+            <p className="text-[11px] text-stone-500 -mt-2">
+              Owners have every capability automatically. Toggles below are shown for reference but can't be turned off.
+            </p>
+          ) : role === 'manager' ? (
+            <p className="text-[11px] text-stone-500 -mt-2">
+              Managers default to all capabilities on. Turn off anything they shouldn't have.
+            </p>
+          ) : (
+            <p className="text-[11px] text-stone-500 -mt-2">
+              Employees default to no extra capabilities. Turn on what this person should be allowed to do.
+            </p>
+          )}
+
+          <div className="space-y-2 pt-1">
+            {CAPABILITIES.map(c => {
+              const isOn = role === 'owner' ? true : !!responsibilities[c.key];
+              const disabled = role === 'owner';
+              return (
+                <label key={c.key}
+                  className={`flex items-start justify-between gap-3 p-3 rounded-xl cursor-pointer ${disabled ? 'bg-amber-50 cursor-not-allowed' : 'bg-stone-50 hover:bg-stone-100'}`}>
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-medium text-stone-900">{c.label}</div>
+                    <div className="text-[11px] text-stone-500">{c.hint}</div>
+                  </div>
+                  <input type="checkbox" checked={isOn} disabled={disabled}
+                    onChange={() => toggleResp(c.key)}
+                    className="w-5 h-5 rounded accent-stone-900 flex-shrink-0 mt-0.5 disabled:opacity-60" />
+                </label>
+              );
+            })}
+          </div>
+        </div>
+
+        {showNotificationSettings && (
+          <div className="p-4 rounded-2xl bg-white border border-stone-200 space-y-3">
+            <div className="flex items-center gap-2 mb-1">
+              <MessageCircle size={14} className="text-stone-500" />
+              <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">Notifications (SMS)</div>
+            </div>
+            <p className="text-[11px] text-stone-500 -mt-2">
+              Coming soon: text-message alerts when cleaners or PMs message you. Fill in phone & opt-in below — SMS will activate once we connect the SMS provider.
+            </p>
+
+            <div>
+              <label className="text-xs text-stone-700 font-medium mb-1.5 block">Phone number</label>
+              <input type="tel" value={phone} onChange={(e) => setPhone(e.target.value)}
+                placeholder="e.g. (801) 555-0123"
+                className="w-full px-3 py-2.5 rounded-xl border border-stone-300 bg-white focus:outline-none focus:border-stone-900 text-stone-900 text-sm" />
+            </div>
+
+            <label className="flex items-center justify-between gap-3 p-3 rounded-xl bg-stone-50 cursor-pointer">
+              <div className="flex-1 min-w-0">
+                <div className="text-sm font-medium text-stone-900">Allow SMS notifications</div>
+                <div className="text-[11px] text-stone-500">Required to receive any text alerts. You can opt out anytime.</div>
+              </div>
+              <input type="checkbox" checked={smsOptIn} onChange={(e) => setSmsOptIn(e.target.checked)}
+                className="w-5 h-5 rounded accent-stone-900 flex-shrink-0" />
+            </label>
+
+            {smsOptIn && (
+              <label className="flex items-center justify-between gap-3 p-3 rounded-xl bg-stone-50 cursor-pointer">
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm font-medium text-stone-900">New messages</div>
+                  <div className="text-[11px] text-stone-500">Text when a teammate or PM sends you a message.</div>
+                </div>
+                <input type="checkbox" checked={notifyMessages} onChange={(e) => setNotifyMessages(e.target.checked)}
+                  className="w-5 h-5 rounded accent-stone-900 flex-shrink-0" />
+              </label>
+            )}
+          </div>
+        )}
+
         <div className="p-4 rounded-2xl bg-white border border-stone-200">
           <label className="flex items-center justify-between cursor-pointer">
             <div>
@@ -4703,27 +5167,61 @@ function UnitList({ property, onBack, onEditProperty, onUnitOpen, onUnitEdit, on
             No units match "{search}".
           </div>
         ) : (
-          <div className="space-y-2">
-            {filtered.map(u => (
-              <div key={u.id} className={`rounded-2xl border ${u.active ? 'bg-white border-stone-200' : 'bg-stone-100 border-stone-200 opacity-60'}`}>
-                <button onClick={() => onUnitOpen(u)} className="w-full text-left p-4 hover:border-stone-400 transition-colors">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <div className="font-serif text-lg text-stone-900">{u.label}</div>
-                      <div className="text-xs text-stone-500 font-mono">
-                        {(u.parties?.length || 0)} {u.parties?.length === 1 ? 'party' : 'parties'}
+          <div className="space-y-4">
+            {(() => {
+              const commonAreas = filtered.filter(u => u.kind === 'common_area');
+              const regularUnits = filtered.filter(u => u.kind !== 'common_area');
+              const renderUnit = (u) => (
+                <div key={u.id} className={`rounded-2xl border ${u.active ? 'bg-white border-stone-200' : 'bg-stone-100 border-stone-200 opacity-60'}`}>
+                  <button onClick={() => onUnitOpen(u)} className="w-full text-left p-4 hover:border-stone-400 transition-colors">
+                    <div className="flex items-center justify-between">
+                      <div className="flex-1 min-w-0">
+                        <div className="font-serif text-lg text-stone-900 flex items-center gap-2 flex-wrap">
+                          {u.label}
+                          {u.kind === 'common_area' && (
+                            <span className="text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-900 font-mono">Common</span>
+                          )}
+                          {u.kind === 'townhome' && (
+                            <span className="text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-stone-200 text-stone-700 font-mono">Townhome</span>
+                          )}
+                        </div>
+                        <div className="text-xs text-stone-500 font-mono">
+                          {(u.parties?.length || 0)} {u.parties?.length === 1 ? (u.kind === 'common_area' ? 'area' : 'party') : (u.kind === 'common_area' ? 'areas' : 'parties')}
+                        </div>
                       </div>
+                      <ChevronRight size={16} className="text-stone-400 flex-shrink-0" />
                     </div>
-                    <ChevronRight size={16} className="text-stone-400" />
-                  </div>
-                </button>
-                <div className="px-4 pb-3 pt-0">
-                  <button onClick={() => onUnitEdit(u)} className="text-xs font-mono text-stone-500 hover:text-stone-900 flex items-center gap-1">
-                    <Edit2 size={11} /> Edit unit
                   </button>
+                  <div className="px-4 pb-3 pt-0">
+                    <button onClick={() => onUnitEdit(u)} className="text-xs font-mono text-stone-500 hover:text-stone-900 flex items-center gap-1">
+                      <Edit2 size={11} /> Edit unit
+                    </button>
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+              return (
+                <>
+                  {commonAreas.length > 0 && (
+                    <div>
+                      <div className="text-[10px] uppercase tracking-wider font-mono text-amber-800 mb-2 px-1 flex items-center gap-1.5">
+                        <Building2 size={11} /> Common areas ({commonAreas.length})
+                      </div>
+                      <div className="space-y-2">{commonAreas.map(renderUnit)}</div>
+                    </div>
+                  )}
+                  {regularUnits.length > 0 && (
+                    <div>
+                      {commonAreas.length > 0 && (
+                        <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-2 px-1">
+                          Units ({regularUnits.length})
+                        </div>
+                      )}
+                      <div className="space-y-2">{regularUnits.map(renderUnit)}</div>
+                    </div>
+                  )}
+                </>
+              );
+            })()}
           </div>
         )}
       </div>
@@ -4736,6 +5234,7 @@ function UnitForm({ property, unit, onCancel, onSaved }) {
   const [label, setLabel] = useState(unit?.label || '');
   const [notes, setNotes] = useState(unit?.notes || '');
   const [active, setActive] = useState(unit?.active ?? true);
+  const [kind, setKind] = useState(unit?.kind || 'apartment');
   const [partyCount, setPartyCount] = useState(4);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -4745,17 +5244,30 @@ function UnitForm({ property, unit, onCancel, onSaved }) {
     setBusy(true);
     if (isNew) {
       const { data: created, error: e } = await supabase.from('units')
-        .insert({ customer_id: property.id, label: label.trim(), notes: notes.trim() || null, active })
+        .insert({ customer_id: property.id, label: label.trim(), notes: notes.trim() || null, active, kind })
         .select().single();
       if (e) { setBusy(false); setError(e.message); return; }
-      if (partyCount > 0) {
-        const parties = Array.from({ length: partyCount }, (_, i) => ({
-          unit_id: created.id, label: `Bedroom ${i + 1}`, sort_order: i + 1
+      // For common areas with 0 parties, auto-create a "Main" party so cleaners can clock into it.
+      // For apartments/townhomes with 0 parties, respect the choice (no auto-create).
+      let effectivePartyCount = partyCount;
+      let partyLabels = null;
+      if (kind === 'common_area') {
+        if (partyCount === 0) {
+          partyLabels = ['Main'];
+        } else {
+          partyLabels = Array.from({ length: partyCount }, (_, i) => `Area ${i + 1}`);
+        }
+      } else if (partyCount > 0) {
+        partyLabels = Array.from({ length: partyCount }, (_, i) => `Bedroom ${i + 1}`);
+      }
+      if (partyLabels && partyLabels.length > 0) {
+        const parties = partyLabels.map((lbl, i) => ({
+          unit_id: created.id, label: lbl, sort_order: i + 1
         }));
         await supabase.from('parties').insert(parties);
       }
     } else {
-      const { error: e } = await supabase.from('units').update({ label: label.trim(), notes: notes.trim() || null, active })
+      const { error: e } = await supabase.from('units').update({ label: label.trim(), notes: notes.trim() || null, active, kind })
         .eq('id', unit.id);
       if (e) { setBusy(false); setError(e.message); return; }
     }
@@ -4784,12 +5296,37 @@ function UnitForm({ property, unit, onCancel, onSaved }) {
       <div className="px-5 pt-6 space-y-5">
         <div>
           <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Unit label</label>
-          <input type="text" value={label} onChange={(e) => setLabel(e.target.value)} placeholder="e.g. Apt 101"
+          <input type="text" value={label} onChange={(e) => setLabel(e.target.value)}
+            placeholder={kind === 'common_area' ? 'e.g. Clubhouse' : kind === 'townhome' ? 'e.g. 204' : 'e.g. Apt 101'}
             className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white focus:outline-none focus:border-stone-900 text-stone-900" />
+        </div>
+        <div>
+          <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Kind</label>
+          <div className="grid grid-cols-3 gap-2">
+            <button type="button" onClick={() => setKind('apartment')}
+              className={`py-3 px-2 rounded-xl border-2 text-sm font-medium transition-all ${kind === 'apartment' ? 'border-stone-900 bg-stone-900 text-stone-50' : 'border-stone-200 bg-white text-stone-600'}`}>
+              Apartment
+            </button>
+            <button type="button" onClick={() => setKind('townhome')}
+              className={`py-3 px-2 rounded-xl border-2 text-sm font-medium transition-all ${kind === 'townhome' ? 'border-stone-900 bg-stone-900 text-stone-50' : 'border-stone-200 bg-white text-stone-600'}`}>
+              Townhome
+            </button>
+            <button type="button" onClick={() => setKind('common_area')}
+              className={`py-3 px-2 rounded-xl border-2 text-sm font-medium transition-all ${kind === 'common_area' ? 'border-amber-600 bg-amber-100 text-amber-900' : 'border-stone-200 bg-white text-stone-600'}`}>
+              Common area
+            </button>
+          </div>
+          <p className="text-[11px] text-stone-500 mt-2">
+            {kind === 'common_area' && 'For clubhouses, gyms, lobbies, pools, etc. Pick "0" parties below if cleaned as one area, or 2+ for sub-areas like bathroom/kitchen.'}
+            {kind === 'townhome' && 'For townhomes. Pick 0 parties if cleaned as one unit (family housing), or 2+ for student housing with bedrooms.'}
+            {kind === 'apartment' && 'Standard apartment. Pick how many bedrooms (parties) to auto-create below.'}
+          </p>
         </div>
         {isNew && (
           <div>
-            <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Auto-create how many parties?</label>
+            <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">
+              {kind === 'common_area' ? 'Auto-create how many sub-areas?' : 'Auto-create how many parties?'}
+            </label>
             <div className="grid grid-cols-5 gap-2">
               {[0, 2, 3, 4, 5].map(n => (
                 <button key={n} onClick={() => setPartyCount(n)} type="button"
@@ -4798,6 +5335,11 @@ function UnitForm({ property, unit, onCancel, onSaved }) {
                 </button>
               ))}
             </div>
+            {kind === 'common_area' && partyCount === 0 && (
+              <p className="text-[11px] text-stone-500 mt-2">
+                A "Main" sub-area will be auto-created so cleaners can clock into this common area.
+              </p>
+            )}
           </div>
         )}
         <div>
@@ -4836,6 +5378,44 @@ function UnitForm({ property, unit, onCancel, onSaved }) {
 }
 
 function BulkCreateUnits({ property, onCancel, onSaved }) {
+  const [mode, setMode] = useState('apartment-grid'); // 'apartment-grid' | 'townhome-import'
+
+  return (
+    <div className="min-h-screen bg-stone-50 pb-24">
+      <div className="flex items-center gap-3 px-5 py-4 border-b border-stone-200">
+        <button onClick={onCancel} className="p-2 -ml-2 rounded-full hover:bg-stone-100">
+          <ArrowLeft size={20} className="text-stone-700" />
+        </button>
+        <div>
+          <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">{property.name}</div>
+          <div className="font-serif text-xl text-stone-900">Bulk create units</div>
+        </div>
+      </div>
+
+      <div className="px-5 pt-4">
+        <div className="flex gap-1 mb-4 bg-stone-100 p-1 rounded-xl">
+          <button onClick={() => setMode('apartment-grid')}
+            className={`flex-1 py-2 px-3 rounded-lg text-xs font-medium transition-colors ${mode === 'apartment-grid' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+            Apartment grid
+          </button>
+          <button onClick={() => setMode('townhome-import')}
+            className={`flex-1 py-2 px-3 rounded-lg text-xs font-medium transition-colors ${mode === 'townhome-import' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+            Townhome import
+          </button>
+        </div>
+      </div>
+
+      {mode === 'apartment-grid'
+        ? <ApartmentGridBuilder property={property} onSaved={onSaved} />
+        : <TownhomeImportBuilder property={property} onSaved={onSaved} />}
+    </div>
+  );
+}
+
+// =================================================================
+// APARTMENT GRID BUILDER — the original bulk creator (B1-101, B1-102…)
+// =================================================================
+function ApartmentGridBuilder({ property, onSaved }) {
   const [buildings, setBuildings] = useState(10);
   const [floors, setFloors] = useState(3);
   const [unitsPerFloor, setUnitsPerFloor] = useState(4);
@@ -4928,18 +5508,7 @@ function BulkCreateUnits({ property, onCancel, onSaved }) {
   };
 
   return (
-    <div className="min-h-screen bg-stone-50 pb-24">
-      <div className="flex items-center gap-3 px-5 py-4 border-b border-stone-200">
-        <button onClick={onCancel} className="p-2 -ml-2 rounded-full hover:bg-stone-100">
-          <ArrowLeft size={20} className="text-stone-700" />
-        </button>
-        <div>
-          <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">{property.name}</div>
-          <div className="font-serif text-xl text-stone-900">Bulk create units</div>
-        </div>
-      </div>
-
-      <div className="px-5 pt-6 space-y-5">
+    <div className="px-5 pt-2 space-y-5">
         <div className="p-4 rounded-2xl bg-amber-50 border border-amber-200 text-sm text-amber-900">
           <strong>How it works:</strong> labels follow <code className="font-mono bg-white/60 px-1 rounded">B<em>X</em>-<em>FUU</em></code> where X is the building, F is the floor, and UU is the unit number. Unit numbers cumulate across buildings — Building 1 floor 1 is <code className="font-mono bg-white/60 px-1 rounded">B1-101</code> through <code className="font-mono bg-white/60 px-1 rounded">B1-104</code>, Building 2 floor 1 is <code className="font-mono bg-white/60 px-1 rounded">B2-105</code> through <code className="font-mono bg-white/60 px-1 rounded">B2-108</code>, and so on.
         </div>
@@ -5027,7 +5596,265 @@ function BulkCreateUnits({ property, onCancel, onSaved }) {
         <p className="text-xs text-stone-500 text-center">
           ⚠️ Existing units with duplicate labels will cause errors. Run this on an empty property.
         </p>
+    </div>
+  );
+}
+
+// =================================================================
+// TOWNHOME IMPORT BUILDER — parses CSV/Excel-pasted data and creates
+// townhome units. Hybrid: user picks per-row whether each townhome
+// is a "single unit" (family housing, 1 party) or "per-bedroom"
+// (student housing, N bedrooms). Defaults can be set globally.
+// =================================================================
+function TownhomeImportBuilder({ property, onSaved }) {
+  const [text, setText] = useState('');
+  const [defaultBedrooms, setDefaultBedrooms] = useState(0); // 0 = single party (family); 1+ = per-bedroom
+  const [rows, setRows] = useState([]); // [{ label, bedrooms, error }]
+  const [parsed, setParsed] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState('');
+  const [error, setError] = useState('');
+
+  // Parse the raw text input. Accepts CSV (commas), TSV (tabs from Excel),
+  // and one-per-line. Each row can be just a label, or "label, bedrooms".
+  const parse = () => {
+    setError('');
+    const lines = text.split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0);
+    if (lines.length === 0) {
+      setError('No rows to import.');
+      setRows([]);
+      setParsed(false);
+      return;
+    }
+    // Detect if the first line looks like a header
+    const HEADER_HINTS = /^(label|name|unit|townhome|address|house|number|bedrooms?|beds)\b/i;
+    const startIdx = HEADER_HINTS.test(lines[0]) ? 1 : 0;
+    const dataLines = lines.slice(startIdx);
+
+    const parsedRows = dataLines.map((line, i) => {
+      // Split by tab first (Excel paste), then comma
+      const cells = line.includes('\t') ? line.split('\t') : line.split(',');
+      const label = (cells[0] || '').trim();
+      let bedrooms = defaultBedrooms;
+      if (cells[1] !== undefined && cells[1].trim() !== '') {
+        const n = parseInt(cells[1].trim(), 10);
+        if (!isNaN(n) && n >= 0 && n <= 20) bedrooms = n;
+      }
+      let rowError = null;
+      if (!label) rowError = 'Empty label';
+      return { lineNum: i + startIdx + 1, label, bedrooms, error: rowError };
+    });
+
+    // Check for duplicate labels within the file
+    const seen = new Map();
+    parsedRows.forEach(r => {
+      if (!r.label || r.error) return;
+      if (seen.has(r.label.toLowerCase())) {
+        r.error = `Duplicate of row ${seen.get(r.label.toLowerCase())}`;
+      } else {
+        seen.set(r.label.toLowerCase(), r.lineNum);
+      }
+    });
+
+    setRows(parsedRows);
+    setParsed(true);
+  };
+
+  // Auto-parse when text changes (debounced via React's batching)
+  useEffect(() => {
+    if (text.trim()) parse();
+    else { setRows([]); setParsed(false); }
+    // eslint-disable-next-line
+  }, [text, defaultBedrooms]);
+
+  const handleFileUpload = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (file.size > 5 * 1024 * 1024) {
+      setError('File too large (max 5MB).');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const result = ev.target.result;
+        // For CSV-like text, just use it. For .xlsx binary, we can't parse
+        // without an Excel library — but most users save as CSV anyway.
+        if (file.name.match(/\.xlsx?$/i)) {
+          setError('Excel files (.xlsx) aren\'t directly supported. Save as CSV from Excel (File → Save As → CSV) and try again. Or copy-paste rows directly into the box below.');
+          return;
+        }
+        setText(typeof result === 'string' ? result : '');
+      } catch (err) {
+        setError('Could not read file: ' + (err.message || 'unknown error'));
+      }
+    };
+    reader.onerror = () => setError('File read failed.');
+    reader.readAsText(file);
+  };
+
+  const validRows = rows.filter(r => !r.error);
+  const errorRows = rows.filter(r => r.error);
+  const totalUnits = validRows.length;
+  const totalParties = validRows.reduce((s, r) => s + Math.max(1, r.bedrooms), 0);
+
+  const create = async () => {
+    if (totalUnits === 0) return;
+    if (!confirm(`Create ${totalUnits} townhome${totalUnits === 1 ? '' : 's'} and ${totalParties} bedrooms/parties under "${property.name}"? This can't be undone in bulk.`)) return;
+
+    setBusy(true); setError(''); setProgress('Creating townhomes…');
+
+    // Insert units in chunks
+    const CHUNK = 50;
+    const unitRows = validRows.map((r, i) => ({
+      customer_id: property.id,
+      label: r.label,
+      kind: 'townhome',
+      sort_order: i,
+      active: true,
+    }));
+
+    const createdUnits = [];
+    for (let i = 0; i < unitRows.length; i += CHUNK) {
+      const slice = unitRows.slice(i, i + CHUNK);
+      setProgress(`Creating townhomes ${i + 1}–${Math.min(i + CHUNK, unitRows.length)} of ${unitRows.length}…`);
+      const { data, error: e } = await supabase.from('units').insert(slice).select();
+      if (e) { setBusy(false); setError(`Failed at townhome batch ${i + 1}: ${e.message}`); return; }
+      createdUnits.push(...(data || []));
+    }
+
+    // For each townhome, create the right number of parties.
+    // bedrooms === 0 → 1 "Main" party (family housing, single cleaning task)
+    // bedrooms >= 1 → that many "Bedroom N" parties (student housing style)
+    const partyRows = [];
+    createdUnits.forEach((u, idx) => {
+      const r = validRows[idx];
+      if (!r) return;
+      if (r.bedrooms === 0) {
+        partyRows.push({ unit_id: u.id, label: 'Main', sort_order: 1, active: true });
+      } else {
+        for (let p = 1; p <= r.bedrooms; p++) {
+          partyRows.push({ unit_id: u.id, label: `Bedroom ${p}`, sort_order: p, active: true });
+        }
+      }
+    });
+
+    for (let i = 0; i < partyRows.length; i += CHUNK) {
+      const slice = partyRows.slice(i, i + CHUNK);
+      setProgress(`Creating parties ${i + 1}–${Math.min(i + CHUNK, partyRows.length)} of ${partyRows.length}…`);
+      const { error: e } = await supabase.from('parties').insert(slice);
+      if (e) { setBusy(false); setError(`Failed at party batch ${i + 1}: ${e.message}`); return; }
+    }
+
+    setBusy(false);
+    onSaved();
+  };
+
+  return (
+    <div className="px-5 pt-2 space-y-5">
+      <div className="p-4 rounded-2xl bg-amber-50 border border-amber-200 text-sm text-amber-900 space-y-2">
+        <div><strong>How it works:</strong> upload a CSV or paste rows directly from Excel.</div>
+        <div className="text-xs text-amber-800 space-y-1">
+          <div><strong>One column:</strong> just the townhome label (one per line). Each will be a single unit with however many bedrooms you set as the default below.</div>
+          <div><strong>Two columns:</strong> label, bedrooms (per row). Example: <code className="font-mono bg-white/60 px-1 rounded">204, 3</code> = townhome "204" with 3 bedrooms. Use <code className="font-mono bg-white/60 px-1 rounded">0</code> for family housing (one cleaning unit, not split by bedrooms).</div>
+          <div><strong>Headers:</strong> first row is auto-detected if it looks like a header (e.g. "label", "address", "bedrooms").</div>
+        </div>
       </div>
+
+      <div>
+        <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">
+          Default bedrooms per townhome (if not specified in CSV)
+        </label>
+        <div className="grid grid-cols-6 gap-2">
+          {[0, 1, 2, 3, 4, 5].map(n => (
+            <button key={n} onClick={() => setDefaultBedrooms(n)} type="button"
+              className={`py-3 rounded-xl border-2 font-mono text-sm transition-all ${defaultBedrooms === n ? 'border-stone-900 bg-stone-900 text-stone-50' : 'border-stone-200 bg-white text-stone-700'}`}>
+              {n === 0 ? 'Family' : n}
+            </button>
+          ))}
+        </div>
+        <p className="text-[11px] text-stone-500 mt-1.5">
+          {defaultBedrooms === 0 ? 'Family housing — each townhome is one cleaning unit (no per-bedroom split).' : `Each townhome will have ${defaultBedrooms} bedrooms unless the CSV specifies otherwise.`}
+        </p>
+      </div>
+
+      <div>
+        <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">
+          Upload CSV file
+        </label>
+        <input type="file" accept=".csv,text/csv,text/plain" onChange={handleFileUpload}
+          className="w-full px-3 py-2 text-sm rounded-xl border border-stone-300 bg-white" />
+        <p className="text-[11px] text-stone-500 mt-1">
+          From Excel: File → Save As → CSV. Or copy rows directly into the box below.
+        </p>
+      </div>
+
+      <div>
+        <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">
+          Or paste rows here
+        </label>
+        <textarea value={text} onChange={(e) => setText(e.target.value)} rows={8}
+          placeholder={`204\n206\n208, 3\n210, 4`}
+          className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white focus:outline-none focus:border-stone-900 text-stone-900 font-mono text-sm resize-y" />
+      </div>
+
+      {error && (
+        <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-red-700 text-sm flex items-start gap-2">
+          <AlertCircle size={16} className="flex-shrink-0 mt-0.5" /><span>{error}</span>
+        </div>
+      )}
+
+      {parsed && rows.length > 0 && (
+        <div>
+          <div className="flex items-baseline justify-between mb-2">
+            <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">Preview</div>
+            <div className="text-xs font-mono text-stone-500">
+              {totalUnits} valid · {errorRows.length} error{errorRows.length === 1 ? '' : 's'}
+            </div>
+          </div>
+          <div className="max-h-80 overflow-y-auto border border-stone-200 rounded-xl bg-white">
+            {rows.map((r, i) => (
+              <div key={i} className={`px-3 py-2 text-sm border-b border-stone-100 last:border-b-0 flex items-center justify-between gap-2 ${r.error ? 'bg-red-50' : ''}`}>
+                <div className="flex items-center gap-2 min-w-0">
+                  <span className="text-[10px] font-mono text-stone-400 w-6 flex-shrink-0">{r.lineNum}</span>
+                  <span className={`font-mono ${r.error ? 'text-red-700 line-through' : 'text-stone-900'}`}>
+                    {r.label || '(empty)'}
+                  </span>
+                </div>
+                <div className="flex items-center gap-2 flex-shrink-0">
+                  {r.error ? (
+                    <span className="text-[10px] text-red-600 font-mono">{r.error}</span>
+                  ) : (
+                    <span className="text-[10px] font-mono text-stone-500">
+                      {r.bedrooms === 0 ? 'family (1 party)' : `${r.bedrooms} bedroom${r.bedrooms === 1 ? '' : 's'}`}
+                    </span>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+          {totalUnits > 0 && (
+            <div className="mt-3 p-3 rounded-xl bg-stone-100 text-xs text-stone-700 font-mono">
+              Total: {totalUnits} townhomes · {totalParties} parties
+            </div>
+          )}
+        </div>
+      )}
+
+      {busy && progress && (
+        <div className="p-3 rounded-xl bg-blue-50 border border-blue-200 text-blue-800 text-sm">
+          {progress}
+        </div>
+      )}
+
+      <button onClick={create} disabled={busy || totalUnits === 0}
+        className="w-full py-4 rounded-2xl bg-stone-900 text-stone-50 font-medium flex items-center justify-center gap-2 active:scale-98 disabled:opacity-50">
+        {busy ? 'Creating…' : totalUnits > 0 ? `Create ${totalUnits} townhome${totalUnits === 1 ? '' : 's'} & ${totalParties} parties` : 'Add some rows first'}
+      </button>
+
+      <p className="text-xs text-stone-500 text-center">
+        ⚠️ Errors above will be skipped. Duplicate labels with existing units will fail — pick fresh names.
+      </p>
     </div>
   );
 }
@@ -8201,10 +9028,12 @@ function AssignmentList({ property, employee, onBack, onNew, onOpen }) {
         </div>
       </div>
       <div className="px-5 pt-6">
-        <button onClick={onNew}
-          className="w-full mb-4 p-4 rounded-2xl bg-stone-900 text-stone-50 font-medium flex items-center justify-center gap-2 active:scale-98">
-          <Plus size={18} /> Upload new assignment
-        </button>
+        {can(employee, 'upload_assignments') && (
+          <button onClick={onNew}
+            className="w-full mb-4 p-4 rounded-2xl bg-stone-900 text-stone-50 font-medium flex items-center justify-center gap-2 active:scale-98">
+            <Plus size={18} /> Upload new assignment
+          </button>
+        )}
 
         <div className="flex gap-2 mb-4">
           <button onClick={() => setFilter('open')}
@@ -11193,16 +12022,25 @@ function StaffMessagesTab({ employee, onClose }) {
         setView({ kind: 'thread', conversationId, otherName, isPropertyThread: false })} />;
   }
 
+  if (view.kind === 'new-property-thread') {
+    return <NewPropertyThreadPicker employee={employee}
+      onBack={() => setView({ kind: 'list' })}
+      onPicked={(conversationId, propertyName) =>
+        setView({ kind: 'thread', conversationId, otherName: propertyName, isPropertyThread: true, propertyName })} />;
+  }
+
   return <ConversationList employee={employee}
     onOpen={(c) => setView({ kind: 'thread', ...c })}
     onNewDm={() => setView({ kind: 'new-dm' })}
+    onNewPropertyThread={() => setView({ kind: 'new-property-thread' })}
     onClose={onClose} />;
 }
 
-function ConversationList({ employee, onOpen, onNewDm, onClose }) {
+function ConversationList({ employee, onOpen, onNewDm, onNewPropertyThread, onClose }) {
   const [dms, setDms] = useState([]);
   const [threads, setThreads] = useState([]);
   const [loaded, setLoaded] = useState(false);
+  const [showNewMenu, setShowNewMenu] = useState(false);
   const canSeeThreads = employee.role === 'owner' || employee.role === 'manager';
 
   const load = async () => {
@@ -11322,10 +12160,35 @@ function ConversationList({ employee, onOpen, onNewDm, onClose }) {
       <div className="px-5 pt-6 max-w-2xl mx-auto w-full">
         <div className="flex items-center justify-between mb-4">
           {!onClose && <h2 className="font-serif text-2xl text-stone-900">Messages</h2>}
-          <button onClick={onNewDm}
-            className={`px-3 py-2 rounded-full bg-stone-900 text-stone-50 text-xs font-mono flex items-center gap-1.5 ${onClose ? 'ml-auto' : ''}`}>
-            <Plus size={14} /> New
-          </button>
+          <div className={`relative ${onClose ? 'ml-auto' : ''}`}>
+            <button onClick={() => canSeeThreads ? setShowNewMenu(s => !s) : onNewDm()}
+              className="px-3 py-2 rounded-full bg-stone-900 text-stone-50 text-xs font-mono flex items-center gap-1.5">
+              <Plus size={14} /> New
+            </button>
+            {canSeeThreads && showNewMenu && (
+              <>
+                <div className="fixed inset-0 z-40" onClick={() => setShowNewMenu(false)} />
+                <div className="absolute right-0 top-full mt-1 z-50 w-56 rounded-2xl bg-white border border-stone-200 shadow-lg overflow-hidden">
+                  <button onClick={() => { setShowNewMenu(false); onNewDm(); }}
+                    className="w-full text-left px-4 py-3 hover:bg-stone-50 flex items-start gap-2.5 border-b border-stone-100">
+                    <User size={16} className="text-stone-500 mt-0.5 flex-shrink-0" />
+                    <div>
+                      <div className="text-sm font-medium text-stone-900">Message a teammate</div>
+                      <div className="text-[11px] text-stone-500">Direct message to cleaners, managers</div>
+                    </div>
+                  </button>
+                  <button onClick={() => { setShowNewMenu(false); onNewPropertyThread && onNewPropertyThread(); }}
+                    className="w-full text-left px-4 py-3 hover:bg-stone-50 flex items-start gap-2.5">
+                    <Building2 size={16} className="text-amber-700 mt-0.5 flex-shrink-0" />
+                    <div>
+                      <div className="text-sm font-medium text-stone-900">Message a property</div>
+                      <div className="text-[11px] text-stone-500">Reach PMs and owners at a property</div>
+                    </div>
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
         </div>
 
         {!loaded ? <Splash text="Loading…" /> : (
@@ -11494,6 +12357,123 @@ function NewDmPicker({ employee, onBack, onPicked }) {
             </button>
           ))}
         </div>
+      </div>
+    </div>
+  );
+}
+
+// =================================================================
+// NEW PROPERTY THREAD PICKER — owner/manager picks a property to
+// start a property_thread conversation. If a thread already exists
+// for that property, opens it; otherwise creates a fresh one.
+// =================================================================
+function NewPropertyThreadPicker({ employee, onBack, onPicked }) {
+  const [properties, setProperties] = useState([]);
+  const [search, setSearch] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      const { data } = await supabase.from('customers')
+        .select('id, name, address')
+        .eq('active', true)
+        .order('name');
+      setProperties(data || []);
+      setLoaded(true);
+    })();
+  }, []);
+
+  const startThread = async (property) => {
+    setBusy(true);
+    try {
+      // Check if a property_thread already exists for this property
+      const { data: existing } = await supabase.from('conversations')
+        .select('id')
+        .eq('kind', 'property_thread')
+        .eq('customer_id', property.id)
+        .maybeSingle();
+      let convId = existing?.id;
+      if (!convId) {
+        // Create a new property_thread conversation
+        const { data: conv, error } = await supabase.from('conversations')
+          .insert({ kind: 'property_thread', customer_id: property.id })
+          .select().single();
+        if (error) throw error;
+        convId = conv.id;
+        // Add the current employee as a participant (so last_read_at tracks for them)
+        await supabase.from('conversation_participants').insert({
+          conversation_id: convId,
+          employee_id: employee.id,
+        });
+      } else {
+        // Make sure the current employee is a participant
+        const { data: part } = await supabase.from('conversation_participants')
+          .select('id')
+          .eq('conversation_id', convId)
+          .eq('employee_id', employee.id)
+          .maybeSingle();
+        if (!part) {
+          await supabase.from('conversation_participants').insert({
+            conversation_id: convId,
+            employee_id: employee.id,
+          });
+        }
+      }
+      onPicked(convId, property.name);
+    } catch (e) {
+      alert('Could not start thread: ' + e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const filtered = search
+    ? properties.filter(p => p.name.toLowerCase().includes(search.toLowerCase()))
+    : properties;
+
+  return (
+    <div className="min-h-screen bg-stone-50 pb-24">
+      <div className="flex items-center gap-3 px-5 py-4 border-b border-stone-200">
+        <button onClick={onBack} className="p-2 -ml-2 rounded-full hover:bg-stone-100" disabled={busy}>
+          <ArrowLeft size={20} className="text-stone-700" />
+        </button>
+        <div>
+          <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">New thread</div>
+          <div className="font-serif text-xl text-stone-900">Pick a property</div>
+        </div>
+      </div>
+
+      <div className="px-5 pt-6 max-w-2xl mx-auto w-full">
+        {properties.length >= 6 && (
+          <input type="text" value={search} onChange={(e) => setSearch(e.target.value)}
+            placeholder={`Search ${properties.length} properties…`}
+            className="w-full mb-4 px-4 py-3 rounded-xl border border-stone-300 bg-white focus:outline-none focus:border-stone-900 text-stone-900 text-sm" />
+        )}
+
+        {!loaded ? <Splash text="Loading…" /> : filtered.length === 0 ? (
+          <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
+            {search ? `No properties match "${search}".` : 'No properties yet.'}
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {filtered.map(p => (
+              <button key={p.id} onClick={() => startThread(p)} disabled={busy}
+                className="w-full text-left p-4 rounded-2xl bg-white border border-stone-200 hover:border-amber-500 transition-colors active:scale-[0.99] disabled:opacity-50 flex items-center gap-3">
+                <Building2 size={18} className="text-amber-700 flex-shrink-0" />
+                <div className="flex-1 min-w-0">
+                  <div className="font-serif text-base text-stone-900 truncate">{p.name}</div>
+                  {p.address && <div className="text-xs text-stone-500 truncate">{p.address}</div>}
+                </div>
+                <ChevronRight size={16} className="text-stone-400 flex-shrink-0" />
+              </button>
+            ))}
+          </div>
+        )}
+
+        <p className="text-xs text-stone-500 mt-6 text-center">
+          Messages here are visible to all PMs &amp; property owners assigned to this property.
+        </p>
       </div>
     </div>
   );

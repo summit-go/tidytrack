@@ -8940,16 +8940,32 @@ function PortalHistoryTab({ property, groups, loaded, filter, setFilter, onOpenU
                   <button key={`${g.date}-${u.unitId || 'simple'}`}
                     onClick={() => onOpenUnitDay(u.unitId, g.date)}
                     className={`w-full text-left p-4 rounded-2xl border transition-colors relative overflow-hidden ${
-                      u.hasDamage ? 'bg-red-50 border-red-300 hover:border-red-500 border-l-4 border-l-red-600' : 'bg-white border-stone-200 hover:border-stone-400'
+                      u.hasDamage
+                        ? 'bg-red-50 border-red-300 hover:border-red-500 border-l-4 border-l-red-600'
+                        : u.hasResolvedDamage
+                          ? 'bg-white border-stone-200 hover:border-stone-400 border-l-4 border-l-emerald-500'
+                          : 'bg-white border-stone-200 hover:border-stone-400'
                     }`}>
                     <div className="flex items-center justify-between gap-3">
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2 flex-wrap">
                           {u.hasDamage && <AlertCircle size={16} className="text-red-600 flex-shrink-0" />}
+                          {!u.hasDamage && u.hasResolvedDamage && <Check size={16} className="text-emerald-600 flex-shrink-0" />}
                           <span className={`font-serif text-lg ${u.hasDamage ? 'text-red-900' : 'text-stone-900'}`}>{u.label}</span>
                           {u.hasDamage && (
                             <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-red-600 text-white font-bold">
                               ⚠ Damage
+                            </span>
+                          )}
+                          {!u.hasDamage && u.hasResolvedDamage && (
+                            <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 border border-emerald-300">
+                              Damage resolved
+                            </span>
+                          )}
+                          {u.hasDamage && u.hasResolvedDamage && (
+                            <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-100 text-stone-600 border border-stone-200"
+                              title="This cleaning also had past damage that was resolved">
+                              + past
                             </span>
                           )}
                         </div>
@@ -9147,18 +9163,43 @@ function PortalUnitDay({ property, unitId, date, portalUser, onBack }) {
             <PortalPhotoSection label="After cleaning"  photos={allAfter} />
           </>
         ) : (
-          // BY-SECTION MODE — bucket by task category (cleaner's structured
-          // category), falling back to party label, then "Other".
+          // BY-SECTION MODE — bucket photos by the most specific identifier
+          // available. The cleaner could organize their work in 3 ways:
+          //   1. Structured: Quick picker → category + subcategory set
+          //      → group by the structured label (e.g. "Bedroom", "General — Kitchen")
+          //   2. Freeform per party: cleaning Bedroom 2 with tasks
+          //      "habitación" + "baño" → group by task name within party
+          //      (e.g. "Bedroom 2 — habitación", "Bedroom 2 — baño")
+          //   3. Freeform without parties: simple property with tasks named
+          //      "kitchen", "bathroom" → group by task name alone
+          // Task name is more SPECIFIC than party label, so it takes
+          // precedence — that was the bug that lumped all photos under
+          // "Bedroom 2" when the cleaner clearly split work into habitación
+          // and baño tasks.
           (() => {
             const sectionMap = new Map();
-            // Include ALL damage (active + resolved) so each section card
-            // can show its full damage story together.
             const sectionAll = [...allBefore, ...allAfter, ...allDamageActive, ...allDamageResolved];
+
+            // Figure out if task names are useful for grouping — i.e. are
+            // there multiple distinct task names? If there's only one task
+            // name, falling back to party label gives more useful labels.
+            const distinctTaskNames = new Set(sectionAll.map(p => p.taskName).filter(Boolean));
+            const useTaskNameAsKey = distinctTaskNames.size > 1;
+
+            const buildKey = (p) => {
+              // Structured category trumps everything
+              const catLabel = taskCategoryShortLabel(p.taskCategory, p.taskSubcategory);
+              if (catLabel) return catLabel;
+              // If task names vary, use them (optionally prefixed with party)
+              if (useTaskNameAsKey && p.taskName) {
+                return p.partyLabel ? `${p.partyLabel} — ${p.taskName}` : p.taskName;
+              }
+              // Otherwise group by party
+              return p.partyLabel || p.taskName || 'Other';
+            };
+
             sectionAll.forEach(p => {
-              const key = taskCategoryShortLabel(p.taskCategory, p.taskSubcategory) ||
-                          p.partyLabel ||
-                          p.taskName ||
-                          'Other';
+              const key = buildKey(p);
               if (!sectionMap.has(key)) sectionMap.set(key, { before: [], after: [], damage: [], damageResolved: [] });
               const bucket = sectionMap.get(key);
               if (p.kind === 'before') bucket.before.push(p);

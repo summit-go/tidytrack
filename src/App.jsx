@@ -8590,12 +8590,14 @@ function PortalHome({ property, portalKind, portalUser, hasMultipleProperties, o
         const date = new Date(b.start_time).toISOString().split('T')[0];
         if (!byDate[date]) byDate[date] = {};
         const u = b.unit;
-        if (!byDate[date][u.id]) byDate[date][u.id] = { unitId: u.id, label: u.label, photoCount: 0, hasDamage: false };
+        if (!byDate[date][u.id]) byDate[date][u.id] = { unitId: u.id, label: u.label, photoCount: 0, hasDamage: false, hasResolvedDamage: false };
         (b.tasks || []).forEach(t => (t.photos || []).forEach(p => {
-          // Only flag ACTIVE damage (unresolved). Resolved damage doesn't
-          // contribute to the red badge anymore — it lives in the
-          // collapsed Resolved damage history inside PortalUnitDay.
-          if (p.kind === 'damage' && !p.resolved_at) byDate[date][u.id].hasDamage = true;
+          // Track active and resolved damage separately. Active damage drives
+          // the red badge; resolved damage powers the "past damage" sub-view.
+          if (p.kind === 'damage') {
+            if (p.resolved_at) byDate[date][u.id].hasResolvedDamage = true;
+            else byDate[date][u.id].hasDamage = true;
+          }
           byDate[date][u.id].photoCount++;
         }));
       });
@@ -8614,14 +8616,17 @@ function PortalHome({ property, portalKind, portalUser, hasMultipleProperties, o
         .gte('start_time', since)
         .order('start_time', { ascending: false });
       const out = (shifts || []).map(s => {
-        let photoCount = 0, hasDamage = false;
+        let photoCount = 0, hasDamage = false, hasResolvedDamage = false;
         (s.tasks || []).forEach(t => (t.photos || []).forEach(p => {
           photoCount++;
-          if (p.kind === 'damage' && !p.resolved_at) hasDamage = true;
+          if (p.kind === 'damage') {
+            if (p.resolved_at) hasResolvedDamage = true;
+            else hasDamage = true;
+          }
         }));
         return {
           date: new Date(s.start_time).toISOString().split('T')[0],
-          units: [{ unitId: null, label: 'Cleaning visit', photoCount, hasDamage }]
+          units: [{ unitId: null, label: 'Cleaning visit', photoCount, hasDamage, hasResolvedDamage }]
         };
       });
       setGroups(out);
@@ -8754,13 +8759,17 @@ function PortalHome({ property, portalKind, portalUser, hasMultipleProperties, o
 function PortalHistoryTab({ property, groups, loaded, filter, setFilter, onOpenUnitDay }) {
   const totalPhotos = groups.reduce((sum, g) => sum + g.units.reduce((s, u) => s + u.photoCount, 0), 0);
   const damageCount = groups.reduce((sum, g) => sum + g.units.filter(u => u.hasDamage).length, 0);
+  const resolvedDamageCount = groups.reduce((sum, g) => sum + g.units.filter(u => u.hasResolvedDamage).length, 0);
   const totalCleanings = groups.reduce((sum, g) => sum + g.units.length, 0);
   // Build the list of damage entries (date + unit) for the expandable view
   const damageEntries = [];
+  const resolvedDamageEntries = [];
   groups.forEach(g => g.units.forEach(u => {
     if (u.hasDamage) damageEntries.push({ date: g.date, unitId: u.unitId, label: u.label });
+    if (u.hasResolvedDamage) resolvedDamageEntries.push({ date: g.date, unitId: u.unitId, label: u.label });
   }));
   const [damageExpanded, setDamageExpanded] = useState(false);
+  const [damageSubTab, setDamageSubTab] = useState('active'); // 'active' | 'resolved'
 
   return (
     <div className="px-5 pt-6">
@@ -8795,47 +8804,112 @@ function PortalHistoryTab({ property, groups, loaded, filter, setFilter, onOpenU
           <div className="text-2xl font-serif">{totalPhotos}</div>
         </div>
         <button
-          onClick={() => damageCount > 0 && setDamageExpanded(e => !e)}
-          disabled={damageCount === 0}
-          className={`p-4 rounded-2xl border text-left transition-all ${damageCount > 0 ? 'bg-red-50 border-red-200 hover:border-red-400 cursor-pointer active:scale-[0.98]' : 'bg-white border-stone-200 cursor-default'}`}>
+          onClick={() => {
+            if (damageCount === 0 && resolvedDamageCount === 0) return;
+            // If there's no active damage but there IS past damage, default sub-tab to resolved
+            if (damageCount === 0 && resolvedDamageCount > 0) setDamageSubTab('resolved');
+            else setDamageSubTab('active');
+            setDamageExpanded(e => !e);
+          }}
+          disabled={damageCount === 0 && resolvedDamageCount === 0}
+          className={`p-4 rounded-2xl border text-left transition-all ${damageCount > 0 ? 'bg-red-50 border-red-200 hover:border-red-400 cursor-pointer active:scale-[0.98]' : resolvedDamageCount > 0 ? 'bg-white border-stone-200 hover:border-stone-400 cursor-pointer active:scale-[0.98]' : 'bg-white border-stone-200 cursor-default'}`}>
           <div className={`flex items-center justify-between mb-1`}>
-            <div className={`text-xs uppercase tracking-wider font-mono ${damageCount > 0 ? 'text-red-700' : 'text-stone-500'}`}>Damage</div>
-            {damageCount > 0 && (
-              <ChevronRight size={12} className={`text-red-700 transition-transform ${damageExpanded ? 'rotate-90' : ''}`} />
+            <div className={`text-xs uppercase tracking-wider font-mono ${damageCount > 0 ? 'text-red-700' : 'text-stone-500'}`}>
+              Damage{resolvedDamageCount > 0 && damageCount === 0 ? ' (past)' : ''}
+            </div>
+            {(damageCount > 0 || resolvedDamageCount > 0) && (
+              <ChevronRight size={12} className={`${damageCount > 0 ? 'text-red-700' : 'text-stone-500'} transition-transform ${damageExpanded ? 'rotate-90' : ''}`} />
             )}
           </div>
           <div className={`text-2xl font-serif ${damageCount > 0 ? 'text-red-800' : ''}`}>{damageCount}</div>
+          {resolvedDamageCount > 0 && damageCount > 0 && (
+            <div className="text-[10px] font-mono text-stone-500 mt-0.5">+ {resolvedDamageCount} resolved</div>
+          )}
         </button>
       </div>
 
-      {/* Damage drill-down: list of (date, unit) pairs with damage; tap to jump
-         to that unit-day where the PM can resolve. */}
-      {damageExpanded && damageCount > 0 && (
+      {/* Damage drill-down: Active and Resolved sub-tabs let PMs scan
+         current issues OR browse past resolved damage without diving
+         into each unit-day. Open when expanded AND there's something
+         to show in either bucket. */}
+      {damageExpanded && (damageCount > 0 || resolvedDamageCount > 0) && (
         <div className="mb-4 p-4 rounded-2xl bg-red-50/50 border-2 border-red-200">
           <div className="flex items-center justify-between mb-3">
             <div className="text-xs uppercase tracking-wider font-mono text-red-700 flex items-center gap-1.5">
-              <AlertCircle size={12} /> Units with active damage
+              <AlertCircle size={12} /> Damage report
             </div>
             <button onClick={() => setDamageExpanded(false)}
               className="text-[10px] text-red-700 hover:text-red-900 font-mono uppercase tracking-wider">
               Hide
             </button>
           </div>
-          <div className="space-y-1.5">
-            {damageEntries.map((e, i) => (
-              <button key={`${e.date}-${e.unitId || i}`}
-                onClick={() => onOpenUnitDay(e.unitId, e.date)}
-                className="w-full p-3 rounded-xl bg-white border border-red-200 hover:border-red-400 active:scale-[0.99] transition-all flex items-center justify-between gap-3 text-left">
-                <div className="flex-1 min-w-0">
-                  <div className="font-medium text-stone-900 text-sm truncate">{e.label}</div>
-                  <div className="text-[11px] text-stone-500 font-mono">
-                    {new Date(e.date + 'T12:00:00').toLocaleDateString('en-US', { weekday:'short', month:'short', day:'numeric' })}
-                  </div>
-                </div>
-                <span className="text-[10px] uppercase tracking-wider font-mono text-red-700 flex-shrink-0">Resolve →</span>
-              </button>
-            ))}
+
+          {/* Sub-tab toggle: Active vs Resolved */}
+          <div className="flex items-center gap-1 p-1 bg-white/70 rounded-xl mb-3">
+            <button onClick={() => setDamageSubTab('active')}
+              className={`flex-1 py-1.5 px-2 rounded-lg text-[11px] font-medium transition-colors flex items-center justify-center gap-1.5 ${damageSubTab === 'active' ? 'bg-red-600 text-white shadow-sm' : 'text-red-700 hover:bg-red-100'}`}>
+              Active
+              <span className={`text-[9px] px-1.5 py-0.5 rounded-full font-mono ${damageSubTab === 'active' ? 'bg-white/20 text-white' : 'bg-red-100 text-red-800'}`}>
+                {damageCount}
+              </span>
+            </button>
+            <button onClick={() => setDamageSubTab('resolved')}
+              className={`flex-1 py-1.5 px-2 rounded-lg text-[11px] font-medium transition-colors flex items-center justify-center gap-1.5 ${damageSubTab === 'resolved' ? 'bg-stone-600 text-white shadow-sm' : 'text-stone-700 hover:bg-stone-100'}`}>
+              Past (resolved)
+              <span className={`text-[9px] px-1.5 py-0.5 rounded-full font-mono ${damageSubTab === 'resolved' ? 'bg-white/20 text-white' : 'bg-stone-100 text-stone-800'}`}>
+                {resolvedDamageCount}
+              </span>
+            </button>
           </div>
+
+          {damageSubTab === 'active' ? (
+            damageEntries.length === 0 ? (
+              <div className="text-center py-4 text-[11px] text-stone-500 italic">
+                No active damage in this period. 🎉
+              </div>
+            ) : (
+              <div className="space-y-1.5">
+                {damageEntries.map((e, i) => (
+                  <button key={`active-${e.date}-${e.unitId || i}`}
+                    onClick={() => onOpenUnitDay(e.unitId, e.date)}
+                    className="w-full p-3 rounded-xl bg-white border border-red-200 hover:border-red-400 active:scale-[0.99] transition-all flex items-center justify-between gap-3 text-left">
+                    <div className="flex-1 min-w-0">
+                      <div className="font-medium text-stone-900 text-sm truncate">{e.label}</div>
+                      <div className="text-[11px] text-stone-500 font-mono">
+                        {new Date(e.date + 'T12:00:00').toLocaleDateString('en-US', { weekday:'short', month:'short', day:'numeric' })}
+                      </div>
+                    </div>
+                    <span className="text-[10px] uppercase tracking-wider font-mono text-red-700 flex-shrink-0">Resolve →</span>
+                  </button>
+                ))}
+              </div>
+            )
+          ) : (
+            resolvedDamageEntries.length === 0 ? (
+              <div className="text-center py-4 text-[11px] text-stone-500 italic">
+                No resolved damage in this period.
+              </div>
+            ) : (
+              <div className="space-y-1.5">
+                {resolvedDamageEntries.map((e, i) => (
+                  <button key={`resolved-${e.date}-${e.unitId || i}`}
+                    onClick={() => onOpenUnitDay(e.unitId, e.date)}
+                    className="w-full p-3 rounded-xl bg-white border border-stone-200 hover:border-stone-400 active:scale-[0.99] transition-all flex items-center justify-between gap-3 text-left">
+                    <div className="flex-1 min-w-0">
+                      <div className="font-medium text-stone-900 text-sm truncate flex items-center gap-1.5">
+                        <Check size={12} className="text-emerald-600 flex-shrink-0" />
+                        {e.label}
+                      </div>
+                      <div className="text-[11px] text-stone-500 font-mono">
+                        {new Date(e.date + 'T12:00:00').toLocaleDateString('en-US', { weekday:'short', month:'short', day:'numeric' })}
+                      </div>
+                    </div>
+                    <span className="text-[10px] uppercase tracking-wider font-mono text-stone-600 flex-shrink-0">View →</span>
+                  </button>
+                ))}
+              </div>
+            )
+          )}
         </div>
       )}
 
@@ -8865,24 +8939,25 @@ function PortalHistoryTab({ property, groups, loaded, filter, setFilter, onOpenU
                 {g.units.map(u => (
                   <button key={`${g.date}-${u.unitId || 'simple'}`}
                     onClick={() => onOpenUnitDay(u.unitId, g.date)}
-                    className={`w-full text-left p-4 rounded-2xl border transition-colors ${
-                      u.hasDamage ? 'bg-red-50/50 border-red-200 hover:border-red-400' : 'bg-white border-stone-200 hover:border-stone-400'
+                    className={`w-full text-left p-4 rounded-2xl border transition-colors relative overflow-hidden ${
+                      u.hasDamage ? 'bg-red-50 border-red-300 hover:border-red-500 border-l-4 border-l-red-600' : 'bg-white border-stone-200 hover:border-stone-400'
                     }`}>
-                    <div className="flex items-center justify-between">
-                      <div className="flex-1">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2 flex-wrap">
-                          <span className="font-serif text-lg text-stone-900">{u.label}</span>
+                          {u.hasDamage && <AlertCircle size={16} className="text-red-600 flex-shrink-0" />}
+                          <span className={`font-serif text-lg ${u.hasDamage ? 'text-red-900' : 'text-stone-900'}`}>{u.label}</span>
                           {u.hasDamage && (
-                            <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-red-100 text-red-700">
-                              ⚠ Damage reported
+                            <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-red-600 text-white font-bold">
+                              ⚠ Damage
                             </span>
                           )}
                         </div>
-                        <div className="text-xs text-stone-500 font-mono mt-1">
-                          {u.photoCount} {u.photoCount === 1 ? 'photo' : 'photos'}
+                        <div className={`text-xs font-mono mt-1 ${u.hasDamage ? 'text-red-700' : 'text-stone-500'}`}>
+                          {u.photoCount} {u.photoCount === 1 ? 'photo' : 'photos'}{u.hasDamage ? ' · tap to resolve' : ''}
                         </div>
                       </div>
-                      <ChevronRight size={16} className="text-stone-400 flex-shrink-0 ml-2" />
+                      <ChevronRight size={16} className={`flex-shrink-0 ${u.hasDamage ? 'text-red-600' : 'text-stone-400'}`} />
                     </div>
                   </button>
                 ))}
@@ -9036,38 +9111,20 @@ function PortalUnitDay({ property, unitId, date, portalUser, onBack }) {
       </div>
 
       <div className="px-5 pt-6 space-y-6">
-        {/* View mode toggle — show when there's enough variety to group by:
-           multiple distinct categories, party labels, OR task names. The
-           "By section" view groups by the BEST available identifier per
-           photo (category → party → task name), so PMs can sensibly group
-           even on older data without categories set.
-           IMPORTANT: count keys across all tasks in this day, not just
-           tasks that already have photos. Otherwise the toggle disappears
-           when a cleaner has multiple tasks open but only photographed one. */}
-        {(() => {
-          const sectionKeys = new Set();
-          blocks.forEach(b => (b.tasks || []).forEach(t => {
-            const key = taskCategoryShortLabel(t.category, t.subcategory) ||
-                        b.party?.label ||
-                        t.name ||
-                        '__none__';
-            sectionKeys.add(key);
-          }));
-          const hasMultipleSections = sectionKeys.size > 1;
-          if (!hasMultipleSections) return null;
-          return (
-            <div className="flex items-center gap-1 p-1 bg-stone-100 rounded-xl">
-              <button onClick={() => setViewMode('all')}
-                className={`flex-1 py-2 px-3 rounded-lg text-xs font-medium transition-colors ${viewMode === 'all' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
-                All photos
-              </button>
-              <button onClick={() => setViewMode('by-section')}
-                className={`flex-1 py-2 px-3 rounded-lg text-xs font-medium transition-colors ${viewMode === 'by-section' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
-                By section
-              </button>
-            </div>
-          );
-        })()}
+        {/* View mode toggle — always visible so PMs can switch even when
+           the day looks like one section. Removes ambiguity about whether
+           the toggle "should" be there. In edge cases (one task only) both
+           modes will look similar; that's expected. */}
+        <div className="flex items-center gap-1 p-1 bg-stone-100 rounded-xl">
+          <button onClick={() => setViewMode('all')}
+            className={`flex-1 py-2 px-3 rounded-lg text-xs font-medium transition-colors ${viewMode === 'all' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+            All photos
+          </button>
+          <button onClick={() => setViewMode('by-section')}
+            className={`flex-1 py-2 px-3 rounded-lg text-xs font-medium transition-colors ${viewMode === 'by-section' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+            By section
+          </button>
+        </div>
 
         {viewMode === 'all' ? (
           <>

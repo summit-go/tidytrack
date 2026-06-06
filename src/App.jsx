@@ -921,6 +921,48 @@ const can = (employee, capabilityKey) => {
 };
 
 // =================================================================
+// TASK CATEGORIES — structured picker for cleaners. Coexists with
+// freeform task names. Each task has both a category (e.g. "general")
+// and an optional subcategory (e.g. "kitchen_area"). Order here is
+// preserved in the picker UI.
+//
+// PM portal groups "By section" on category for clean breakdown.
+// =================================================================
+const TASK_CATEGORIES = [
+  { id: 'bedroom',  label: 'Bedroom',  subcategories: null },
+  { id: 'bathroom', label: 'Bathroom', subcategories: null },
+  { id: 'vanity',   label: 'Vanity',   subcategories: null },
+  { id: 'general',  label: 'General',  subcategories: [
+    { id: 'kitchen',    label: 'Kitchen area' },
+    { id: 'living',     label: 'Living room, patio, water heater' },
+    { id: 'hallways',   label: 'Hallways, vents, stove, oven, dishwasher' },
+    { id: 'fridge',     label: 'Refrigerator, freezer, microwave, breezeway' },
+  ]},
+];
+
+// Look up a friendly label for category/subcategory ids
+const taskCategoryLabel = (category, subcategory) => {
+  if (!category) return null;
+  const cat = TASK_CATEGORIES.find(c => c.id === category);
+  if (!cat) return category;
+  if (!subcategory) return cat.label;
+  const sub = cat.subcategories?.find(s => s.id === subcategory);
+  return sub ? `${cat.label} — ${sub.label}` : cat.label;
+};
+
+// Short label for compact display (PM "By section" chips)
+const taskCategoryShortLabel = (category, subcategory) => {
+  if (!category) return null;
+  const cat = TASK_CATEGORIES.find(c => c.id === category);
+  if (!cat) return category;
+  if (category === 'general' && subcategory) {
+    const sub = cat.subcategories?.find(s => s.id === subcategory);
+    return sub ? `General — ${sub.label.split(',')[0]}` : 'General';
+  }
+  return cat.label;
+};
+
+// =================================================================
 // ADDRESS LINK — tappable address chip. Opens the address in the
 // user's default maps app (native on phones, Google Maps in browser
 // on desktop). Always rendered as a <span> with stopPropagation so
@@ -1066,6 +1108,167 @@ function BedBathPicker({ bedrooms, bathrooms, onChange }) {
         {bathrooms && (
           <button type="button" onClick={() => onChange({ bedrooms, bathrooms: null })}
             className="text-[11px] text-stone-500 hover:text-stone-700 mt-1.5 font-mono">
+            Clear
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// =================================================================
+// TASK CATEGORY PICKER — structured task starter for cleaners.
+// Cleaner picks one of: Bedroom / Bathroom / Vanity / General.
+// If General, a row of sub-category chips appears (kitchen, living
+// room, hallways, fridge). Sub-categories support multi-select.
+//
+// Cleaner can also type a custom name to override the auto-filled
+// name OR specify (freeform coexists with the structured picker).
+//
+// On submit:
+//   - For single-select categories (bedroom/bathroom/vanity, or
+//     general+0-or-1 subcategory): calls onStartOne(name, cat, sub).
+//   - For multi-select general: calls onStartMany([{name,cat,sub}, ...])
+//     which creates multiple tasks at once (first becomes active,
+//     rest are queued for resume).
+//
+// Props:
+//   busy: disabled state from parent
+//   onStartOne(name, category, subcategory)
+//   onStartMany(taskInputs)  // optional; falls back to onStartOne if not provided
+//   defaultName, setDefaultName: shared freeform name state (for the
+//                                 existing "type your own name" flow)
+// =================================================================
+function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDefaultName }) {
+  const [category, setCategory] = useState(null); // 'bedroom'|'bathroom'|'vanity'|'general'|null
+  const [selectedSubs, setSelectedSubs] = useState(new Set()); // for 'general' only
+  const [customName, setCustomName] = useState('');
+
+  const reset = () => {
+    setCategory(null);
+    setSelectedSubs(new Set());
+    setCustomName('');
+    setDefaultName && setDefaultName('');
+  };
+
+  const toggleSub = (subId) => {
+    setSelectedSubs(prev => {
+      const next = new Set(prev);
+      if (next.has(subId)) next.delete(subId);
+      else next.add(subId);
+      return next;
+    });
+  };
+
+  const cat = TASK_CATEGORIES.find(c => c.id === category);
+  const isGeneral = category === 'general';
+  const hasSubs = isGeneral && selectedSubs.size > 0;
+  // For non-general, name auto-fills with the category label
+  // For general with subs, name comes from the subcategory itself
+  // For general with no subs, just "General"
+  // Cleaner can override with customName for any of those.
+
+  const canSubmit = !!category && !busy;
+
+  const submit = async () => {
+    if (!canSubmit) return;
+    const customTrimmed = customName.trim();
+
+    // SIMPLE single-task path
+    if (!isGeneral || selectedSubs.size <= 1) {
+      const subId = isGeneral && selectedSubs.size === 1 ? Array.from(selectedSubs)[0] : null;
+      // Default name: subcategory label > category label
+      const sub = subId ? cat.subcategories.find(s => s.id === subId) : null;
+      const autoName = sub ? sub.label : cat.label;
+      const finalName = customTrimmed || autoName;
+      await onStartOne(finalName, category, subId || null);
+      reset();
+      return;
+    }
+
+    // MULTI-SELECT general path — create one task per selected sub
+    const taskInputs = Array.from(selectedSubs).map(subId => {
+      const sub = cat.subcategories.find(s => s.id === subId);
+      return {
+        name: customTrimmed ? `${customTrimmed} — ${sub.label}` : sub.label,
+        category: 'general',
+        subcategory: subId,
+      };
+    });
+    if (onStartMany) {
+      await onStartMany(taskInputs);
+    } else {
+      // Fallback: just start the first one if multi handler not provided
+      const first = taskInputs[0];
+      await onStartOne(first.name, first.category, first.subcategory);
+    }
+    reset();
+  };
+
+  return (
+    <div className="space-y-3">
+      <div>
+        <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Pick a category</label>
+        <div className="grid grid-cols-4 gap-2">
+          {TASK_CATEGORIES.map(c => (
+            <button key={c.id} type="button" onClick={() => {
+              setCategory(c.id);
+              setSelectedSubs(new Set());
+            }}
+              className={`py-3 px-2 rounded-xl border-2 font-medium text-sm transition-all ${category === c.id ? 'border-stone-900 bg-stone-900 text-stone-50' : 'border-stone-200 bg-white text-stone-700 hover:border-stone-400'}`}>
+              {c.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {isGeneral && cat.subcategories && (
+        <div>
+          <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">
+            Pick one or more areas {selectedSubs.size > 1 && <span className="normal-case text-amber-700">· creates {selectedSubs.size} tasks</span>}
+          </label>
+          <div className="grid grid-cols-1 gap-1.5">
+            {cat.subcategories.map(s => {
+              const checked = selectedSubs.has(s.id);
+              return (
+                <button key={s.id} type="button" onClick={() => toggleSub(s.id)}
+                  className={`flex items-center gap-2 p-3 rounded-xl border-2 text-left transition-all ${checked ? 'border-amber-600 bg-amber-50' : 'border-stone-200 bg-white hover:border-stone-400'}`}>
+                  <div className={`w-4 h-4 rounded border-2 flex-shrink-0 flex items-center justify-center ${checked ? 'border-amber-600 bg-amber-600' : 'border-stone-300'}`}>
+                    {checked && <Check size={11} className="text-white" />}
+                  </div>
+                  <span className="text-sm text-stone-900">{s.label}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {category && (
+        <div>
+          <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">
+            Custom name <span className="normal-case text-stone-400">(optional)</span>
+          </label>
+          <input type="text" value={customName} onChange={(e) => setCustomName(e.target.value)}
+            placeholder={isGeneral && selectedSubs.size === 0 ? 'Defaults to "General"' :
+                         isGeneral && selectedSubs.size > 1 ? 'Custom prefix for all selected' :
+                         `Defaults to "${(isGeneral && selectedSubs.size === 1 ?
+                           cat.subcategories.find(s => s.id === Array.from(selectedSubs)[0])?.label :
+                           cat.label) || ''}"`}
+            className="w-full px-3 py-2.5 rounded-xl border border-stone-300 bg-white focus:outline-none focus:border-stone-900 text-stone-900 text-sm"
+            onKeyDown={(e) => e.key === 'Enter' && submit()} />
+        </div>
+      )}
+
+      <div className="flex gap-2 pt-1">
+        <button onClick={submit} disabled={!canSubmit}
+          className="flex-1 py-3 rounded-xl bg-stone-900 text-stone-50 font-medium text-sm disabled:opacity-50 flex items-center justify-center gap-1.5">
+          <Play size={14} />
+          {isGeneral && selectedSubs.size > 1 ? `Start ${selectedSubs.size} tasks` : 'Start task'}
+        </button>
+        {category && (
+          <button onClick={reset} disabled={busy} type="button"
+            className="px-4 py-3 rounded-xl border border-stone-300 text-stone-700 font-medium text-sm disabled:opacity-50">
             Clear
           </button>
         )}
@@ -1469,14 +1672,69 @@ function EmployeeApp({ employee: employeeInit, onSignOut }) {
   };
 
   // Tasks
-  const startTask = async () => {
-    if (!newTaskName.trim()) return;
+  const startTask = async (overrideName = null, category = null, subcategory = null) => {
+    const nameToUse = (overrideName || newTaskName || '').trim();
+    if (!nameToUse) return;
     if (activeTask) await stopTask(activeTask, false);
-    const insert = { shift_id: shift.id, name: newTaskName.trim() };
+    const insert = { shift_id: shift.id, name: nameToUse };
     if (activeBlock) insert.work_block_id = activeBlock.id;
+    if (category) insert.category = category;
+    if (subcategory) insert.subcategory = subcategory;
     const { data, error } = await supabase.from('tasks').insert(insert).select('*, photos(*)').single();
     if (error) { alert('Could not start task: ' + error.message); return; }
     setTasks(prev => [...prev, data]); setActiveTask(data.id); setNewTaskName('');
+    return data;
+  };
+
+  // Cleaner picker can submit ONE task (single category) or MULTIPLE
+  // (e.g. multi-selected General subcategories). When multiple are
+  // submitted, the FIRST one becomes active and the rest are inserted
+  // as not-yet-started tasks so the cleaner can resume them in order.
+  const startTasksFromPicker = async (taskInputs) => {
+    if (!taskInputs || taskInputs.length === 0) return;
+    if (activeTask) await stopTask(activeTask, false);
+    // Insert the first task as started (with current timestamp via default)
+    const first = taskInputs[0];
+    const firstInsert = {
+      shift_id: shift.id,
+      name: first.name,
+      category: first.category || null,
+      subcategory: first.subcategory || null,
+    };
+    if (activeBlock) firstInsert.work_block_id = activeBlock.id;
+    const { data: firstRow, error: firstErr } = await supabase.from('tasks')
+      .insert(firstInsert).select('*, photos(*)').single();
+    if (firstErr) { alert('Could not start task: ' + firstErr.message); return; }
+    setTasks(prev => [...prev, firstRow]);
+    setActiveTask(firstRow.id);
+
+    // Insert the rest as "queued" tasks with start_time AND end_time both
+    // null... actually they need start_time NOT NULL per schema. Best to
+    // insert them STILL with start_time but immediately stop them — so
+    // they appear in the task list as paused/queued, ready to resume.
+    if (taskInputs.length > 1) {
+      const rest = taskInputs.slice(1);
+      const now = new Date();
+      const queueRows = rest.map((t, i) => ({
+        shift_id: shift.id,
+        work_block_id: activeBlock?.id || null,
+        name: t.name,
+        category: t.category || null,
+        subcategory: t.subcategory || null,
+        // Start them at a stable future-ish moment so order is preserved,
+        // then immediately stop. They'll appear as "Resume" cards.
+        start_time: new Date(now.getTime() + (i + 1) * 1000).toISOString(),
+        end_time:   new Date(now.getTime() + (i + 1) * 1000 + 100).toISOString(),
+      }));
+      const { data: queued, error: qErr } = await supabase.from('tasks')
+        .insert(queueRows).select('*, photos(*)');
+      if (qErr) {
+        console.warn('[startTasksFromPicker] could not queue extras:', qErr);
+      } else if (queued) {
+        setTasks(prev => [...prev, ...queued]);
+      }
+    }
+    setNewTaskName('');
   };
 
   const stopTask = async (taskId, refetch = true) => {
@@ -1637,7 +1895,8 @@ function EmployeeApp({ employee: employeeInit, onSignOut }) {
       employeeName={employee.name} employee={employee} onSignOut={onSignOut} onFinish={finishBlock}
       onPause={() => setActiveBlock(null)}
       newTaskName={newTaskName} setNewTaskName={setNewTaskName}
-      onStartTask={startTask} onStopTask={stopTask} onResumeTask={resumeTask}
+      onStartTask={startTask} onStartTasksFromPicker={startTasksFromPicker}
+      onStopTask={stopTask} onResumeTask={resumeTask}
       onAddPhoto={(taskId, kind) => setPhotoModal({ taskId, kind })}
       photoModal={photoModal} onClosePhotoModal={() => setPhotoModal(null)}
       onUploadPhoto={uploadPhoto}
@@ -1649,7 +1908,8 @@ function EmployeeApp({ employee: employeeInit, onSignOut }) {
     onSwitchProperty={switchProperty}
     onAttachProperty={startAttachProperty}
     newTaskName={newTaskName} setNewTaskName={setNewTaskName}
-    onStartTask={startTask} onStopTask={stopTask} onResumeTask={resumeTask}
+    onStartTask={startTask} onStartTasksFromPicker={startTasksFromPicker}
+    onStopTask={stopTask} onResumeTask={resumeTask}
     onAddPhoto={(taskId, kind) => setPhotoModal({ taskId, kind })}
     photoModal={photoModal} onClosePhotoModal={() => setPhotoModal(null)}
     onUploadPhoto={uploadPhoto}
@@ -2119,11 +2379,13 @@ function OtherCleanersTasksPanel({ block }) {
 }
 
 function BlockView({ shift, block, tasks, activeTask, employeeName, employee, onSignOut, onFinish, onPause,
-  newTaskName, setNewTaskName, onStartTask, onStopTask, onResumeTask, onAddPhoto,
+  newTaskName, setNewTaskName, onStartTask, onStartTasksFromPicker, onStopTask, onResumeTask, onAddPhoto,
   photoModal, onClosePhotoModal, onUploadPhoto, onOpenMessages, onOpenBedroomHistory, busy }) {
   useTick(true);
   const blockElapsed = Date.now() - new Date(block.start_time).getTime();
   const activeTaskObj = tasks.find(t => t.id === activeTask);
+  // Task input mode toggle: structured picker (default) vs freeform typing
+  const [taskInputMode, setTaskInputMode] = useState('picker'); // 'picker' | 'custom'
 
   // Logo tap: confirm before pausing the block + bouncing to PropertyHub
   const handleLogoClick = () => {
@@ -2200,17 +2462,41 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
       <OtherCleanersTasksPanel block={block} />
 
       <div className="mx-4 mt-4">
-        <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Start a new task</label>
-        <div className="flex gap-2">
-          <input type="text" value={newTaskName} onChange={(e) => setNewTaskName(e.target.value)}
-            placeholder="e.g. Master bathroom, Kitchen…"
-            className="flex-1 px-4 py-3 rounded-xl border border-stone-300 bg-white focus:outline-none focus:border-stone-900 text-stone-900"
-            onKeyDown={(e) => e.key === 'Enter' && onStartTask()} />
-          <button onClick={onStartTask} disabled={!newTaskName.trim()}
-            className="px-4 rounded-xl bg-stone-900 text-stone-50 disabled:opacity-30 active:scale-95 transition-transform">
-            <Plus size={20} />
-          </button>
+        <div className="flex items-center justify-between mb-2">
+          <label className="text-xs uppercase tracking-wider text-stone-500 font-mono">Start a new task</label>
+          <div className="flex items-center gap-1 p-0.5 bg-stone-100 rounded-full">
+            <button onClick={() => setTaskInputMode('picker')}
+              className={`px-2.5 py-1 rounded-full text-[10px] font-mono uppercase tracking-wider transition-colors ${taskInputMode === 'picker' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+              Quick
+            </button>
+            <button onClick={() => setTaskInputMode('custom')}
+              className={`px-2.5 py-1 rounded-full text-[10px] font-mono uppercase tracking-wider transition-colors ${taskInputMode === 'custom' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+              Custom
+            </button>
+          </div>
         </div>
+
+        {taskInputMode === 'picker' ? (
+          <div className="p-4 rounded-2xl bg-stone-50 border border-stone-200">
+            <TaskCategoryPicker
+              busy={busy}
+              onStartOne={(name, category, subcategory) => onStartTask(name, category, subcategory)}
+              onStartMany={onStartTasksFromPicker}
+              defaultName={newTaskName}
+              setDefaultName={setNewTaskName} />
+          </div>
+        ) : (
+          <div className="flex gap-2">
+            <input type="text" value={newTaskName} onChange={(e) => setNewTaskName(e.target.value)}
+              placeholder="e.g. Master bathroom, Kitchen…"
+              className="flex-1 px-4 py-3 rounded-xl border border-stone-300 bg-white focus:outline-none focus:border-stone-900 text-stone-900"
+              onKeyDown={(e) => e.key === 'Enter' && onStartTask()} />
+            <button onClick={() => onStartTask()} disabled={!newTaskName.trim()}
+              className="px-4 rounded-xl bg-stone-900 text-stone-50 disabled:opacity-30 active:scale-95 transition-transform">
+              <Plus size={20} />
+            </button>
+          </div>
+        )}
       </div>
 
       <div className="mx-4 mt-6">
@@ -2245,9 +2531,10 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
 // SIMPLE SHIFT VIEW (single-bill properties)
 // =================================================================
 function SimpleShiftView({ shift, tasks, activeTask, employeeName, employee, onSignOut, onClockOut, onSwitchProperty, onAttachProperty,
-  newTaskName, setNewTaskName, onStartTask, onStopTask, onResumeTask, onAddPhoto,
+  newTaskName, setNewTaskName, onStartTask, onStartTasksFromPicker, onStopTask, onResumeTask, onAddPhoto,
   photoModal, onClosePhotoModal, onUploadPhoto, onOpenMessages, onOpenChangePin, busy }) {
   const [showMenu, setShowMenu] = useState(false);
+  const [taskInputMode, setTaskInputMode] = useState('picker'); // 'picker' | 'custom'
   useTick(true);
   const elapsed = Date.now() - new Date(shift.start_time).getTime();
   const activeTaskObj = tasks.find(t => t.id === activeTask);
@@ -2323,17 +2610,41 @@ function SimpleShiftView({ shift, tasks, activeTask, employeeName, employee, onS
       )}
 
       <div className="mx-4 mt-4">
-        <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Start a new task</label>
-        <div className="flex gap-2">
-          <input type="text" value={newTaskName} onChange={(e) => setNewTaskName(e.target.value)}
-            placeholder="e.g. Master bathroom, Kitchen…"
-            className="flex-1 px-4 py-3 rounded-xl border border-stone-300 bg-white focus:outline-none focus:border-stone-900 text-stone-900"
-            onKeyDown={(e) => e.key === 'Enter' && onStartTask()} />
-          <button onClick={onStartTask} disabled={!newTaskName.trim()}
-            className="px-4 rounded-xl bg-stone-900 text-stone-50 disabled:opacity-30 active:scale-95 transition-transform">
-            <Plus size={20} />
-          </button>
+        <div className="flex items-center justify-between mb-2">
+          <label className="text-xs uppercase tracking-wider text-stone-500 font-mono">Start a new task</label>
+          <div className="flex items-center gap-1 p-0.5 bg-stone-100 rounded-full">
+            <button onClick={() => setTaskInputMode('picker')}
+              className={`px-2.5 py-1 rounded-full text-[10px] font-mono uppercase tracking-wider transition-colors ${taskInputMode === 'picker' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+              Quick
+            </button>
+            <button onClick={() => setTaskInputMode('custom')}
+              className={`px-2.5 py-1 rounded-full text-[10px] font-mono uppercase tracking-wider transition-colors ${taskInputMode === 'custom' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+              Custom
+            </button>
+          </div>
         </div>
+
+        {taskInputMode === 'picker' ? (
+          <div className="p-4 rounded-2xl bg-stone-50 border border-stone-200">
+            <TaskCategoryPicker
+              busy={busy}
+              onStartOne={(name, category, subcategory) => onStartTask(name, category, subcategory)}
+              onStartMany={onStartTasksFromPicker}
+              defaultName={newTaskName}
+              setDefaultName={setNewTaskName} />
+          </div>
+        ) : (
+          <div className="flex gap-2">
+            <input type="text" value={newTaskName} onChange={(e) => setNewTaskName(e.target.value)}
+              placeholder="e.g. Master bathroom, Kitchen…"
+              className="flex-1 px-4 py-3 rounded-xl border border-stone-300 bg-white focus:outline-none focus:border-stone-900 text-stone-900"
+              onKeyDown={(e) => e.key === 'Enter' && onStartTask()} />
+            <button onClick={() => onStartTask()} disabled={!newTaskName.trim()}
+              className="px-4 rounded-xl bg-stone-900 text-stone-50 disabled:opacity-30 active:scale-95 transition-transform">
+              <Plus size={20} />
+            </button>
+          </div>
+        )}
       </div>
 
       <div className="mx-4 mt-6">
@@ -2789,7 +3100,7 @@ function TaskCard({ task, isActive, onStop, onResume, onAddPhoto }) {
       style={{ touchAction: 'manipulation' }}>
       <div className="flex items-start justify-between mb-4">
         <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 mb-1">
+          <div className="flex items-center gap-2 mb-1 flex-wrap">
             {isDone && <Check size={14} className="text-emerald-600 flex-shrink-0" />}
             {isActive && <span className="w-2 h-2 rounded-full bg-amber-600 animate-pulse flex-shrink-0" />}
             <span className="font-serif text-lg text-stone-900 truncate">{task.name}</span>
@@ -2799,6 +3110,11 @@ function TaskCard({ task, isActive, onStop, onResume, onAddPhoto }) {
               </span>
             )}
           </div>
+          {task.category && (
+            <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1">
+              {taskCategoryShortLabel(task.category, task.subcategory)}
+            </div>
+          )}
           <div className="text-xs text-stone-500 font-mono">
             {fmtClock(task.start_time)}{task.end_time && ` — ${fmtClock(task.end_time)}`} · {fmtTimeShort(elapsed)}
           </div>
@@ -4295,7 +4611,7 @@ function PhotoColumn({ label, photos, highlight }) {
 }
 
 // Photo viewer that lets you swipe through all photos in a bucket
-function PhotoZoomViewer({ photos, initialUrl, onClose }) {
+function PhotoZoomViewer({ photos, initialUrl, onClose, onResolveCurrent }) {
   const startIdx = Math.max(0, photos.findIndex(p => p.public_url === initialUrl));
   const [idx, setIdx] = useState(startIdx);
   const photo = photos[idx];
@@ -4309,15 +4625,23 @@ function PhotoZoomViewer({ photos, initialUrl, onClose }) {
       <div className="absolute top-4 left-4 px-3 py-1.5 rounded-full bg-stone-800 text-stone-50 text-xs font-mono z-10">
         {idx + 1} / {photos.length}
       </div>
-      <img loading="lazy" src={photo.public_url} alt="" className="max-w-full max-h-[85vh] rounded-xl" />
-      {photos.length > 1 && (
-        <div className="mt-4 flex items-center gap-3">
-          <button onClick={() => setIdx((idx - 1 + photos.length) % photos.length)}
-            className="px-4 py-2 rounded-full bg-stone-800 text-stone-50 text-sm">← Prev</button>
-          <button onClick={() => setIdx((idx + 1) % photos.length)}
-            className="px-4 py-2 rounded-full bg-stone-800 text-stone-50 text-sm">Next →</button>
-        </div>
-      )}
+      <img loading="lazy" src={photo.public_url} alt="" className="max-w-full max-h-[80vh] rounded-xl" />
+      <div className="mt-4 flex items-center gap-3 flex-wrap justify-center">
+        {photos.length > 1 && (
+          <>
+            <button onClick={() => setIdx((idx - 1 + photos.length) % photos.length)}
+              className="px-4 py-2 rounded-full bg-stone-800 text-stone-50 text-sm">← Prev</button>
+            <button onClick={() => setIdx((idx + 1) % photos.length)}
+              className="px-4 py-2 rounded-full bg-stone-800 text-stone-50 text-sm">Next →</button>
+          </>
+        )}
+        {onResolveCurrent && (
+          <button onClick={() => onResolveCurrent(photo)}
+            className="px-4 py-2 rounded-full bg-emerald-700 hover:bg-emerald-800 text-white text-sm font-medium flex items-center gap-2">
+            <Check size={14} /> Mark resolved
+          </button>
+        )}
+      </div>
     </div>
   );
 }
@@ -8196,6 +8520,7 @@ function PortalDashboard({ property, portalKind, portalUser, hasMultipleProperti
 
   if (view.kind === 'unit-day') {
     return <PortalUnitDay property={property} unitId={view.unitId} date={view.date}
+      portalUser={portalUser}
       onBack={() => setView({ kind: 'home' })} />;
   }
 
@@ -8210,7 +8535,7 @@ function PortalHome({ property, portalKind, portalUser, hasMultipleProperties, o
   const [tab, setTab] = useState('history'); // 'history' | 'upload-photo' | 'assignments'
   const [groups, setGroups] = useState([]);
   const [loaded, setLoaded] = useState(false);
-  const [filter, setFilter] = useState('30d');
+  const [filter, setFilter] = useState('7d');
   const [showWelcome, setShowWelcome] = useState(false);
   const [showChangeCode, setShowChangeCode] = useState(false);
   const [showMessages, setShowMessages] = useState(false);
@@ -8247,7 +8572,7 @@ function PortalHome({ property, portalKind, portalUser, hasMultipleProperties, o
     if (property.property_type === 'multi_unit') {
       const { data: blocks } = await supabase
         .from('work_blocks')
-        .select('id, start_time, end_time, unit:units(id, label), shift:shifts!inner(customer_id), tasks(id, photos(kind))')
+        .select('id, start_time, end_time, unit:units(id, label), shift:shifts!inner(customer_id), tasks(id, photos(kind, resolved_at))')
         .gte('start_time', since)
         .order('start_time', { ascending: false });
       const filtered = (blocks || []).filter(b => b.shift?.customer_id === property.id && b.unit);
@@ -8258,7 +8583,10 @@ function PortalHome({ property, portalKind, portalUser, hasMultipleProperties, o
         const u = b.unit;
         if (!byDate[date][u.id]) byDate[date][u.id] = { unitId: u.id, label: u.label, photoCount: 0, hasDamage: false };
         (b.tasks || []).forEach(t => (t.photos || []).forEach(p => {
-          if (p.kind === 'damage') byDate[date][u.id].hasDamage = true;
+          // Only flag ACTIVE damage (unresolved). Resolved damage doesn't
+          // contribute to the red badge anymore — it lives in the
+          // collapsed Resolved damage history inside PortalUnitDay.
+          if (p.kind === 'damage' && !p.resolved_at) byDate[date][u.id].hasDamage = true;
           byDate[date][u.id].photoCount++;
         }));
       });
@@ -8272,7 +8600,7 @@ function PortalHome({ property, portalKind, portalUser, hasMultipleProperties, o
     } else {
       // Simple property
       const { data: shifts } = await supabase.from('shifts')
-        .select('id, start_time, end_time, tasks(id, photos(kind))')
+        .select('id, start_time, end_time, tasks(id, photos(kind, resolved_at))')
         .eq('customer_id', property.id)
         .gte('start_time', since)
         .order('start_time', { ascending: false });
@@ -8280,7 +8608,7 @@ function PortalHome({ property, portalKind, portalUser, hasMultipleProperties, o
         let photoCount = 0, hasDamage = false;
         (s.tasks || []).forEach(t => (t.photos || []).forEach(p => {
           photoCount++;
-          if (p.kind === 'damage') hasDamage = true;
+          if (p.kind === 'damage' && !p.resolved_at) hasDamage = true;
         }));
         return {
           date: new Date(s.start_time).toISOString().split('T')[0],
@@ -8494,7 +8822,7 @@ function PortalHistoryTab({ property, groups, loaded, filter, setFilter, onOpenU
 
 
 // Detail screen: one unit, one day. Shows all parties cleaned with photos.
-function PortalUnitDay({ property, unitId, date, onBack }) {
+function PortalUnitDay({ property, unitId, date, portalUser, onBack }) {
   const [unit, setUnit] = useState(null);
   const [blocks, setBlocks] = useState([]);
   const [loaded, setLoaded] = useState(false);
@@ -8545,15 +8873,51 @@ function PortalUnitDay({ property, unitId, date, onBack }) {
 
   if (!loaded) return <Splash text="Loading…" />;
 
-  // Aggregate all photos for this unit/day, separated by kind
+  // Aggregate all photos for this unit/day, separated by kind.
+  // We also tag each photo with the task's category/subcategory so
+  // the "By section" view can group on them.
   const allBefore = [];
   const allAfter = [];
-  const allDamage = [];
+  const allDamageActive = []; // unresolved damage — shows in red banner
+  const allDamageResolved = []; // resolved damage — collapsed history below
   blocks.forEach(b => (b.tasks || []).forEach(t => (t.photos || []).forEach(p => {
-    if (p.kind === 'before') allBefore.push({ ...p, taskName: t.name, partyLabel: b.party?.label });
-    else if (p.kind === 'after') allAfter.push({ ...p, taskName: t.name, partyLabel: b.party?.label });
-    else if (p.kind === 'damage') allDamage.push({ ...p, taskName: t.name, partyLabel: b.party?.label });
+    const enriched = {
+      ...p,
+      taskName: t.name,
+      taskCategory: t.category,
+      taskSubcategory: t.subcategory,
+      partyLabel: b.party?.label,
+    };
+    if (p.kind === 'before') allBefore.push(enriched);
+    else if (p.kind === 'after') allAfter.push(enriched);
+    else if (p.kind === 'damage') {
+      if (p.resolved_at) allDamageResolved.push(enriched);
+      else allDamageActive.push(enriched);
+    }
   })));
+
+  // Local mutation helper — flip a photo's resolved state and re-fetch
+  // (cheap reload to keep state in sync).
+  const setPhotoResolution = async (photo, resolve) => {
+    const payload = resolve
+      ? { resolved_at: new Date().toISOString(), resolved_by: portalUser?.id || null, resolved_by_kind: 'portal_user' }
+      : { resolved_at: null, resolved_by: null, resolved_by_kind: null };
+    const { error } = await supabase.from('photos').update(payload).eq('id', photo.id);
+    if (error) {
+      alert('Could not update damage status: ' + error.message);
+      return;
+    }
+    // Update in place via block mutation
+    setBlocks(prev => prev.map(b => ({
+      ...b,
+      tasks: (b.tasks || []).map(t => ({
+        ...t,
+        photos: (t.photos || []).map(p =>
+          p.id === photo.id ? { ...p, ...payload } : p
+        ),
+      })),
+    })));
+  };
 
   return (
     <div className="min-h-screen bg-stone-50 pb-12">
@@ -8597,12 +8961,13 @@ function PortalUnitDay({ property, unitId, date, onBack }) {
       </div>
 
       <div className="px-5 pt-6 space-y-6">
-        {/* View mode toggle — only show when there are multiple sub-sections to group by */}
+        {/* View mode toggle — only show when there are multiple categories OR sub-sections to group by */}
         {(() => {
-          const hasMultipleSections = new Set(
-            [...allBefore, ...allAfter, ...allDamage]
-              .map(p => p.partyLabel || '__noparty__')
-          ).size > 1;
+          const allDisplayed = [...allBefore, ...allAfter, ...allDamageActive];
+          const categories = new Set(allDisplayed.map(p =>
+            taskCategoryShortLabel(p.taskCategory, p.taskSubcategory) || p.partyLabel || '__none__'
+          ));
+          const hasMultipleSections = categories.size > 1;
           if (!hasMultipleSections) return null;
           return (
             <div className="flex items-center gap-1 p-1 bg-stone-100 rounded-xl">
@@ -8612,7 +8977,7 @@ function PortalUnitDay({ property, unitId, date, onBack }) {
               </button>
               <button onClick={() => setViewMode('by-section')}
                 className={`flex-1 py-2 px-3 rounded-lg text-xs font-medium transition-colors ${viewMode === 'by-section' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
-                By sub-section
+                By section
               </button>
             </div>
           );
@@ -8620,35 +8985,45 @@ function PortalUnitDay({ property, unitId, date, onBack }) {
 
         {viewMode === 'all' ? (
           <>
-            {allDamage.length > 0 && (
+            {allDamageActive.length > 0 && (
               <PortalPhotoSection
-                label="Damage report"
-                photos={allDamage}
+                label="Active damage"
+                photos={allDamageActive}
                 highlight="red"
-                description="Issues identified during cleaning. Please review."
+                description="Issues identified during cleaning. Tap a photo to resolve."
+                onResolve={(p) => setPhotoResolution(p, true)}
               />
             )}
             <PortalPhotoSection label="Before cleaning" photos={allBefore} />
             <PortalPhotoSection label="After cleaning"  photos={allAfter} />
           </>
         ) : (
-          // BY-SECTION MODE — bucket photos by partyLabel, then within each
-          // section show Before / After / Damage subsections.
+          // BY-SECTION MODE — bucket by task category (cleaner's structured
+          // category), falling back to party label, then "Other".
           (() => {
             const sectionMap = new Map();
-            const allPhotos = [...allBefore, ...allAfter, ...allDamage];
-            allPhotos.forEach(p => {
-              const key = p.partyLabel || 'Other';
+            const sectionAll = [...allBefore, ...allAfter, ...allDamageActive];
+            sectionAll.forEach(p => {
+              const key = taskCategoryShortLabel(p.taskCategory, p.taskSubcategory) || p.partyLabel || 'Other';
               if (!sectionMap.has(key)) sectionMap.set(key, { before: [], after: [], damage: [] });
               const bucket = sectionMap.get(key);
               if (p.kind === 'before') bucket.before.push(p);
               else if (p.kind === 'after') bucket.after.push(p);
               else if (p.kind === 'damage') bucket.damage.push(p);
             });
-            // Order: alphabetical by section label, but keep "Other" last
+            // Order: bedroom > bathroom > vanity > general > others alphabetical, "Other" last
+            const orderHint = (label) => {
+              const l = (label || '').toLowerCase();
+              if (l.startsWith('bedroom')) return 0;
+              if (l.startsWith('bathroom')) return 1;
+              if (l.startsWith('vanity')) return 2;
+              if (l.startsWith('general')) return 3;
+              if (label === 'Other') return 99;
+              return 50;
+            };
             const sorted = Array.from(sectionMap.entries()).sort(([a], [b]) => {
-              if (a === 'Other') return 1;
-              if (b === 'Other') return -1;
+              const oA = orderHint(a), oB = orderHint(b);
+              if (oA !== oB) return oA - oB;
               return a.localeCompare(b);
             });
             return sorted.map(([sectionLabel, buckets]) => (
@@ -8661,8 +9036,9 @@ function PortalUnitDay({ property, unitId, date, onBack }) {
                 </div>
                 {buckets.damage.length > 0 && (
                   <PortalPhotoSection
-                    label="Damage" photos={buckets.damage} highlight="red"
-                    description="Issues identified during cleaning."
+                    label="Active damage" photos={buckets.damage} highlight="red"
+                    description="Tap a photo to resolve."
+                    onResolve={(p) => setPhotoResolution(p, true)}
                   />
                 )}
                 {buckets.before.length > 0 && (
@@ -8707,7 +9083,15 @@ function PortalUnitDay({ property, unitId, date, onBack }) {
           </div>
         )}
 
-        {allBefore.length === 0 && allAfter.length === 0 && allDamage.length === 0 && (
+        {/* Resolved damage history — collapsed by default, neutral tone */}
+        {allDamageResolved.length > 0 && (
+          <ResolvedDamageHistory
+            photos={allDamageResolved}
+            onReopen={(p) => setPhotoResolution(p, false)}
+          />
+        )}
+
+        {allBefore.length === 0 && allAfter.length === 0 && allDamageActive.length === 0 && allDamageResolved.length === 0 && (
           <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
             No photos recorded for this date.
           </div>
@@ -8717,7 +9101,58 @@ function PortalUnitDay({ property, unitId, date, onBack }) {
   );
 }
 
-function PortalPhotoSection({ label, photos, highlight, description }) {
+// =================================================================
+// RESOLVED DAMAGE HISTORY — collapsed, neutral panel showing damage
+// the PM has already marked resolved. Always has "Re-open" buttons
+// per photo so they can flip back if they tapped resolved by mistake.
+// =================================================================
+function ResolvedDamageHistory({ photos, onReopen }) {
+  const [expanded, setExpanded] = useState(false);
+  const [zoom, setZoom] = useState(null);
+  return (
+    <div className="rounded-2xl bg-stone-100 border border-stone-200 overflow-hidden">
+      <button onClick={() => setExpanded(e => !e)}
+        className="w-full flex items-center justify-between px-4 py-3 hover:bg-stone-200/50 transition-colors">
+        <div className="flex items-center gap-2">
+          <Check size={14} className="text-emerald-600" />
+          <span className="text-xs uppercase tracking-wider text-stone-600 font-mono">
+            Resolved damage ({photos.length})
+          </span>
+        </div>
+        <ChevronRight size={14} className={`text-stone-500 transition-transform ${expanded ? 'rotate-90' : ''}`} />
+      </button>
+      {expanded && (
+        <div className="px-4 pb-4">
+          <p className="text-[11px] text-stone-500 italic mb-3">
+            Issues marked resolved. Tap any photo to view; tap "Re-open" if it shouldn't have been resolved.
+          </p>
+          <div className="grid grid-cols-3 sm:grid-cols-4 gap-2">
+            {photos.map(p => (
+              <div key={p.id} className="relative">
+                <button onClick={() => setZoom(p)}
+                  className="block aspect-square w-full rounded-lg overflow-hidden bg-stone-200 opacity-75 hover:opacity-100 transition-opacity">
+                  <img loading="lazy" src={p.public_url} alt="" className="w-full h-full object-cover" />
+                  <span className="absolute top-1 left-1 px-1.5 py-0.5 rounded bg-emerald-700/90 text-white text-[9px] font-mono uppercase tracking-wider">
+                    Resolved
+                  </span>
+                </button>
+                <button onClick={() => onReopen(p)}
+                  className="mt-1 w-full px-2 py-1 rounded bg-white border border-stone-300 hover:bg-stone-50 text-stone-700 text-[10px] font-mono">
+                  Re-open
+                </button>
+              </div>
+            ))}
+          </div>
+          {zoom && (
+            <PhotoZoomViewer photos={photos} initialUrl={zoom.public_url} onClose={() => setZoom(null)} />
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PortalPhotoSection({ label, photos, highlight, description, onResolve }) {
   const [zoom, setZoom] = useState(null);
   const isDamage = highlight === 'red';
   if (photos.length === 0 && !isDamage) {
@@ -8729,8 +9164,6 @@ function PortalPhotoSection({ label, photos, highlight, description }) {
     );
   }
   // Determine the badge to put on each thumbnail based on the photo's kind.
-  // Falls back to the section label so older photos without a `kind` still
-  // tag correctly visually.
   const kindBadge = (p) => {
     const k = p.kind || (label.toLowerCase().includes('before') ? 'before' :
                         label.toLowerCase().includes('after') ? 'after' :
@@ -8754,20 +9187,30 @@ function PortalPhotoSection({ label, photos, highlight, description }) {
       {description && <p className="text-sm text-stone-600 mb-3">{description}</p>}
       <div className="grid grid-cols-3 sm:grid-cols-4 gap-2">
         {photos.map(p => (
-          <button key={p.id} onClick={() => setZoom(p)}
-            className={`relative aspect-square rounded-lg overflow-hidden ${isDamage ? 'ring-2 ring-red-400' : ''}`}>
-            <img loading="lazy" src={p.public_url} alt="" className="w-full h-full object-cover" />
-            {kindBadge(p)}
-            {p.partyLabel && (
-              <span className="absolute bottom-1 left-1 right-1 px-1.5 py-0.5 rounded bg-black/70 text-white text-[9px] font-mono truncate">
-                {p.partyLabel}
-              </span>
+          <div key={p.id} className="relative">
+            <button onClick={() => setZoom(p)}
+              className={`relative aspect-square w-full rounded-lg overflow-hidden ${isDamage ? 'ring-2 ring-red-400' : ''}`}>
+              <img loading="lazy" src={p.public_url} alt="" className="w-full h-full object-cover" />
+              {kindBadge(p)}
+              {p.partyLabel && (
+                <span className="absolute bottom-1 left-1 right-1 px-1.5 py-0.5 rounded bg-black/70 text-white text-[9px] font-mono truncate">
+                  {p.partyLabel}
+                </span>
+              )}
+            </button>
+            {onResolve && isDamage && (
+              <button onClick={() => onResolve(p)}
+                className="mt-1 w-full px-2 py-1 rounded bg-emerald-700 hover:bg-emerald-800 text-white text-[10px] font-mono active:scale-95">
+                Resolve
+              </button>
             )}
-          </button>
+          </div>
         ))}
       </div>
       {zoom && (
-        <PhotoZoomViewer photos={photos} initialUrl={zoom.public_url} onClose={() => setZoom(null)} />
+        <PhotoZoomViewer photos={photos} initialUrl={zoom.public_url}
+          onClose={() => setZoom(null)}
+          onResolveCurrent={onResolve && isDamage ? (p) => { onResolve(p); setZoom(null); } : null} />
       )}
     </div>
   );
@@ -8863,12 +9306,14 @@ function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenMess
       if (cancelled) return;
 
       // Separately: which days in this window have damage photos? One query, ID-only.
-      // We get all damage photos created in the window, then map their task → shift → date.
-      // This is far lighter than nesting on the main shifts query.
+      // We get all UNRESOLVED damage photos created in the window, then
+      // map their task → shift → date. Resolved damage doesn't contribute
+      // to the red dot on the calendar.
       const { data: damagePhotos } = await supabase
         .from('photos')
-        .select('task_id, tasks!inner(shift_id, work_block_id, shifts(start_time), work_blocks(shift_id, shifts(start_time)))')
-        .eq('kind', 'damage');
+        .select('task_id, resolved_at, tasks!inner(shift_id, work_block_id, shifts(start_time), work_blocks(shift_id, shifts(start_time)))')
+        .eq('kind', 'damage')
+        .is('resolved_at', null);
       if (cancelled) return;
 
       // Build a set of date keys that have at least one damage photo

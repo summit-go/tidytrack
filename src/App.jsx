@@ -9499,24 +9499,23 @@ function PortalUnitDay({ property, unitId, date, portalUser, onBack }) {
                     onReopen={(p) => setPhotoResolution(p, false)}
                   />
                 )}
-                {/* 3-column side-by-side layout: Before | After | Damage.
-                   Each column is its own PortalPhotoSection but uses a
-                   compact thumbnail grid so multiple photos fit per
-                   column without dominating the screen. */}
+                {/* 3-column side-by-side layout on desktop, stacked on
+                   mobile. Each child uses `compact` so its inner thumbnail
+                   grid adapts to the available width. */}
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                  <PortalPhotoSection label="Before" photos={buckets.before}
+                  <PortalPhotoSection label="Before" photos={buckets.before} compact
                     selectMode={selectMode} selectedIds={selectedIds} onToggleSelect={toggleSelectOne} />
-                  <PortalPhotoSection label="After" photos={buckets.after}
+                  <PortalPhotoSection label="After" photos={buckets.after} compact
                     selectMode={selectMode} selectedIds={selectedIds} onToggleSelect={toggleSelectOne} />
                   {buckets.damage.length > 0 ? (
                     <PortalPhotoSection
-                      label="Active damage" photos={buckets.damage} highlight="red"
+                      label="Active damage" photos={buckets.damage} highlight="red" compact
                       description="Tap to resolve."
                       onResolve={(p) => setPhotoResolution(p, true)}
                       selectMode={selectMode} selectedIds={selectedIds} onToggleSelect={toggleSelectOne}
                     />
                   ) : (
-                    <PortalPhotoSection label="Damage" photos={[]} highlight="red" />
+                    <PortalPhotoSection label="Damage" photos={[]} highlight="red" compact />
                   )}
                 </div>
               </div>
@@ -9654,9 +9653,18 @@ function ResolvedDamageHistory({ photos, onReopen }) {
   );
 }
 
-function PortalPhotoSection({ label, photos, highlight, description, onResolve, selectMode, selectedIds, onToggleSelect }) {
+function PortalPhotoSection({ label, photos, highlight, description, onResolve, selectMode, selectedIds, onToggleSelect, compact }) {
   const [zoom, setZoom] = useState(null);
   const isDamage = highlight === 'red';
+  // `compact` is set when this section sits inside a 3-column side-by-side
+  // wrapper (by-section view: Before | After | Damage). The inner grid
+  // adapts to whatever width the parent gives us:
+  //   - compact + phone (outer collapses to 1 col, full width): 4 cols inside
+  //   - compact + desktop (outer is 3 cols, ~200px each): 2 cols inside
+  //   - non-compact (standalone full-width "All photos" mode): 3/4 cols
+  const innerGridClass = compact
+    ? 'grid grid-cols-4 sm:grid-cols-2 gap-1.5'
+    : 'grid grid-cols-3 sm:grid-cols-4 gap-2';
   if (photos.length === 0) {
     return (
       <div>
@@ -9694,9 +9702,7 @@ function PortalPhotoSection({ label, photos, highlight, description, onResolve, 
         <span className="text-[10px] font-mono text-stone-500">{photos.length}</span>
       </div>
       {description && <p className="text-xs text-stone-600 mb-2">{description}</p>}
-      {/* Compact grid: more thumbs per row so PMs see more at once.
-         4 cols on mobile, 5-6 on larger screens. */}
-      <div className="grid grid-cols-4 sm:grid-cols-5 md:grid-cols-6 gap-1.5">
+      <div className={innerGridClass}>
         {photos.map(p => {
           const isSelected = selectMode && selectedIds && selectedIds.has(p.id);
           return (

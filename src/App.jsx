@@ -58,6 +58,12 @@ const SUPPORTED_TRANSLATE_LANGUAGES = [
 // pipeline and the Translate button on assignments. When false, all translation
 // UI is hidden and no API calls are made (regardless of the API key).
 const TRANSLATION_ENABLED = false;
+// Text-only translation for short content (cleaner notes, task names).
+// This is independent from TRANSLATION_ENABLED (which gates the full
+// PDF/image document translation pipeline that's currently dormant).
+// Text translation is cheap and useful so it's on by default; gates
+// downstream still check for a valid API key.
+const TEXT_TRANSLATION_ENABLED = true;
 
 const isTranslateConfigured = () =>
   TRANSLATION_ENABLED &&
@@ -65,10 +71,18 @@ const isTranslateConfigured = () =>
   GOOGLE_TRANSLATE_API_KEY !== 'PASTE_YOUR_GOOGLE_TRANSLATE_KEY_HERE' &&
   GOOGLE_TRANSLATE_API_KEY.length > 10;
 
+// Lighter gate for short-text translation. Doesn't require the master
+// document-translation flag, but still needs a real API key.
+const isTextTranslateConfigured = () =>
+  TEXT_TRANSLATION_ENABLED &&
+  GOOGLE_TRANSLATE_API_KEY &&
+  GOOGLE_TRANSLATE_API_KEY !== 'PASTE_YOUR_GOOGLE_TRANSLATE_KEY_HERE' &&
+  GOOGLE_TRANSLATE_API_KEY.length > 10;
+
 // Translate one or more strings via Google Cloud Translation API v2.
 // Returns array of { translatedText, detectedSourceLanguage } in the same order.
 async function translateText(strings, targetLang) {
-  if (!isTranslateConfigured()) throw new Error('Translation is not configured.');
+  if (!isTextTranslateConfigured()) throw new Error('Translation is not configured.');
   const inputs = (Array.isArray(strings) ? strings : [strings]).filter(s => s && s.trim());
   if (inputs.length === 0) return [];
   const url = `https://translation.googleapis.com/language/translate/v2?key=${GOOGLE_TRANSLATE_API_KEY}`;
@@ -931,6 +945,82 @@ function AddressLink({ address, icon = 'pin', className = '' }) {
       title="Open in maps">
       {icon === 'pin' && <MapPin size={11} className="flex-shrink-0" />}
       <span className="truncate">{address}</span>
+    </span>
+  );
+}
+
+// =================================================================
+// TRANSLATABLE TEXT — wraps a text snippet (work notes, task name,
+// etc) with a small inline translate toggle. Defaults to showing
+// original; user taps "Translate" to fetch translation via Google
+// Cloud Translate. Caches result in component state so toggling
+// back is free. Gracefully hides the button if translation isn't
+// configured.
+// Props:
+//   text: the original string
+//   targetLang: 'en' | 'es' (the language to translate INTO when tapped)
+//   className: classes for the wrapping text span
+// =================================================================
+function TranslatableText({ text, targetLang = 'en', className = '' }) {
+  const [translated, setTranslated] = useState(null); // { text, sourceLang } | null
+  const [showTranslation, setShowTranslation] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+
+  if (!text || !text.trim()) return null;
+  const canTranslate = isTextTranslateConfigured();
+
+  const onToggle = async () => {
+    setError(null);
+    if (translated) {
+      // Already fetched — just flip the view
+      setShowTranslation(s => !s);
+      return;
+    }
+    setBusy(true);
+    try {
+      const results = await translateText([text], targetLang);
+      const first = results[0];
+      if (!first) throw new Error('No translation returned.');
+      // If detected source matches target, the translation is the same as original.
+      // Inform the user rather than showing identical text.
+      if (first.detectedSourceLanguage === targetLang) {
+        setError(`This text is already in ${targetLang === 'en' ? 'English' : 'Spanish'}.`);
+        setBusy(false);
+        return;
+      }
+      setTranslated({ text: first.translatedText, sourceLang: first.detectedSourceLanguage });
+      setShowTranslation(true);
+    } catch (e) {
+      setError(e.message || 'Translation failed.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const visibleText = showTranslation && translated ? translated.text : text;
+  const sourceLangLabel = translated?.sourceLang === 'es' ? 'Spanish' :
+                          translated?.sourceLang === 'en' ? 'English' :
+                          translated?.sourceLang || 'original';
+
+  return (
+    <span className={className}>
+      <span>{visibleText}</span>
+      {canTranslate && (
+        <button onClick={onToggle} disabled={busy} type="button"
+          className="ml-1.5 inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-stone-100 hover:bg-stone-200 text-stone-600 text-[9px] font-mono uppercase tracking-wider align-middle disabled:opacity-50">
+          <Languages size={9} />
+          {busy ? '…' :
+            showTranslation
+              ? `Show ${sourceLangLabel}`
+              : translated
+                ? `Show ${targetLang === 'en' ? 'English' : 'Spanish'}`
+                : `Translate`}
+        </button>
+      )}
+      {error && (
+        <span className="ml-1.5 text-[9px] font-mono text-amber-700 italic">({error})</span>
+      )}
     </span>
   );
 }
@@ -4144,7 +4234,7 @@ function TaskDetail({ task, compact }) {
       <div className="flex items-start justify-between mb-2">
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
-            <div className="font-serif text-base text-stone-900">{task.name}</div>
+            <div className="font-serif text-base text-stone-900"><TranslatableText text={task.name} targetLang="en" /></div>
             {damage.length > 0 && (
               <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-red-100 text-red-700">
                 ⚠ Damage reported
@@ -8408,6 +8498,7 @@ function PortalUnitDay({ property, unitId, date, onBack }) {
   const [unit, setUnit] = useState(null);
   const [blocks, setBlocks] = useState([]);
   const [loaded, setLoaded] = useState(false);
+  const [viewMode, setViewMode] = useState('all'); // 'all' | 'by-section'
 
   useEffect(() => { (async () => {
     setLoaded(false);
@@ -8506,16 +8597,84 @@ function PortalUnitDay({ property, unitId, date, onBack }) {
       </div>
 
       <div className="px-5 pt-6 space-y-6">
-        {allDamage.length > 0 && (
-          <PortalPhotoSection
-            label="Damage report"
-            photos={allDamage}
-            highlight="red"
-            description="Issues identified during cleaning. Please review."
-          />
+        {/* View mode toggle — only show when there are multiple sub-sections to group by */}
+        {(() => {
+          const hasMultipleSections = new Set(
+            [...allBefore, ...allAfter, ...allDamage]
+              .map(p => p.partyLabel || '__noparty__')
+          ).size > 1;
+          if (!hasMultipleSections) return null;
+          return (
+            <div className="flex items-center gap-1 p-1 bg-stone-100 rounded-xl">
+              <button onClick={() => setViewMode('all')}
+                className={`flex-1 py-2 px-3 rounded-lg text-xs font-medium transition-colors ${viewMode === 'all' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+                All photos
+              </button>
+              <button onClick={() => setViewMode('by-section')}
+                className={`flex-1 py-2 px-3 rounded-lg text-xs font-medium transition-colors ${viewMode === 'by-section' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+                By sub-section
+              </button>
+            </div>
+          );
+        })()}
+
+        {viewMode === 'all' ? (
+          <>
+            {allDamage.length > 0 && (
+              <PortalPhotoSection
+                label="Damage report"
+                photos={allDamage}
+                highlight="red"
+                description="Issues identified during cleaning. Please review."
+              />
+            )}
+            <PortalPhotoSection label="Before cleaning" photos={allBefore} />
+            <PortalPhotoSection label="After cleaning"  photos={allAfter} />
+          </>
+        ) : (
+          // BY-SECTION MODE — bucket photos by partyLabel, then within each
+          // section show Before / After / Damage subsections.
+          (() => {
+            const sectionMap = new Map();
+            const allPhotos = [...allBefore, ...allAfter, ...allDamage];
+            allPhotos.forEach(p => {
+              const key = p.partyLabel || 'Other';
+              if (!sectionMap.has(key)) sectionMap.set(key, { before: [], after: [], damage: [] });
+              const bucket = sectionMap.get(key);
+              if (p.kind === 'before') bucket.before.push(p);
+              else if (p.kind === 'after') bucket.after.push(p);
+              else if (p.kind === 'damage') bucket.damage.push(p);
+            });
+            // Order: alphabetical by section label, but keep "Other" last
+            const sorted = Array.from(sectionMap.entries()).sort(([a], [b]) => {
+              if (a === 'Other') return 1;
+              if (b === 'Other') return -1;
+              return a.localeCompare(b);
+            });
+            return sorted.map(([sectionLabel, buckets]) => (
+              <div key={sectionLabel} className="p-4 rounded-2xl bg-white border border-stone-200 space-y-4">
+                <div className="flex items-baseline justify-between pb-2 border-b border-stone-200">
+                  <h2 className="font-serif text-2xl text-stone-900">{sectionLabel}</h2>
+                  <span className="text-[11px] font-mono text-stone-500">
+                    {buckets.before.length + buckets.after.length + buckets.damage.length} photos
+                  </span>
+                </div>
+                {buckets.damage.length > 0 && (
+                  <PortalPhotoSection
+                    label="Damage" photos={buckets.damage} highlight="red"
+                    description="Issues identified during cleaning."
+                  />
+                )}
+                {buckets.before.length > 0 && (
+                  <PortalPhotoSection label="Before" photos={buckets.before} />
+                )}
+                {buckets.after.length > 0 && (
+                  <PortalPhotoSection label="After" photos={buckets.after} />
+                )}
+              </div>
+            ));
+          })()
         )}
-        <PortalPhotoSection label="Before cleaning" photos={allBefore} />
-        <PortalPhotoSection label="After cleaning"  photos={allAfter} />
 
         {/* Per-party breakdown (no cleaner names — only labels and notes) */}
         {blocks.length > 0 && blocks.some(b => b.party || b.tasks?.length) && (
@@ -8530,12 +8689,15 @@ function PortalUnitDay({ property, unitId, date, onBack }) {
                     </div>
                   )}
                   {b.work_notes && (
-                    <div className="text-sm text-stone-600 italic mb-2">"{b.work_notes}"</div>
+                    <div className="text-sm text-stone-600 italic mb-2">
+                      "<TranslatableText text={b.work_notes} targetLang="en" />"
+                    </div>
                   )}
                   {b.tasks?.length > 0 && (
                     <ul className="text-sm text-stone-700 space-y-0.5">
                       {b.tasks.map(t => <li key={t.id} className="flex items-center gap-2">
-                        <Check size={12} className="text-emerald-600 flex-shrink-0" /> {t.name}
+                        <Check size={12} className="text-emerald-600 flex-shrink-0" />
+                        <TranslatableText text={t.name} targetLang="en" />
                       </li>)}
                     </ul>
                   )}
@@ -8566,6 +8728,21 @@ function PortalPhotoSection({ label, photos, highlight, description }) {
       </div>
     );
   }
+  // Determine the badge to put on each thumbnail based on the photo's kind.
+  // Falls back to the section label so older photos without a `kind` still
+  // tag correctly visually.
+  const kindBadge = (p) => {
+    const k = p.kind || (label.toLowerCase().includes('before') ? 'before' :
+                        label.toLowerCase().includes('after') ? 'after' :
+                        label.toLowerCase().includes('damage') ? 'damage' : null);
+    if (!k) return null;
+    const bg = k === 'damage' ? 'bg-red-600' : k === 'before' ? 'bg-blue-600' : k === 'after' ? 'bg-emerald-600' : 'bg-stone-700';
+    return (
+      <span className={`absolute top-1 left-1 px-1.5 py-0.5 rounded text-white text-[9px] font-mono uppercase tracking-wider ${bg}/90`}>
+        {k}
+      </span>
+    );
+  };
   return (
     <div>
       <div className={`flex items-baseline justify-between mb-3 ${isDamage ? 'pb-2 border-b-2 border-red-200' : ''}`}>
@@ -8578,8 +8755,14 @@ function PortalPhotoSection({ label, photos, highlight, description }) {
       <div className="grid grid-cols-3 sm:grid-cols-4 gap-2">
         {photos.map(p => (
           <button key={p.id} onClick={() => setZoom(p)}
-            className={`aspect-square rounded-lg overflow-hidden ${isDamage ? 'ring-2 ring-red-400' : ''}`}>
+            className={`relative aspect-square rounded-lg overflow-hidden ${isDamage ? 'ring-2 ring-red-400' : ''}`}>
             <img loading="lazy" src={p.public_url} alt="" className="w-full h-full object-cover" />
+            {kindBadge(p)}
+            {p.partyLabel && (
+              <span className="absolute bottom-1 left-1 right-1 px-1.5 py-0.5 rounded bg-black/70 text-white text-[9px] font-mono truncate">
+                {p.partyLabel}
+              </span>
+            )}
           </button>
         ))}
       </div>
@@ -9345,14 +9528,16 @@ function BedroomHistoryView({ propertyId, propertyName, unitId, unitLabel, party
                             </div>
                           </div>
                           {b.work_notes && (
-                            <div className="text-xs text-stone-600 italic pl-5 mb-2">"{b.work_notes}"</div>
+                            <div className="text-xs text-stone-600 italic pl-5 mb-2">
+                              "<TranslatableText text={b.work_notes} targetLang="en" />"
+                            </div>
                           )}
                           {b.tasks?.length > 0 && (
                             <div className="pl-5 space-y-1.5">
                               {b.tasks.map(t => (
                                 <div key={t.id} className="text-xs text-stone-700 flex items-start gap-1.5">
                                   {t.end_time ? <Check size={11} className="text-emerald-600 mt-0.5 flex-shrink-0" /> : <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse mt-1 flex-shrink-0" />}
-                                  <span className="flex-1">{t.name}</span>
+                                  <span className="flex-1"><TranslatableText text={t.name} targetLang="en" /></span>
                                   {t.photos?.length > 0 && (
                                     <span className="text-[10px] font-mono text-stone-400">{t.photos.length} 📷</span>
                                   )}
@@ -9583,7 +9768,9 @@ function DailyUnitDayDetail({ date, propertyId, unitId, unitLabel, propertyName,
                           </div>
                         </div>
                         {b.work_notes && (
-                          <div className="text-xs text-stone-600 italic mb-2 pl-5">"{b.work_notes}"</div>
+                          <div className="text-xs text-stone-600 italic mb-2 pl-5">
+                            "<TranslatableText text={b.work_notes} targetLang="en" />"
+                          </div>
                         )}
                         {b.tasks?.length > 0 && (
                           <div className="pl-5 space-y-2">

@@ -6,7 +6,7 @@ import {
   Briefcase, Delete, AlertCircle, UserPlus, Building2,
   Trash2, Eye, EyeOff, LayoutDashboard, FileText, DollarSign,
   Home, Layers, User, Edit2, Copy, Printer, Calendar, HelpCircle,
-  MessageCircle, Settings, Languages, Menu
+  MessageCircle, Settings, Languages, Menu, Square, Share2
 } from 'lucide-react';
 
 // =================================================================
@@ -3643,12 +3643,29 @@ function ShiftList({ shifts, showMoney, onOpen }) {
 
 // New: groups all work into Property → Unit → Party rows showing who worked it and for how long
 function GroupedByPartyView({ shifts, showMoney, onOpenShift }) {
+  // Multi-select property filter — narrows the list to just the
+  // properties the user wants to see. Defaults to "all" (empty filter
+  // means "show everything").
+  const [selectedProperties, setSelectedProperties] = useState(new Set());
+  const [filterOpen, setFilterOpen] = useState(false);
+  const filterRef = useRef(null);
+
+  // Click-outside to close the filter dropdown
+  useEffect(() => {
+    if (!filterOpen) return;
+    const onClick = (e) => {
+      if (filterRef.current && !filterRef.current.contains(e.target)) setFilterOpen(false);
+    };
+    document.addEventListener('mousedown', onClick);
+    return () => document.removeEventListener('mousedown', onClick);
+  }, [filterOpen]);
+
   // Flatten every work_block from every shift into a list, plus simple-property shifts as standalone rows
-  const rows = [];
+  const allRows = [];
   shifts.forEach(s => {
     if (s.customer?.property_type === 'multi_unit' && s.work_blocks?.length) {
       s.work_blocks.forEach(b => {
-        rows.push({
+        allRows.push({
           kind: 'block',
           shift: s,
           block: b,
@@ -3662,7 +3679,7 @@ function GroupedByPartyView({ shifts, showMoney, onOpenShift }) {
         });
       });
     } else {
-      rows.push({
+      allRows.push({
         kind: 'shift',
         shift: s,
         property: s.customer?.name || 'No property',
@@ -3675,6 +3692,24 @@ function GroupedByPartyView({ shifts, showMoney, onOpenShift }) {
       });
     }
   });
+
+  // All property names that appear in the period (for the filter dropdown)
+  const allPropertyNames = [...new Set(allRows.map(r => r.property))].sort();
+  // Apply filter — empty set means "show everything"
+  const rows = selectedProperties.size === 0
+    ? allRows
+    : allRows.filter(r => selectedProperties.has(r.property));
+
+  const toggleProperty = (name) => {
+    setSelectedProperties(prev => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+  };
+  const clearFilter = () => setSelectedProperties(new Set());
+  const selectAll = () => setSelectedProperties(new Set(allPropertyNames));
 
   // Group by property + unit + party
   const groups = {};
@@ -3697,12 +3732,80 @@ function GroupedByPartyView({ shifts, showMoney, onOpenShift }) {
   });
 
   const propertyNames = Object.keys(byProperty).sort();
+  const isFiltered = selectedProperties.size > 0;
+  const filterLabel = !isFiltered
+    ? `All ${allPropertyNames.length} ${allPropertyNames.length === 1 ? 'property' : 'properties'}`
+    : selectedProperties.size === 1
+      ? Array.from(selectedProperties)[0]
+      : `${selectedProperties.size} of ${allPropertyNames.length} properties`;
+
+  // Filter dropdown (reused in both empty + populated states)
+  const filterDropdown = (
+    <div className="relative" ref={filterRef}>
+      <button onClick={() => setFilterOpen(o => !o)}
+        className={`w-full flex items-center justify-between gap-2 px-3 py-2.5 rounded-xl border ${isFiltered ? 'bg-amber-50 border-amber-300 text-amber-900' : 'bg-white border-stone-300 text-stone-700'} hover:border-stone-500 transition-colors`}>
+        <div className="flex items-center gap-2 min-w-0">
+          <Building2 size={14} className="flex-shrink-0" />
+          <span className="text-sm font-medium truncate">{filterLabel}</span>
+        </div>
+        <div className="flex items-center gap-2 flex-shrink-0">
+          {isFiltered && (
+            <span onClick={(e) => { e.stopPropagation(); clearFilter(); }}
+              className="text-[10px] uppercase tracking-wider font-mono text-amber-700 hover:text-amber-900 cursor-pointer">
+              Clear
+            </span>
+          )}
+          <ChevronRight size={14} className={`text-stone-400 transition-transform ${filterOpen ? 'rotate-90' : ''}`} />
+        </div>
+      </button>
+      {filterOpen && (
+        <div className="absolute top-full left-0 right-0 mt-1 z-30 bg-white border border-stone-200 rounded-xl shadow-lg max-h-80 overflow-y-auto">
+          <div className="p-2 sticky top-0 bg-white border-b border-stone-100 flex items-center justify-between">
+            <span className="text-[10px] uppercase tracking-wider font-mono text-stone-500">Pick properties to show</span>
+            <div className="flex items-center gap-1.5">
+              <button onClick={selectAll}
+                className="text-[10px] uppercase tracking-wider font-mono text-stone-600 hover:text-stone-900">
+                All
+              </button>
+              <span className="text-stone-300">·</span>
+              <button onClick={clearFilter}
+                className="text-[10px] uppercase tracking-wider font-mono text-stone-600 hover:text-stone-900">
+                None
+              </button>
+            </div>
+          </div>
+          {allPropertyNames.length === 0 ? (
+            <div className="px-3 py-4 text-center text-xs text-stone-400 italic">No properties to filter.</div>
+          ) : (
+            allPropertyNames.map(name => {
+              const checked = selectedProperties.has(name);
+              return (
+                <label key={name}
+                  className={`flex items-center gap-2 px-3 py-2.5 cursor-pointer hover:bg-stone-50 ${checked ? 'bg-amber-50' : ''}`}>
+                  <input type="checkbox" checked={checked} onChange={() => toggleProperty(name)}
+                    className="w-4 h-4 flex-shrink-0 accent-amber-700" />
+                  <span className="text-sm text-stone-900 truncate">{name}</span>
+                </label>
+              );
+            })
+          )}
+        </div>
+      )}
+    </div>
+  );
 
   if (propertyNames.length === 0) {
+    // Could be "no work at all" OR "filter excludes everything in scope"
     return (
-      <div className="px-5">
+      <div className="px-5 space-y-4">
+        {allPropertyNames.length > 0 && filterDropdown}
         <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
-          No work in this period.
+          {isFiltered
+            ? <>No work in this period for the {selectedProperties.size === 1 ? 'selected property' : 'selected properties'}.<br/>
+                <button onClick={clearFilter} className="text-amber-700 hover:text-amber-900 underline mt-2 inline-block">
+                  Clear filter to see all
+                </button></>
+            : 'No work in this period.'}
         </div>
       </div>
     );
@@ -3710,6 +3813,13 @@ function GroupedByPartyView({ shifts, showMoney, onOpenShift }) {
 
   return (
     <div className="px-5 space-y-6">
+      {/* Property filter dropdown — only shown when there's more than one
+         property in the period (no point filtering with just one). */}
+      {allPropertyNames.length > 1 && (
+        <div className="-mt-2">
+          {filterDropdown}
+        </div>
+      )}
       {propertyNames.map(propName => {
         const propGroups = byProperty[propName];
         const propTotalMs = propGroups.reduce((sum, g) =>
@@ -4617,6 +4727,102 @@ function PhotoColumn({ label, photos, highlight }) {
       )}
     </div>
   );
+}
+
+// =================================================================
+// PHOTO FILENAME + DOWNLOAD/SHARE HELPERS
+// =================================================================
+
+// Build a friendly, tagged filename for a single photo.
+// Combines property/unit, party (bedroom), task name, and kind into
+// a clean filename. e.g. "B1-204_Bedroom-4_tub_before.jpg".
+// Sanitizes whitespace and unsafe characters.
+function photoFilename(photo, context = {}) {
+  const sanitize = (s) => String(s || '')
+    .normalize('NFKD').replace(/[\u0300-\u036f]/g, '')   // strip accents
+    .replace(/[^a-zA-Z0-9\-_]+/g, '-')                    // non-safe → hyphen
+    .replace(/-+/g, '-')                                   // collapse hyphens
+    .replace(/^-|-$/g, '');                                // trim hyphens
+  const parts = [];
+  if (context.unitLabel) parts.push(sanitize(context.unitLabel));
+  else if (context.propertyName) parts.push(sanitize(context.propertyName));
+  if (photo.partyLabel || context.partyLabel) parts.push(sanitize(photo.partyLabel || context.partyLabel));
+  if (photo.taskName || context.taskName) parts.push(sanitize(photo.taskName || context.taskName));
+  if (photo.kind) parts.push(photo.kind);
+  // Date fallback if we have no other context
+  if (parts.length === 0 && context.date) parts.push(context.date);
+  if (parts.length === 0) parts.push('photo');
+  // Best-effort extension from URL or default to jpg
+  let ext = 'jpg';
+  const m = (photo.public_url || '').match(/\.([a-zA-Z0-9]{3,4})(?:\?|$)/);
+  if (m) ext = m[1].toLowerCase();
+  return `${parts.join('_')}.${ext}`;
+}
+
+// Download a single photo with its tagged filename. Uses fetch + blob
+// so we can rename it (a plain <a download> doesn't always rename
+// cross-origin photos).
+async function downloadPhoto(photo, context) {
+  const filename = photoFilename(photo, context);
+  try {
+    const resp = await fetch(photo.public_url);
+    if (!resp.ok) throw new Error(`Fetch failed: ${resp.status}`);
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+    return true;
+  } catch (e) {
+    console.error('[downloadPhoto] failed', e);
+    return false;
+  }
+}
+
+// Download multiple photos sequentially (each with its own filename).
+async function downloadPhotos(photos, contextFn) {
+  for (let i = 0; i < photos.length; i++) {
+    const ctx = typeof contextFn === 'function' ? contextFn(photos[i]) : contextFn;
+    await downloadPhoto(photos[i], ctx);
+    // Small delay between downloads so browsers don't drop them
+    if (i < photos.length - 1) await new Promise(r => setTimeout(r, 300));
+  }
+}
+
+// Check whether the Web Share API supports sharing files
+function canShareFiles() {
+  return typeof navigator !== 'undefined' &&
+    typeof navigator.canShare === 'function' &&
+    typeof navigator.share === 'function';
+}
+
+// Share photos via native share sheet. Returns true on success,
+// false if not supported or user cancelled.
+async function sharePhotos(photos, contextFn) {
+  if (!canShareFiles()) return false;
+  try {
+    const files = [];
+    for (const p of photos) {
+      const ctx = typeof contextFn === 'function' ? contextFn(p) : contextFn;
+      const filename = photoFilename(p, ctx);
+      const resp = await fetch(p.public_url);
+      if (!resp.ok) continue;
+      const blob = await resp.blob();
+      files.push(new File([blob], filename, { type: blob.type || 'image/jpeg' }));
+    }
+    if (files.length === 0) return false;
+    if (!navigator.canShare({ files })) return false;
+    await navigator.share({ files, title: 'Cleaning photos' });
+    return true;
+  } catch (e) {
+    if (e.name === 'AbortError') return true; // User cancelled — not an error
+    console.error('[sharePhotos] failed', e);
+    return false;
+  }
 }
 
 // Photo viewer that lets you swipe through all photos in a bucket
@@ -8993,6 +9199,21 @@ function PortalUnitDay({ property, unitId, date, portalUser, onBack }) {
   const [blocks, setBlocks] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [viewMode, setViewMode] = useState('all'); // 'all' | 'by-section'
+  // Selection mode lets the PM check photos and bulk-download or share
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState(new Set());
+  const [bulkBusy, setBulkBusy] = useState(false);
+
+  const toggleSelectOne = (photoId) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(photoId)) next.delete(photoId);
+      else next.add(photoId);
+      return next;
+    });
+  };
+  const clearSelection = () => setSelectedIds(new Set());
+  const exitSelectMode = () => { setSelectMode(false); setSelectedIds(new Set()); };
 
   useEffect(() => { (async () => {
     setLoaded(false);
@@ -9062,6 +9283,39 @@ function PortalUnitDay({ property, unitId, date, portalUser, onBack }) {
     }
   })));
 
+  // Build a flat lookup so the toolbar can find selected photos and
+  // their context for download/share filename tagging.
+  const allPhotos = [...allBefore, ...allAfter, ...allDamageActive, ...allDamageResolved];
+  const photoContext = (p) => ({
+    propertyName: property.name,
+    unitLabel: unit?.label || null,
+    partyLabel: p.partyLabel,
+    taskName: p.taskName,
+    date,
+  });
+  const getSelectedPhotos = () => allPhotos.filter(p => selectedIds.has(p.id));
+
+  const handleBulkDownload = async () => {
+    const sel = getSelectedPhotos();
+    if (sel.length === 0) return;
+    setBulkBusy(true);
+    await downloadPhotos(sel, (p) => photoContext(p));
+    setBulkBusy(false);
+  };
+
+  const handleBulkShare = async () => {
+    const sel = getSelectedPhotos();
+    if (sel.length === 0) return;
+    setBulkBusy(true);
+    const ok = await sharePhotos(sel, (p) => photoContext(p));
+    setBulkBusy(false);
+    if (!ok && canShareFiles()) {
+      alert('Share didn\'t complete. You can try Download instead.');
+    } else if (!ok && !canShareFiles()) {
+      alert('Share isn\'t available on this device — please use Download.');
+    }
+  };
+
   // Local mutation helper — flip a photo's resolved state and re-fetch
   // (cheap reload to keep state in sync).
   const setPhotoResolution = async (photo, resolve) => {
@@ -9127,18 +9381,22 @@ function PortalUnitDay({ property, unitId, date, portalUser, onBack }) {
       </div>
 
       <div className="px-5 pt-6 space-y-6">
-        {/* View mode toggle — always visible so PMs can switch even when
-           the day looks like one section. Removes ambiguity about whether
-           the toggle "should" be there. In edge cases (one task only) both
-           modes will look similar; that's expected. */}
-        <div className="flex items-center gap-1 p-1 bg-stone-100 rounded-xl">
-          <button onClick={() => setViewMode('all')}
-            className={`flex-1 py-2 px-3 rounded-lg text-xs font-medium transition-colors ${viewMode === 'all' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
-            All photos
-          </button>
-          <button onClick={() => setViewMode('by-section')}
-            className={`flex-1 py-2 px-3 rounded-lg text-xs font-medium transition-colors ${viewMode === 'by-section' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
-            By section
+        {/* View mode toggle + Select button on the same row */}
+        <div className="flex items-center gap-2">
+          <div className="flex-1 flex items-center gap-1 p-1 bg-stone-100 rounded-xl">
+            <button onClick={() => setViewMode('all')}
+              className={`flex-1 py-2 px-3 rounded-lg text-xs font-medium transition-colors ${viewMode === 'all' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+              All photos
+            </button>
+            <button onClick={() => setViewMode('by-section')}
+              className={`flex-1 py-2 px-3 rounded-lg text-xs font-medium transition-colors ${viewMode === 'by-section' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+              By section
+            </button>
+          </div>
+          <button onClick={() => { setSelectMode(s => !s); setSelectedIds(new Set()); }}
+            className={`px-3 py-2 rounded-xl text-xs font-medium flex items-center gap-1.5 flex-shrink-0 transition-colors ${selectMode ? 'bg-stone-900 text-stone-50' : 'bg-stone-100 text-stone-700 hover:bg-stone-200'}`}>
+            {selectMode ? <Check size={14} /> : <Square size={14} />}
+            {selectMode ? 'Done' : 'Select'}
           </button>
         </div>
 
@@ -9151,6 +9409,7 @@ function PortalUnitDay({ property, unitId, date, portalUser, onBack }) {
                 highlight="red"
                 description="Issues identified during cleaning. Tap a photo to resolve."
                 onResolve={(p) => setPhotoResolution(p, true)}
+                selectMode={selectMode} selectedIds={selectedIds} onToggleSelect={toggleSelectOne}
               />
             )}
             {allDamageResolved.length > 0 && (
@@ -9159,8 +9418,10 @@ function PortalUnitDay({ property, unitId, date, portalUser, onBack }) {
                 onReopen={(p) => setPhotoResolution(p, false)}
               />
             )}
-            <PortalPhotoSection label="Before cleaning" photos={allBefore} />
-            <PortalPhotoSection label="After cleaning"  photos={allAfter} />
+            <PortalPhotoSection label="Before cleaning" photos={allBefore}
+              selectMode={selectMode} selectedIds={selectedIds} onToggleSelect={toggleSelectOne} />
+            <PortalPhotoSection label="After cleaning"  photos={allAfter}
+              selectMode={selectMode} selectedIds={selectedIds} onToggleSelect={toggleSelectOne} />
           </>
         ) : (
           // BY-SECTION MODE — bucket photos by the most specific identifier
@@ -9232,25 +9493,32 @@ function PortalUnitDay({ property, unitId, date, portalUser, onBack }) {
                     {buckets.before.length + buckets.after.length + buckets.damage.length + buckets.damageResolved.length} photos
                   </span>
                 </div>
-                {buckets.damage.length > 0 && (
-                  <PortalPhotoSection
-                    label="Active damage" photos={buckets.damage} highlight="red"
-                    description="Tap a photo to resolve."
-                    onResolve={(p) => setPhotoResolution(p, true)}
-                  />
-                )}
                 {buckets.damageResolved.length > 0 && (
                   <ResolvedDamageHistory
                     photos={buckets.damageResolved}
                     onReopen={(p) => setPhotoResolution(p, false)}
                   />
                 )}
-                {buckets.before.length > 0 && (
-                  <PortalPhotoSection label="Before" photos={buckets.before} />
-                )}
-                {buckets.after.length > 0 && (
-                  <PortalPhotoSection label="After" photos={buckets.after} />
-                )}
+                {/* 3-column side-by-side layout: Before | After | Damage.
+                   Each column is its own PortalPhotoSection but uses a
+                   compact thumbnail grid so multiple photos fit per
+                   column without dominating the screen. */}
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <PortalPhotoSection label="Before" photos={buckets.before}
+                    selectMode={selectMode} selectedIds={selectedIds} onToggleSelect={toggleSelectOne} />
+                  <PortalPhotoSection label="After" photos={buckets.after}
+                    selectMode={selectMode} selectedIds={selectedIds} onToggleSelect={toggleSelectOne} />
+                  {buckets.damage.length > 0 ? (
+                    <PortalPhotoSection
+                      label="Active damage" photos={buckets.damage} highlight="red"
+                      description="Tap to resolve."
+                      onResolve={(p) => setPhotoResolution(p, true)}
+                      selectMode={selectMode} selectedIds={selectedIds} onToggleSelect={toggleSelectOne}
+                    />
+                  ) : (
+                    <PortalPhotoSection label="Damage" photos={[]} highlight="red" />
+                  )}
+                </div>
               </div>
             ));
           })()
@@ -9292,7 +9560,44 @@ function PortalUnitDay({ property, unitId, date, portalUser, onBack }) {
             No photos recorded for this date.
           </div>
         )}
+
+        {/* Bottom spacer when select mode is active so the toolbar doesn't
+           cover content */}
+        {selectMode && <div className="h-20" />}
       </div>
+
+      {/* Selection toolbar pinned to the bottom while select mode is on */}
+      {selectMode && (
+        <div className="fixed bottom-0 left-0 right-0 z-40 bg-stone-900 text-stone-50 shadow-2xl"
+          style={{ paddingBottom: 'max(0.75rem, env(safe-area-inset-bottom))' }}>
+          <div className="px-4 py-3 max-w-2xl mx-auto flex items-center gap-2">
+            <div className="flex-1 min-w-0">
+              <div className="text-xs font-mono uppercase tracking-wider text-stone-400">Selected</div>
+              <div className="text-base font-medium">{selectedIds.size} {selectedIds.size === 1 ? 'photo' : 'photos'}</div>
+            </div>
+            <button onClick={clearSelection} disabled={selectedIds.size === 0 || bulkBusy}
+              className="px-3 py-2 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-50 text-xs font-mono disabled:opacity-40">
+              Clear
+            </button>
+            <button onClick={handleBulkDownload} disabled={selectedIds.size === 0 || bulkBusy}
+              className="px-3 py-2 rounded-full bg-amber-600 hover:bg-amber-700 text-white text-xs font-medium flex items-center gap-1.5 disabled:opacity-40">
+              {bulkBusy ? <div className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" /> : <Download size={14} />}
+              Download
+            </button>
+            {canShareFiles() && (
+              <button onClick={handleBulkShare} disabled={selectedIds.size === 0 || bulkBusy}
+                className="px-3 py-2 rounded-full bg-blue-600 hover:bg-blue-700 text-white text-xs font-medium flex items-center gap-1.5 disabled:opacity-40">
+                <Share2 size={14} />
+                Share
+              </button>
+            )}
+            <button onClick={exitSelectMode} disabled={bulkBusy}
+              className="p-2 rounded-full hover:bg-stone-800 disabled:opacity-40">
+              <X size={16} />
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -9349,14 +9654,21 @@ function ResolvedDamageHistory({ photos, onReopen }) {
   );
 }
 
-function PortalPhotoSection({ label, photos, highlight, description, onResolve }) {
+function PortalPhotoSection({ label, photos, highlight, description, onResolve, selectMode, selectedIds, onToggleSelect }) {
   const [zoom, setZoom] = useState(null);
   const isDamage = highlight === 'red';
-  if (photos.length === 0 && !isDamage) {
+  if (photos.length === 0) {
     return (
       <div>
-        <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2">{label}</div>
-        <div className="text-sm text-stone-400 italic">No {label.toLowerCase()} photos.</div>
+        <div className={`flex items-baseline justify-between mb-2 ${isDamage ? 'pb-1.5 border-b-2 border-red-200' : ''}`}>
+          <h3 className={`font-serif text-base flex items-center gap-1.5 ${isDamage ? 'text-red-800' : 'text-stone-900'}`}>
+            {isDamage && '⚠'} {label}
+          </h3>
+          <span className="text-[10px] font-mono text-stone-400">0</span>
+        </div>
+        <div className={`aspect-square rounded-lg border-2 border-dashed flex items-center justify-center ${isDamage ? 'border-red-100 text-red-200' : 'border-stone-200 text-stone-300'}`}>
+          <Camera size={18} />
+        </div>
       </div>
     );
   }
@@ -9368,41 +9680,52 @@ function PortalPhotoSection({ label, photos, highlight, description, onResolve }
     if (!k) return null;
     const bg = k === 'damage' ? 'bg-red-600' : k === 'before' ? 'bg-blue-600' : k === 'after' ? 'bg-emerald-600' : 'bg-stone-700';
     return (
-      <span className={`absolute top-1 left-1 px-1.5 py-0.5 rounded text-white text-[9px] font-mono uppercase tracking-wider ${bg}/90`}>
+      <span className={`absolute top-0.5 left-0.5 px-1 py-0.5 rounded text-white text-[8px] font-mono uppercase tracking-wider ${bg}/90`}>
         {k}
       </span>
     );
   };
   return (
     <div>
-      <div className={`flex items-baseline justify-between mb-3 ${isDamage ? 'pb-2 border-b-2 border-red-200' : ''}`}>
-        <h3 className={`font-serif text-xl flex items-center gap-2 ${isDamage ? 'text-red-800' : 'text-stone-900'}`}>
+      <div className={`flex items-baseline justify-between mb-2 ${isDamage ? 'pb-1.5 border-b-2 border-red-200' : ''}`}>
+        <h3 className={`font-serif text-base flex items-center gap-1.5 ${isDamage ? 'text-red-800' : 'text-stone-900'}`}>
           {isDamage && '⚠'} {label}
         </h3>
-        <span className="text-xs font-mono text-stone-500">{photos.length}</span>
+        <span className="text-[10px] font-mono text-stone-500">{photos.length}</span>
       </div>
-      {description && <p className="text-sm text-stone-600 mb-3">{description}</p>}
-      <div className="grid grid-cols-3 sm:grid-cols-4 gap-2">
-        {photos.map(p => (
-          <div key={p.id} className="relative">
-            <button onClick={() => setZoom(p)}
-              className={`relative aspect-square w-full rounded-lg overflow-hidden ${isDamage ? 'ring-2 ring-red-400' : ''}`}>
-              <img loading="lazy" src={p.public_url} alt="" className="w-full h-full object-cover" />
-              {kindBadge(p)}
-              {p.partyLabel && (
-                <span className="absolute bottom-1 left-1 right-1 px-1.5 py-0.5 rounded bg-black/70 text-white text-[9px] font-mono truncate">
-                  {p.partyLabel}
-                </span>
-              )}
-            </button>
-            {onResolve && isDamage && (
-              <button onClick={() => onResolve(p)}
-                className="mt-1 w-full px-2 py-1 rounded bg-emerald-700 hover:bg-emerald-800 text-white text-[10px] font-mono active:scale-95">
-                Resolve
+      {description && <p className="text-xs text-stone-600 mb-2">{description}</p>}
+      {/* Compact grid: more thumbs per row so PMs see more at once.
+         4 cols on mobile, 5-6 on larger screens. */}
+      <div className="grid grid-cols-4 sm:grid-cols-5 md:grid-cols-6 gap-1.5">
+        {photos.map(p => {
+          const isSelected = selectMode && selectedIds && selectedIds.has(p.id);
+          return (
+            <div key={p.id} className="relative">
+              <button
+                onClick={() => selectMode ? onToggleSelect(p.id) : setZoom(p)}
+                className={`relative aspect-square w-full rounded-lg overflow-hidden ${isDamage ? 'ring-2 ring-red-400' : ''} ${isSelected ? 'ring-4 ring-stone-900' : ''}`}>
+                <img loading="lazy" src={p.public_url} alt="" className="w-full h-full object-cover" />
+                {kindBadge(p)}
+                {p.partyLabel && (
+                  <span className="absolute bottom-0.5 left-0.5 right-0.5 px-1 py-0.5 rounded bg-black/70 text-white text-[8px] font-mono truncate">
+                    {p.partyLabel}
+                  </span>
+                )}
+                {selectMode && (
+                  <span className={`absolute top-0.5 right-0.5 w-5 h-5 rounded-full border-2 flex items-center justify-center ${isSelected ? 'bg-stone-900 border-stone-900' : 'bg-white/80 border-white'}`}>
+                    {isSelected && <Check size={12} className="text-white" />}
+                  </span>
+                )}
               </button>
-            )}
-          </div>
-        ))}
+              {onResolve && isDamage && !selectMode && (
+                <button onClick={() => onResolve(p)}
+                  className="mt-1 w-full px-1 py-0.5 rounded bg-emerald-700 hover:bg-emerald-800 text-white text-[9px] font-mono active:scale-95">
+                  Resolve
+                </button>
+              )}
+            </div>
+          );
+        })}
       </div>
       {zoom && (
         <PhotoZoomViewer photos={photos} initialUrl={zoom.public_url}

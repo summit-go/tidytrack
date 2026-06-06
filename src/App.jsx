@@ -445,6 +445,15 @@ const fmtDateLong = (ts) => new Date(ts).toLocaleDateString('en-US', { month:'lo
 const fmtDateWithDay = (ts) => new Date(ts).toLocaleDateString('en-US', { weekday:'short', month:'short', day:'numeric' });
 const fmtClock = (ts) => new Date(ts).toLocaleTimeString('en-US', { hour:'numeric', minute:'2-digit' });
 
+// Time-of-day greeting helper. Returns "Good morning", "Good afternoon",
+// or "Good evening" based on the current hour in the user's local time.
+const greetingForTime = () => {
+  const h = new Date().getHours();
+  if (h < 12) return 'Good morning';
+  if (h < 17) return 'Good afternoon';
+  return 'Good evening';
+};
+
 // Compute billable milliseconds for a shift:
 //   raw clocked-in time − idle_seconds + manual_adjustment_seconds
 // Falls back to raw duration for shifts without these fields.
@@ -1195,6 +1204,39 @@ function EmployeeApp({ employee: employeeInit, onSignOut }) {
     setBusy(false);
   };
 
+  // Attach a property to an existing no-property shift WITHOUT clocking
+  // out. Routes the user to the property picker; on pick, just updates
+  // the existing shift row's customer_id (and bill_rate_at_work for
+  // simple properties). Keeps their clocked-in time running.
+  const startAttachProperty = () => setClockInFlow({ step: 'attach-property' });
+
+  const onAttachProperty = async (property) => {
+    if (!property?.id || !shift?.id) {
+      // Nothing to do
+      setClockInFlow(null);
+      return;
+    }
+    setBusy(true);
+    const update = { customer_id: property.id };
+    // For simple properties, also update the bill_rate snapshot so
+    // billing reflects the now-attached property. Skip for multi-unit
+    // since they're billed per work block.
+    if (property.property_type === 'simple' && property.bill_rate_hourly) {
+      update.bill_rate_at_work = property.bill_rate_hourly;
+    }
+    const { data, error } = await supabase.from('shifts')
+      .update(update)
+      .eq('id', shift.id)
+      .select('*, customer:customers(*)').single();
+    setBusy(false);
+    if (error) {
+      alert('Could not attach property: ' + error.message);
+      return;
+    }
+    setShift(data);
+    setClockInFlow(null);
+  };
+
   // Work blocks
   const startNewBlock = () => setBlockStartFlow({ step: 'unit' });
   const onPickBlockUnit = (unit) => setBlockStartFlow({ step: 'party', unit });
@@ -1430,6 +1472,15 @@ function EmployeeApp({ employee: employeeInit, onSignOut }) {
       subtitle="View-only — no time will be tracked"
       viewOnly={true} />);
   }
+  if (shift && clockInFlow?.step === 'attach-property') {
+    return withIdleModal(<PropertyPicker
+      onPick={onAttachProperty}
+      onCancel={() => setClockInFlow(null)}
+      busy={busy}
+      title="Attach a property to this shift"
+      subtitle="You'll stay clocked in — no time lost"
+      viewOnly={true} />);
+  }
   if (shift && blockStartFlow?.step === 'unit') {
     return withIdleModal(<UnitPicker property={shift.customer} onPick={onPickBlockUnit}
       onBack={() => setBlockStartFlow(null)} busy={busy} title="Which apartment?" />);
@@ -1506,6 +1557,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut }) {
   return withIdleModal(<SimpleShiftView shift={shift} tasks={tasks} activeTask={activeTask}
     employeeName={employee.name} employee={employee} onSignOut={onSignOut} onClockOut={clockOut}
     onSwitchProperty={switchProperty}
+    onAttachProperty={startAttachProperty}
     newTaskName={newTaskName} setNewTaskName={setNewTaskName}
     onStartTask={startTask} onStopTask={stopTask} onResumeTask={resumeTask}
     onAddPhoto={(taskId, kind) => setPhotoModal({ taskId, kind })}
@@ -1657,7 +1709,7 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
 // PropertyHub stats card. Holds secondary actions to keep the main
 // view uncluttered.
 // =================================================================
-function CleanerMenuSheet({ employee, shift, onClose, onSwitchProperty, onChangePin, onOpenMessages, onSignOut }) {
+function CleanerMenuSheet({ employee, shift, onClose, onSwitchProperty, onAttachProperty, onChangePin, onOpenMessages, onSignOut }) {
   const Item = ({ icon: Icon, label, hint, onClick, danger }) => (
     <button onClick={onClick}
       className={`w-full px-4 py-4 flex items-center gap-3 active:bg-stone-100 text-left border-b border-stone-100 last:border-b-0 ${danger ? 'text-red-700' : 'text-stone-900'}`}>
@@ -1699,6 +1751,10 @@ function CleanerMenuSheet({ employee, shift, onClose, onSwitchProperty, onChange
 
         {/* Menu items */}
         <div className="bg-white">
+          {onAttachProperty && (
+            <Item icon={Building2} label="Pick a property" hint="Keep your time running, just attach a property to this shift"
+              onClick={onAttachProperty} />
+          )}
           {onSwitchProperty && (
             <Item icon={Home} label="Switch property" hint="Clock out here and clock in somewhere else"
               onClick={onSwitchProperty} />
@@ -2098,7 +2154,7 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
 // =================================================================
 // SIMPLE SHIFT VIEW (single-bill properties)
 // =================================================================
-function SimpleShiftView({ shift, tasks, activeTask, employeeName, employee, onSignOut, onClockOut, onSwitchProperty,
+function SimpleShiftView({ shift, tasks, activeTask, employeeName, employee, onSignOut, onClockOut, onSwitchProperty, onAttachProperty,
   newTaskName, setNewTaskName, onStartTask, onStopTask, onResumeTask, onAddPhoto,
   photoModal, onClosePhotoModal, onUploadPhoto, onOpenMessages, onOpenChangePin, busy }) {
   const [showMenu, setShowMenu] = useState(false);
@@ -2131,8 +2187,8 @@ function SimpleShiftView({ shift, tasks, activeTask, employeeName, employee, onS
             <Building2 size={11} /> {shift.customer.name}
           </div>
         ) : (
-          <div className="flex items-center gap-1.5 text-xs text-amber-400 font-mono">
-            <AlertCircle size={11} /> No property selected
+          <div className="flex items-center gap-1.5 text-xs text-stone-400 font-mono italic">
+            No property selected
           </div>
         )}
         {shift.customer?.address && (
@@ -2158,24 +2214,6 @@ function SimpleShiftView({ shift, tasks, activeTask, employeeName, employee, onS
           Started {fmtClock(shift.start_time)} · {tasks.length} {tasks.length === 1 ? 'task' : 'tasks'}
         </div>
       </div>
-
-      {!shift.customer_id && onSwitchProperty && (
-        <div className="mx-4 mt-4 p-4 rounded-2xl bg-amber-50 border-2 border-amber-200">
-          <div className="flex items-start gap-3">
-            <AlertCircle size={18} className="text-amber-700 flex-shrink-0 mt-0.5" />
-            <div className="flex-1 min-w-0">
-              <div className="text-sm font-medium text-amber-900">You're clocked in without a property</div>
-              <div className="text-xs text-amber-800 mt-0.5">
-                Pick a property so your work shows up in the right place. (This will clock you out here first.)
-              </div>
-              <button onClick={onSwitchProperty}
-                className="mt-2.5 px-3 py-2 rounded-full bg-amber-700 hover:bg-amber-800 text-white text-xs font-medium flex items-center gap-1.5 active:scale-95">
-                <Home size={12} /> Pick a property
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
       {shift.customer_id && (
         <AssignmentBanner propertyId={shift.customer_id} unitId={null} partyId={null} employee={employee} />
@@ -2237,7 +2275,8 @@ function SimpleShiftView({ shift, tasks, activeTask, employeeName, employee, onS
           employee={employee}
           shift={shift}
           onClose={() => setShowMenu(false)}
-          onSwitchProperty={shift.customer_id ? () => { setShowMenu(false); onSwitchProperty && onSwitchProperty(); } : null}
+          onAttachProperty={!shift.customer_id && onAttachProperty ? () => { setShowMenu(false); onAttachProperty(); } : null}
+          onSwitchProperty={shift.customer_id && onSwitchProperty ? () => { setShowMenu(false); onSwitchProperty(); } : null}
           onChangePin={onOpenChangePin ? () => { setShowMenu(false); onOpenChangePin(); } : null}
           onOpenMessages={onOpenMessages ? () => { setShowMenu(false); onOpenMessages(); } : null}
           onSignOut={() => { setShowMenu(false); onSignOut && onSignOut(); }}
@@ -5108,6 +5147,244 @@ function PropertySetup({ property, onDone, onAssignPortalUsers, onAddUnits, onEd
   );
 }
 
+// =================================================================
+// PORTAL USER ASSIGNMENT SECTION — searchable, kind-toggled list of
+// portal users with checkboxes to assign to the current property.
+// Includes a Quick Add button for creating someone on the spot.
+// =================================================================
+function PortalUserAssignmentSection({ portalUsers, assignedIds, loaded, search, setSearch, onToggle, onUserCreated }) {
+  const [kindFilter, setKindFilter] = useState('pm'); // 'pm' | 'property_owner' | 'pm_staff'
+  const [showQuickAdd, setShowQuickAdd] = useState(false);
+
+  const KIND_TABS = [
+    { id: 'pm', label: 'Managers' },
+    { id: 'property_owner', label: 'Owners' },
+    { id: 'pm_staff', label: 'PM Staff' },
+  ];
+
+  // Filter by kind first, then by search
+  const byKind = (portalUsers || []).filter(u => u.kind === kindFilter && u.active !== false);
+  const filtered = search.trim()
+    ? byKind.filter(u =>
+        u.name?.toLowerCase().includes(search.trim().toLowerCase()) ||
+        u.code?.toLowerCase().includes(search.trim().toLowerCase()))
+    : byKind;
+
+  // Count assigned per kind for the badge
+  const assignedByKind = { pm: 0, property_owner: 0, pm_staff: 0 };
+  (portalUsers || []).forEach(u => {
+    if (assignedIds.has(u.id) && assignedByKind[u.kind] !== undefined) {
+      assignedByKind[u.kind]++;
+    }
+  });
+
+  return (
+    <div className="p-4 rounded-2xl bg-white border border-stone-200">
+      <div className="flex items-center justify-between gap-2 mb-3">
+        <div className="flex items-center gap-2">
+          <Users size={14} className="text-stone-500" />
+          <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">Who's over this property?</div>
+        </div>
+        <button type="button" onClick={() => setShowQuickAdd(true)}
+          className="px-2.5 py-1.5 rounded-full bg-amber-700 hover:bg-amber-800 text-white text-[11px] font-mono flex items-center gap-1 active:scale-95">
+          <Plus size={11} /> Add new
+        </button>
+      </div>
+      <p className="text-[11px] text-stone-500 -mt-1 mb-3">
+        Check any owners, managers, or PM staff that need access to this property's portal.
+      </p>
+
+      <div className="flex gap-1 p-1 bg-stone-100 rounded-xl mb-3">
+        {KIND_TABS.map(tab => {
+          const isActive = kindFilter === tab.id;
+          const count = assignedByKind[tab.id];
+          return (
+            <button key={tab.id} type="button" onClick={() => setKindFilter(tab.id)}
+              className={`flex-1 py-1.5 px-2 rounded-lg text-[11px] font-medium transition-colors flex items-center justify-center gap-1 ${isActive ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+              {tab.label}
+              {count > 0 && (
+                <span className={`text-[9px] px-1.5 py-0.5 rounded-full ${isActive ? 'bg-amber-100 text-amber-900' : 'bg-stone-200 text-stone-600'}`}>
+                  {count}
+                </span>
+              )}
+            </button>
+          );
+        })}
+      </div>
+
+      {byKind.length >= 6 && (
+        <input type="text" value={search} onChange={(e) => setSearch(e.target.value)}
+          placeholder={`Search ${byKind.length} ${KIND_TABS.find(t => t.id === kindFilter)?.label.toLowerCase() || ''}…`}
+          className="w-full mb-3 px-3 py-2 text-sm rounded-lg border border-stone-200 bg-stone-50 focus:outline-none focus:border-stone-400" />
+      )}
+
+      {!loaded ? (
+        <div className="text-center py-6 text-stone-400 text-xs font-mono">Loading…</div>
+      ) : filtered.length === 0 ? (
+        <div className="text-center py-6 text-stone-400 text-xs border-2 border-dashed border-stone-200 rounded-xl">
+          {search ? `No ${KIND_TABS.find(t => t.id === kindFilter)?.label.toLowerCase() || 'users'} match "${search}".` :
+            `No ${KIND_TABS.find(t => t.id === kindFilter)?.label.toLowerCase() || 'users'} yet. Tap "Add new" to create one.`}
+        </div>
+      ) : (
+        <div className="space-y-1 max-h-64 overflow-y-auto pr-1">
+          {filtered.map(u => {
+            const checked = assignedIds.has(u.id);
+            return (
+              <label key={u.id}
+                className={`flex items-center gap-3 p-2.5 rounded-lg cursor-pointer transition-colors ${checked ? 'bg-amber-50' : 'hover:bg-stone-50'}`}>
+                <input type="checkbox" checked={checked} onChange={() => onToggle(u.id)}
+                  className="w-4 h-4 flex-shrink-0 accent-amber-700" />
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm font-medium text-stone-900 truncate">{u.name}</div>
+                  {u.code && (
+                    <div className="text-[10px] font-mono text-stone-500">Code: {u.code}</div>
+                  )}
+                </div>
+              </label>
+            );
+          })}
+        </div>
+      )}
+
+      {showQuickAdd && (
+        <QuickAddPortalUserModal
+          defaultKind={kindFilter}
+          onClose={() => setShowQuickAdd(false)}
+          onCreated={(user) => {
+            setShowQuickAdd(false);
+            // Switch to the kind tab the new user lives in so they're visible
+            if (user.kind && user.kind !== kindFilter) setKindFilter(user.kind);
+            onUserCreated(user);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+// Modal: quick-create a portal user without leaving PropertyForm
+function QuickAddPortalUserModal({ defaultKind = 'pm', onClose, onCreated }) {
+  const [name, setName] = useState('');
+  const [kind, setKind] = useState(defaultKind);
+  const [code, setCode] = useState(generatePortalUserCode());
+  const [phone, setPhone] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  const save = async () => {
+    setError('');
+    if (!name.trim()) { setError('Please enter a name.'); return; }
+    const cleanCode = code.trim().toLowerCase();
+    if (cleanCode.length < 6 || !/[a-z]/i.test(cleanCode) || !/\d/.test(cleanCode) || !/^[a-z0-9]+$/i.test(cleanCode)) {
+      setError('Code must be at least 6 characters with letters and numbers.');
+      return;
+    }
+    setBusy(true);
+    // Check uniqueness
+    const { data: dupe } = await supabase.from('portal_users')
+      .select('id').eq('code', cleanCode).maybeSingle();
+    if (dupe) {
+      setBusy(false);
+      setError('That code is already in use — pick a different one.');
+      return;
+    }
+    const { data, error: e } = await supabase.from('portal_users').insert({
+      name: name.trim(),
+      code: cleanCode,
+      kind,
+      phone: phone.trim() || null,
+      active: true,
+    }).select().single();
+    setBusy(false);
+    if (e) {
+      setError('Could not save: ' + e.message);
+      return;
+    }
+    onCreated(data);
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/50 p-0 sm:p-4" onClick={onClose}>
+      <div onClick={(e) => e.stopPropagation()}
+        className="w-full sm:max-w-md bg-white rounded-t-3xl sm:rounded-3xl overflow-hidden">
+        <div className="px-5 py-4 border-b border-stone-200 flex items-center justify-between">
+          <div>
+            <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">Quick add</div>
+            <div className="font-serif text-lg text-stone-900">New portal user</div>
+          </div>
+          <button onClick={onClose} disabled={busy}
+            className="p-2 rounded-full hover:bg-stone-100">
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="p-5 space-y-4">
+          <div>
+            <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-1.5 block">Name</label>
+            <input type="text" value={name} onChange={(e) => setName(e.target.value)}
+              placeholder="e.g. Sarah Jenkins"
+              autoFocus
+              className="w-full px-3 py-2.5 rounded-xl border border-stone-300 bg-white focus:outline-none focus:border-stone-900 text-stone-900" />
+          </div>
+
+          <div>
+            <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-1.5 block">Role</label>
+            <div className="grid grid-cols-3 gap-2">
+              {[
+                { id: 'pm', label: 'Manager' },
+                { id: 'property_owner', label: 'Owner' },
+                { id: 'pm_staff', label: 'PM Staff' },
+              ].map(opt => (
+                <button key={opt.id} type="button" onClick={() => setKind(opt.id)}
+                  className={`py-2 px-2 rounded-xl border-2 text-xs font-medium transition-all ${kind === opt.id ? 'border-stone-900 bg-stone-900 text-stone-50' : 'border-stone-200 bg-white text-stone-700'}`}>
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-1.5 block">Portal code</label>
+            <div className="flex gap-2">
+              <input type="text" value={code} onChange={(e) => setCode(e.target.value.toLowerCase())}
+                className="flex-1 px-3 py-2.5 rounded-xl border border-stone-300 bg-white focus:outline-none focus:border-stone-900 text-stone-900 font-mono text-sm" />
+              <button type="button" onClick={() => setCode(generatePortalUserCode())}
+                className="px-3 py-2.5 rounded-xl bg-stone-100 hover:bg-stone-200 text-stone-700 text-xs font-mono">
+                Generate
+              </button>
+            </div>
+            <p className="text-[11px] text-stone-500 mt-1">This is how they'll sign in.</p>
+          </div>
+
+          <div>
+            <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-1.5 block">Phone (optional)</label>
+            <input type="tel" value={phone} onChange={(e) => setPhone(e.target.value)}
+              placeholder="For future SMS notifications"
+              className="w-full px-3 py-2.5 rounded-xl border border-stone-300 bg-white focus:outline-none focus:border-stone-900 text-stone-900 text-sm" />
+          </div>
+
+          {error && (
+            <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-red-700 text-xs flex items-start gap-2">
+              <AlertCircle size={14} className="flex-shrink-0 mt-0.5" /> <span>{error}</span>
+            </div>
+          )}
+
+          <div className="flex gap-2 pt-2">
+            <button onClick={onClose} disabled={busy}
+              className="flex-1 py-3 rounded-xl border border-stone-300 text-stone-700 font-medium text-sm hover:bg-stone-50 disabled:opacity-50">
+              Cancel
+            </button>
+            <button onClick={save} disabled={busy || !name.trim()}
+              className="flex-1 py-3 rounded-xl bg-stone-900 text-stone-50 font-medium text-sm disabled:opacity-50">
+              {busy ? 'Saving…' : 'Create & check'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function PropertyForm({ property, currentUserRole, onCancel, onSaved, onManageAssignments }) {
   const isNew = !property;
   const [name, setName] = useState(property?.name || '');
@@ -5126,8 +5403,45 @@ function PropertyForm({ property, currentUserRole, onCancel, onSaved, onManageAs
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const canEditMoney = currentUserRole === 'owner';
+
+  // Portal user assignment: load all portal users + which ones are
+  // currently assigned to this property (for edit mode). For new
+  // properties, the set starts empty.
+  const [allPortalUsers, setAllPortalUsers] = useState([]);
+  const [assignedPortalUserIds, setAssignedPortalUserIds] = useState(new Set());
+  const [portalSearch, setPortalSearch] = useState('');
+  const [portalLoaded, setPortalLoaded] = useState(false);
+
   useEffect(() => {
-    if (type === 'multi_unit' && billMode === 'flat') setBillMode('hourly');
+    let cancelled = false;
+    (async () => {
+      const { data: users } = await supabase.from('portal_users')
+        .select('id, name, kind, active, code')
+        .order('name');
+      if (cancelled) return;
+      setAllPortalUsers(users || []);
+      if (property?.id) {
+        const { data: links } = await supabase.from('portal_user_properties')
+          .select('portal_user_id')
+          .eq('property_id', property.id);
+        if (cancelled) return;
+        setAssignedPortalUserIds(new Set((links || []).map(l => l.portal_user_id)));
+      }
+      setPortalLoaded(true);
+    })();
+    return () => { cancelled = true; };
+  }, [property?.id]);
+
+  const togglePortalUser = (pid) => {
+    setAssignedPortalUserIds(prev => {
+      const next = new Set(prev);
+      if (next.has(pid)) next.delete(pid);
+      else next.add(pid);
+      return next;
+    });
+  };
+  useEffect(() => {
+    // No restriction — both bill modes are valid for both property types.
   }, [type, billMode]);
 
   // Generate a memorable portal code: word + 4 digits
@@ -5188,6 +5502,26 @@ function PropertyForm({ property, currentUserRole, onCancel, onSaved, onManageAs
       }
       savedRow = { ...property, ...payload };
     }
+
+    // Sync portal user assignments: insert all checked links, delete unchecked ones.
+    // For new properties: just insert. For edits: clear then re-insert (idempotent + simple).
+    if (savedRow?.id) {
+      try {
+        await supabase.from('portal_user_properties')
+          .delete().eq('property_id', savedRow.id);
+        if (assignedPortalUserIds.size > 0) {
+          const rows = Array.from(assignedPortalUserIds).map(uid => ({
+            portal_user_id: uid,
+            property_id: savedRow.id,
+          }));
+          await supabase.from('portal_user_properties').insert(rows);
+        }
+      } catch (linkErr) {
+        // Property saved fine, but portal links failed — log and continue
+        console.warn('[PropertyForm] portal user link sync failed:', linkErr);
+      }
+    }
+
     setBusy(false);
     onSaved(savedRow);
   };
@@ -5244,6 +5578,23 @@ function PropertyForm({ property, currentUserRole, onCancel, onSaved, onManageAs
               onChange={({ bedrooms: bd, bathrooms: ba }) => { setBedrooms(bd); setBathrooms(ba); }} />
           </div>
         )}
+
+        <PortalUserAssignmentSection
+          portalUsers={allPortalUsers}
+          assignedIds={assignedPortalUserIds}
+          loaded={portalLoaded}
+          search={portalSearch}
+          setSearch={setPortalSearch}
+          onToggle={togglePortalUser}
+          onUserCreated={(user) => {
+            // Add the new user to the list AND auto-check them
+            setAllPortalUsers(prev => [...prev, user].sort((a, b) =>
+              (a.name || '').localeCompare(b.name || '')
+            ));
+            setAssignedPortalUserIds(prev => new Set(prev).add(user.id));
+          }}
+        />
+
         {canEditMoney && (
         <div>
           <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Bill mode</label>
@@ -5252,8 +5603,8 @@ function PropertyForm({ property, currentUserRole, onCancel, onSaved, onManageAs
               className={`p-3 rounded-xl border-2 text-left ${billMode === 'hourly' ? 'border-stone-900 bg-white' : 'border-stone-200 bg-white/50'}`}>
               <div className="font-medium text-stone-900 text-sm">Hourly</div>
             </button>
-            <button onClick={() => setBillMode('flat')} type="button" disabled={type === 'multi_unit'}
-              className={`p-3 rounded-xl border-2 text-left ${billMode === 'flat' && type !== 'multi_unit' ? 'border-stone-900 bg-white' : 'border-stone-200 bg-white/50'} ${type === 'multi_unit' ? 'opacity-40 cursor-not-allowed' : ''}`}>
+            <button onClick={() => setBillMode('flat')} type="button"
+              className={`p-3 rounded-xl border-2 text-left ${billMode === 'flat' ? 'border-stone-900 bg-white' : 'border-stone-200 bg-white/50'}`}>
               <div className="font-medium text-stone-900 text-sm">Flat rate</div>
             </button>
           </div>
@@ -7720,8 +8071,12 @@ function PortalPropertyPicker({ portalUser, properties, onPick, onSignOut }) {
       </div>
       <div className="flex-1 px-5 py-8 max-w-md mx-auto w-full">
         <div className="text-center mb-6">
-          <h2 className="font-serif text-2xl text-stone-900 mb-1">Pick a property</h2>
-          <p className="text-sm text-stone-500">You manage {properties.length} {properties.length === 1 ? 'property' : 'properties'}.</p>
+          <h2 className="font-serif text-2xl text-stone-900 mb-1">
+            {greetingForTime()}, <span className="italic text-amber-700">{portalUser.name?.split(' ')[0] || portalUser.name}</span>
+          </h2>
+          <p className="text-sm text-stone-500">
+            You {properties.length === 1 ? 'have access to 1 property' : `have access to ${properties.length} properties`}. Pick one to get started.
+          </p>
         </div>
         <div className="space-y-2">
           {properties.map(p => (
@@ -7890,7 +8245,12 @@ function PortalHome({ property, portalKind, portalUser, hasMultipleProperties, o
             </button>
           </div>
         </div>
-        <h1 className="text-3xl font-light tracking-tight mt-2">{property.name}</h1>
+        {portalUser?.name && (
+          <div className="text-xs text-stone-300 mt-2 font-mono">
+            {greetingForTime()}, <span className="text-amber-400">{portalUser.name.split(' ')[0]}</span>
+          </div>
+        )}
+        <h1 className="text-3xl font-light tracking-tight mt-1">{property.name}</h1>
         {property.address && (
           <div className="text-sm text-stone-300 mt-1">
             <AddressLink address={property.address} className="text-amber-400" />

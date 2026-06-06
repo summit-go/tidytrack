@@ -927,6 +927,55 @@ function AddressLink({ address, icon = 'pin', className = '' }) {
 }
 
 // =================================================================
+// BED/BATH PICKER — bedrooms (1-8) + bathrooms (1, 1.5, ... 5) for
+// simple properties and townhome units. Pass nullable to allow
+// "not specified" state.
+// =================================================================
+function BedBathPicker({ bedrooms, bathrooms, onChange }) {
+  const BEDROOM_OPTS = [1, 2, 3, 4, 5, 6, 7, 8];
+  const BATHROOM_OPTS = [1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5];
+  const formatBath = (n) => Number.isInteger(n) ? `${n}` : `${n}`;
+  return (
+    <div className="space-y-4">
+      <div>
+        <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Bedrooms</label>
+        <div className="grid grid-cols-8 gap-1.5">
+          {BEDROOM_OPTS.map(n => (
+            <button key={n} type="button" onClick={() => onChange({ bedrooms: n, bathrooms })}
+              className={`py-2.5 rounded-lg border-2 font-mono text-sm transition-all ${bedrooms === n ? 'border-stone-900 bg-stone-900 text-stone-50' : 'border-stone-200 bg-white text-stone-700 hover:border-stone-400'}`}>
+              {n}
+            </button>
+          ))}
+        </div>
+        {bedrooms && (
+          <button type="button" onClick={() => onChange({ bedrooms: null, bathrooms })}
+            className="text-[11px] text-stone-500 hover:text-stone-700 mt-1.5 font-mono">
+            Clear
+          </button>
+        )}
+      </div>
+      <div>
+        <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Bathrooms <span className="normal-case text-stone-400 text-[10px]">(.5 = half bath)</span></label>
+        <div className="grid grid-cols-9 gap-1.5">
+          {BATHROOM_OPTS.map(n => (
+            <button key={n} type="button" onClick={() => onChange({ bedrooms, bathrooms: n })}
+              className={`py-2.5 rounded-lg border-2 font-mono text-xs transition-all ${bathrooms === n ? 'border-stone-900 bg-stone-900 text-stone-50' : 'border-stone-200 bg-white text-stone-700 hover:border-stone-400'}`}>
+              {formatBath(n)}
+            </button>
+          ))}
+        </div>
+        {bathrooms && (
+          <button type="button" onClick={() => onChange({ bedrooms, bathrooms: null })}
+            className="text-[11px] text-stone-500 hover:text-stone-700 mt-1.5 font-mono">
+            Clear
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// =================================================================
 // EMPLOYEE APP — three-state machine
 // =================================================================
 function EmployeeApp({ employee: employeeInit, onSignOut }) {
@@ -1954,6 +2003,20 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
           {block.unit?.label} · <span className="italic text-amber-400">{block.party?.label}</span>
         </div>
         {block.party?.full_name && <div className="text-xs text-stone-400 mt-0.5">{block.party.full_name}</div>}
+        {block.unit?.kind === 'townhome' && (block.unit?.bedrooms != null || block.unit?.bathrooms != null) && (
+          <div className="mt-1.5 flex items-center gap-1.5 flex-wrap">
+            {block.unit.bedrooms != null && (
+              <span className="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full bg-stone-800 text-stone-200 font-mono">
+                {block.unit.bedrooms} bed
+              </span>
+            )}
+            {block.unit.bathrooms != null && (
+              <span className="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full bg-stone-800 text-stone-200 font-mono">
+                {block.unit.bathrooms} bath
+              </span>
+            )}
+          </div>
+        )}
         <div className="mt-2 font-mono text-xl text-stone-50">{fmtTime(blockElapsed)}</div>
         {block.work_notes && (
           <div className="mt-2 px-3 py-2 rounded-lg bg-stone-800 text-stone-300 text-xs italic">"{block.work_notes}"</div>
@@ -2063,9 +2126,13 @@ function SimpleShiftView({ shift, tasks, activeTask, employeeName, employee, onS
             </button>
           </div>
         </div>
-        {shift.customer?.name && (
+        {shift.customer?.name ? (
           <div className="flex items-center gap-1.5 text-xs text-amber-400 font-mono">
             <Building2 size={11} /> {shift.customer.name}
+          </div>
+        ) : (
+          <div className="flex items-center gap-1.5 text-xs text-amber-400 font-mono">
+            <AlertCircle size={11} /> No property selected
           </div>
         )}
         {shift.customer?.address && (
@@ -2073,10 +2140,42 @@ function SimpleShiftView({ shift, tasks, activeTask, employeeName, employee, onS
             <AddressLink address={shift.customer.address} className="text-stone-300" />
           </div>
         )}
+        {(shift.customer?.bedrooms != null || shift.customer?.bathrooms != null) && (
+          <div className="mt-1.5 flex items-center gap-1.5 flex-wrap">
+            {shift.customer.bedrooms != null && (
+              <span className="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full bg-stone-700 text-stone-200 font-mono">
+                {shift.customer.bedrooms} bed
+              </span>
+            )}
+            {shift.customer.bathrooms != null && (
+              <span className="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full bg-stone-700 text-stone-200 font-mono">
+                {shift.customer.bathrooms} bath
+              </span>
+            )}
+          </div>
+        )}
         <div className="mt-1 text-xs text-stone-400 font-mono">
           Started {fmtClock(shift.start_time)} · {tasks.length} {tasks.length === 1 ? 'task' : 'tasks'}
         </div>
       </div>
+
+      {!shift.customer_id && onSwitchProperty && (
+        <div className="mx-4 mt-4 p-4 rounded-2xl bg-amber-50 border-2 border-amber-200">
+          <div className="flex items-start gap-3">
+            <AlertCircle size={18} className="text-amber-700 flex-shrink-0 mt-0.5" />
+            <div className="flex-1 min-w-0">
+              <div className="text-sm font-medium text-amber-900">You're clocked in without a property</div>
+              <div className="text-xs text-amber-800 mt-0.5">
+                Pick a property so your work shows up in the right place. (This will clock you out here first.)
+              </div>
+              <button onClick={onSwitchProperty}
+                className="mt-2.5 px-3 py-2 rounded-full bg-amber-700 hover:bg-amber-800 text-white text-xs font-medium flex items-center gap-1.5 active:scale-95">
+                <Home size={12} /> Pick a property
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {shift.customer_id && (
         <AssignmentBanner propertyId={shift.customer_id} unitId={null} partyId={null} employee={employee} />
@@ -4759,10 +4858,27 @@ function PropertyAdmin({ employee, onSignOut, onOpenMessages, onLogoClick }) {
   if (view.kind === 'property-edit') {
     return <PropertyForm property={view.property} currentUserRole={employee.role}
       onCancel={() => setView({ kind: 'list' })}
-      onSaved={() => { setView({ kind: 'list' }); load(); }}
+      onSaved={(savedRow) => {
+        // For NEW properties, drop into the setup landing so the user can
+        // assign portal users + build out units in one flow.
+        if (!view.property && savedRow?.id) {
+          setView({ kind: 'property-setup', property: savedRow });
+        } else {
+          setView({ kind: 'list' }); load();
+        }
+      }}
       onManageAssignments={view.property
         ? () => setView({ kind: 'assignment-list', property: view.property })
         : null} />;
+  }
+  if (view.kind === 'property-setup') {
+    return <PropertySetup property={view.property}
+      onDone={() => { setView({ kind: 'list' }); load(); }}
+      onAssignPortalUsers={() => setView({ kind: 'portal-users', focusProperty: view.property })}
+      onAddUnits={() => view.property.property_type === 'multi_unit'
+        ? setView({ kind: 'bulk-create', property: view.property })
+        : setView({ kind: 'unit-list', property: view.property })}
+      onEditProperty={() => setView({ kind: 'property-edit', property: view.property })} />;
   }
   if (view.kind === 'unit-list') {
     return <UnitList property={view.property}
@@ -4892,6 +5008,106 @@ function PropertyAdmin({ employee, onSignOut, onOpenMessages, onLogoClick }) {
   );
 }
 
+// =================================================================
+// PROPERTY SETUP — landing page after creating a new property.
+// Shows next-step cards so the user can assign portal users (PMs /
+// owners) and build out units in one flow. All steps are optional;
+// "I'll do this later" is always available.
+// =================================================================
+function PropertySetup({ property, onDone, onAssignPortalUsers, onAddUnits, onEditProperty }) {
+  const isMulti = property.property_type === 'multi_unit';
+  return (
+    <div className="min-h-screen bg-stone-50 pb-24">
+      <div className="px-5 py-4 border-b border-stone-200 bg-white">
+        <div className="flex items-center gap-2 text-xs text-emerald-700 font-mono uppercase tracking-wider mb-1">
+          <Check size={12} /> Property created
+        </div>
+        <h1 className="font-serif text-2xl text-stone-900 truncate">{property.name}</h1>
+        {property.address && (
+          <div className="text-sm text-stone-500 mt-0.5">
+            <AddressLink address={property.address} />
+          </div>
+        )}
+      </div>
+
+      <div className="px-5 pt-6 space-y-4 max-w-xl mx-auto">
+        <div className="text-sm text-stone-600 mb-2">
+          Now let's set this property up. You can skip any step and come back to it later.
+        </div>
+
+        {/* Card 1: Assign portal users */}
+        <button onClick={onAssignPortalUsers}
+          className="w-full text-left p-4 rounded-2xl bg-white border border-stone-200 hover:border-amber-500 active:scale-[0.99] transition-all">
+          <div className="flex items-start gap-3">
+            <div className="w-10 h-10 rounded-full bg-amber-100 flex items-center justify-center flex-shrink-0">
+              <UserPlus size={18} className="text-amber-700" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="font-serif text-lg text-stone-900">Assign portal users</div>
+              <div className="text-xs text-stone-500 mt-0.5">
+                Who owns or manages this property? Give them access to the PM portal so they can
+                communicate, upload assignments, and see work.
+              </div>
+              <div className="text-[11px] uppercase tracking-wider font-mono text-amber-700 mt-2">
+                Optional · recommended
+              </div>
+            </div>
+            <ChevronRight size={18} className="text-stone-400 flex-shrink-0 mt-1" />
+          </div>
+        </button>
+
+        {/* Card 2: Add units */}
+        <button onClick={onAddUnits}
+          className="w-full text-left p-4 rounded-2xl bg-white border border-stone-200 hover:border-amber-500 active:scale-[0.99] transition-all">
+          <div className="flex items-start gap-3">
+            <div className="w-10 h-10 rounded-full bg-stone-100 flex items-center justify-center flex-shrink-0">
+              <Building2 size={18} className="text-stone-700" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="font-serif text-lg text-stone-900">
+                {isMulti ? 'Build out units' : 'Add details'}
+              </div>
+              <div className="text-xs text-stone-500 mt-0.5">
+                {isMulti
+                  ? 'Bulk-create apartments in a grid, import a townhome list from CSV, or add individual units.'
+                  : 'Simple property — you can skip this. If it has multiple structures or specific units to track, add them here.'}
+              </div>
+              <div className="text-[11px] uppercase tracking-wider font-mono text-stone-600 mt-2">
+                {isMulti ? 'Strongly recommended for multi-unit' : 'Optional for simple properties'}
+              </div>
+            </div>
+            <ChevronRight size={18} className="text-stone-400 flex-shrink-0 mt-1" />
+          </div>
+        </button>
+
+        {/* Card 3: Edit basics */}
+        <button onClick={onEditProperty}
+          className="w-full text-left p-4 rounded-2xl bg-white border border-stone-200 hover:border-stone-400 active:scale-[0.99] transition-all">
+          <div className="flex items-start gap-3">
+            <div className="w-10 h-10 rounded-full bg-stone-100 flex items-center justify-center flex-shrink-0">
+              <Edit2 size={16} className="text-stone-700" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="font-serif text-lg text-stone-900">Edit property details</div>
+              <div className="text-xs text-stone-500 mt-0.5">
+                Update name, address, bill rate, notes, or other property info.
+              </div>
+            </div>
+            <ChevronRight size={18} className="text-stone-400 flex-shrink-0 mt-1" />
+          </div>
+        </button>
+
+        <div className="pt-2">
+          <button onClick={onDone}
+            className="w-full py-3 rounded-2xl border-2 border-dashed border-stone-300 text-stone-600 text-sm hover:border-stone-500 active:scale-[0.99] transition-all">
+            I'll set this up later — back to properties
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function PropertyForm({ property, currentUserRole, onCancel, onSaved, onManageAssignments }) {
   const isNew = !property;
   const [name, setName] = useState(property?.name || '');
@@ -4905,6 +5121,8 @@ function PropertyForm({ property, currentUserRole, onCancel, onSaved, onManageAs
   const [staffPortalCode, setStaffPortalCode] = useState(property?.staff_portal_code || '');
   const [portalStartDate, setPortalStartDate] = useState(property?.portal_start_date || '');
   const [active, setActive] = useState(property?.active ?? true);
+  const [bedrooms, setBedrooms] = useState(property?.bedrooms ?? null);
+  const [bathrooms, setBathrooms] = useState(property?.bathrooms ?? null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const canEditMoney = currentUserRole === 'owner';
@@ -4944,19 +5162,34 @@ function PropertyForm({ property, currentUserRole, onCancel, onSaved, onManageAs
       portal_code: cleanPortal,
       staff_portal_code: cleanStaff,
       portal_start_date: portalStartDate || null,
+      bedrooms: type === 'simple' ? bedrooms : null,
+      bathrooms: type === 'simple' ? bathrooms : null,
       active
     };
-    const { error: e } = isNew
-      ? await supabase.from('customers').insert(payload)
-      : await supabase.from('customers').update(payload).eq('id', property.id);
-    setBusy(false);
-    if (e) {
-      setError(e.message.includes('duplicate') && (e.message.includes('portal_code') || e.message.includes('staff_portal_code'))
-        ? 'That code is already in use by another property — pick another.'
-        : e.message);
-      return;
+    let savedRow = null;
+    if (isNew) {
+      const { data, error: e } = await supabase.from('customers').insert(payload).select().single();
+      if (e) {
+        setBusy(false);
+        setError(e.message.includes('duplicate') && (e.message.includes('portal_code') || e.message.includes('staff_portal_code'))
+          ? 'That code is already in use by another property — pick another.'
+          : e.message);
+        return;
+      }
+      savedRow = data;
+    } else {
+      const { error: e } = await supabase.from('customers').update(payload).eq('id', property.id);
+      if (e) {
+        setBusy(false);
+        setError(e.message.includes('duplicate') && (e.message.includes('portal_code') || e.message.includes('staff_portal_code'))
+          ? 'That code is already in use by another property — pick another.'
+          : e.message);
+        return;
+      }
+      savedRow = { ...property, ...payload };
     }
-    onSaved();
+    setBusy(false);
+    onSaved(savedRow);
   };
   const remove = async () => {
     if (!confirm(`Delete "${property.name}"? All units, parties, and shift history will be removed.`)) return;
@@ -4998,6 +5231,19 @@ function PropertyForm({ property, currentUserRole, onCancel, onSaved, onManageAs
             </button>
           </div>
         </div>
+        {type === 'simple' && (
+          <div className="p-4 rounded-2xl bg-white border border-stone-200">
+            <div className="flex items-center gap-2 mb-3">
+              <Home size={14} className="text-stone-500" />
+              <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">Layout</div>
+            </div>
+            <p className="text-[11px] text-stone-500 -mt-2 mb-3">
+              Helps cleaners know what they're walking into. Skip if you'll set this per-unit later.
+            </p>
+            <BedBathPicker bedrooms={bedrooms} bathrooms={bathrooms}
+              onChange={({ bedrooms: bd, bathrooms: ba }) => { setBedrooms(bd); setBathrooms(ba); }} />
+          </div>
+        )}
         {canEditMoney && (
         <div>
           <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Bill mode</label>
@@ -5277,6 +5523,8 @@ function UnitForm({ property, unit, onCancel, onSaved }) {
   const [active, setActive] = useState(unit?.active ?? true);
   const [kind, setKind] = useState(unit?.kind || 'apartment');
   const [partyCount, setPartyCount] = useState(4);
+  const [bedrooms, setBedrooms] = useState(unit?.bedrooms ?? null);
+  const [bathrooms, setBathrooms] = useState(unit?.bathrooms ?? null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const save = async () => {
@@ -5285,7 +5533,9 @@ function UnitForm({ property, unit, onCancel, onSaved }) {
     setBusy(true);
     if (isNew) {
       const { data: created, error: e } = await supabase.from('units')
-        .insert({ customer_id: property.id, label: label.trim(), notes: notes.trim() || null, active, kind })
+        .insert({ customer_id: property.id, label: label.trim(), notes: notes.trim() || null, active, kind,
+          bedrooms: kind === 'townhome' ? bedrooms : null,
+          bathrooms: kind === 'townhome' ? bathrooms : null })
         .select().single();
       if (e) { setBusy(false); setError(e.message); return; }
       // For common areas with 0 parties, auto-create a "Main" party so cleaners can clock into it.
@@ -5308,7 +5558,9 @@ function UnitForm({ property, unit, onCancel, onSaved }) {
         await supabase.from('parties').insert(parties);
       }
     } else {
-      const { error: e } = await supabase.from('units').update({ label: label.trim(), notes: notes.trim() || null, active, kind })
+      const { error: e } = await supabase.from('units').update({ label: label.trim(), notes: notes.trim() || null, active, kind,
+          bedrooms: kind === 'townhome' ? bedrooms : null,
+          bathrooms: kind === 'townhome' ? bathrooms : null })
         .eq('id', unit.id);
       if (e) { setBusy(false); setError(e.message); return; }
     }
@@ -5381,6 +5633,19 @@ function UnitForm({ property, unit, onCancel, onSaved }) {
                 A "Main" sub-area will be auto-created so cleaners can clock into this common area.
               </p>
             )}
+          </div>
+        )}
+        {kind === 'townhome' && (
+          <div className="p-4 rounded-2xl bg-white border border-stone-200">
+            <div className="flex items-center gap-2 mb-3">
+              <Home size={14} className="text-stone-500" />
+              <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">Layout</div>
+            </div>
+            <p className="text-[11px] text-stone-500 -mt-2 mb-3">
+              Cleaners will see this before they start so they know what to expect.
+            </p>
+            <BedBathPicker bedrooms={bedrooms} bathrooms={bathrooms}
+              onChange={({ bedrooms: bd, bathrooms: ba }) => { setBedrooms(bd); setBathrooms(ba); }} />
           </div>
         )}
         <div>

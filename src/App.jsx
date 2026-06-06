@@ -33,11 +33,11 @@ const ASSIGNMENT_MAX_SIZE_MB = 20; // sanity cap on upload size
 // The set of assignment types PMs can pick from when uploading.
 // Owners/managers can change the type when approving.
 const ASSIGNMENT_TYPES = [
-  { value: 'standard',       label: 'Standard clean' },
-  { value: 'deep',           label: 'Deep clean' },
   { value: 'cleaning_check', label: 'Cleaning check' },
+  { value: 'deep',           label: 'Deep clean' },
   { value: 'move_out_check', label: 'Move-out check' },
   { value: 'reclean',        label: 'Reclean' },
+  { value: 'standard',       label: 'Standard clean' },
 ];
 const assignmentTypeLabel = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value)?.label || value || '';
@@ -933,10 +933,19 @@ const TASK_CATEGORIES = [
   { id: 'bathroom', label: 'Bathroom', subcategories: null },
   { id: 'vanity',   label: 'Vanity',   subcategories: null },
   { id: 'general',  label: 'General',  subcategories: [
-    { id: 'kitchen',    label: 'Kitchen area' },
-    { id: 'living',     label: 'Living room, patio, water heater' },
-    { id: 'hallways',   label: 'Hallways, vents, stove, oven, dishwasher' },
-    { id: 'fridge',     label: 'Refrigerator, freezer, microwave, breezeway' },
+    { id: 'kitchen',      label: 'Kitchen' },
+    { id: 'living_room',  label: 'Living room' },
+    { id: 'patio',        label: 'Patio' },
+    { id: 'water_heater', label: 'Water heater' },
+    { id: 'hallways',     label: 'Hallways' },
+    { id: 'vents',        label: 'Vents' },
+    { id: 'stove',        label: 'Stove' },
+    { id: 'oven',         label: 'Oven' },
+    { id: 'dishwasher',   label: 'Dishwasher' },
+    { id: 'refrigerator', label: 'Refrigerator' },
+    { id: 'freezer',      label: 'Freezer' },
+    { id: 'microwave',    label: 'Microwave' },
+    { id: 'breezeway',    label: 'Breezeway' },
   ]},
 ];
 
@@ -957,7 +966,7 @@ const taskCategoryShortLabel = (category, subcategory) => {
   if (!cat) return category;
   if (category === 'general' && subcategory) {
     const sub = cat.subcategories?.find(s => s.id === subcategory);
-    return sub ? `General — ${sub.label.split(',')[0]}` : 'General';
+    return sub ? `General — ${sub.label}` : 'General';
   }
   return cat.label;
 };
@@ -1227,16 +1236,16 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
           <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">
             Pick one or more areas {selectedSubs.size > 1 && <span className="normal-case text-amber-700">· creates {selectedSubs.size} tasks</span>}
           </label>
-          <div className="grid grid-cols-1 gap-1.5">
+          <div className="grid grid-cols-2 gap-1.5">
             {cat.subcategories.map(s => {
               const checked = selectedSubs.has(s.id);
               return (
                 <button key={s.id} type="button" onClick={() => toggleSub(s.id)}
-                  className={`flex items-center gap-2 p-3 rounded-xl border-2 text-left transition-all ${checked ? 'border-amber-600 bg-amber-50' : 'border-stone-200 bg-white hover:border-stone-400'}`}>
+                  className={`flex items-center gap-2 px-3 py-2.5 rounded-xl border-2 text-left transition-all ${checked ? 'border-amber-600 bg-amber-50' : 'border-stone-200 bg-white hover:border-stone-400'}`}>
                   <div className={`w-4 h-4 rounded border-2 flex-shrink-0 flex items-center justify-center ${checked ? 'border-amber-600 bg-amber-600' : 'border-stone-300'}`}>
                     {checked && <Check size={11} className="text-white" />}
                   </div>
-                  <span className="text-sm text-stone-900">{s.label}</span>
+                  <span className="text-sm text-stone-900 truncate">{s.label}</span>
                 </button>
               );
             })}
@@ -10416,7 +10425,16 @@ function AssignmentForm({ property, employee, onCancel, onSaved }) {
       .select('*, parties(id, label, full_name, active, sort_order)')
       .eq('customer_id', propertyId).eq('active', true)
       .order('sort_order').order('label');
-    const sorted = (data || []).slice().sort((a, b) => naturalCompare(a.label, b.label));
+    // Sort: common areas (clubhouse, gym, etc) first, then everything else alphabetical.
+    // Common areas are typically the kind of thing assignments get uploaded for
+    // (clubhouse cleanings) so surfacing them at the top saves scrolling.
+    const sorted = (data || []).slice().sort((a, b) => {
+      const aCommon = a.kind === 'common_area';
+      const bCommon = b.kind === 'common_area';
+      if (aCommon && !bCommon) return -1;
+      if (!aCommon && bCommon) return 1;
+      return naturalCompare(a.label, b.label);
+    });
     setUnitsByProperty(prev => ({ ...prev, [propertyId]: sorted }));
     return sorted;
   };
@@ -12322,7 +12340,14 @@ function PortalAssignmentForm({ property, assignment, portalKind, onCancel, onSa
         .select('*, parties(id, label, full_name, active, sort_order)')
         .eq('customer_id', property.id).eq('active', true)
         .order('sort_order').order('label');
-      setUnits((data || []).slice().sort((a, b) => naturalCompare(a.label, b.label)));
+      // Common areas (clubhouse, gym) first, then everything else alphabetical
+      setUnits((data || []).slice().sort((a, b) => {
+        const aCommon = a.kind === 'common_area';
+        const bCommon = b.kind === 'common_area';
+        if (aCommon && !bCommon) return -1;
+        if (!aCommon && bCommon) return 1;
+        return naturalCompare(a.label, b.label);
+      }));
     })();
   }, [property.id, isMulti]);
 

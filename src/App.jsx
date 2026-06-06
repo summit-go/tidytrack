@@ -8764,6 +8764,27 @@ function PortalHistoryTab({ property, groups, loaded, filter, setFilter, onOpenU
 
   return (
     <div className="px-5 pt-6">
+      {/* Sticky damage indicator — pins to the top of the viewport when the
+         PM scrolls past the stats row, so they never lose sight of active
+         damage while reviewing the cleaning history below. Hidden when no
+         active damage. Clicking it expands the same drill-down list. */}
+      {damageCount > 0 && (
+        <button
+          onClick={() => setDamageExpanded(e => !e)}
+          className="sticky top-0 z-30 -mx-5 mb-3 px-5 py-2.5 bg-red-600 hover:bg-red-700 text-white flex items-center justify-between gap-3 shadow-md active:scale-[0.99] transition-all">
+          <div className="flex items-center gap-2 min-w-0">
+            <AlertCircle size={16} className="flex-shrink-0" />
+            <span className="text-sm font-medium truncate">
+              {damageCount} {damageCount === 1 ? 'unit has' : 'units have'} active damage
+            </span>
+          </div>
+          <span className="text-[10px] uppercase tracking-wider font-mono opacity-90 flex-shrink-0 flex items-center gap-0.5">
+            {damageExpanded ? 'Hide' : 'View'}
+            <ChevronRight size={12} className={`transition-transform ${damageExpanded ? 'rotate-90' : ''}`} />
+          </span>
+        </button>
+      )}
+
       <div className="grid grid-cols-3 gap-3 mb-3">
         <div className="p-4 rounded-2xl bg-white border border-stone-200">
           <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-1">Cleanings</div>
@@ -9019,15 +9040,19 @@ function PortalUnitDay({ property, unitId, date, portalUser, onBack }) {
            multiple distinct categories, party labels, OR task names. The
            "By section" view groups by the BEST available identifier per
            photo (category → party → task name), so PMs can sensibly group
-           even on older data without categories set. */}
+           even on older data without categories set.
+           IMPORTANT: count keys across all tasks in this day, not just
+           tasks that already have photos. Otherwise the toggle disappears
+           when a cleaner has multiple tasks open but only photographed one. */}
         {(() => {
-          const allDisplayed = [...allBefore, ...allAfter, ...allDamageActive];
-          const sectionKeys = new Set(allDisplayed.map(p =>
-            taskCategoryShortLabel(p.taskCategory, p.taskSubcategory) ||
-            p.partyLabel ||
-            p.taskName ||
-            '__none__'
-          ));
+          const sectionKeys = new Set();
+          blocks.forEach(b => (b.tasks || []).forEach(t => {
+            const key = taskCategoryShortLabel(t.category, t.subcategory) ||
+                        b.party?.label ||
+                        t.name ||
+                        '__none__';
+            sectionKeys.add(key);
+          }));
           const hasMultipleSections = sectionKeys.size > 1;
           if (!hasMultipleSections) return null;
           return (

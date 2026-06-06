@@ -8755,10 +8755,16 @@ function PortalHistoryTab({ property, groups, loaded, filter, setFilter, onOpenU
   const totalPhotos = groups.reduce((sum, g) => sum + g.units.reduce((s, u) => s + u.photoCount, 0), 0);
   const damageCount = groups.reduce((sum, g) => sum + g.units.filter(u => u.hasDamage).length, 0);
   const totalCleanings = groups.reduce((sum, g) => sum + g.units.length, 0);
+  // Build the list of damage entries (date + unit) for the expandable view
+  const damageEntries = [];
+  groups.forEach(g => g.units.forEach(u => {
+    if (u.hasDamage) damageEntries.push({ date: g.date, unitId: u.unitId, label: u.label });
+  }));
+  const [damageExpanded, setDamageExpanded] = useState(false);
 
   return (
     <div className="px-5 pt-6">
-      <div className="grid grid-cols-3 gap-3 mb-6">
+      <div className="grid grid-cols-3 gap-3 mb-3">
         <div className="p-4 rounded-2xl bg-white border border-stone-200">
           <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-1">Cleanings</div>
           <div className="text-2xl font-serif">{totalCleanings}</div>
@@ -8767,13 +8773,52 @@ function PortalHistoryTab({ property, groups, loaded, filter, setFilter, onOpenU
           <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-1">Photos</div>
           <div className="text-2xl font-serif">{totalPhotos}</div>
         </div>
-        <div className={`p-4 rounded-2xl border ${damageCount > 0 ? 'bg-red-50 border-red-200' : 'bg-white border-stone-200'}`}>
-          <div className={`text-xs uppercase tracking-wider font-mono mb-1 ${damageCount > 0 ? 'text-red-700' : 'text-stone-500'}`}>Damage</div>
+        <button
+          onClick={() => damageCount > 0 && setDamageExpanded(e => !e)}
+          disabled={damageCount === 0}
+          className={`p-4 rounded-2xl border text-left transition-all ${damageCount > 0 ? 'bg-red-50 border-red-200 hover:border-red-400 cursor-pointer active:scale-[0.98]' : 'bg-white border-stone-200 cursor-default'}`}>
+          <div className={`flex items-center justify-between mb-1`}>
+            <div className={`text-xs uppercase tracking-wider font-mono ${damageCount > 0 ? 'text-red-700' : 'text-stone-500'}`}>Damage</div>
+            {damageCount > 0 && (
+              <ChevronRight size={12} className={`text-red-700 transition-transform ${damageExpanded ? 'rotate-90' : ''}`} />
+            )}
+          </div>
           <div className={`text-2xl font-serif ${damageCount > 0 ? 'text-red-800' : ''}`}>{damageCount}</div>
-        </div>
+        </button>
       </div>
 
-      <div className="mb-4 flex gap-2">
+      {/* Damage drill-down: list of (date, unit) pairs with damage; tap to jump
+         to that unit-day where the PM can resolve. */}
+      {damageExpanded && damageCount > 0 && (
+        <div className="mb-4 p-4 rounded-2xl bg-red-50/50 border-2 border-red-200">
+          <div className="flex items-center justify-between mb-3">
+            <div className="text-xs uppercase tracking-wider font-mono text-red-700 flex items-center gap-1.5">
+              <AlertCircle size={12} /> Units with active damage
+            </div>
+            <button onClick={() => setDamageExpanded(false)}
+              className="text-[10px] text-red-700 hover:text-red-900 font-mono uppercase tracking-wider">
+              Hide
+            </button>
+          </div>
+          <div className="space-y-1.5">
+            {damageEntries.map((e, i) => (
+              <button key={`${e.date}-${e.unitId || i}`}
+                onClick={() => onOpenUnitDay(e.unitId, e.date)}
+                className="w-full p-3 rounded-xl bg-white border border-red-200 hover:border-red-400 active:scale-[0.99] transition-all flex items-center justify-between gap-3 text-left">
+                <div className="flex-1 min-w-0">
+                  <div className="font-medium text-stone-900 text-sm truncate">{e.label}</div>
+                  <div className="text-[11px] text-stone-500 font-mono">
+                    {new Date(e.date + 'T12:00:00').toLocaleDateString('en-US', { weekday:'short', month:'short', day:'numeric' })}
+                  </div>
+                </div>
+                <span className="text-[10px] uppercase tracking-wider font-mono text-red-700 flex-shrink-0">Resolve →</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="mb-4 flex gap-2 mt-3">
         {[{ id: '7d', label: '7 days' }, { id: '30d', label: '30 days' }, { id: '1y', label: '1 year' }].map(f => (
           <button key={f.id} onClick={() => setFilter(f.id)}
             className={`px-4 py-2 rounded-full text-sm font-medium transition-colors ${
@@ -8970,13 +9015,20 @@ function PortalUnitDay({ property, unitId, date, portalUser, onBack }) {
       </div>
 
       <div className="px-5 pt-6 space-y-6">
-        {/* View mode toggle — only show when there are multiple categories OR sub-sections to group by */}
+        {/* View mode toggle — show when there's enough variety to group by:
+           multiple distinct categories, party labels, OR task names. The
+           "By section" view groups by the BEST available identifier per
+           photo (category → party → task name), so PMs can sensibly group
+           even on older data without categories set. */}
         {(() => {
           const allDisplayed = [...allBefore, ...allAfter, ...allDamageActive];
-          const categories = new Set(allDisplayed.map(p =>
-            taskCategoryShortLabel(p.taskCategory, p.taskSubcategory) || p.partyLabel || '__none__'
+          const sectionKeys = new Set(allDisplayed.map(p =>
+            taskCategoryShortLabel(p.taskCategory, p.taskSubcategory) ||
+            p.partyLabel ||
+            p.taskName ||
+            '__none__'
           ));
-          const hasMultipleSections = categories.size > 1;
+          const hasMultipleSections = sectionKeys.size > 1;
           if (!hasMultipleSections) return null;
           return (
             <div className="flex items-center gap-1 p-1 bg-stone-100 rounded-xl">
@@ -9003,6 +9055,12 @@ function PortalUnitDay({ property, unitId, date, portalUser, onBack }) {
                 onResolve={(p) => setPhotoResolution(p, true)}
               />
             )}
+            {allDamageResolved.length > 0 && (
+              <ResolvedDamageHistory
+                photos={allDamageResolved}
+                onReopen={(p) => setPhotoResolution(p, false)}
+              />
+            )}
             <PortalPhotoSection label="Before cleaning" photos={allBefore} />
             <PortalPhotoSection label="After cleaning"  photos={allAfter} />
           </>
@@ -9011,14 +9069,22 @@ function PortalUnitDay({ property, unitId, date, portalUser, onBack }) {
           // category), falling back to party label, then "Other".
           (() => {
             const sectionMap = new Map();
-            const sectionAll = [...allBefore, ...allAfter, ...allDamageActive];
+            // Include ALL damage (active + resolved) so each section card
+            // can show its full damage story together.
+            const sectionAll = [...allBefore, ...allAfter, ...allDamageActive, ...allDamageResolved];
             sectionAll.forEach(p => {
-              const key = taskCategoryShortLabel(p.taskCategory, p.taskSubcategory) || p.partyLabel || 'Other';
-              if (!sectionMap.has(key)) sectionMap.set(key, { before: [], after: [], damage: [] });
+              const key = taskCategoryShortLabel(p.taskCategory, p.taskSubcategory) ||
+                          p.partyLabel ||
+                          p.taskName ||
+                          'Other';
+              if (!sectionMap.has(key)) sectionMap.set(key, { before: [], after: [], damage: [], damageResolved: [] });
               const bucket = sectionMap.get(key);
               if (p.kind === 'before') bucket.before.push(p);
               else if (p.kind === 'after') bucket.after.push(p);
-              else if (p.kind === 'damage') bucket.damage.push(p);
+              else if (p.kind === 'damage') {
+                if (p.resolved_at) bucket.damageResolved.push(p);
+                else bucket.damage.push(p);
+              }
             });
             // Order: bedroom > bathroom > vanity > general > others alphabetical, "Other" last
             const orderHint = (label) => {
@@ -9040,7 +9106,7 @@ function PortalUnitDay({ property, unitId, date, portalUser, onBack }) {
                 <div className="flex items-baseline justify-between pb-2 border-b border-stone-200">
                   <h2 className="font-serif text-2xl text-stone-900">{sectionLabel}</h2>
                   <span className="text-[11px] font-mono text-stone-500">
-                    {buckets.before.length + buckets.after.length + buckets.damage.length} photos
+                    {buckets.before.length + buckets.after.length + buckets.damage.length + buckets.damageResolved.length} photos
                   </span>
                 </div>
                 {buckets.damage.length > 0 && (
@@ -9048,6 +9114,12 @@ function PortalUnitDay({ property, unitId, date, portalUser, onBack }) {
                     label="Active damage" photos={buckets.damage} highlight="red"
                     description="Tap a photo to resolve."
                     onResolve={(p) => setPhotoResolution(p, true)}
+                  />
+                )}
+                {buckets.damageResolved.length > 0 && (
+                  <ResolvedDamageHistory
+                    photos={buckets.damageResolved}
+                    onReopen={(p) => setPhotoResolution(p, false)}
                   />
                 )}
                 {buckets.before.length > 0 && (
@@ -9092,14 +9164,6 @@ function PortalUnitDay({ property, unitId, date, portalUser, onBack }) {
           </div>
         )}
 
-        {/* Resolved damage history — collapsed by default, neutral tone */}
-        {allDamageResolved.length > 0 && (
-          <ResolvedDamageHistory
-            photos={allDamageResolved}
-            onReopen={(p) => setPhotoResolution(p, false)}
-          />
-        )}
-
         {allBefore.length === 0 && allAfter.length === 0 && allDamageActive.length === 0 && allDamageResolved.length === 0 && (
           <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
             No photos recorded for this date.
@@ -9112,50 +9176,51 @@ function PortalUnitDay({ property, unitId, date, portalUser, onBack }) {
 
 // =================================================================
 // RESOLVED DAMAGE HISTORY — collapsed, neutral panel showing damage
-// the PM has already marked resolved. Always has "Re-open" buttons
-// per photo so they can flip back if they tapped resolved by mistake.
+// =================================================================
+// RESOLVED DAMAGE — sits right under Active damage. Shows photos
+// the PM has marked resolved with "Re-open" buttons in case they
+// were marked by mistake. Always inline (not collapsed) so the
+// history stays in context.
 // =================================================================
 function ResolvedDamageHistory({ photos, onReopen }) {
-  const [expanded, setExpanded] = useState(false);
   const [zoom, setZoom] = useState(null);
+  if (!photos.length) return null;
   return (
-    <div className="rounded-2xl bg-stone-100 border border-stone-200 overflow-hidden">
-      <button onClick={() => setExpanded(e => !e)}
-        className="w-full flex items-center justify-between px-4 py-3 hover:bg-stone-200/50 transition-colors">
-        <div className="flex items-center gap-2">
-          <Check size={14} className="text-emerald-600" />
-          <span className="text-xs uppercase tracking-wider text-stone-600 font-mono">
-            Resolved damage ({photos.length})
-          </span>
-        </div>
-        <ChevronRight size={14} className={`text-stone-500 transition-transform ${expanded ? 'rotate-90' : ''}`} />
-      </button>
-      {expanded && (
-        <div className="px-4 pb-4">
-          <p className="text-[11px] text-stone-500 italic mb-3">
-            Issues marked resolved. Tap any photo to view; tap "Re-open" if it shouldn't have been resolved.
-          </p>
-          <div className="grid grid-cols-3 sm:grid-cols-4 gap-2">
-            {photos.map(p => (
-              <div key={p.id} className="relative">
-                <button onClick={() => setZoom(p)}
-                  className="block aspect-square w-full rounded-lg overflow-hidden bg-stone-200 opacity-75 hover:opacity-100 transition-opacity">
-                  <img loading="lazy" src={p.public_url} alt="" className="w-full h-full object-cover" />
-                  <span className="absolute top-1 left-1 px-1.5 py-0.5 rounded bg-emerald-700/90 text-white text-[9px] font-mono uppercase tracking-wider">
-                    Resolved
-                  </span>
-                </button>
-                <button onClick={() => onReopen(p)}
-                  className="mt-1 w-full px-2 py-1 rounded bg-white border border-stone-300 hover:bg-stone-50 text-stone-700 text-[10px] font-mono">
-                  Re-open
-                </button>
-              </div>
-            ))}
+    <div className="rounded-2xl bg-stone-50 border border-stone-200 p-4">
+      <div className="flex items-baseline justify-between mb-3 pb-2 border-b border-stone-200">
+        <h3 className="font-serif text-xl flex items-center gap-2 text-stone-700">
+          <Check size={16} className="text-emerald-600" />
+          Resolved damage
+        </h3>
+        <span className="text-xs font-mono text-stone-500">{photos.length}</span>
+      </div>
+      <p className="text-[11px] text-stone-500 italic mb-3">
+        Previously flagged damage that's been marked resolved. Tap "Re-open" if it should still be active.
+      </p>
+      <div className="grid grid-cols-3 sm:grid-cols-4 gap-2">
+        {photos.map(p => (
+          <div key={p.id} className="relative">
+            <button onClick={() => setZoom(p)}
+              className="block aspect-square w-full rounded-lg overflow-hidden bg-stone-200 opacity-80 hover:opacity-100 transition-opacity relative">
+              <img loading="lazy" src={p.public_url} alt="" className="w-full h-full object-cover" />
+              <span className="absolute top-1 left-1 px-1.5 py-0.5 rounded bg-emerald-700/90 text-white text-[9px] font-mono uppercase tracking-wider">
+                Resolved
+              </span>
+              {p.partyLabel && (
+                <span className="absolute bottom-1 left-1 right-1 px-1.5 py-0.5 rounded bg-black/70 text-white text-[9px] font-mono truncate">
+                  {p.partyLabel}
+                </span>
+              )}
+            </button>
+            <button onClick={() => onReopen(p)}
+              className="mt-1 w-full px-2 py-1 rounded bg-white border border-stone-300 hover:bg-stone-50 text-stone-700 text-[10px] font-mono">
+              Re-open
+            </button>
           </div>
-          {zoom && (
-            <PhotoZoomViewer photos={photos} initialUrl={zoom.public_url} onClose={() => setZoom(null)} />
-          )}
-        </div>
+        ))}
+      </div>
+      {zoom && (
+        <PhotoZoomViewer photos={photos} initialUrl={zoom.public_url} onClose={() => setZoom(null)} />
       )}
     </div>
   );
@@ -13814,6 +13879,7 @@ function MessageThread({ conversationId, otherName, asEmployee = null, asPmCusto
   const [sending, setSending] = useState(false);
   const [error, setError] = useState('');
   const [zoomPhoto, setZoomPhoto] = useState(null);
+  const [urgent, setUrgent] = useState(false); // urgent flag for next message
   const scrollRef = useRef(null);
 
   const load = async () => {
@@ -13879,6 +13945,7 @@ function MessageThread({ conversationId, otherName, asEmployee = null, asPmCusto
         content: text.trim() || null,
         photo_url: photoUrl,
         photo_path: photoPath,
+        urgent: !!urgent,
       };
       if (asEmployee) {
         insert.sender_employee_id = asEmployee.id;
@@ -13890,7 +13957,7 @@ function MessageThread({ conversationId, otherName, asEmployee = null, asPmCusto
       }
       const { error: e } = await supabase.from('messages').insert(insert);
       if (e) throw e;
-      setText(''); setPhotoFile(null);
+      setText(''); setPhotoFile(null); setUrgent(false);
       // load() will be triggered by realtime, but call it anyway for instant response
       load();
     } catch (e) {
@@ -13944,13 +14011,22 @@ function MessageThread({ conversationId, otherName, asEmployee = null, asPmCusto
           <div className="text-center text-stone-400 text-sm py-12">No messages yet. Say hi!</div>
         ) : messages.map(m => {
           const mine = isMine(m);
+          const isUrgent = !!m.urgent;
+          const bubbleClass = isUrgent
+            ? (mine ? 'bg-amber-600 text-white border border-amber-700' : 'bg-amber-50 border-2 border-amber-400 text-amber-950')
+            : (mine ? 'bg-stone-900 text-stone-50' : 'bg-white border border-stone-200 text-stone-900');
           return (
             <div key={m.id} className={`flex ${mine ? 'justify-end' : 'justify-start'}`}>
               <div className={`max-w-[80%] ${mine ? 'items-end' : 'items-start'} flex flex-col`}>
                 {!mine && (
                   <div className="text-[10px] font-mono text-stone-500 mb-0.5 px-1">{senderName(m)}</div>
                 )}
-                <div className={`px-3 py-2 rounded-2xl ${mine ? 'bg-stone-900 text-stone-50' : 'bg-white border border-stone-200 text-stone-900'}`}>
+                {isUrgent && (
+                  <div className={`flex items-center gap-1 mb-0.5 px-1 text-[10px] font-mono uppercase tracking-wider ${mine ? 'text-amber-700' : 'text-amber-700'}`}>
+                    <AlertCircle size={10} /> Urgent
+                  </div>
+                )}
+                <div className={`px-3 py-2 rounded-2xl ${bubbleClass}`}>
                   {m.photo_url && (
                     <button onClick={() => setZoomPhoto(m.photo_url)} className="block mb-1">
                       <img src={m.photo_url} alt="" loading="lazy"
@@ -13992,23 +14068,38 @@ function MessageThread({ conversationId, otherName, asEmployee = null, asPmCusto
       )}
 
       <div className="border-t border-stone-200 bg-white flex-shrink-0" style={{ paddingBottom: 'max(0.75rem, env(safe-area-inset-bottom))' }}>
+        {urgent && (
+          <div className="px-4 py-2 bg-amber-100 border-t border-amber-200 flex items-center gap-2 flex-shrink-0">
+            <AlertCircle size={14} className="text-amber-700 flex-shrink-0" />
+            <span className="text-xs text-amber-900 flex-1">This message will be sent as <span className="font-bold">urgent</span>.</span>
+            <button onClick={() => setUrgent(false)}
+              className="text-[10px] text-amber-700 hover:text-amber-900 font-mono uppercase tracking-wider">
+              Cancel
+            </button>
+          </div>
+        )}
         <div className="px-4 py-3 max-w-2xl mx-auto flex items-end gap-2">
         <label className="p-2 rounded-full hover:bg-stone-100 cursor-pointer flex-shrink-0">
           <Camera size={20} className="text-stone-600" />
           <input type="file" accept="image/*" className="hidden"
             onChange={(e) => { const f = e.target.files?.[0]; if (f) setPhotoFile(f); }} />
         </label>
+        <button onClick={() => setUrgent(u => !u)} type="button"
+          title={urgent ? 'Urgent flag enabled — tap to turn off' : 'Mark this message as urgent'}
+          className={`p-2 rounded-full flex-shrink-0 transition-colors ${urgent ? 'bg-amber-600 hover:bg-amber-700 text-white' : 'hover:bg-stone-100 text-stone-600'}`}>
+          <AlertCircle size={20} />
+        </button>
         <textarea value={text} onChange={(e) => setText(e.target.value)} rows={1}
-          placeholder="Type a message…" disabled={sending}
+          placeholder={urgent ? 'Type your urgent message…' : 'Type a message…'} disabled={sending}
           onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }}
           onFocus={(e) => {
             // Scroll the input into view after the iOS keyboard animation
             setTimeout(() => { try { e.target.scrollIntoView({ block: 'end', behavior: 'smooth' }); } catch {} }, 300);
           }}
           style={{ fontSize: 16 }}
-          className="flex-1 px-3 py-2 rounded-xl border border-stone-300 bg-white resize-none max-h-32" />
+          className={`flex-1 px-3 py-2 rounded-xl border bg-white resize-none max-h-32 ${urgent ? 'border-amber-400 focus:border-amber-600' : 'border-stone-300'}`} />
         <button onClick={send} disabled={sending || (!text.trim() && !photoFile)}
-          className="p-2.5 rounded-full bg-stone-900 text-stone-50 disabled:opacity-40 flex-shrink-0">
+          className={`p-2.5 rounded-full text-stone-50 disabled:opacity-40 flex-shrink-0 ${urgent ? 'bg-amber-600 hover:bg-amber-700' : 'bg-stone-900'}`}>
           {sending ? <div className="w-4 h-4 border-2 border-stone-50 border-t-transparent rounded-full animate-spin" /> : <ChevronRight size={16} />}
         </button>
         </div>

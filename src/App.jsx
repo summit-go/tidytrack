@@ -1468,6 +1468,37 @@ function EmployeeApp({ employee: employeeInit, onSignOut }) {
     setBusy(false);
   };
 
+  // Sign-out wrapper that force-clocks-out any active shift before
+  // exiting. This prevents ghost shifts from cleaners who tap "Sign out"
+  // while still on the clock. Note we do NOT pop a confirm dialog here
+  // because the user already confirmed (by tapping Sign out); we just
+  // close out their work cleanly in the background.
+  const signOutWithCleanup = async () => {
+    try {
+      if (activeTask) {
+        try { await stopTask(activeTask, false); } catch (e) { console.warn('[signOut] stopTask failed', e); }
+      }
+      if (activeBlock && !activeBlock.end_time) {
+        await supabase.from('work_blocks').update({ end_time: new Date().toISOString() }).eq('id', activeBlock.id);
+      }
+      if (shift && !shift.end_time) {
+        await supabase.from('shifts').update({ end_time: new Date().toISOString() }).eq('id', shift.id);
+      }
+      // Also close any open view-only session so the audit trail is clean
+      if (viewOnlySession && !viewOnlySession.end_time) {
+        try {
+          await supabase.from('view_only_sessions').update({ end_time: new Date().toISOString() }).eq('id', viewOnlySession.id);
+        } catch (e) { console.warn('[signOut] view-only close failed', e); }
+      }
+    } catch (e) {
+      console.warn('[signOutWithCleanup] cleanup error (proceeding with sign out)', e);
+    }
+    // Clear local state, then let the parent finish the sign-out
+    setShift(null); setWorkBlocks([]); setActiveBlock(null); setTasks([]); setActiveTask(null);
+    setViewOnlySession(null); setViewOnlyProperty(null);
+    onSignOut();
+  };
+
   // Auto clock-out triggered by idle detector. endTs = the last activity time;
   // we use that as the shift's end_time so billable time excludes the idle gap.
   const autoClockOut = async (endTs) => {
@@ -1812,7 +1843,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut }) {
     return <ViewOnlyDashboard
       employee={employee}
       property={viewOnlyProperty}
-      onSignOut={async () => { await endViewOnly(); onSignOut(); }}
+      onSignOut={signOutWithCleanup}
       onEndViewing={endViewOnly}
       onOpenMessages={() => { logViewOnlyAction('opened_messages'); setShowMessages(true); }}
       onOpenBedroomHistory={(params) => { logViewOnlyAction('opened_bedroom_history'); setBedroomHistory(params); }}
@@ -1850,7 +1881,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut }) {
   if (!shift) {
     return withIdleModal(
       <div className="min-h-screen bg-stone-50 flex flex-col">
-        <Header name={employee.name} onSignOut={onSignOut} role={employee.role}
+        <Header name={employee.name} onSignOut={signOutWithCleanup} role={employee.role}
           employee={employee} onOpenMessages={() => setShowMessages(true)} />
         <div className="flex-1 flex flex-col justify-center items-center px-6">
           <div className="text-center mb-12">
@@ -1893,7 +1924,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut }) {
 
   if (isMulti && !activeBlock) {
     return withIdleModal(<PropertyHub shift={shift} workBlocks={workBlocks} employeeName={employee.name} employee={employee}
-      onSignOut={onSignOut} onClockOut={clockOut} onSwitchProperty={switchProperty}
+      onSignOut={signOutWithCleanup} onClockOut={clockOut} onSwitchProperty={switchProperty}
       onStartNew={startNewBlock} onReopen={reopenBlock} onGoToBedroom={goToBedroomForTarget}
       onOpenMessages={() => setShowMessages(true)}
       onOpenChangePin={() => setShowChangePin(true)}
@@ -1901,7 +1932,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut }) {
   }
   if (isMulti && activeBlock) {
     return withIdleModal(<BlockView shift={shift} block={activeBlock} tasks={tasks} activeTask={activeTask}
-      employeeName={employee.name} employee={employee} onSignOut={onSignOut} onFinish={finishBlock}
+      employeeName={employee.name} employee={employee} onSignOut={signOutWithCleanup} onFinish={finishBlock}
       onPause={() => setActiveBlock(null)}
       newTaskName={newTaskName} setNewTaskName={setNewTaskName}
       onStartTask={startTask} onStartTasksFromPicker={startTasksFromPicker}
@@ -1913,7 +1944,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut }) {
       onOpenBedroomHistory={setBedroomHistory} busy={busy} />);
   }
   return withIdleModal(<SimpleShiftView shift={shift} tasks={tasks} activeTask={activeTask}
-    employeeName={employee.name} employee={employee} onSignOut={onSignOut} onClockOut={clockOut}
+    employeeName={employee.name} employee={employee} onSignOut={signOutWithCleanup} onClockOut={clockOut}
     onSwitchProperty={switchProperty}
     onAttachProperty={startAttachProperty}
     newTaskName={newTaskName} setNewTaskName={setNewTaskName}
@@ -2701,11 +2732,70 @@ function SimpleShiftView({ shift, tasks, activeTask, employeeName, employee, onS
 // =================================================================
 function PropertyPicker({ onPick, onCancel, busy, title, subtitle, viewOnly = false }) {
   const [properties, setProperties] = useState([]);
+  const [assignmentCounts, setAssignmentCounts] = useState({}); // { customer_id: number }
   const [loaded, setLoaded] = useState(false);
+  const [showAllOthers, setShowAllOthers] = useState(false);
+
   useEffect(() => { (async () => {
-    const { data } = await supabase.from('customers').select('*').eq('active', true).order('name');
-    setProperties(data || []); setLoaded(true);
+    // Load active properties AND open assignment counts in parallel.
+    // "Open" = status != 'done', so the cleaner still has something to do.
+    const [propsRes, targetsRes] = await Promise.all([
+      supabase.from('customers').select('*').eq('active', true).order('name'),
+      supabase.from('assignment_targets')
+        .select('status, assignment:assignments!inner(customer_id, active)')
+        .neq('status', 'done'),
+    ]);
+    const counts = {};
+    (targetsRes.data || []).forEach(t => {
+      const a = t.assignment;
+      if (!a || a.active === false) return;
+      const cid = a.customer_id;
+      if (!cid) return;
+      counts[cid] = (counts[cid] || 0) + 1;
+    });
+    setProperties(propsRes.data || []);
+    setAssignmentCounts(counts);
+    setLoaded(true);
   })(); }, []);
+
+  // Split into two buckets: properties with open assignments (top) and
+  // everything else (collapsed dropdown). Both lists are alphabetical
+  // by name.
+  const withAssignments = properties
+    .filter(p => (assignmentCounts[p.id] || 0) > 0)
+    .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+  const others = properties
+    .filter(p => (assignmentCounts[p.id] || 0) === 0)
+    .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+
+  // Reusable row renderer so both buckets look the same
+  const PropertyRow = ({ p }) => (
+    <button key={p.id} onClick={() => onPick(p)} disabled={busy}
+      className="w-full text-left p-4 rounded-2xl bg-white border-2 border-stone-200 hover:border-stone-900 active:scale-98 transition-all disabled:opacity-50">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 mb-1 flex-wrap">
+            <span className="font-serif text-lg text-stone-900">{p.name}</span>
+            {p.property_type === 'multi_unit' && (
+              <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-amber-100 text-amber-800">Multi-unit</span>
+            )}
+            {(assignmentCounts[p.id] || 0) > 0 && (
+              <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-amber-600 text-white flex items-center gap-1 font-bold">
+                <FileText size={10} /> {assignmentCounts[p.id]} assignment{assignmentCounts[p.id] === 1 ? '' : 's'}
+              </span>
+            )}
+          </div>
+          {p.address && (
+            <div className="text-xs text-stone-500 font-mono">
+              <AddressLink address={p.address} />
+            </div>
+          )}
+        </div>
+        <ChevronRight size={16} className="text-stone-400 flex-shrink-0" />
+      </div>
+    </button>
+  );
+
   return (
     <div className="min-h-screen bg-stone-50 flex flex-col">
       <div className="flex items-center gap-3 px-5 py-4 border-b border-stone-200">
@@ -2723,29 +2813,45 @@ function PropertyPicker({ onPick, onCancel, busy, title, subtitle, viewOnly = fa
             {properties.length === 0 ? (
               <div className="text-center py-12 text-stone-400 text-sm">No properties yet.</div>
             ) : (
-              <div className="space-y-2 mb-6">
-                {properties.map(p => (
-                  <button key={p.id} onClick={() => onPick(p)} disabled={busy}
-                    className="w-full text-left p-4 rounded-2xl bg-white border-2 border-stone-200 hover:border-stone-900 active:scale-98 transition-all disabled:opacity-50">
-                    <div className="flex items-center justify-between">
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2 mb-1">
-                          <span className="font-serif text-lg text-stone-900">{p.name}</span>
-                          {p.property_type === 'multi_unit' && (
-                            <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-amber-100 text-amber-800">Multi-unit</span>
-                          )}
-                        </div>
-                        {p.address && (
-                          <div className="text-xs text-stone-500 font-mono">
-                            <AddressLink address={p.address} />
-                          </div>
-                        )}
-                      </div>
-                      <ChevronRight size={16} className="text-stone-400" />
+              <>
+                {/* Top section: properties with open assignments — shown
+                   as cards so cleaners can immediately tap the one they
+                   need to work on. */}
+                {withAssignments.length > 0 && (
+                  <div className="mb-6">
+                    <div className="text-xs uppercase tracking-wider text-amber-700 font-mono mb-2 flex items-center gap-1.5">
+                      <FileText size={11} /> Has open assignments
                     </div>
-                  </button>
-                ))}
-              </div>
+                    <div className="space-y-2">
+                      {withAssignments.map(p => <PropertyRow key={p.id} p={p} />)}
+                    </div>
+                  </div>
+                )}
+
+                {/* Below: everything else, alphabetical, hidden behind
+                   a toggle to keep the screen short when there are
+                   lots of properties. */}
+                {others.length > 0 && (
+                  <div className="mb-6">
+                    <button onClick={() => setShowAllOthers(s => !s)}
+                      className="w-full flex items-center justify-between px-3 py-2.5 rounded-xl bg-stone-100 hover:bg-stone-200 text-stone-700 transition-colors">
+                      <div className="flex items-center gap-2">
+                        <Building2 size={14} />
+                        <span className="text-sm font-medium">
+                          {withAssignments.length > 0 ? 'Other properties' : 'All properties'}
+                        </span>
+                        <span className="text-[10px] font-mono text-stone-500">({others.length})</span>
+                      </div>
+                      <ChevronRight size={14} className={`text-stone-500 transition-transform ${showAllOthers ? 'rotate-90' : ''}`} />
+                    </button>
+                    {showAllOthers && (
+                      <div className="space-y-2 mt-2">
+                        {others.map(p => <PropertyRow key={p.id} p={p} />)}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </>
             )}
             {!viewOnly && (
               <button onClick={() => onPick(null)} disabled={busy}
@@ -4912,9 +5018,43 @@ function EmployeeAdmin({ employee, onSignOut, onOpenMessages, onLogoClick }) {
                     {e.role === 'manager' && <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-200 text-stone-700">Manager</span>}
                     {!e.active && <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-200 text-stone-600">Inactive</span>}
                   </div>
-                  <div className="text-xs text-stone-500 font-mono">PIN: •••• {e.id === employee.id && '· (you)'}</div>
+                  <div className="text-xs text-stone-500 font-mono mb-2">PIN: •••• {e.id === employee.id && '· (you)'}</div>
+                  {/* Capability summary so owners can scan who has what without
+                     drilling into each card. Owners are "Full access" by virtue
+                     of their role; others get tiny labelled chips. */}
+                  {(() => {
+                    if (e.role === 'owner') {
+                      return (
+                        <div className="text-[10px] uppercase tracking-wider font-mono text-amber-700 flex items-center gap-1">
+                          <Check size={10} /> Full access
+                        </div>
+                      );
+                    }
+                    const r = e.responsibilities || {};
+                    const enabled = CAPABILITIES.filter(c => r[c.key] === true);
+                    if (enabled.length === 0) {
+                      return (
+                        <div className="text-[10px] uppercase tracking-wider font-mono text-stone-400 italic">
+                          No extra responsibilities
+                        </div>
+                      );
+                    }
+                    return (
+                      <div className="flex flex-wrap gap-1">
+                        <span className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mr-0.5 self-center">
+                          {enabled.length}/{CAPABILITIES.length}:
+                        </span>
+                        {enabled.map(c => (
+                          <span key={c.key}
+                            className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-50 text-amber-800 border border-amber-200 whitespace-nowrap">
+                            {c.label}
+                          </span>
+                        ))}
+                      </div>
+                    );
+                  })()}
                 </div>
-                <ChevronRight size={16} className="text-stone-400" />
+                <ChevronRight size={16} className="text-stone-400 flex-shrink-0 self-start mt-1" />
               </div>
             </button>
           ))}
@@ -5058,9 +5198,23 @@ function EmployeeForm({ employee, currentUserId, currentUserRole, onCancel, onSa
         </div>
 
         <div className="p-4 rounded-2xl bg-white border border-stone-200 space-y-3">
-          <div className="flex items-center gap-2 mb-1">
-            <Settings size={14} className="text-stone-500" />
-            <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">Responsibilities</div>
+          <div className="flex items-center justify-between gap-2 mb-1">
+            <div className="flex items-center gap-2">
+              <Settings size={14} className="text-stone-500" />
+              <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">Responsibilities</div>
+            </div>
+            {/* Running tally so the user can see at a glance how many caps
+               are on without scanning every checkbox. Owners are always
+               full so we just say "Full access". */}
+            {role === 'owner' ? (
+              <span className="text-[10px] uppercase tracking-wider font-mono text-amber-700 flex items-center gap-1">
+                <Check size={10} /> Full access
+              </span>
+            ) : (
+              <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-100 text-stone-700">
+                {Object.values(responsibilities).filter(v => v === true).length} of {CAPABILITIES.length}
+              </span>
+            )}
           </div>
           {role === 'owner' ? (
             <p className="text-[11px] text-stone-500 -mt-2">

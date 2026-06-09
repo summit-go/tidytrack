@@ -5091,6 +5091,11 @@ function EmployeeForm({ employee, currentUserId, currentUserRole, onCancel, onSa
   // Track whether the user manually edited any toggle, so we don't clobber
   // their choices when they switch roles back and forth.
   const [respDirty, setRespDirty] = useState(false);
+  // Remember the role this employee was loaded with, so we can detect
+  // when the user actually changes it. Without this, the role-defaults
+  // effect would fire on mount and overwrite saved capabilities with
+  // empty defaults — which was a real bug that hid existing toggles.
+  const initialRoleRef = useRef(employee?.role || 'employee');
 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -5099,11 +5104,14 @@ function EmployeeForm({ employee, currentUserId, currentUserRole, onCancel, onSa
   // Only owners + managers benefit from notification settings (cleaners use the app directly)
   const showNotificationSettings = role === 'owner' || role === 'manager';
 
-  // When role changes (and the user hasn't manually edited toggles yet),
-  // reset the responsibilities to the defaults for that role.
-  // Only kicks in on NEW employees or when the user hasn't touched the toggles.
+  // When the user actually changes the role (and hasn't manually edited
+  // toggles), reset the responsibilities to that role's defaults. Skips
+  // the initial mount — the loaded values from the row are authoritative
+  // on open. Without this guard, opening an employee with custom caps
+  // would wipe them on render.
   useEffect(() => {
-    if (respDirty) return;
+    if (role === initialRoleRef.current) return; // mount or back-to-original
+    if (respDirty) return;                       // user has already customized
     setResponsibilities(defaultRespForRole(role));
     // eslint-disable-next-line
   }, [role]);

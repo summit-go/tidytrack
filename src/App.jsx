@@ -43,20 +43,17 @@ const assignmentTypeLabel = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value)?.label || value || '';
 
 // Build a compact display title from a unit + party (bedroom) label.
-// "B1-103" + "Bedroom 2" → "B1-103-2". If the party label doesn't end in
-// a number, fall back to the full label appended. If there's no party
-// (whole-unit assignment), return just the unit. If no unit either, ''.
+// Format: "<unit> - <party>"  e.g. "B1-103 - Bedroom 1".
+// We keep the full party label (rather than extracting just the number)
+// so cleaners see the human-readable bedroom name. Falls back gracefully
+// when one side is missing.
 function buildTargetTitle(unitLabel, partyLabel) {
   const u = (unitLabel || '').trim();
   const p = (partyLabel || '').trim();
   if (!u && !p) return '';
   if (!p) return u;
-  // Pull a trailing number out of the party label ("Bedroom 1" → "1",
-  // "BR2" → "2"). If we can't find one, use the whole party label
-  // (sanitized) so weird labels like "Master" still get represented.
-  const trailNum = p.match(/(\d+)\s*$/);
-  const suffix = trailNum ? trailNum[1] : p.replace(/\s+/g, '-');
-  return u ? `${u}-${suffix}` : suffix;
+  if (!u) return p;
+  return `${u} - ${p}`;
 }
 
 const SUPPORTED_TRANSLATE_LANGUAGES = [
@@ -11369,14 +11366,15 @@ function AssignmentForm({ property, employee, onCancel, onSaved }) {
 
   const addFiles = (files) => {
     const newRows = Array.from(files).map(f => {
-      // Pre-strip extension for a sensible default title
-      const baseName = (f.name || '').replace(/\.[a-z0-9]+$/i, '');
       const defaultProperty = property?.id || (allProperties[0]?.id || '');
-      const isMulti = allProperties.find(p => p.id === defaultProperty)?.property_type === 'multi_unit';
       return {
         id: `${Date.now()}_${Math.random().toString(36).slice(2,8)}`,
         file: f,
-        title: baseName.slice(0, 80),
+        // Start empty so picking a unit + bedroom auto-fills the title.
+        // (Previously we pre-filled from the filename; that meant the
+        // title was never "empty" and the auto-fill wouldn't replace it,
+        // breaking the auto-population behavior the user expects.)
+        title: '',
         notes: '',
         propertyId: defaultProperty,
         scope: 'single',

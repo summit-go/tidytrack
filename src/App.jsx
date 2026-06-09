@@ -3517,12 +3517,13 @@ function ManagerShell({ employee, onSignOut }) {
   const [showMessages, setShowMessages] = useState(false);
   const showMoneyTabs = canSeeMoney(employee); // owner only
 
-  // If a manager somehow lands on a money tab (e.g. via stale state), bounce them home
+  // If a manager somehow lands on the money tab (e.g. via stale state), bounce them home
   useEffect(() => {
-    if (!showMoneyTabs && (tab === 'invoice' || tab === 'payroll')) setTab('daily');
+    if (!showMoneyTabs && tab === 'money') setTab('daily');
   }, [showMoneyTabs, tab]);
 
-  const colCount = showMoneyTabs ? 6 : 4;
+  // Tab count: managers get 5 (no Money), owners get 6.
+  const colCount = showMoneyTabs ? 6 : 5;
   const openMessages = () => setShowMessages(true);
   const goHome = () => setTab('daily');
 
@@ -3533,21 +3534,21 @@ function ManagerShell({ employee, onSignOut }) {
 
   return (
     <div className="min-h-screen bg-stone-50">
-      {tab === 'daily'     && <DailyView        employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} onLogoClick={goHome} />}
-      {tab === 'dashboard' && <ManagerDashboard employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} onLogoClick={goHome} />}
-      {tab === 'team'      && <EmployeeAdmin   employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} onLogoClick={goHome} />}
-      {tab === 'props'     && <PropertyAdmin   employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} onLogoClick={goHome} />}
-      {showMoneyTabs && tab === 'invoice'   && <InvoiceView     employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} onLogoClick={goHome} />}
-      {showMoneyTabs && tab === 'payroll'   && <ExportView      employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} onLogoClick={goHome} />}
+      {tab === 'daily'       && <DailyView         employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} onLogoClick={goHome} />}
+      {tab === 'dashboard'   && <ManagerDashboard  employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} onLogoClick={goHome} />}
+      {tab === 'team'        && <EmployeeAdmin    employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} onLogoClick={goHome} />}
+      {tab === 'props'       && <PropertyAdmin    employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} onLogoClick={goHome} />}
+      {tab === 'assignments' && <AssignmentsTab   employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} onLogoClick={goHome} />}
+      {showMoneyTabs && tab === 'money' && <MoneyView employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} onLogoClick={goHome} />}
 
       <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-stone-200 px-1 py-2 z-30">
         <div className="max-w-md mx-auto grid gap-0.5" style={{ gridTemplateColumns: `repeat(${colCount}, minmax(0, 1fr))` }}>
-          <TabButton active={tab==='daily'}     onClick={() => setTab('daily')}     icon={<Calendar size={18} />} label="Daily" />
-          <TabButton active={tab==='dashboard'} onClick={() => setTab('dashboard')} icon={<LayoutDashboard size={18} />} label="Shifts" />
-          <TabButton active={tab==='team'}      onClick={() => setTab('team')}      icon={<Users size={18} />} label="Team" />
-          <TabButton active={tab==='props'}     onClick={() => setTab('props')}     icon={<Building2 size={18} />} label="Properties" />
-          {showMoneyTabs && <TabButton active={tab==='invoice'} onClick={() => setTab('invoice')} icon={<FileText size={18} />} label="Invoices" />}
-          {showMoneyTabs && <TabButton active={tab==='payroll'} onClick={() => setTab('payroll')} icon={<DollarSign size={18} />} label="Payroll" />}
+          <TabButton active={tab==='daily'}       onClick={() => setTab('daily')}       icon={<Calendar size={18} />} label="Daily" />
+          <TabButton active={tab==='dashboard'}   onClick={() => setTab('dashboard')}   icon={<LayoutDashboard size={18} />} label="Shifts" />
+          <TabButton active={tab==='team'}        onClick={() => setTab('team')}        icon={<Users size={18} />} label="Team" />
+          <TabButton active={tab==='props'}       onClick={() => setTab('props')}       icon={<Building2 size={18} />} label="Properties" />
+          <TabButton active={tab==='assignments'} onClick={() => setTab('assignments')} icon={<FileText size={18} />} label="Assignments" />
+          {showMoneyTabs && <TabButton active={tab==='money'} onClick={() => setTab('money')} icon={<DollarSign size={18} />} label="Money" />}
         </div>
       </div>
     </div>
@@ -4975,11 +4976,35 @@ function EmployeeAdmin({ employee, onSignOut, onOpenMessages, onLogoClick }) {
   const [loaded, setLoaded] = useState(false);
   const [editing, setEditing] = useState(null);
   const [showInactive, setShowInactive] = useState(false);
+  const [togglingId, setTogglingId] = useState(null);
   const load = async () => {
     const { data } = await supabase.from('employees').select('*').order('active', { ascending: false }).order('name');
     setEmployees(data || []); setLoaded(true);
   };
   useEffect(() => { load(); }, []);
+
+  // Quick activate / deactivate from the list — no need to open the edit
+  // form. Deactivating warns first because it's a meaningful action
+  // (they can't sign in). Activating is one tap.
+  const toggleActive = async (e) => {
+    if (e.id === employee.id && e.active) {
+      alert("You can't deactivate your own account from here.");
+      return;
+    }
+    const turningOff = e.active;
+    if (turningOff && !confirm(`Deactivate ${e.name}? They won't be able to sign in until reactivated.`)) {
+      return;
+    }
+    setTogglingId(e.id);
+    const { error } = await supabase.from('employees').update({ active: !e.active }).eq('id', e.id);
+    setTogglingId(null);
+    if (error) {
+      alert('Could not update: ' + error.message);
+      return;
+    }
+    load();
+  };
+
   if (!loaded) return <Splash text="Loading…" />;
   if (editing) {
     return <EmployeeForm employee={editing === 'new' ? null : editing} currentUserId={employee.id} currentUserRole={employee.role}
@@ -5007,57 +5032,77 @@ function EmployeeAdmin({ employee, onSignOut, onOpenMessages, onLogoClick }) {
         <div className="space-y-2">
           {visible.length === 0 ? (
             <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">No employees yet.</div>
-          ) : visible.map(e => (
-            <button key={e.id} onClick={() => setEditing(e)}
-              className={`w-full text-left p-4 rounded-2xl border ${e.active ? 'bg-white border-stone-200 hover:border-stone-400' : 'bg-stone-100 border-stone-200 opacity-60'}`}>
-              <div className="flex items-center justify-between">
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2 mb-1">
-                    <span className="font-serif text-lg text-stone-900">{e.name}</span>
-                    {e.role === 'owner' && <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-amber-100 text-amber-800">Owner</span>}
-                    {e.role === 'manager' && <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-200 text-stone-700">Manager</span>}
-                    {!e.active && <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-200 text-stone-600">Inactive</span>}
-                  </div>
-                  <div className="text-xs text-stone-500 font-mono mb-2">PIN: •••• {e.id === employee.id && '· (you)'}</div>
-                  {/* Capability summary so owners can scan who has what without
-                     drilling into each card. Owners are "Full access" by virtue
-                     of their role; others get tiny labelled chips. */}
-                  {(() => {
-                    if (e.role === 'owner') {
+          ) : visible.map(e => {
+            const isSelfRow = e.id === employee.id;
+            const isToggling = togglingId === e.id;
+            return (
+              <div key={e.id}
+                onClick={() => setEditing(e)}
+                className={`w-full text-left p-4 rounded-2xl border cursor-pointer ${e.active ? 'bg-white border-stone-200 hover:border-stone-400' : 'bg-stone-100 border-stone-200 opacity-60'}`}>
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className="font-serif text-lg text-stone-900">{e.name}</span>
+                      {e.role === 'owner' && <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-amber-100 text-amber-800">Owner</span>}
+                      {e.role === 'manager' && <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-200 text-stone-700">Manager</span>}
+                      {!e.active && <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-200 text-stone-600">Inactive</span>}
+                    </div>
+                    <div className="text-xs text-stone-500 font-mono mb-2">PIN: •••• {isSelfRow && '· (you)'}</div>
+                    {/* Capability summary so owners can scan who has what without
+                       drilling into each card. Owners are "Full access" by virtue
+                       of their role; others get tiny labelled chips. */}
+                    {(() => {
+                      if (e.role === 'owner') {
+                        return (
+                          <div className="text-[10px] uppercase tracking-wider font-mono text-amber-700 flex items-center gap-1">
+                            <Check size={10} /> Full access
+                          </div>
+                        );
+                      }
+                      const r = e.responsibilities || {};
+                      const enabled = CAPABILITIES.filter(c => r[c.key] === true);
+                      if (enabled.length === 0) {
+                        return (
+                          <div className="text-[10px] uppercase tracking-wider font-mono text-stone-400 italic">
+                            No extra responsibilities
+                          </div>
+                        );
+                      }
                       return (
-                        <div className="text-[10px] uppercase tracking-wider font-mono text-amber-700 flex items-center gap-1">
-                          <Check size={10} /> Full access
-                        </div>
-                      );
-                    }
-                    const r = e.responsibilities || {};
-                    const enabled = CAPABILITIES.filter(c => r[c.key] === true);
-                    if (enabled.length === 0) {
-                      return (
-                        <div className="text-[10px] uppercase tracking-wider font-mono text-stone-400 italic">
-                          No extra responsibilities
-                        </div>
-                      );
-                    }
-                    return (
-                      <div className="flex flex-wrap gap-1">
-                        <span className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mr-0.5 self-center">
-                          {enabled.length}/{CAPABILITIES.length}:
-                        </span>
-                        {enabled.map(c => (
-                          <span key={c.key}
-                            className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-50 text-amber-800 border border-amber-200 whitespace-nowrap">
-                            {c.label}
+                        <div className="flex flex-wrap gap-1">
+                          <span className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mr-0.5 self-center">
+                            {enabled.length}/{CAPABILITIES.length}:
                           </span>
-                        ))}
-                      </div>
-                    );
-                  })()}
+                          {enabled.map(c => (
+                            <span key={c.key}
+                              className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-50 text-amber-800 border border-amber-200 whitespace-nowrap">
+                              {c.label}
+                            </span>
+                          ))}
+                        </div>
+                      );
+                    })()}
+                  </div>
+                  <div className="flex items-center gap-2 flex-shrink-0">
+                    {/* Inline active toggle — stopPropagation so it doesn't open
+                       the edit form. Disabled for self to prevent self-lockout. */}
+                    <button
+                      onClick={(ev) => { ev.stopPropagation(); toggleActive(e); }}
+                      disabled={isToggling || (isSelfRow && e.active)}
+                      title={isSelfRow && e.active ? "Can't deactivate yourself" : (e.active ? 'Deactivate' : 'Activate')}
+                      className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${e.active ? 'bg-emerald-600' : 'bg-stone-300'} disabled:opacity-50 disabled:cursor-not-allowed`}>
+                      <span className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform ${e.active ? 'translate-x-5' : 'translate-x-0.5'}`}>
+                        {isToggling && <span className="absolute inset-0 flex items-center justify-center">
+                          <div className="w-2.5 h-2.5 border-2 border-stone-400 border-t-transparent rounded-full animate-spin" />
+                        </span>}
+                      </span>
+                    </button>
+                    <ChevronRight size={16} className="text-stone-400" />
+                  </div>
                 </div>
-                <ChevronRight size={16} className="text-stone-400 flex-shrink-0 self-start mt-1" />
               </div>
-            </button>
-          ))}
+            );
+          })}
         </div>
       </div>
     </div>
@@ -5136,6 +5181,18 @@ function EmployeeForm({ employee, currentUserId, currentUserRole, onCancel, onSa
       return;
     }
     setBusy(true);
+    // Proactive PIN uniqueness check — catches duplicates BEFORE the
+    // insert/update so the error message names the conflicting employee.
+    const { data: pinClash } = await supabase.from('employees')
+      .select('id, name')
+      .eq('pin', pin)
+      .maybeSingle();
+    if (pinClash && pinClash.id !== employee?.id) {
+      setBusy(false);
+      setError(`That PIN is already in use by ${pinClash.name}. Pick a different PIN.`);
+      return;
+    }
+
     const payload = {
       name: name.trim(), pin, role, active,
       phone: cleanPhone || null,
@@ -5147,7 +5204,12 @@ function EmployeeForm({ employee, currentUserId, currentUserRole, onCancel, onSa
       ? await supabase.from('employees').insert(payload)
       : await supabase.from('employees').update(payload).eq('id', employee.id);
     setBusy(false);
-    if (e) { setError(e.message.includes('duplicate') ? 'That PIN is already in use' : e.message); return; }
+    if (e) {
+      // Belt-and-suspenders: if a race lets a duplicate through, fall back
+      // to the DB constraint's error message.
+      setError(e.message.includes('duplicate') ? 'That PIN is already in use. Pick a different PIN.' : e.message);
+      return;
+    }
     onSaved();
   };
   const remove = async () => {
@@ -7454,7 +7516,168 @@ function PartyForm({ property, unit, party, onCancel, onSaved }) {
 // =================================================================
 // INVOICE VIEW (uses work blocks)
 // =================================================================
-function InvoiceView({ employee, onSignOut, onOpenMessages, onLogoClick }) {
+// =================================================================
+// ASSIGNMENTS TAB — top-level tab where owners/managers can pick a
+// property and either view its OPEN assignments or upload new ones.
+// Composes the existing AssignmentList + AssignmentForm components.
+// =================================================================
+function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
+  const [properties, setProperties] = useState([]);
+  const [assignmentCounts, setAssignmentCounts] = useState({}); // { customer_id: open_count }
+  const [loaded, setLoaded] = useState(false);
+  const [picked, setPicked] = useState(null); // selected property
+  const [view, setView] = useState('open');   // 'open' | 'upload' | 'detail'
+  const [detail, setDetail] = useState(null);  // selected assignment when view === 'detail'
+
+  const load = async () => {
+    const [propsRes, targetsRes] = await Promise.all([
+      supabase.from('customers').select('*').eq('active', true).order('name'),
+      supabase.from('assignment_targets')
+        .select('status, assignment:assignments!inner(customer_id, active)')
+        .neq('status', 'done'),
+    ]);
+    const counts = {};
+    (targetsRes.data || []).forEach(t => {
+      const a = t.assignment;
+      if (!a || a.active === false) return;
+      const cid = a.customer_id;
+      if (!cid) return;
+      counts[cid] = (counts[cid] || 0) + 1;
+    });
+    setProperties(propsRes.data || []);
+    setAssignmentCounts(counts);
+    setLoaded(true);
+  };
+  useEffect(() => { load(); }, []);
+
+  // Detail view: show a single assignment's status / targets
+  if (picked && view === 'detail' && detail) {
+    return <AssignmentDetail property={picked} assignment={detail} employee={employee}
+      onBack={() => { setDetail(null); setView('open'); load(); }} />;
+  }
+
+  // Picked property + Upload sub-view → render form
+  if (picked && view === 'upload') {
+    return <AssignmentForm property={picked} employee={employee}
+      onCancel={() => setView('open')}
+      onSaved={() => { setView('open'); load(); }} />;
+  }
+
+  // Picked property + Open sub-view → render list
+  if (picked && view === 'open') {
+    return <AssignmentList property={picked} employee={employee}
+      onBack={() => { setPicked(null); load(); }}
+      onNew={() => setView('upload')}
+      onOpen={(a) => { setDetail(a); setView('detail'); }} />;
+  }
+
+  // No picked property → property picker
+  // Top section: properties with open assignments. Below: everything else alphabetical.
+  const withAssignments = properties
+    .filter(p => (assignmentCounts[p.id] || 0) > 0)
+    .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+  const others = properties
+    .filter(p => (assignmentCounts[p.id] || 0) === 0)
+    .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+
+  const PropertyRow = ({ p }) => (
+    <button onClick={() => setPicked(p)}
+      className="w-full text-left p-4 rounded-2xl bg-white border-2 border-stone-200 hover:border-stone-900 transition-all">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 mb-1 flex-wrap">
+            <span className="font-serif text-lg text-stone-900">{p.name}</span>
+            {p.property_type === 'multi_unit' && (
+              <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-amber-100 text-amber-800">Multi-unit</span>
+            )}
+            {(assignmentCounts[p.id] || 0) > 0 && (
+              <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-amber-600 text-white font-bold flex items-center gap-1">
+                <FileText size={10} /> {assignmentCounts[p.id]} open
+              </span>
+            )}
+          </div>
+          {p.address && <div className="text-xs text-stone-500 font-mono"><AddressLink address={p.address} /></div>}
+        </div>
+        <ChevronRight size={16} className="text-stone-400 flex-shrink-0" />
+      </div>
+    </button>
+  );
+
+  return (
+    <div className="pb-24">
+      <Header name={employee.name} onSignOut={onSignOut} role={employee.role} employee={employee} onOpenMessages={onOpenMessages} onLogoClick={onLogoClick} />
+      <div className="px-5 pt-6">
+        <div className="text-xs uppercase tracking-widest text-stone-400 font-mono mb-3">Manage</div>
+        <h1 className="text-4xl font-light text-stone-900 tracking-tight mb-2">
+          <span className="font-serif italic text-amber-700">Assignments</span>
+        </h1>
+        <p className="text-sm text-stone-600 mb-6">Pick a property to view open assignments or upload new ones.</p>
+
+        {!loaded ? <Splash text="Loading…" /> : properties.length === 0 ? (
+          <div className="text-center py-12 text-stone-400 text-sm">No properties yet.</div>
+        ) : (
+          <>
+            {withAssignments.length > 0 && (
+              <div className="mb-6">
+                <div className="text-xs uppercase tracking-wider text-amber-700 font-mono mb-2 flex items-center gap-1.5">
+                  <FileText size={11} /> Has open assignments
+                </div>
+                <div className="space-y-2">
+                  {withAssignments.map(p => <PropertyRow key={p.id} p={p} />)}
+                </div>
+              </div>
+            )}
+            {others.length > 0 && (
+              <div className="mb-6">
+                <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 flex items-center gap-1.5">
+                  <Building2 size={11} /> All properties ({others.length})
+                </div>
+                <div className="space-y-2">
+                  {others.map(p => <PropertyRow key={p.id} p={p} />)}
+                </div>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// =================================================================
+// MONEY VIEW — wraps InvoiceView + ExportView (Payroll) with a small
+// segmented toggle so the owner can swap between them without leaving
+// the tab. Each child view renders its own Header; the toggle sits
+// pinned right below it.
+// =================================================================
+function MoneyView({ employee, onSignOut, onOpenMessages, onLogoClick }) {
+  const [subTab, setSubTab] = useState('invoices'); // 'invoices' | 'payroll'
+
+  const ChildView = subTab === 'invoices' ? InvoiceView : ExportView;
+  return (
+    <div>
+      <ChildView employee={employee} onSignOut={onSignOut}
+        onOpenMessages={onOpenMessages} onLogoClick={onLogoClick}
+        topToggle={
+          <div className="px-5 pt-4">
+            <div className="flex items-center gap-1 p-1 bg-stone-100 rounded-xl">
+              <button onClick={() => setSubTab('invoices')}
+                className={`flex-1 py-2 px-3 rounded-lg text-xs font-medium transition-colors flex items-center justify-center gap-1.5 ${subTab === 'invoices' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+                <FileText size={13} /> Invoices
+              </button>
+              <button onClick={() => setSubTab('payroll')}
+                className={`flex-1 py-2 px-3 rounded-lg text-xs font-medium transition-colors flex items-center justify-center gap-1.5 ${subTab === 'payroll' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+                <DollarSign size={13} /> Payroll
+              </button>
+            </div>
+          </div>
+        }
+      />
+    </div>
+  );
+}
+
+function InvoiceView({ employee, onSignOut, onOpenMessages, onLogoClick, topToggle }) {
   const today = new Date().toISOString().split('T')[0];
   const twoWeeksAgo = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
   const [properties, setProperties] = useState([]);
@@ -7513,6 +7736,7 @@ function InvoiceView({ employee, onSignOut, onOpenMessages, onLogoClick }) {
   return (
     <div className="pb-24">
       <Header name={employee.name} onSignOut={onSignOut} role={employee.role} employee={employee} onOpenMessages={onOpenMessages} onLogoClick={onLogoClick} />
+      {topToggle}
       <div className="px-5 pt-6">
         <div className="text-xs uppercase tracking-widest text-stone-400 font-mono mb-3">Billing</div>
         <h1 className="text-4xl font-light text-stone-900 tracking-tight mb-6">
@@ -7675,7 +7899,7 @@ function InvoicePreview({ invoice, showZeros, setShowZeros, onBack, onPrint }) {
 // =================================================================
 // PAYROLL EXPORT
 // =================================================================
-function ExportView({ employee, onSignOut, onOpenMessages, onLogoClick }) {
+function ExportView({ employee, onSignOut, onOpenMessages, onLogoClick, topToggle }) {
   const today = new Date().toISOString().split('T')[0];
   const twoWeeksAgo = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
   const [start, setStart] = useState(twoWeeksAgo);
@@ -7751,6 +7975,7 @@ function ExportView({ employee, onSignOut, onOpenMessages, onLogoClick }) {
   return (
     <div className="pb-24">
       <Header name={employee.name} onSignOut={onSignOut} role={employee.role} employee={employee} onOpenMessages={onOpenMessages} onLogoClick={onLogoClick} />
+      {topToggle}
       <div className="px-5 pt-6">
         <div className="text-xs uppercase tracking-widest text-stone-400 font-mono mb-3">Payroll</div>
         <h1 className="text-4xl font-light text-stone-900 tracking-tight mb-6">
@@ -11137,7 +11362,7 @@ function AssignmentForm({ property, employee, onCancel, onSaved }) {
         title: baseName.slice(0, 80),
         notes: '',
         propertyId: defaultProperty,
-        scope: isMulti ? 'specific' : 'property',
+        scope: 'single',
         unitId: '',
         partyId: '',
         multipleTargets: []  // [{ unitId, partyId }]
@@ -11184,10 +11409,9 @@ function AssignmentForm({ property, employee, onCancel, onSaved }) {
 
   // When the property on a row changes, reset its scope/targets
   const changeRowProperty = (id, newPropId) => {
-    const isMulti = allProperties.find(p => p.id === newPropId)?.property_type === 'multi_unit';
     updateRow(id, {
       propertyId: newPropId,
-      scope: isMulti ? 'specific' : 'property',
+      scope: 'single',
       unitId: '', partyId: '', multipleTargets: []
     });
   };
@@ -11232,8 +11456,14 @@ function AssignmentForm({ property, employee, onCancel, onSaved }) {
       const prop = allProperties.find(p => p.id === r.propertyId);
       const isMulti = prop?.property_type === 'multi_unit';
       if (isMulti) {
-        if (!r.unitId || !r.partyId) {
-          return `"${r.title}" needs a unit and bedroom.`;
+        if (r.scope === 'multiple') {
+          if (!r.multipleTargets || r.multipleTargets.length === 0) {
+            return `"${r.title}" needs at least one bedroom selected.`;
+          }
+        } else {
+          if (!r.unitId || !r.partyId) {
+            return `"${r.title}" needs a unit and bedroom.`;
+          }
         }
       }
     }
@@ -11269,10 +11499,23 @@ function AssignmentForm({ property, employee, onCancel, onSaved }) {
 
         const prop = allProperties.find(p => p.id === r.propertyId);
         const isMulti = prop?.property_type === 'multi_unit';
-        // Single target only: either the picked unit+bedroom, or the whole property for simple
-        const targetRows = isMulti
-          ? [{ assignment_id: created.id, unit_id: r.unitId, party_id: r.partyId, status: 'pending' }]
-          : [{ assignment_id: created.id, unit_id: null, party_id: null, status: 'pending' }];
+        // Build assignment_targets rows based on scope:
+        // - simple property: single property-wide row
+        // - multi-unit + single bedroom: one row for that unit/party
+        // - multi-unit + multiple bedrooms: one row per selected (unit, party)
+        let targetRows;
+        if (!isMulti) {
+          targetRows = [{ assignment_id: created.id, unit_id: null, party_id: null, status: 'pending' }];
+        } else if (r.scope === 'multiple') {
+          targetRows = r.multipleTargets.map(t => ({
+            assignment_id: created.id,
+            unit_id: t.unitId,
+            party_id: t.partyId,
+            status: 'pending'
+          }));
+        } else {
+          targetRows = [{ assignment_id: created.id, unit_id: r.unitId, party_id: r.partyId, status: 'pending' }];
+        }
         const { error: te } = await supabase.from('assignment_targets').insert(targetRows);
         if (te) throw te;
       }
@@ -11366,20 +11609,108 @@ function AssignmentForm({ property, employee, onCancel, onSaved }) {
 
                   {isMulti && (
                     <div>
-                      <label className="text-[10px] uppercase tracking-wider text-stone-500 font-mono mb-1 block">Bedroom</label>
-                      <div className="grid grid-cols-2 gap-2">
-                        <SearchableUnitPicker
-                          units={units}
-                          value={row.unitId}
-                          placeholder="Pick a unit…"
-                          onChange={(newUnitId) => autoPrefixFor(row.id, newUnitId, '')} />
-                        <select value={row.partyId} onChange={(e) => autoPrefixFor(row.id, row.unitId, e.target.value)}
-                          disabled={!row.unitId}
-                          className="px-3 py-2 rounded-lg border border-stone-300 bg-white text-sm disabled:opacity-50">
-                          <option value="">Bedroom…</option>
-                          {rowParties.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}
-                        </select>
+                      <label className="text-[10px] uppercase tracking-wider text-stone-500 font-mono mb-1 block">Send to</label>
+                      {/* Scope toggle: single bedroom vs multiple. Switching
+                         resets the OTHER side's state to avoid confusion
+                         when saving. */}
+                      <div className="flex items-center gap-1 p-1 bg-stone-100 rounded-xl mb-2">
+                        <button type="button"
+                          onClick={() => updateRow(row.id, { scope: 'single', multipleTargets: [] })}
+                          className={`flex-1 py-1.5 px-2 rounded-lg text-[11px] font-medium transition-colors ${(row.scope || 'single') === 'single' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+                          Single bedroom
+                        </button>
+                        <button type="button"
+                          onClick={() => updateRow(row.id, { scope: 'multiple', unitId: '', partyId: '' })}
+                          className={`flex-1 py-1.5 px-2 rounded-lg text-[11px] font-medium transition-colors ${row.scope === 'multiple' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+                          Multiple bedrooms
+                        </button>
                       </div>
+
+                      {(row.scope || 'single') === 'single' ? (
+                        <div className="grid grid-cols-2 gap-2">
+                          <SearchableUnitPicker
+                            units={units}
+                            value={row.unitId}
+                            placeholder="Pick a unit…"
+                            onChange={(newUnitId) => autoPrefixFor(row.id, newUnitId, '')} />
+                          <select value={row.partyId} onChange={(e) => autoPrefixFor(row.id, row.unitId, e.target.value)}
+                            disabled={!row.unitId}
+                            className="px-3 py-2 rounded-lg border border-stone-300 bg-white text-sm disabled:opacity-50">
+                            <option value="">Bedroom…</option>
+                            {rowParties.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}
+                          </select>
+                        </div>
+                      ) : (
+                        // Multi mode: tree of units → bedrooms with
+                        // checkboxes. "Select all" per unit makes it
+                        // easy to assign one PDF to every bedroom in a
+                        // building.
+                        <div className="space-y-1.5 max-h-72 overflow-y-auto border border-stone-200 rounded-xl p-2 bg-stone-50">
+                          {/* Search box to filter units */}
+                          <input
+                            type="text"
+                            value={unitSearches[row.id] || ''}
+                            onChange={(e) => setUnitSearch(row.id, e.target.value)}
+                            placeholder="Filter units…"
+                            className="w-full px-2 py-1.5 rounded-lg border border-stone-300 bg-white text-xs mb-1" />
+                          {(() => {
+                            const q = (unitSearches[row.id] || '').trim().toLowerCase();
+                            const filteredUnits = q
+                              ? units.filter(u => (u.label || '').toLowerCase().includes(q))
+                              : units;
+                            if (filteredUnits.length === 0) {
+                              return <div className="text-center py-3 text-stone-400 text-xs italic">
+                                {units.length === 0 ? 'No units in this property.' : 'No units match your search.'}
+                              </div>;
+                            }
+                            return filteredUnits.map(u => {
+                              const activeParties = (u.parties || []).filter(p => p.active).sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0));
+                              const allSelected = activeParties.length > 0 && activeParties.every(p =>
+                                row.multipleTargets.some(t => t.unitId === u.id && (t.partyId || null) === p.id));
+                              const someSelected = activeParties.some(p =>
+                                row.multipleTargets.some(t => t.unitId === u.id && (t.partyId || null) === p.id));
+                              return (
+                                <div key={u.id} className="bg-white rounded-lg border border-stone-200 p-2">
+                                  <button type="button"
+                                    onClick={() => toggleAllInUnit(row.id, u)}
+                                    className="w-full flex items-center gap-2 mb-1 text-left">
+                                    <div className={`w-4 h-4 rounded border-2 flex-shrink-0 flex items-center justify-center ${allSelected ? 'border-amber-600 bg-amber-600' : someSelected ? 'border-amber-600 bg-amber-100' : 'border-stone-300'}`}>
+                                      {allSelected && <Check size={11} className="text-white" />}
+                                      {!allSelected && someSelected && <div className="w-2 h-2 bg-amber-600 rounded-sm" />}
+                                    </div>
+                                    <span className="text-xs font-medium text-stone-900">{u.label}</span>
+                                    <span className="text-[10px] font-mono text-stone-400 ml-auto">
+                                      {activeParties.length} bedroom{activeParties.length === 1 ? '' : 's'}
+                                    </span>
+                                  </button>
+                                  {activeParties.length > 0 && (
+                                    <div className="ml-6 grid grid-cols-2 gap-1">
+                                      {activeParties.map(p => {
+                                        const checked = row.multipleTargets.some(t => t.unitId === u.id && (t.partyId || null) === p.id);
+                                        return (
+                                          <button key={p.id} type="button"
+                                            onClick={() => toggleTarget(row.id, u.id, p.id)}
+                                            className={`flex items-center gap-1.5 px-2 py-1 rounded-lg text-left border ${checked ? 'border-amber-600 bg-amber-50' : 'border-stone-200 bg-white hover:border-stone-400'}`}>
+                                            <div className={`w-3.5 h-3.5 rounded border-2 flex-shrink-0 flex items-center justify-center ${checked ? 'border-amber-600 bg-amber-600' : 'border-stone-300'}`}>
+                                              {checked && <Check size={9} className="text-white" />}
+                                            </div>
+                                            <span className="text-[11px] text-stone-900 truncate">{p.label}</span>
+                                          </button>
+                                        );
+                                      })}
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            });
+                          })()}
+                          {row.multipleTargets.length > 0 && (
+                            <div className="text-[10px] font-mono text-amber-700 px-1 pt-1 border-t border-stone-200">
+                              {row.multipleTargets.length} bedroom{row.multipleTargets.length === 1 ? '' : 's'} selected — will create {row.multipleTargets.length} target{row.multipleTargets.length === 1 ? '' : 's'}
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
                   )}
 

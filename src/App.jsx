@@ -42,6 +42,23 @@ const ASSIGNMENT_TYPES = [
 const assignmentTypeLabel = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value)?.label || value || '';
 
+// Build a compact display title from a unit + party (bedroom) label.
+// "B1-103" + "Bedroom 2" → "B1-103-2". If the party label doesn't end in
+// a number, fall back to the full label appended. If there's no party
+// (whole-unit assignment), return just the unit. If no unit either, ''.
+function buildTargetTitle(unitLabel, partyLabel) {
+  const u = (unitLabel || '').trim();
+  const p = (partyLabel || '').trim();
+  if (!u && !p) return '';
+  if (!p) return u;
+  // Pull a trailing number out of the party label ("Bedroom 1" → "1",
+  // "BR2" → "2"). If we can't find one, use the whole party label
+  // (sanitized) so weird labels like "Master" still get represented.
+  const trailNum = p.match(/(\d+)\s*$/);
+  const suffix = trailNum ? trailNum[1] : p.replace(/\s+/g, '-');
+  return u ? `${u}-${suffix}` : suffix;
+}
+
 const SUPPORTED_TRANSLATE_LANGUAGES = [
   { code: 'es', label: 'Spanish' },
   { code: 'en', label: 'English' },
@@ -11394,21 +11411,32 @@ function AssignmentForm({ property, employee, onCancel, onSaved }) {
   // Auto-build a title prefix from the target selection, e.g. "B3-205 · Bedroom 2 — "
   // Called when unit/party changes on a row. Replaces any existing auto-prefix but
   // keeps anything the user manually typed after it.
+  // When the user picks a unit/party in single mode, set the title to
+  // a compact identifier like "B1-103-1". If they've manually edited
+  // the title to something custom that doesn't match the auto-format,
+  // we don't clobber it — only update when the title is empty or
+  // matches the previous auto-built pattern.
   const autoPrefixFor = (rowId, unitIdNew, partyIdNew) => {
     setRows(prev => prev.map(r => {
       if (r.id !== rowId) return r;
       const units = unitsByProperty[r.propertyId] || [];
       const unit = units.find(u => u.id === unitIdNew);
       const party = (unit?.parties || []).find(p => p.id === partyIdNew);
-      const prefix = unit
-        ? `${unit.label}${party ? ` · ${party.label}` : ''} — `
-        : '';
-      // Strip the OLD prefix off the title if it was previously set, so we replace cleanly.
-      // The old prefix looks like "<unit> · <party> — " — match it generically.
-      let manualPart = r.title;
-      const oldPrefixMatch = manualPart.match(/^[^—]+ — /);
-      if (oldPrefixMatch) manualPart = manualPart.slice(oldPrefixMatch[0].length);
-      return { ...r, unitId: unitIdNew, partyId: partyIdNew, title: prefix + manualPart };
+      const newAutoTitle = buildTargetTitle(unit?.label, party?.label);
+      // Compute what the OLD auto title would have been, so we can detect
+      // whether the current title is still the auto value (safe to replace)
+      // vs custom (preserve).
+      const oldUnit = units.find(u => u.id === r.unitId);
+      const oldParty = (oldUnit?.parties || []).find(p => p.id === r.partyId);
+      const oldAutoTitle = buildTargetTitle(oldUnit?.label, oldParty?.label);
+      // Also strip legacy " — " prefixed manual edits so they get refreshed
+      const legacyPrefixMatch = r.title.match(/^[^—]+ — (.*)$/);
+      const titleIsAuto =
+        r.title === oldAutoTitle ||
+        r.title === '' ||
+        (legacyPrefixMatch && legacyPrefixMatch[1] === '');
+      const nextTitle = titleIsAuto ? newAutoTitle : r.title;
+      return { ...r, unitId: unitIdNew, partyId: partyIdNew, title: nextTitle };
     }));
   };
 
@@ -11456,19 +11484,22 @@ function AssignmentForm({ property, employee, onCancel, onSaved }) {
   const validateRows = () => {
     if (rows.length === 0) return 'Add at least one file.';
     for (const r of rows) {
-      if (!r.title.trim()) return `One of the files is missing a title.`;
-      if (!r.assignmentType) return `"${r.title}" needs a cleaning type picked.`;
       if (!r.propertyId) return `One of the files has no property set.`;
       const prop = allProperties.find(p => p.id === r.propertyId);
       const isMulti = prop?.property_type === 'multi_unit';
+      // Title check: required only in single mode (multi auto-generates per target)
+      if (!(isMulti && r.scope === 'multiple') && !r.title.trim()) {
+        return `One of the files is missing a title. Pick the unit + bedroom to auto-fill, or type one.`;
+      }
+      if (!r.assignmentType) return `"${r.title || r.file.name}" needs a cleaning type picked.`;
       if (isMulti) {
         if (r.scope === 'multiple') {
           if (!r.multipleTargets || r.multipleTargets.length === 0) {
-            return `"${r.title}" needs at least one bedroom selected.`;
+            return `"${r.title || r.file.name}" needs at least one bedroom selected.`;
           }
         } else {
           if (!r.unitId || !r.partyId) {
-            return `"${r.title}" needs a unit and bedroom.`;
+            return `"${r.title || r.file.name}" needs a unit and bedroom.`;
           }
         }
       }
@@ -11482,52 +11513,77 @@ function AssignmentForm({ property, employee, onCancel, onSaved }) {
     if (v) { setError(v); return; }
     setBusy(true);
     try {
+      let totalCreated = 0;
       for (let i = 0; i < rows.length; i++) {
         const r = rows[i];
         setProgress(`Uploading file ${i + 1} of ${rows.length}…`);
         const { path, publicUrl, kind } = await uploadAssignmentFile(r.file, r.propertyId);
 
-        const { data: created, error: e } = await supabase.from('assignments')
-          .insert({
-            customer_id: r.propertyId,
-            title: r.title.trim(),
-            notes: r.notes.trim() || null,
-            file_path: path,
-            file_url: publicUrl,
-            file_kind: kind,
-            uploaded_by: employee.id,
-            active: true,
-            assignment_type: r.assignmentType,
-            scheduled_date: r.scheduledDate || null,
-          }).select().single();
-        if (e) throw e;
-
-        // Fire-and-forget auto-translation (does NOT block the upload flow)
-        autoTranslateAssignment(created.id, publicUrl, kind);
-
         const prop = allProperties.find(p => p.id === r.propertyId);
         const isMulti = prop?.property_type === 'multi_unit';
-        // Build assignment_targets rows based on scope:
-        // - simple property: single property-wide row
-        // - multi-unit + single bedroom: one row for that unit/party
-        // - multi-unit + multiple bedrooms: one row per selected (unit, party)
-        let targetRows;
-        if (!isMulti) {
-          targetRows = [{ assignment_id: created.id, unit_id: null, party_id: null, status: 'pending' }];
-        } else if (r.scope === 'multiple') {
-          targetRows = r.multipleTargets.map(t => ({
+        const units = unitsByProperty[r.propertyId] || [];
+
+        // Build the list of (target, generated title) pairs we'll create
+        // assignments for. In multi mode each target becomes its own
+        // assignments row with a per-bedroom title like "B1-101-1", so
+        // each cleaner sees their own clean identifier. The file URL is
+        // shared across all of them since they reference the same PDF.
+        const targets = (() => {
+          if (!isMulti) {
+            return [{ unit_id: null, party_id: null, title: r.title.trim() }];
+          }
+          if (r.scope === 'multiple') {
+            return r.multipleTargets.map(t => {
+              const u = units.find(uu => uu.id === t.unitId);
+              const p = (u?.parties || []).find(pp => pp.id === t.partyId);
+              return {
+                unit_id: t.unitId,
+                party_id: t.partyId,
+                title: buildTargetTitle(u?.label, p?.label) || r.title.trim(),
+              };
+            });
+          }
+          return [{ unit_id: r.unitId, party_id: r.partyId, title: r.title.trim() }];
+        })();
+
+        for (let t = 0; t < targets.length; t++) {
+          const target = targets[t];
+          if (targets.length > 1) {
+            setProgress(`Creating assignment ${t + 1} of ${targets.length} for file ${i + 1}…`);
+          }
+          const { data: created, error: e } = await supabase.from('assignments')
+            .insert({
+              customer_id: r.propertyId,
+              title: target.title,
+              notes: r.notes.trim() || null,
+              file_path: path,
+              file_url: publicUrl,
+              file_kind: kind,
+              uploaded_by: employee.id,
+              active: true,
+              assignment_type: r.assignmentType,
+              scheduled_date: r.scheduledDate || null,
+            }).select().single();
+          if (e) throw e;
+
+          // Fire-and-forget auto-translation for the first one only; siblings
+          // sharing the same file will read the translation from any sibling
+          // since file_url is identical. (Keeps API costs down for big batches.)
+          if (t === 0) {
+            autoTranslateAssignment(created.id, publicUrl, kind);
+          }
+
+          const { error: te } = await supabase.from('assignment_targets').insert({
             assignment_id: created.id,
-            unit_id: t.unitId,
-            party_id: t.partyId,
-            status: 'pending'
-          }));
-        } else {
-          targetRows = [{ assignment_id: created.id, unit_id: r.unitId, party_id: r.partyId, status: 'pending' }];
+            unit_id: target.unit_id,
+            party_id: target.party_id,
+            status: 'pending',
+          });
+          if (te) throw te;
+          totalCreated++;
         }
-        const { error: te } = await supabase.from('assignment_targets').insert(targetRows);
-        if (te) throw te;
       }
-      setProgress(`Done — ${rows.length} assignment${rows.length === 1 ? '' : 's'} created.`);
+      setProgress(`Done — ${totalCreated} assignment${totalCreated === 1 ? '' : 's'} created.`);
       setTimeout(() => onSaved(), 400);
     } catch (err) {
       setError(err.message || String(err));
@@ -11623,8 +11679,14 @@ function AssignmentForm({ property, employee, onCancel, onSaved }) {
                   <div>
                     <label className="text-[10px] uppercase tracking-wider text-stone-500 font-mono mb-1 block">Title</label>
                     <input type="text" value={row.title} onChange={(e) => updateRow(row.id, { title: e.target.value })}
-                      placeholder="e.g. Week of May 13 — kitchen + bath"
-                      className="w-full px-3 py-2 rounded-lg border border-stone-300 bg-white text-sm" />
+                      placeholder={row.scope === 'multiple' ? 'Auto-filled per bedroom on save' : 'Pick a unit + bedroom to auto-fill'}
+                      disabled={row.scope === 'multiple'}
+                      className={`w-full px-3 py-2 rounded-lg border border-stone-300 bg-white text-sm ${row.scope === 'multiple' ? 'opacity-60 bg-stone-50' : ''}`} />
+                    {row.assignmentType && (
+                      <div className="mt-1 text-[10px] font-mono text-stone-500">
+                        Cleaning type: <span className="text-amber-700 font-medium">{assignmentTypeLabel(row.assignmentType)}</span>
+                      </div>
+                    )}
                   </div>
 
                   <div>
@@ -11739,11 +11801,30 @@ function AssignmentForm({ property, employee, onCancel, onSaved }) {
                               );
                             });
                           })()}
-                          {row.multipleTargets.length > 0 && (
-                            <div className="text-[10px] font-mono text-amber-700 px-1 pt-1 border-t border-stone-200">
-                              {row.multipleTargets.length} bedroom{row.multipleTargets.length === 1 ? '' : 's'} selected — will create {row.multipleTargets.length} target{row.multipleTargets.length === 1 ? '' : 's'}
-                            </div>
-                          )}
+                          {row.multipleTargets.length > 0 && (() => {
+                            // Compute the generated titles so the user sees
+                            // exactly what each assignment will be named.
+                            const generated = row.multipleTargets.map(t => {
+                              const u = units.find(uu => uu.id === t.unitId);
+                              const p = (u?.parties || []).find(pp => pp.id === t.partyId);
+                              return buildTargetTitle(u?.label, p?.label);
+                            });
+                            const preview = generated.slice(0, 4).join(', ');
+                            const more = generated.length > 4 ? `, +${generated.length - 4} more` : '';
+                            return (
+                              <div className="text-[10px] font-mono text-amber-700 px-1 pt-1 border-t border-stone-200">
+                                <div>
+                                  Creating {row.multipleTargets.length} assignment{row.multipleTargets.length === 1 ? '' : 's'}:
+                                </div>
+                                <div className="text-amber-900 mt-0.5">{preview}{more}</div>
+                                {row.assignmentType && (
+                                  <div className="text-stone-500 mt-0.5">
+                                    Type: <span className="text-amber-700">{assignmentTypeLabel(row.assignmentType)}</span>
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })()}
                         </div>
                       )}
                     </div>
@@ -13534,36 +13615,68 @@ function PortalAssignmentForm({ property, assignment, portalKind, onCancel, onSa
         const { error: e2 } = await supabase.from('assignment_targets').insert(targetRows);
         if (e2) throw e2;
       } else {
-        setProgress('Creating assignment…');
-        const { data: created, error: e1 } = await supabase.from('assignments').insert({
-          customer_id: property.id,
-          title: title.trim() || assignmentTypeLabel(assignmentType),
-          notes: notes.trim() || null,
-          assignment_type: assignmentType,
-          scheduled_date: scheduledDate || null,
-          source: 'pm',
-          pm_status: newStatus,
-          active: true,
-          actor_kind: portalKind || 'pm',
-          ...filePayload
-        }).select().single();
-        if (e1) throw e1;
-        // Fire-and-forget auto-translation if a file was uploaded
-        if (filePayload?.file_url && filePayload?.file_kind) {
-          autoTranslateAssignment(created.id, filePayload.file_url, filePayload.file_kind);
+        // Build the list of targets we'll create assignments for. In
+        // multi mode each gets its own assignments row with a per-bedroom
+        // title like "B1-101-1" so each cleaner sees their own clean
+        // identifier; the file URL is shared across all of them.
+        const targets = (() => {
+          if (!isMulti || scope === 'property') {
+            return [{
+              unit_id: null, party_id: null,
+              title: title.trim() || assignmentTypeLabel(assignmentType),
+            }];
+          }
+          if (scope === 'multiple') {
+            return multipleTargets.map(t => {
+              const u = units.find(uu => uu.id === t.unitId);
+              const p = (u?.parties || []).find(pp => pp.id === t.partyId);
+              return {
+                unit_id: t.unitId,
+                party_id: t.partyId,
+                title: buildTargetTitle(u?.label, p?.label) || assignmentTypeLabel(assignmentType),
+              };
+            });
+          }
+          return [{
+            unit_id: unitId, party_id: partyId,
+            title: title.trim() || assignmentTypeLabel(assignmentType),
+          }];
+        })();
+
+        let firstCreatedId = null;
+        for (let t = 0; t < targets.length; t++) {
+          const target = targets[t];
+          setProgress(targets.length > 1
+            ? `Creating assignment ${t + 1} of ${targets.length}…`
+            : 'Creating assignment…');
+          const { data: created, error: e1 } = await supabase.from('assignments').insert({
+            customer_id: property.id,
+            title: target.title,
+            notes: notes.trim() || null,
+            assignment_type: assignmentType,
+            scheduled_date: scheduledDate || null,
+            source: 'pm',
+            pm_status: newStatus,
+            active: true,
+            actor_kind: portalKind || 'pm',
+            ...filePayload,
+          }).select().single();
+          if (e1) throw e1;
+
+          // Fire translation once for the first sibling (file is shared)
+          if (t === 0 && filePayload?.file_url && filePayload?.file_kind) {
+            autoTranslateAssignment(created.id, filePayload.file_url, filePayload.file_kind);
+            firstCreatedId = created.id;
+          }
+
+          const { error: e2 } = await supabase.from('assignment_targets').insert({
+            assignment_id: created.id,
+            unit_id: target.unit_id,
+            party_id: target.party_id,
+            status: 'pending',
+          });
+          if (e2) throw e2;
         }
-        let targetRows;
-        if (!isMulti || scope === 'property') {
-          targetRows = [{ assignment_id: created.id, unit_id: null, party_id: null, status: 'pending' }];
-        } else if (scope === 'multiple') {
-          targetRows = multipleTargets.map(t => ({
-            assignment_id: created.id, unit_id: t.unitId, party_id: t.partyId, status: 'pending'
-          }));
-        } else {
-          targetRows = [{ assignment_id: created.id, unit_id: unitId, party_id: partyId, status: 'pending' }];
-        }
-        const { error: e2 } = await supabase.from('assignment_targets').insert(targetRows);
-        if (e2) throw e2;
       }
       onSaved();
     } catch (err) {
@@ -13649,11 +13762,17 @@ function PortalAssignmentForm({ property, assignment, portalKind, onCancel, onSa
 
         <div>
           <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">
-            Title <span className="text-stone-400 normal-case">(optional)</span>
+            Title <span className="text-stone-400 normal-case">{scope === 'multiple' ? '(auto-filled per bedroom)' : '(optional)'}</span>
           </label>
           <input type="text" value={title} onChange={(e) => setTitle(e.target.value)}
-            placeholder={assignmentType ? `e.g. "${assignmentTypeLabel(assignmentType)} - VIP guest"` : 'e.g. "Standard clean - VIP guest"'}
-            className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white" />
+            placeholder={scope === 'multiple' ? 'Auto-filled per bedroom on save' : 'Pick a unit + bedroom to auto-fill'}
+            disabled={scope === 'multiple'}
+            className={`w-full px-4 py-3 rounded-xl border border-stone-300 bg-white ${scope === 'multiple' ? 'opacity-60 bg-stone-50' : ''}`} />
+          {assignmentType && (
+            <div className="mt-1.5 text-[11px] font-mono text-stone-500">
+              Cleaning type: <span className="text-amber-700 font-medium">{assignmentTypeLabel(assignmentType)}</span>
+            </div>
+          )}
         </div>
 
         <div>
@@ -13693,9 +13812,13 @@ function PortalAssignmentForm({ property, assignment, portalKind, onCancel, onSa
                     onChange={(newUnitId) => {
                       setUnitId(newUnitId); setPartyId('');
                       const u = units.find(x => x.id === newUnitId);
-                      if (u) {
-                        const stripped = title.replace(/^[^—]+ — /, '');
-                        setTitle(`${u.label} — ${stripped}`);
+                      // Auto-fill title only if it's empty or matches the
+                      // previous auto value (so we don't clobber custom edits).
+                      const prevU = units.find(x => x.id === unitId);
+                      const prevP = (prevU?.parties || []).find(x => x.id === partyId);
+                      const prevAuto = buildTargetTitle(prevU?.label, prevP?.label);
+                      if (!title || title === prevAuto) {
+                        setTitle(buildTargetTitle(u?.label, ''));
                       }
                     }} />
                 </div>
@@ -13707,9 +13830,10 @@ function PortalAssignmentForm({ property, assignment, portalKind, onCancel, onSa
                         setPartyId(newPartyId);
                         const u = units.find(x => x.id === unitId);
                         const p = (u?.parties || []).find(x => x.id === newPartyId);
-                        if (u) {
-                          const stripped = title.replace(/^[^—]+ — /, '');
-                          setTitle(`${u.label}${p ? ` · ${p.label}` : ''} — ${stripped}`);
+                        const prevP = (u?.parties || []).find(x => x.id === partyId);
+                        const prevAuto = buildTargetTitle(u?.label, prevP?.label);
+                        if (!title || title === prevAuto) {
+                          setTitle(buildTargetTitle(u?.label, p?.label));
                         }
                       }}
                       className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white">
@@ -13778,11 +13902,28 @@ function PortalAssignmentForm({ property, assignment, portalKind, onCancel, onSa
                       );
                     });
                   })()}
-                  {multipleTargets.length > 0 && (
-                    <div className="text-[10px] font-mono text-amber-700 px-1 pt-1 border-t border-stone-200">
-                      {multipleTargets.length} bedroom{multipleTargets.length === 1 ? '' : 's'} selected
-                    </div>
-                  )}
+                  {multipleTargets.length > 0 && (() => {
+                    const generated = multipleTargets.map(t => {
+                      const u = units.find(uu => uu.id === t.unitId);
+                      const p = (u?.parties || []).find(pp => pp.id === t.partyId);
+                      return buildTargetTitle(u?.label, p?.label);
+                    });
+                    const preview = generated.slice(0, 4).join(', ');
+                    const more = generated.length > 4 ? `, +${generated.length - 4} more` : '';
+                    return (
+                      <div className="text-[10px] font-mono text-amber-700 px-1 pt-1 border-t border-stone-200">
+                        <div>
+                          Creating {multipleTargets.length} assignment{multipleTargets.length === 1 ? '' : 's'}:
+                        </div>
+                        <div className="text-amber-900 mt-0.5">{preview}{more}</div>
+                        {assignmentType && (
+                          <div className="text-stone-500 mt-0.5">
+                            Type: <span className="text-amber-700">{assignmentTypeLabel(assignmentType)}</span>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
                 </div>
               </div>
             )}

@@ -11365,7 +11365,12 @@ function AssignmentForm({ property, employee, onCancel, onSaved }) {
         scope: 'single',
         unitId: '',
         partyId: '',
-        multipleTargets: []  // [{ unitId, partyId }]
+        multipleTargets: [], // [{ unitId, partyId }]
+        // Cleaning type (Standard / Deep / Move-out check / etc) — empty
+        // default so the owner has to actively pick. Validation enforces.
+        assignmentType: '',
+        // Optional target date for when this assignment should be done
+        scheduledDate: '',
       };
     });
     setRows(prev => [...prev, ...newRows]);
@@ -11452,6 +11457,7 @@ function AssignmentForm({ property, employee, onCancel, onSaved }) {
     if (rows.length === 0) return 'Add at least one file.';
     for (const r of rows) {
       if (!r.title.trim()) return `One of the files is missing a title.`;
+      if (!r.assignmentType) return `"${r.title}" needs a cleaning type picked.`;
       if (!r.propertyId) return `One of the files has no property set.`;
       const prop = allProperties.find(p => p.id === r.propertyId);
       const isMulti = prop?.property_type === 'multi_unit';
@@ -11490,7 +11496,9 @@ function AssignmentForm({ property, employee, onCancel, onSaved }) {
             file_url: publicUrl,
             file_kind: kind,
             uploaded_by: employee.id,
-            active: true
+            active: true,
+            assignment_type: r.assignmentType,
+            scheduled_date: r.scheduledDate || null,
           }).select().single();
         if (e) throw e;
 
@@ -11585,6 +11593,33 @@ function AssignmentForm({ property, employee, onCancel, onSaved }) {
                 </div>
 
                 <div className="space-y-3">
+                  {/* Cleaning type — empty default forces an active pick.
+                     Sits at the top of the config since user wants this
+                     decision early in the flow. */}
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="text-[10px] uppercase tracking-wider text-stone-500 font-mono mb-1 block">
+                        Cleaning type <span className="text-red-600">*</span>
+                      </label>
+                      <select value={row.assignmentType}
+                        onChange={(e) => updateRow(row.id, { assignmentType: e.target.value })}
+                        className={`w-full px-3 py-2 rounded-lg border bg-white text-sm ${row.assignmentType ? 'border-stone-300' : 'border-amber-400'}`}>
+                        <option value="">Pick a type…</option>
+                        {ASSIGNMENT_TYPES.map(t => (
+                          <option key={t.value} value={t.value}>{t.label}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="text-[10px] uppercase tracking-wider text-stone-500 font-mono mb-1 block">
+                        Due date <span className="text-stone-400 normal-case">(optional)</span>
+                      </label>
+                      <input type="date" value={row.scheduledDate}
+                        onChange={(e) => updateRow(row.id, { scheduledDate: e.target.value })}
+                        className="w-full px-3 py-2 rounded-lg border border-stone-300 bg-white text-sm" />
+                    </div>
+                  </div>
+
                   <div>
                     <label className="text-[10px] uppercase tracking-wider text-stone-500 font-mono mb-1 block">Title</label>
                     <input type="text" value={row.title} onChange={(e) => updateRow(row.id, { title: e.target.value })}
@@ -13329,18 +13364,48 @@ function PortalAssignmentForm({ property, assignment, portalKind, onCancel, onSa
   const isEdit = !!assignment;
   const [title, setTitle] = useState(assignment?.title || '');
   const [notes, setNotes] = useState(assignment?.notes || '');
-  const [assignmentType, setAssignmentType] = useState(assignment?.assignment_type || 'standard');
+  // Empty default forces the user to actively pick a type
+  const [assignmentType, setAssignmentType] = useState(assignment?.assignment_type || '');
   const [scheduledDate, setScheduledDate] = useState(assignment?.scheduled_date || '');
   const [file, setFile] = useState(null); // a NEW file (replaces existing)
   const [keepExistingFile, setKeepExistingFile] = useState(isEdit);
+  // Scope: 'specific' (single bedroom), 'multiple' (several bedrooms),
+  // 'property' (whole property). Multi mode added to mirror the owner-side
+  // form so PMs can fan out one assignment to many bedrooms at once.
   const [scope, setScope] = useState(isMulti ? 'specific' : 'property');
   const [units, setUnits] = useState([]);
   const [unitId, setUnitId] = useState('');
   const [partyId, setPartyId] = useState('');
   const [parties, setParties] = useState([]);
+  // Multi-target state — array of { unitId, partyId } pairs
+  const [multipleTargets, setMultipleTargets] = useState([]);
+  const [unitSearch, setUnitSearch] = useState('');
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState('');
   const [error, setError] = useState('');
+
+  const toggleTarget = (uId, pId) => {
+    setMultipleTargets(prev => {
+      const exists = prev.some(t => t.unitId === uId && (t.partyId || null) === (pId || null));
+      return exists
+        ? prev.filter(t => !(t.unitId === uId && (t.partyId || null) === (pId || null)))
+        : [...prev, { unitId: uId, partyId: pId || null }];
+    });
+  };
+
+  const toggleAllInUnit = (unit) => {
+    setMultipleTargets(prev => {
+      const activeParties = (unit.parties || []).filter(p => p.active);
+      const allSelected = activeParties.length > 0 && activeParties.every(p =>
+        prev.some(t => t.unitId === unit.id && (t.partyId || null) === p.id));
+      return allSelected
+        ? prev.filter(t => t.unitId !== unit.id)
+        : [
+            ...prev.filter(t => t.unitId !== unit.id),
+            ...activeParties.map(p => ({ unitId: unit.id, partyId: p.id })),
+          ];
+    });
+  };
 
   // Load units for multi-unit properties
   useEffect(() => {
@@ -13361,17 +13426,31 @@ function PortalAssignmentForm({ property, assignment, portalKind, onCancel, onSa
     })();
   }, [property.id, isMulti]);
 
-  // If editing, load the existing target so dropdowns are pre-populated
+  // If editing, load all existing targets and pre-populate the right
+  // scope (single vs multiple bedrooms vs whole property).
   useEffect(() => {
     if (!isEdit || !assignment) return;
     (async () => {
       const { data } = await supabase.from('assignment_targets')
-        .select('unit_id, party_id').eq('assignment_id', assignment.id).limit(1).maybeSingle();
-      if (data) {
-        if (data.unit_id) { setUnitId(data.unit_id); setScope('specific'); }
-        if (data.party_id) setPartyId(data.party_id);
-        if (!data.unit_id && !data.party_id) setScope('property');
+        .select('unit_id, party_id').eq('assignment_id', assignment.id);
+      const targets = data || [];
+      if (targets.length === 0) return;
+      // Whole property → single row with null unit/party
+      if (targets.length === 1 && !targets[0].unit_id && !targets[0].party_id) {
+        setScope('property');
+        return;
       }
+      // Multiple targets → multi mode
+      if (targets.length > 1) {
+        setScope('multiple');
+        setMultipleTargets(targets.map(t => ({ unitId: t.unit_id, partyId: t.party_id })));
+        return;
+      }
+      // Single specific target
+      const t = targets[0];
+      setScope('specific');
+      if (t.unit_id) setUnitId(t.unit_id);
+      if (t.party_id) setPartyId(t.party_id);
     })();
   }, [isEdit, assignment]);
 
@@ -13391,9 +13470,15 @@ function PortalAssignmentForm({ property, assignment, portalKind, onCancel, onSa
 
   const save = async (submitForApproval) => {
     setError('');
-    if (!keepExistingFile && !file) { setError('Pick a PDF or image.'); return; }
-    if (isMulti && scope === 'specific' && (!unitId || !partyId)) {
-      setError('Pick a unit and party.'); return;
+    if (!keepExistingFile && !file) { setError('Pick a PDF or image first.'); return; }
+    if (!assignmentType) { setError('Pick a cleaning type.'); return; }
+    if (isMulti) {
+      if (scope === 'specific' && (!unitId || !partyId)) {
+        setError('Pick a unit and bedroom.'); return;
+      }
+      if (scope === 'multiple' && multipleTargets.length === 0) {
+        setError('Pick at least one bedroom.'); return;
+      }
     }
     setBusy(true);
     try {
@@ -13436,13 +13521,17 @@ function PortalAssignmentForm({ property, assignment, portalKind, onCancel, onSa
 
         // Replace targets with the new selection
         await supabase.from('assignment_targets').delete().eq('assignment_id', assignment.id);
-        const targetRow = {
-          assignment_id: assignment.id,
-          unit_id: !isMulti || scope === 'property' ? null : unitId,
-          party_id: !isMulti || scope === 'property' ? null : partyId,
-          status: 'pending'
-        };
-        const { error: e2 } = await supabase.from('assignment_targets').insert(targetRow);
+        let targetRows;
+        if (!isMulti || scope === 'property') {
+          targetRows = [{ assignment_id: assignment.id, unit_id: null, party_id: null, status: 'pending' }];
+        } else if (scope === 'multiple') {
+          targetRows = multipleTargets.map(t => ({
+            assignment_id: assignment.id, unit_id: t.unitId, party_id: t.partyId, status: 'pending'
+          }));
+        } else {
+          targetRows = [{ assignment_id: assignment.id, unit_id: unitId, party_id: partyId, status: 'pending' }];
+        }
+        const { error: e2 } = await supabase.from('assignment_targets').insert(targetRows);
         if (e2) throw e2;
       } else {
         setProgress('Creating assignment…');
@@ -13463,13 +13552,17 @@ function PortalAssignmentForm({ property, assignment, portalKind, onCancel, onSa
         if (filePayload?.file_url && filePayload?.file_kind) {
           autoTranslateAssignment(created.id, filePayload.file_url, filePayload.file_kind);
         }
-        const targetRow = {
-          assignment_id: created.id,
-          unit_id: !isMulti || scope === 'property' ? null : unitId,
-          party_id: !isMulti || scope === 'property' ? null : partyId,
-          status: 'pending'
-        };
-        const { error: e2 } = await supabase.from('assignment_targets').insert(targetRow);
+        let targetRows;
+        if (!isMulti || scope === 'property') {
+          targetRows = [{ assignment_id: created.id, unit_id: null, party_id: null, status: 'pending' }];
+        } else if (scope === 'multiple') {
+          targetRows = multipleTargets.map(t => ({
+            assignment_id: created.id, unit_id: t.unitId, party_id: t.partyId, status: 'pending'
+          }));
+        } else {
+          targetRows = [{ assignment_id: created.id, unit_id: unitId, party_id: partyId, status: 'pending' }];
+        }
+        const { error: e2 } = await supabase.from('assignment_targets').insert(targetRows);
         if (e2) throw e2;
       }
       onSaved();
@@ -13494,45 +13587,12 @@ function PortalAssignmentForm({ property, assignment, portalKind, onCancel, onSa
       </div>
 
       <div className="px-5 pt-6 space-y-5">
-        <div>
-          <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Type</label>
-          <select value={assignmentType} onChange={(e) => setAssignmentType(e.target.value)}
-            className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white">
-            {ASSIGNMENT_TYPES.map(t => (
-              <option key={t.value} value={t.value}>{t.label}</option>
-            ))}
-          </select>
-        </div>
-
+        {/* File first — the user wants this to be the very first thing
+           they handle, matching the owner-side flow. */}
         <div>
           <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">
-            Scheduled for <span className="text-stone-400 normal-case">(optional)</span>
+            File (PDF or image) <span className="text-red-600 normal-case">*</span>
           </label>
-          <input type="date" value={scheduledDate} onChange={(e) => setScheduledDate(e.target.value)}
-            className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white" />
-          <div className="text-[11px] text-stone-500 mt-1">
-            The Summit Clean team can adjust this if needed.
-          </div>
-        </div>
-
-        <div>
-          <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">
-            Title <span className="text-stone-400 normal-case">(optional)</span>
-          </label>
-          <input type="text" value={title} onChange={(e) => setTitle(e.target.value)}
-            placeholder={`e.g. "${assignmentTypeLabel(assignmentType)} - VIP guest"`}
-            className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white" />
-        </div>
-
-        <div>
-          <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Notes / instructions</label>
-          <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={4}
-            placeholder="What needs to be done…"
-            className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white resize-none" />
-        </div>
-
-        <div>
-          <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">File (PDF or image)</label>
           {keepExistingFile && assignment?.file_url && (
             <div className="mb-2 p-3 rounded-xl bg-stone-100 flex items-center gap-2 text-sm">
               {assignment.file_kind === 'pdf' ? <FileText size={16} /> : <ImageIcon size={16} />}
@@ -13562,18 +13622,63 @@ function PortalAssignmentForm({ property, assignment, portalKind, onCancel, onSa
           )}
         </div>
 
+        {/* Type — empty default forces an active pick */}
+        <div>
+          <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">
+            Type <span className="text-red-600 normal-case">*</span>
+          </label>
+          <select value={assignmentType} onChange={(e) => setAssignmentType(e.target.value)}
+            className={`w-full px-4 py-3 rounded-xl border bg-white ${assignmentType ? 'border-stone-300' : 'border-amber-400'}`}>
+            <option value="">Pick a type…</option>
+            {ASSIGNMENT_TYPES.map(t => (
+              <option key={t.value} value={t.value}>{t.label}</option>
+            ))}
+          </select>
+        </div>
+
+        <div>
+          <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">
+            Scheduled for <span className="text-stone-400 normal-case">(optional)</span>
+          </label>
+          <input type="date" value={scheduledDate} onChange={(e) => setScheduledDate(e.target.value)}
+            className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white" />
+          <div className="text-[11px] text-stone-500 mt-1">
+            The Summit Clean team can adjust this if needed.
+          </div>
+        </div>
+
+        <div>
+          <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">
+            Title <span className="text-stone-400 normal-case">(optional)</span>
+          </label>
+          <input type="text" value={title} onChange={(e) => setTitle(e.target.value)}
+            placeholder={assignmentType ? `e.g. "${assignmentTypeLabel(assignmentType)} - VIP guest"` : 'e.g. "Standard clean - VIP guest"'}
+            className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white" />
+        </div>
+
+        <div>
+          <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Notes / instructions</label>
+          <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={4}
+            placeholder="What needs to be done…"
+            className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white resize-none" />
+        </div>
+
         {isMulti && (
           <>
             <div>
               <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Where?</label>
-              <div className="grid grid-cols-2 gap-2">
-                <button type="button" onClick={() => setScope('specific')}
+              <div className="grid grid-cols-3 gap-2">
+                <button type="button" onClick={() => { setScope('specific'); setMultipleTargets([]); }}
                   className={`p-3 rounded-xl border-2 text-left ${scope === 'specific' ? 'border-stone-900 bg-white' : 'border-stone-200 bg-white/50'}`}>
-                  <div className="font-medium text-sm">One party</div>
+                  <div className="font-medium text-xs">One bedroom</div>
                 </button>
-                <button type="button" onClick={() => setScope('property')}
+                <button type="button" onClick={() => { setScope('multiple'); setUnitId(''); setPartyId(''); }}
+                  className={`p-3 rounded-xl border-2 text-left ${scope === 'multiple' ? 'border-stone-900 bg-white' : 'border-stone-200 bg-white/50'}`}>
+                  <div className="font-medium text-xs">Multiple bedrooms</div>
+                </button>
+                <button type="button" onClick={() => { setScope('property'); setUnitId(''); setPartyId(''); setMultipleTargets([]); }}
                   className={`p-3 rounded-xl border-2 text-left ${scope === 'property' ? 'border-stone-900 bg-white' : 'border-stone-200 bg-white/50'}`}>
-                  <div className="font-medium text-sm">Whole property</div>
+                  <div className="font-medium text-xs">Whole property</div>
                 </button>
               </div>
             </div>
@@ -13614,6 +13719,72 @@ function PortalAssignmentForm({ property, assignment, portalKind, onCancel, onSa
                   </div>
                 )}
               </>
+            )}
+            {scope === 'multiple' && (
+              <div>
+                <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">
+                  Pick bedrooms
+                </label>
+                <div className="space-y-1.5 max-h-72 overflow-y-auto border border-stone-200 rounded-xl p-2 bg-stone-50">
+                  <input type="text" value={unitSearch} onChange={(e) => setUnitSearch(e.target.value)}
+                    placeholder="Filter units…"
+                    className="w-full px-2 py-1.5 rounded-lg border border-stone-300 bg-white text-xs mb-1" />
+                  {(() => {
+                    const q = unitSearch.trim().toLowerCase();
+                    const filteredUnits = q
+                      ? units.filter(u => (u.label || '').toLowerCase().includes(q))
+                      : units;
+                    if (filteredUnits.length === 0) {
+                      return <div className="text-center py-3 text-stone-400 text-xs italic">
+                        {units.length === 0 ? 'No units in this property.' : 'No units match your search.'}
+                      </div>;
+                    }
+                    return filteredUnits.map(u => {
+                      const activeParties = (u.parties || []).filter(p => p.active).sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0));
+                      const allSelected = activeParties.length > 0 && activeParties.every(p =>
+                        multipleTargets.some(t => t.unitId === u.id && (t.partyId || null) === p.id));
+                      const someSelected = activeParties.some(p =>
+                        multipleTargets.some(t => t.unitId === u.id && (t.partyId || null) === p.id));
+                      return (
+                        <div key={u.id} className="bg-white rounded-lg border border-stone-200 p-2">
+                          <button type="button" onClick={() => toggleAllInUnit(u)}
+                            className="w-full flex items-center gap-2 mb-1 text-left">
+                            <div className={`w-4 h-4 rounded border-2 flex-shrink-0 flex items-center justify-center ${allSelected ? 'border-amber-600 bg-amber-600' : someSelected ? 'border-amber-600 bg-amber-100' : 'border-stone-300'}`}>
+                              {allSelected && <Check size={11} className="text-white" />}
+                              {!allSelected && someSelected && <div className="w-2 h-2 bg-amber-600 rounded-sm" />}
+                            </div>
+                            <span className="text-xs font-medium text-stone-900">{u.label}</span>
+                            <span className="text-[10px] font-mono text-stone-400 ml-auto">
+                              {activeParties.length} bedroom{activeParties.length === 1 ? '' : 's'}
+                            </span>
+                          </button>
+                          {activeParties.length > 0 && (
+                            <div className="ml-6 grid grid-cols-2 gap-1">
+                              {activeParties.map(p => {
+                                const checked = multipleTargets.some(t => t.unitId === u.id && (t.partyId || null) === p.id);
+                                return (
+                                  <button key={p.id} type="button" onClick={() => toggleTarget(u.id, p.id)}
+                                    className={`flex items-center gap-1.5 px-2 py-1 rounded-lg text-left border ${checked ? 'border-amber-600 bg-amber-50' : 'border-stone-200 bg-white hover:border-stone-400'}`}>
+                                    <div className={`w-3.5 h-3.5 rounded border-2 flex-shrink-0 flex items-center justify-center ${checked ? 'border-amber-600 bg-amber-600' : 'border-stone-300'}`}>
+                                      {checked && <Check size={9} className="text-white" />}
+                                    </div>
+                                    <span className="text-[11px] text-stone-900 truncate">{p.label}</span>
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    });
+                  })()}
+                  {multipleTargets.length > 0 && (
+                    <div className="text-[10px] font-mono text-amber-700 px-1 pt-1 border-t border-stone-200">
+                      {multipleTargets.length} bedroom{multipleTargets.length === 1 ? '' : 's'} selected
+                    </div>
+                  )}
+                </div>
+              </div>
             )}
           </>
         )}

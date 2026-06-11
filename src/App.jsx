@@ -33,14 +33,48 @@ const ASSIGNMENT_MAX_SIZE_MB = 20; // sanity cap on upload size
 // The set of assignment types PMs can pick from when uploading.
 // Owners/managers can change the type when approving.
 const ASSIGNMENT_TYPES = [
-  { value: 'cleaning_check', label: 'Cleaning check' },
-  { value: 'deep',           label: 'Deep clean' },
-  { value: 'move_out_check', label: 'Move-out check' },
-  { value: 'reclean',        label: 'Reclean' },
-  { value: 'standard',       label: 'Standard clean' },
+  { value: 'cleaning_check', label: 'Cleaning check', short: 'Check',     color: 'bg-sky-100 text-sky-800 border-sky-300' },
+  { value: 'deep',           label: 'Deep clean',     short: 'Deep',      color: 'bg-purple-100 text-purple-800 border-purple-300' },
+  { value: 'move_out_check', label: 'Move-out check', short: 'Move-out',  color: 'bg-orange-100 text-orange-800 border-orange-300' },
+  { value: 'reclean',        label: 'Reclean',        short: 'Reclean',   color: 'bg-yellow-100 text-yellow-800 border-yellow-300' },
+  { value: 'standard',       label: 'Standard clean', short: 'Standard',  color: 'bg-emerald-100 text-emerald-800 border-emerald-300' },
 ];
 const assignmentTypeLabel = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value)?.label || value || '';
+const assignmentTypeMeta = (value) =>
+  ASSIGNMENT_TYPES.find(t => t.value === value) || null;
+
+// Small inline chip showing the cleaning type with its color. Used
+// anywhere a bedroom/assignment is named so the cleaner can see at a
+// glance what kind of clean is expected. Returns null when no type
+// is set (don't render an empty chip).
+function AssignmentTypeChip({ type, size = 'sm' }) {
+  if (!type) return null;
+  const meta = assignmentTypeMeta(type);
+  if (!meta) return null;
+  const sz = size === 'xs'
+    ? 'text-[9px] px-1.5 py-0'
+    : 'text-[10px] px-2 py-0.5';
+  return (
+    <span className={`${sz} uppercase tracking-wider font-mono rounded-full border inline-flex items-center gap-1 ${meta.color}`}>
+      {meta.short}
+    </span>
+  );
+}
+
+// Small priority badge — red, with an alert icon. Hides itself when
+// priority is falsy so callers can use it unconditionally.
+function PriorityChip({ on, size = 'sm' }) {
+  if (!on) return null;
+  const sz = size === 'xs'
+    ? 'text-[9px] px-1.5 py-0'
+    : 'text-[10px] px-2 py-0.5';
+  return (
+    <span className={`${sz} uppercase tracking-wider font-mono font-bold rounded-full border inline-flex items-center gap-0.5 bg-red-100 text-red-800 border-red-300`}>
+      <AlertCircle size={size === 'xs' ? 8 : 10} /> Priority
+    </span>
+  );
+}
 
 // Build a compact display title from a unit + party (bedroom) label.
 // Format: "<unit> - <party>"  e.g. "B1-103 - Bedroom 1".
@@ -1992,6 +2026,25 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       .insert({ task_id: taskId, kind, storage_path: path, public_url: publicUrl, is_preview: previewMode }).select().single();
     if (pErr) { alert('Could not save photo: ' + pErr.message); return; }
     setTasks(prev => prev.map(t => t.id === taskId ? { ...t, photos: [...(t.photos || []), photo] } : t));
+    // Return the new row so callers (PhotoModal) can attach a note to it
+    return photo;
+  };
+
+  // Attach a short note to a previously-uploaded photo. Used by the
+  // damage photo flow so cleaners can describe what's broken. Optional —
+  // an empty note is fine and we no-op out of the DB write to keep
+  // request volume down.
+  const savePhotoNote = async (photoId, noteText) => {
+    if (!photoId) return;
+    const trimmed = (noteText || '').trim();
+    const { error } = await supabase.from('photos')
+      .update({ notes: trimmed || null }).eq('id', photoId);
+    if (error) throw error;
+    // Mirror the update into local state so the note shows immediately
+    setTasks(prev => prev.map(t => ({
+      ...t,
+      photos: (t.photos || []).map(p => p.id === photoId ? { ...p, notes: trimmed || null } : p)
+    })));
   };
 
   if (!loaded) return <Splash text="Loading…" />;
@@ -2146,6 +2199,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       onAddPhoto={(taskId, kind) => setPhotoModal({ taskId, kind })}
       photoModal={photoModal} onClosePhotoModal={() => setPhotoModal(null)}
       onUploadPhoto={uploadPhoto}
+      onSavePhotoNote={savePhotoNote}
       onOpenMessages={() => setShowMessages(true)}
       onOpenBedroomHistory={setBedroomHistory}
       onMoveBlock={moveActiveBlockTo}
@@ -2162,6 +2216,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     onAddPhoto={(taskId, kind) => setPhotoModal({ taskId, kind })}
     photoModal={photoModal} onClosePhotoModal={() => setPhotoModal(null)}
     onUploadPhoto={uploadPhoto}
+    onSavePhotoNote={savePhotoNote}
     onOpenMessages={() => setShowMessages(true)}
     onOpenChangePin={() => setShowChangePin(true)} busy={busy} />);
 }
@@ -2644,6 +2699,26 @@ function PreparingBlockView({ shift, pendingStart, employeeName, employee,
   onSignOut, onCancel, onStart, onOpenMessages, onOpenBedroomHistory, busy }) {
   const handleLogoClick = () => onCancel();
 
+  // Load priority + cleaning types for this bedroom's open assignments
+  // so the chips show in the prep-screen header — same visual language
+  // as BlockView.
+  const [bedroomContext, setBedroomContext] = useState({ priority: false, types: [] });
+  useEffect(() => {
+    if (!pendingStart?.unitId || !pendingStart?.partyId) {
+      setBedroomContext({ priority: false, types: [] }); return;
+    }
+    (async () => {
+      const { data } = await supabase.from('assignment_targets')
+        .select('priority, assignment:assignments!inner(assignment_type, active)')
+        .eq('unit_id', pendingStart.unitId).eq('party_id', pendingStart.partyId)
+        .neq('status', 'done');
+      const open = (data || []).filter(t => t.assignment?.active);
+      const hasPriority = open.some(t => t.priority);
+      const types = [...new Set(open.map(t => t.assignment?.assignment_type).filter(Boolean))];
+      setBedroomContext({ priority: hasPriority, types });
+    })();
+  }, [pendingStart?.unitId, pendingStart?.partyId]);
+
   return (
     <div className="min-h-screen bg-stone-50 pb-24">
       <Header name={employeeName} onSignOut={onSignOut} role={employee?.role} employee={employee}
@@ -2671,6 +2746,14 @@ function PreparingBlockView({ shift, pendingStart, employeeName, employee,
         <div className="font-serif text-2xl text-stone-50 leading-tight">
           {pendingStart.unitLabel} · <span className="italic text-amber-400">{pendingStart.partyLabel}</span>
         </div>
+        {(bedroomContext.priority || bedroomContext.types.length > 0) && (
+          <div className="mt-2 flex items-center gap-1.5 flex-wrap">
+            <PriorityChip on={bedroomContext.priority} />
+            {bedroomContext.types.map(typ => (
+              <AssignmentTypeChip key={typ} type={typ} />
+            ))}
+          </div>
+        )}
         {/* No timer yet — make it explicit so they know the clock isn't running */}
         <div className="mt-2 text-xs font-mono text-stone-400">
           Clock not started yet
@@ -2709,7 +2792,7 @@ function PreparingBlockView({ shift, pendingStart, employeeName, employee,
 
 function BlockView({ shift, block, tasks, activeTask, employeeName, employee, onSignOut, onFinish, onPause,
   newTaskName, setNewTaskName, onStartTask, onStartTasksFromPicker, onStopTask, onResumeTask, onAddPhoto,
-  photoModal, onClosePhotoModal, onUploadPhoto, onOpenMessages, onOpenBedroomHistory,
+  photoModal, onClosePhotoModal, onUploadPhoto, onSavePhotoNote, onOpenMessages, onOpenBedroomHistory,
   onMoveBlock, previewMode, busy }) {
   useTick(true);
   const blockElapsed = Date.now() - new Date(block.start_time).getTime();
@@ -2727,6 +2810,25 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
   // bothering a manager. The move flow asks at confirmation time
   // whether to also reset the old bedroom's assignment to Pending.
   const canMoveBlock = !!onMoveBlock;
+
+  // Surface the open assignments' priority + cleaning types for this
+  // bedroom in the header. AssignmentBanner shows the same info but
+  // it's below the fold; the header is the first thing the cleaner
+  // sees so the chips need to live there too.
+  const [bedroomContext, setBedroomContext] = useState({ priority: false, types: [] });
+  useEffect(() => {
+    if (!block.unit_id || !block.party_id) { setBedroomContext({ priority: false, types: [] }); return; }
+    (async () => {
+      const { data } = await supabase.from('assignment_targets')
+        .select('priority, assignment:assignments!inner(assignment_type, active)')
+        .eq('unit_id', block.unit_id).eq('party_id', block.party_id)
+        .neq('status', 'done');
+      const open = (data || []).filter(t => t.assignment?.active);
+      const hasPriority = open.some(t => t.priority);
+      const types = [...new Set(open.map(t => t.assignment?.assignment_type).filter(Boolean))];
+      setBedroomContext({ priority: hasPriority, types });
+    })();
+  }, [block.unit_id, block.party_id]);
 
   // Logo tap: confirm before pausing the block + bouncing to PropertyHub
   const handleLogoClick = () => {
@@ -2752,6 +2854,17 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
           {block.unit?.label} · <span className="italic text-amber-400">{block.party?.label}</span>
         </div>
         {block.party?.full_name && <div className="text-xs text-stone-400 mt-0.5">{block.party.full_name}</div>}
+        {/* Context chips for this bedroom — priority + cleaning types
+           pulled from the open assignments here. Shown right under
+           the title so the cleaner sees urgency at a glance. */}
+        {(bedroomContext.priority || bedroomContext.types.length > 0) && (
+          <div className="mt-2 flex items-center gap-1.5 flex-wrap">
+            <PriorityChip on={bedroomContext.priority} />
+            {bedroomContext.types.map(typ => (
+              <AssignmentTypeChip key={typ} type={typ} />
+            ))}
+          </div>
+        )}
         {/* Move-bedroom escape hatch — shown to owners/managers and in
            preview mode. Useful when the cleaner accidentally opened the
            wrong bedroom and put their work there; instead of re-keying
@@ -2872,6 +2985,7 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
           taskName={tasks.find(t => t.id === photoModal.taskId)?.name}
           existing={(tasks.find(t => t.id === photoModal.taskId)?.photos || []).filter(p => p.kind === photoModal.kind)}
           onUpload={(file) => onUploadPhoto(photoModal.taskId, photoModal.kind, file)}
+          onSaveNote={onSavePhotoNote}
           onClose={onClosePhotoModal} />
       )}
       {moveModalOpen && (
@@ -3041,7 +3155,7 @@ function MoveBlockModalInline({ block, propertyId, currentEmployeeId, onSave, on
 // =================================================================
 function SimpleShiftView({ shift, tasks, activeTask, employeeName, employee, onSignOut, onClockOut, onSwitchProperty, onAttachProperty,
   newTaskName, setNewTaskName, onStartTask, onStartTasksFromPicker, onStopTask, onResumeTask, onAddPhoto,
-  photoModal, onClosePhotoModal, onUploadPhoto, onOpenMessages, onOpenChangePin, busy }) {
+  photoModal, onClosePhotoModal, onUploadPhoto, onSavePhotoNote, onOpenMessages, onOpenChangePin, busy }) {
   const [showMenu, setShowMenu] = useState(false);
   const [taskInputMode, setTaskInputMode] = useState('picker'); // 'picker' | 'custom'
   useTick(true);
@@ -3178,6 +3292,7 @@ function SimpleShiftView({ shift, tasks, activeTask, employeeName, employee, onS
           taskName={tasks.find(t => t.id === photoModal.taskId)?.name}
           existing={(tasks.find(t => t.id === photoModal.taskId)?.photos || []).filter(p => p.kind === photoModal.kind)}
           onUpload={(file) => onUploadPhoto(photoModal.taskId, photoModal.kind, file)}
+          onSaveNote={onSavePhotoNote}
           onClose={onClosePhotoModal} />
       )}
       {showMenu && (
@@ -3778,9 +3893,17 @@ function TaskCard({ task, isActive, onStop, onResume, onAddPhoto }) {
   );
 }
 
-function PhotoModal({ kind, taskName, existing, onUpload, onClose }) {
+function PhotoModal({ kind, taskName, existing, onUpload, onSaveNote, onClose }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  // Track the most recently uploaded photo so we can attach an
+  // optional note to it. Only used for damage photos — a quick
+  // "what's broken" detail that PMs / owners will see alongside
+  // the image. Notes are never required.
+  const [lastUploaded, setLastUploaded] = useState(null);
+  const [noteDraft, setNoteDraft] = useState('');
+  const [savingNote, setSavingNote] = useState(false);
+  const [noteSaved, setNoteSaved] = useState(false);
   const inputRef = useRef(null);
   const existingPhotos = Array.isArray(existing) ? existing : [];
 
@@ -3791,12 +3914,36 @@ function PhotoModal({ kind, taskName, existing, onUpload, onClose }) {
     if (!file) return;
     setBusy(true);
     setError('');
+    setNoteSaved(false);
     try {
-      await onUpload(file);
+      const uploaded = await onUpload(file);
+      // onUpload may return the new photo so the note prompt can attach.
+      // If it doesn't, we fall back to whatever the parent passes via
+      // `existing` — the latest one is the just-uploaded photo.
+      if (uploaded && uploaded.id) {
+        setLastUploaded(uploaded);
+        setNoteDraft('');
+      }
     } catch (err) {
       setError(err?.message || 'Upload failed. Try again.');
     } finally {
       setBusy(false);
+    }
+  };
+
+  const saveNote = async () => {
+    if (!lastUploaded?.id || !onSaveNote) return;
+    setSavingNote(true);
+    setError('');
+    try {
+      await onSaveNote(lastUploaded.id, noteDraft.trim());
+      setNoteSaved(true);
+      // Keep the textarea contents so the user can see what they just
+      // saved. The "Saved" indicator goes away when they upload another.
+    } catch (err) {
+      setError(err?.message || 'Could not save note.');
+    } finally {
+      setSavingNote(false);
     }
   };
 
@@ -3829,6 +3976,36 @@ function PhotoModal({ kind, taskName, existing, onUpload, onClose }) {
               <AlertCircle size={16} className="flex-shrink-0 mt-0.5" /><span>{error}</span>
             </div>
           )}
+          {/* Damage-only: optional note input that shows up after the
+             cleaner uploads a photo. Pre-upload, it's a hint message;
+             post-upload, it becomes a real save-note input pointing at
+             the photo they just took. */}
+          {kind === 'damage' && lastUploaded && onSaveNote && (
+            <div className="mb-3 p-3 rounded-xl bg-amber-50 border border-amber-200">
+              <div className="text-xs uppercase tracking-wider text-amber-800 font-mono mb-1.5">
+                Add a note (optional)
+              </div>
+              <textarea
+                value={noteDraft}
+                onChange={(e) => { setNoteDraft(e.target.value); setNoteSaved(false); }}
+                disabled={savingNote}
+                rows={3}
+                placeholder="What's damaged? Where exactly? Any context that helps the PM understand."
+                className="w-full px-3 py-2 rounded-lg border border-amber-300 bg-white text-sm focus:outline-none focus:border-amber-600 resize-none disabled:opacity-60" />
+              <div className="mt-2 flex items-center gap-2">
+                <button onClick={saveNote} disabled={savingNote || !noteDraft.trim()}
+                  className="px-3 py-1.5 rounded-lg bg-amber-700 hover:bg-amber-800 text-white text-xs font-medium disabled:opacity-50">
+                  {savingNote ? 'Saving…' : noteSaved ? 'Saved' : 'Save note'}
+                </button>
+                {noteSaved && (
+                  <span className="text-[11px] text-emerald-700 font-mono flex items-center gap-1">
+                    <Check size={11} /> Attached to the photo
+                  </span>
+                )}
+                <span className="text-[11px] text-amber-700 ml-auto">Skipping is fine</span>
+              </div>
+            </div>
+          )}
           <label className={`block w-full p-8 border-2 border-dashed rounded-2xl text-center cursor-pointer transition-colors ${busy ? 'border-amber-300 bg-amber-50 pointer-events-none' : 'border-stone-300 hover:border-stone-900'}`}>
             {busy ? (
               <>
@@ -3838,7 +4015,9 @@ function PhotoModal({ kind, taskName, existing, onUpload, onClose }) {
             ) : (
               <>
                 <Camera size={32} className="mx-auto mb-3 text-stone-400" />
-                <div className="text-stone-700 font-medium mb-1">Take or upload photo</div>
+                <div className="text-stone-700 font-medium mb-1">
+                  {lastUploaded ? 'Take another photo' : 'Take or upload photo'}
+                </div>
                 <div className="text-xs text-stone-500">Tap to open camera</div>
               </>
             )}
@@ -5643,6 +5822,14 @@ function PhotoZoomViewer({ photos, initialUrl, onClose, onResolveCurrent }) {
         {idx + 1} / {photos.length}
       </div>
       <img loading="lazy" src={photo.public_url} alt="" className="max-w-full max-h-[80vh] rounded-xl" />
+      {/* Show the cleaner's note when one is attached — useful for
+         damage photos where the note explains what's broken. */}
+      {photo.notes && photo.notes.trim() && (
+        <div className="mt-3 max-w-md w-full px-4 py-2.5 rounded-xl bg-stone-800/90 text-stone-100 text-sm">
+          <div className="text-[10px] uppercase tracking-wider text-stone-400 font-mono mb-0.5">Note</div>
+          <div className="whitespace-pre-wrap break-words">{photo.notes}</div>
+        </div>
+      )}
       <div className="mt-4 flex items-center gap-3 flex-wrap justify-center">
         {photos.length > 1 && (
           <>
@@ -8223,6 +8410,7 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
   const [picked, setPicked] = useState(null); // selected property
   const [view, setView] = useState('open');   // 'open' | 'upload' | 'detail'
   const [detail, setDetail] = useState(null);  // selected assignment when view === 'detail'
+  const [propSearch, setPropSearch] = useState('');
 
   const load = async () => {
     const [propsRes, targetsRes] = await Promise.all([
@@ -8268,11 +8456,15 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
 
   // No picked property → property picker
   // Top section: properties with open assignments. Below: everything else alphabetical.
+  const pq = propSearch.trim().toLowerCase();
+  const matchesPropSearch = (p) => !pq
+    || (p.name || '').toLowerCase().includes(pq)
+    || (p.address || '').toLowerCase().includes(pq);
   const withAssignments = properties
-    .filter(p => (assignmentCounts[p.id] || 0) > 0)
+    .filter(p => (assignmentCounts[p.id] || 0) > 0 && matchesPropSearch(p))
     .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
   const others = properties
-    .filter(p => (assignmentCounts[p.id] || 0) === 0)
+    .filter(p => (assignmentCounts[p.id] || 0) === 0 && matchesPropSearch(p))
     .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
 
   const PropertyRow = ({ p }) => (
@@ -8308,8 +8500,22 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
         </h1>
         <p className="text-sm text-stone-600 mb-6">Pick a property to view open assignments or upload new ones.</p>
 
+        {/* Property search — always show when there's more than a couple */}
+        {properties.length > 3 && (
+          <div className="mb-4">
+            <input type="text" value={propSearch}
+              onChange={(e) => setPropSearch(e.target.value)}
+              placeholder={`Search ${properties.length} properties…`}
+              className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white focus:outline-none focus:border-stone-900 text-stone-900 text-sm" />
+          </div>
+        )}
+
         {!loaded ? <Splash text="Loading…" /> : properties.length === 0 ? (
           <div className="text-center py-12 text-stone-400 text-sm">No properties yet.</div>
+        ) : (withAssignments.length === 0 && others.length === 0 && pq) ? (
+          <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
+            No properties match "{propSearch}".
+          </div>
         ) : (
           <>
             {withAssignments.length > 0 && (
@@ -9869,12 +10075,50 @@ function PortalHome({ property, portalKind, portalUser, hasMultipleProperties, o
     console.log('[Portal] filtering from:', since, '| portal_start_date:', property.portal_start_date);
 
     if (property.property_type === 'multi_unit') {
-      const { data: blocks } = await supabase
-        .from('work_blocks')
-        .select('id, start_time, end_time, unit:units(id, label), shift:shifts!inner(customer_id), tasks(id, photos(kind, resolved_at))')
-        .gte('start_time', since)
-        .order('start_time', { ascending: false });
-      const filtered = (blocks || []).filter(b => b.shift?.customer_id === property.id && b.unit);
+      // Pull both: work_blocks in window, AND the current status of every
+      // assignment_target for this property. PMs should only see units
+      // where (a) real work happened (at least one task or photo) AND
+      // (b) the assignment for that unit/bedroom is currently in 'done'
+      // status. Reset back to pending → instantly removed from PM view.
+      const [{ data: blocks }, { data: doneTargets }] = await Promise.all([
+        supabase.from('work_blocks')
+          .select('id, start_time, end_time, unit_id, party_id, unit:units(id, label), shift:shifts!inner(customer_id), tasks(id, photos(kind, resolved_at))')
+          .gte('start_time', since)
+          .order('start_time', { ascending: false }),
+        supabase.from('assignment_targets')
+          .select('unit_id, party_id, assignment:assignments!inner(customer_id, active)')
+          .eq('status', 'done'),
+      ]);
+
+      // Build a Set of "unit_id:party_id" keys that are currently Done.
+      // Property-level Done assignments (no unit/party) cover everything
+      // under that property, so we track those separately.
+      const doneUnitParty = new Set();
+      let propertyLevelDone = false;
+      (doneTargets || []).forEach(t => {
+        if (t.assignment?.customer_id !== property.id) return;
+        if (t.assignment?.active === false) return;
+        if (!t.unit_id && !t.party_id) {
+          propertyLevelDone = true;
+          return;
+        }
+        // Match on unit alone if party is null (whole-unit assignment),
+        // or on unit+party for bedroom-level.
+        doneUnitParty.add(`${t.unit_id || ''}:${t.party_id || ''}`);
+        if (t.unit_id && t.party_id) doneUnitParty.add(`${t.unit_id}:`); // also unit-level match
+      });
+
+      const filtered = (blocks || []).filter(b => {
+        if (b.shift?.customer_id !== property.id || !b.unit) return false;
+        // (a) real work: at least one task or photo logged
+        const hasWork = (b.tasks || []).some(t => (t.photos || []).length > 0) || (b.tasks || []).length > 0;
+        if (!hasWork) return false;
+        // (b) linked assignment currently Done
+        if (propertyLevelDone) return true;
+        const key1 = `${b.unit_id || ''}:${b.party_id || ''}`;
+        const key2 = `${b.unit_id || ''}:`;
+        return doneUnitParty.has(key1) || doneUnitParty.has(key2);
+      });
       const byDate = {};
       filtered.forEach(b => {
         const date = new Date(b.start_time).toISOString().split('T')[0];
@@ -9899,27 +10143,42 @@ function PortalHome({ property, portalKind, portalUser, hasMultipleProperties, o
         .sort((a, b) => b.date.localeCompare(a.date));
       setGroups(out);
     } else {
-      // Simple property
-      const { data: shifts } = await supabase.from('shifts')
-        .select('id, start_time, end_time, tasks(id, photos(kind, resolved_at))')
-        .eq('customer_id', property.id)
-        .eq('is_preview', false)
-        .gte('start_time', since)
-        .order('start_time', { ascending: false });
-      const out = (shifts || []).map(s => {
-        let photoCount = 0, hasDamage = false, hasResolvedDamage = false;
-        (s.tasks || []).forEach(t => (t.photos || []).forEach(p => {
-          photoCount++;
-          if (p.kind === 'damage') {
-            if (p.resolved_at) hasResolvedDamage = true;
-            else hasDamage = true;
-          }
-        }));
-        return {
-          date: new Date(s.start_time).toISOString().split('T')[0],
-          units: [{ unitId: null, label: 'Cleaning visit', photoCount, hasDamage, hasResolvedDamage }]
-        };
-      });
+      // Simple property — same dual filter (real work + Done assignment),
+      // but there's no unit/party granularity so any Done assignment for
+      // this property qualifies.
+      const [{ data: shifts }, { data: doneTargets }] = await Promise.all([
+        supabase.from('shifts')
+          .select('id, start_time, end_time, tasks(id, photos(kind, resolved_at))')
+          .eq('customer_id', property.id)
+          .eq('is_preview', false)
+          .gte('start_time', since)
+          .order('start_time', { ascending: false }),
+        supabase.from('assignment_targets')
+          .select('id, assignment:assignments!inner(customer_id, active)')
+          .eq('status', 'done'),
+      ]);
+      const hasDoneAssignment = (doneTargets || []).some(t =>
+        t.assignment?.customer_id === property.id && t.assignment?.active !== false
+      );
+      const out = (shifts || [])
+        .filter(s => {
+          const hasWork = (s.tasks || []).some(t => (t.photos || []).length > 0) || (s.tasks || []).length > 0;
+          return hasWork && hasDoneAssignment;
+        })
+        .map(s => {
+          let photoCount = 0, hasDamage = false, hasResolvedDamage = false;
+          (s.tasks || []).forEach(t => (t.photos || []).forEach(p => {
+            photoCount++;
+            if (p.kind === 'damage') {
+              if (p.resolved_at) hasResolvedDamage = true;
+              else hasDamage = true;
+            }
+          }));
+          return {
+            date: new Date(s.start_time).toISOString().split('T')[0],
+            units: [{ unitId: null, label: 'Cleaning visit', photoCount, hasDamage, hasResolvedDamage }]
+          };
+        });
       setGroups(out);
     }
     setLoaded(true);
@@ -12111,11 +12370,17 @@ function AssignmentList({ property, employee, onBack, onNew, onOpen }) {
   const [assignments, setAssignments] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [filter, setFilter] = useState('open'); // open | all
+  const [search, setSearch] = useState('');
+  // Which building groups are collapsed (default expanded)
+  const [collapsedBuildings, setCollapsedBuildings] = useState({});
+  // Which apartment dropdowns are open inside a building
+  const [openApartments, setOpenApartments] = useState({}); // { 'B1-101': true }
 
   const load = async () => {
+    // Pull targets so we can group by unit and surface priority/type
     const { data } = await supabase
       .from('assignments')
-      .select('*, targets:assignment_targets(id, status, unit:units(label), party:parties(label))')
+      .select('*, targets:assignment_targets(id, status, priority, unit_id, party_id, unit:units(label), party:parties(label))')
       .eq('customer_id', property.id)
       .order('created_at', { ascending: false });
     setAssignments(data || []); setLoaded(true);
@@ -12123,19 +12388,91 @@ function AssignmentList({ property, employee, onBack, onNew, onOpen }) {
   useEffect(() => { load(); }, [property.id]);
   useAssignmentSync(load, 'asgn-list');
 
-  // Aggregate status per assignment
+  // Aggregate status + flags per assignment
   const decorated = (assignments || []).map(a => {
-    const total = a.targets?.length || 0;
-    const done = (a.targets || []).filter(t => t.status === 'done').length;
-    const inProgress = (a.targets || []).filter(t => t.status === 'in_progress').length;
-    const blocked = (a.targets || []).filter(t => t.status === 'blocked').length;
+    const targets = a.targets || [];
+    const total = targets.length;
+    const done = targets.filter(t => t.status === 'done').length;
+    const inProgress = targets.filter(t => t.status === 'in_progress').length;
+    const blocked = targets.filter(t => t.status === 'blocked').length;
     const allDone = total > 0 && done === total;
-    return { ...a, total, done, inProgress, blocked, allDone };
+    const hasPriority = targets.some(t => t.priority);
+    // Primary unit label: most targets share one unit, take the first non-null
+    const firstUnitLabel = targets.find(t => t.unit?.label)?.unit?.label || '';
+    return {
+      ...a, total, done, inProgress, blocked, allDone,
+      hasPriority,
+      firstUnitLabel,
+    };
   });
 
-  const visible = filter === 'open'
-    ? decorated.filter(a => !a.allDone && a.active)
-    : decorated;
+  // Search across title, notes, unit label, bedroom label
+  const q = search.trim().toLowerCase();
+  const matchesSearch = (a) => {
+    if (!q) return true;
+    if ((a.title || '').toLowerCase().includes(q)) return true;
+    if ((a.notes || '').toLowerCase().includes(q)) return true;
+    if ((a.firstUnitLabel || '').toLowerCase().includes(q)) return true;
+    const bedroom = (a.targets || []).some(t => (t.party?.label || '').toLowerCase().includes(q));
+    if (bedroom) return true;
+    return false;
+  };
+
+  const visible = decorated
+    .filter(a => filter === 'open' ? (!a.allDone && a.active) : true)
+    .filter(matchesSearch);
+
+  // Group by building. Property-level (no unit) goes into "Whole property".
+  // Within each building, sub-group by unit label so when one unit has
+  // multiple assignments we can show a collapsible dropdown.
+  const buildings = {}; // { buildingKey: { units: { unitLabel: [assignments] } } }
+  visible.forEach(a => {
+    const buildingKey = a.firstUnitLabel
+      ? (buildingFromLabel(a.firstUnitLabel) || a.firstUnitLabel)
+      : 'Whole property';
+    const unitKey = a.firstUnitLabel || 'Whole property';
+    if (!buildings[buildingKey]) buildings[buildingKey] = {};
+    if (!buildings[buildingKey][unitKey]) buildings[buildingKey][unitKey] = [];
+    buildings[buildingKey][unitKey].push(a);
+  });
+  const buildingKeys = Object.keys(buildings).sort((a, b) => {
+    if (a === 'Whole property') return -1;
+    if (b === 'Whole property') return 1;
+    return naturalCompare(a, b);
+  });
+
+  const toggleBuilding = (b) => setCollapsedBuildings(prev => ({ ...prev, [b]: !prev[b] }));
+  const toggleApartment = (key) => setOpenApartments(prev => ({ ...prev, [key]: !prev[key] }));
+
+  // Render a single assignment row (used inside apartment groups). Pulled
+  // into a helper so the apartment-dropdown and single-card paths share
+  // identical visual treatment.
+  const renderAssignmentRow = (a) => (
+    <button key={a.id} onClick={() => onOpen(a)}
+      className={`w-full text-left p-3 rounded-xl border ${a.allDone ? 'bg-stone-100 border-stone-200 opacity-70' : a.blocked > 0 ? 'bg-red-50/50 border-red-200' : 'bg-white border-stone-200'} hover:border-stone-400 transition-colors`}>
+      <div className="flex items-start justify-between gap-2">
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 mb-1 flex-wrap">
+            {a.file_kind === 'pdf'
+              ? <FileText size={14} className="text-stone-500 flex-shrink-0" />
+              : <ImageIcon size={14} className="text-stone-500 flex-shrink-0" />}
+            <span className="font-serif text-base text-stone-900 truncate">{a.title}</span>
+          </div>
+          <div className="flex items-center gap-1.5 flex-wrap mt-1">
+            <PriorityChip on={a.hasPriority && !a.allDone} />
+            <AssignmentTypeChip type={a.assignment_type} />
+            {a.allDone && <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 border border-emerald-300">Done</span>}
+            {a.blocked > 0 && <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-red-100 text-red-700 border border-red-300">⚠ Blocked</span>}
+          </div>
+          <div className="text-xs text-stone-500 font-mono mt-1">
+            {fmtDate(a.created_at)} · {a.done}/{a.total} done{a.inProgress > 0 && `, ${a.inProgress} in progress`}
+          </div>
+          {a.notes && <div className="text-xs text-stone-600 mt-1 line-clamp-1">{a.notes}</div>}
+        </div>
+        <ChevronRight size={14} className="text-stone-400 flex-shrink-0 mt-1" />
+      </div>
+    </button>
+  );
 
   return (
     <div className="pb-24">
@@ -12156,6 +12493,19 @@ function AssignmentList({ property, employee, onBack, onNew, onOpen }) {
           </button>
         )}
 
+        {/* Search bar — always on for assignments. Filters across
+           title, notes, unit, and bedroom in one box. */}
+        {assignments.length > 0 && (
+          <div className="mb-3">
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder={`Search ${assignments.length} assignment${assignments.length === 1 ? '' : 's'} (apartment, bedroom, title, notes)…`}
+              className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white focus:outline-none focus:border-stone-900 text-stone-900 text-sm" />
+          </div>
+        )}
+
         <div className="flex gap-2 mb-4">
           <button onClick={() => setFilter('open')}
             className={`px-4 py-2 rounded-full text-sm font-medium ${filter === 'open' ? 'bg-stone-900 text-stone-50' : 'bg-stone-100 text-stone-600'}`}>
@@ -12169,32 +12519,72 @@ function AssignmentList({ property, employee, onBack, onNew, onOpen }) {
 
         {!loaded ? <Splash text="Loading…" /> : visible.length === 0 ? (
           <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
-            {filter === 'open' ? 'No open assignments. Tap "Upload new assignment" to add one.' : 'No assignments yet.'}
+            {q
+              ? `No assignments match "${search}".`
+              : filter === 'open' ? 'No open assignments. Tap "Upload new assignment" to add one.' : 'No assignments yet.'}
           </div>
         ) : (
-          <div className="space-y-2">
-            {visible.map(a => (
-              <button key={a.id} onClick={() => onOpen(a)}
-                className={`w-full text-left p-4 rounded-2xl border ${a.allDone ? 'bg-stone-100 border-stone-200 opacity-70' : a.blocked > 0 ? 'bg-red-50/50 border-red-200' : 'bg-white border-stone-200'} hover:border-stone-400 transition-colors`}>
-                <div className="flex items-start justify-between gap-2">
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 mb-1 flex-wrap">
-                      {a.file_kind === 'pdf'
-                        ? <FileText size={14} className="text-stone-500 flex-shrink-0" />
-                        : <ImageIcon size={14} className="text-stone-500 flex-shrink-0" />}
-                      <span className="font-serif text-lg text-stone-900 truncate">{a.title}</span>
-                      {a.allDone && <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800">Done</span>}
-                      {a.blocked > 0 && <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-red-100 text-red-700">⚠ Blocked</span>}
+          <div className="space-y-4">
+            {buildingKeys.map(buildingKey => {
+              const unitsInBuilding = buildings[buildingKey];
+              const unitKeys = Object.keys(unitsInBuilding).sort(naturalCompare);
+              const isCollapsed = !!collapsedBuildings[buildingKey];
+              const buildingTotal = unitKeys.reduce((sum, uk) => sum + unitsInBuilding[uk].length, 0);
+              const buildingHasPriority = unitKeys.some(uk =>
+                unitsInBuilding[uk].some(a => a.hasPriority && !a.allDone)
+              );
+              return (
+                <div key={buildingKey} className="rounded-2xl border border-stone-200 bg-white overflow-hidden">
+                  <button onClick={() => toggleBuilding(buildingKey)}
+                    className="w-full px-4 py-3 flex items-center justify-between bg-stone-50 hover:bg-stone-100 transition-colors">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <Building2 size={16} className="text-stone-700 flex-shrink-0" />
+                      <span className="font-serif text-base text-stone-900 truncate">{buildingKey}</span>
+                      <span className="text-xs font-mono px-2 py-0.5 rounded-full bg-stone-200 text-stone-700 flex-shrink-0">
+                        {buildingTotal}
+                      </span>
+                      <PriorityChip on={buildingHasPriority} size="xs" />
                     </div>
-                    <div className="text-xs text-stone-500 font-mono">
-                      {fmtDate(a.created_at)} · {a.done}/{a.total} done{a.inProgress > 0 && `, ${a.inProgress} in progress`}
+                    <ChevronRight size={14} className={`text-stone-500 flex-shrink-0 transition-transform ${isCollapsed ? '' : 'rotate-90'}`} />
+                  </button>
+                  {!isCollapsed && (
+                    <div className="p-3 space-y-2">
+                      {unitKeys.map(unitKey => {
+                        const assignmentsInUnit = unitsInBuilding[unitKey];
+                        // Single assignment in this unit — render plain.
+                        if (assignmentsInUnit.length === 1) {
+                          return renderAssignmentRow(assignmentsInUnit[0]);
+                        }
+                        // Multiple — render as a dropdown labeled with apt + count.
+                        const apartmentKey = `${buildingKey}::${unitKey}`;
+                        const isOpen = !!openApartments[apartmentKey];
+                        const unitHasPriority = assignmentsInUnit.some(a => a.hasPriority && !a.allDone);
+                        return (
+                          <div key={unitKey} className="rounded-xl border border-amber-200 bg-amber-50/30 overflow-hidden">
+                            <button onClick={() => toggleApartment(apartmentKey)}
+                              className="w-full px-3 py-2 flex items-center justify-between hover:bg-amber-50">
+                              <div className="flex items-center gap-2 min-w-0">
+                                <span className="font-mono text-sm text-stone-800 truncate">{unitKey}</span>
+                                <span className="text-xs font-mono px-2 py-0.5 rounded-full bg-amber-600 text-white font-bold flex-shrink-0">
+                                  {assignmentsInUnit.length}
+                                </span>
+                                <PriorityChip on={unitHasPriority} size="xs" />
+                              </div>
+                              <ChevronRight size={14} className={`text-amber-700 flex-shrink-0 transition-transform ${isOpen ? 'rotate-90' : ''}`} />
+                            </button>
+                            {isOpen && (
+                              <div className="px-2 pb-2 pt-1 space-y-2 border-t border-amber-100">
+                                {assignmentsInUnit.map(a => renderAssignmentRow(a))}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
                     </div>
-                    {a.notes && <div className="text-xs text-stone-600 mt-1 line-clamp-1">{a.notes}</div>}
-                  </div>
-                  <ChevronRight size={16} className="text-stone-400 flex-shrink-0" />
+                  )}
                 </div>
-              </button>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>
@@ -13216,17 +13606,14 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onDone, onReop
           ) : (
             <div className="font-serif text-base text-stone-900 truncate">{t.assignment?.title}</div>
           )}
-          {/* Priority + assignee chips — priority is loud red, assignee
-             is a quieter purple. Both placed right under the title so
-             a cleaner scanning the list sees urgency immediately. */}
-          {(t.priority || t.assignedTo) && !isDone && (
+          {/* Priority + cleaning-type + assignee chips — all use the
+             shared chip components so the visual language is consistent
+             everywhere a bedroom/assignment is shown. */}
+          {(t.priority || t.assignedTo || t.assignment?.assignment_type) && (
             <div className="mt-1 flex items-center gap-1.5 flex-wrap">
-              {t.priority && (
-                <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-red-100 text-red-800 border border-red-300 inline-flex items-center gap-1 font-bold">
-                  <AlertCircle size={10} /> Priority
-                </span>
-              )}
-              {t.assignedTo?.name && (
+              <PriorityChip on={t.priority && !isDone} />
+              <AssignmentTypeChip type={t.assignment?.assignment_type} />
+              {t.assignedTo?.name && !isDone && (
                 <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-purple-100 text-purple-800 border border-purple-300 inline-flex items-center gap-1">
                   <User size={10} /> {t.assignedTo.name}
                 </span>
@@ -13677,26 +14064,11 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
   // cards. The bundle is a collapsible group so the list stays short.
   const toggleBundle = (unitId) => setBundleOpen(prev => ({ ...prev, [unitId]: !prev[unitId] }));
 
-  const renderAssignmentList = (items) => {
-    // Only bundle on the Pending tab — other views don't need it.
-    if (statusFilter !== 'pending') {
-      return (
-        <div className="space-y-2">
-          {items.map(t => (
-            <AssignmentCard key={t.id} target={t} busy={busy} propertyId={propertyId}
-              onView={() => setOpened(t)}
-              onStart={() => startAndGo(t)}
-              onPause={() => updateStatus(t, 'paused')}
-              onDone={() => updateStatus(t, 'done')}
-              onReopen={() => updateStatus(t, 'pending')}
-              onBlocked={() => setStatusModal({ target: t })}
-              onReassign={() => setReassignTarget(t)}
-              onGoToBedroom={onGoToBedroom ? () => startAndGo(t) : null}
-              onOpenBedroomHistory={onOpenBedroomHistory} />
-          ))}
-        </div>
-      );
-    }
+  // Render a single grouped/bundled list. Extracted into a helper so we
+  // can call it twice on the Pending tab — once for priority items
+  // (top), once for the rest — with a visual separator between.
+  const renderGroupedItems = (items) => {
+    if (items.length === 0) return null;
 
     // Group by unit_id (apartment). Items without a unit go in their own bucket.
     const groups = new Map(); // unitId or 'no-unit' -> { unit, items: [] }
@@ -13725,7 +14097,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
               <AssignmentCard key={t.id} target={t} busy={busy} propertyId={propertyId}
                 onView={() => setOpened(t)}
                 onStart={() => startAndGo(t)}
-              onPause={() => updateStatus(t, 'paused')}
+                onPause={() => updateStatus(t, 'paused')}
                 onDone={() => updateStatus(t, 'done')}
                 onReopen={() => updateStatus(t, 'pending')}
                 onBlocked={() => setStatusModal({ target: t })}
@@ -13737,6 +14109,10 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
           // Bundle: collapsible header showing count, expanded shows all cards
           const isOpen = !!bundleOpen[key];
           const unitLabel = group.unit?.label || (key === 'no-unit' ? 'No unit' : key);
+          // Show a red priority dot on the bundle header if any of its
+          // items is priority — useful so a collapsed bundle still
+          // signals urgency.
+          const bundleHasPriority = group.items.some(t => t.priority);
           return (
             <div key={key} className="rounded-xl border-2 border-amber-200 bg-amber-50/40 overflow-hidden">
               <button onClick={() => toggleBundle(key)}
@@ -13747,6 +14123,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                   <span className="text-xs font-mono px-2 py-0.5 rounded-full bg-amber-600 text-white font-bold flex-shrink-0">
                     {group.items.length}
                   </span>
+                  {bundleHasPriority && <PriorityChip on={true} size="xs" />}
                 </div>
                 <ChevronRight size={14} className={`text-amber-700 flex-shrink-0 transition-transform ${isOpen ? 'rotate-90' : ''}`} />
               </button>
@@ -13756,7 +14133,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                     <AssignmentCard key={t.id} target={t} busy={busy} propertyId={propertyId}
                       onView={() => setOpened(t)}
                       onStart={() => startAndGo(t)}
-              onPause={() => updateStatus(t, 'paused')}
+                      onPause={() => updateStatus(t, 'paused')}
                       onDone={() => updateStatus(t, 'done')}
                       onReopen={() => updateStatus(t, 'pending')}
                       onBlocked={() => setStatusModal({ target: t })}
@@ -13769,6 +14146,57 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
             </div>
           );
         })}
+      </div>
+    );
+  };
+
+  const renderAssignmentList = (items) => {
+    // Only bundle on the Pending tab — other views don't need it.
+    if (statusFilter !== 'pending') {
+      return (
+        <div className="space-y-2">
+          {items.map(t => (
+            <AssignmentCard key={t.id} target={t} busy={busy} propertyId={propertyId}
+              onView={() => setOpened(t)}
+              onStart={() => startAndGo(t)}
+              onPause={() => updateStatus(t, 'paused')}
+              onDone={() => updateStatus(t, 'done')}
+              onReopen={() => updateStatus(t, 'pending')}
+              onBlocked={() => setStatusModal({ target: t })}
+              onReassign={() => setReassignTarget(t)}
+              onGoToBedroom={onGoToBedroom ? () => startAndGo(t) : null}
+              onOpenBedroomHistory={onOpenBedroomHistory} />
+          ))}
+        </div>
+      );
+    }
+
+    // PENDING TAB: split priority vs the rest, render with visual divider.
+    const priorityItems = items.filter(t => t.priority);
+    const normalItems = items.filter(t => !t.priority);
+
+    return (
+      <div className="space-y-2">
+        {priorityItems.length > 0 && (
+          <>
+            <div className="flex items-center gap-2 px-1">
+              <AlertCircle size={12} className="text-red-700 flex-shrink-0" />
+              <span className="text-[10px] uppercase tracking-wider font-mono font-bold text-red-700">
+                Priority — do these first ({priorityItems.length})
+              </span>
+              <div className="flex-1 h-px bg-red-200" />
+            </div>
+            {renderGroupedItems(priorityItems)}
+          </>
+        )}
+        {priorityItems.length > 0 && normalItems.length > 0 && (
+          <div className="py-2 flex items-center gap-2 px-1">
+            <div className="flex-1 h-px bg-stone-200" />
+            <span className="text-[10px] uppercase tracking-wider font-mono text-stone-400">Everything else</span>
+            <div className="flex-1 h-px bg-stone-200" />
+          </div>
+        )}
+        {normalItems.length > 0 && renderGroupedItems(normalItems)}
       </div>
     );
   };
@@ -14904,10 +15332,11 @@ function PortalAssignmentsTab({ property, portalKind }) {
   const [assignments, setAssignments] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [view, setView] = useState({ kind: 'list' });
+  const [search, setSearch] = useState('');
 
   const load = async () => {
     const { data } = await supabase.from('assignments')
-      .select('*, targets:assignment_targets(id, status, unit:units(label), party:parties(label))')
+      .select('*, targets:assignment_targets(id, status, priority, unit:units(label), party:parties(label))')
       .eq('customer_id', property.id)
       .eq('source', 'pm')
       .order('created_at', { ascending: false });
@@ -14932,11 +15361,30 @@ function PortalAssignmentsTab({ property, portalKind }) {
       onEdit={() => setView({ kind: 'edit', assignment: view.assignment })} />;
   }
 
+  // Decorate assignments with priority + primary unit label for search/grouping
+  const decorated = assignments.map(a => {
+    const targets = a.targets || [];
+    const hasPriority = targets.some(t => t.priority);
+    const firstUnitLabel = targets.find(t => t.unit?.label)?.unit?.label || '';
+    return { ...a, hasPriority, firstUnitLabel };
+  });
+
+  // Search across title, notes, unit, bedroom
+  const q = search.trim().toLowerCase();
+  const matchesSearch = (a) => {
+    if (!q) return true;
+    if ((a.title || '').toLowerCase().includes(q)) return true;
+    if ((a.notes || '').toLowerCase().includes(q)) return true;
+    if ((a.firstUnitLabel || '').toLowerCase().includes(q)) return true;
+    return (a.targets || []).some(t => (t.party?.label || '').toLowerCase().includes(q));
+  };
+  const visible = decorated.filter(matchesSearch);
+
   const groups = {
-    draft: assignments.filter(a => a.pm_status === 'draft'),
-    pending: assignments.filter(a => a.pm_status === 'pending'),
-    approved: assignments.filter(a => a.pm_status === 'approved'),
-    rejected: assignments.filter(a => a.pm_status === 'rejected'),
+    draft: visible.filter(a => a.pm_status === 'draft'),
+    pending: visible.filter(a => a.pm_status === 'pending'),
+    approved: visible.filter(a => a.pm_status === 'approved'),
+    rejected: visible.filter(a => a.pm_status === 'rejected'),
   };
 
   return (
@@ -14953,9 +15401,23 @@ function PortalAssignmentsTab({ property, portalKind }) {
         <Plus size={18} /> New assignment
       </button>
 
+      {/* Search — filters across title, unit, bedroom, notes. PMs don't
+         need cleaner/category filters but search by apartment/building
+         is universally useful. */}
+      {assignments.length > 0 && (
+        <input type="text" value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder={`Search ${assignments.length} assignment${assignments.length === 1 ? '' : 's'} (apartment, bedroom, title)…`}
+          className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white focus:outline-none focus:border-stone-900 text-stone-900 text-sm" />
+      )}
+
       {!loaded ? <Splash text="Loading…" /> : assignments.length === 0 ? (
         <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
           You haven't created any assignments yet.
+        </div>
+      ) : visible.length === 0 ? (
+        <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
+          No assignments match "{search}".
         </div>
       ) : (
         <>

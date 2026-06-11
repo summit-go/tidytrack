@@ -1718,6 +1718,61 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     setBusy(false);
   };
 
+  // Move the active work block to a different bedroom in this property.
+  // Used when the cleaner (or owner in preview) opened the wrong bedroom
+  // and put their tasks/photos/notes there — instead of redoing all
+  // that data entry, we just relabel the block by updating its unit_id
+  // + party_id. Tasks/photos follow via foreign keys. The old bedroom
+  // is left clean (no leftover row).
+  const moveActiveBlockTo = async (newUnit, newParty) => {
+    if (!activeBlock) return;
+    if (!newUnit?.id || !newParty?.id) {
+      alert('Pick a unit and bedroom.');
+      return;
+    }
+    if (newUnit.id === activeBlock.unit_id && newParty.id === activeBlock.party_id) {
+      alert("That's already where this block is.");
+      return;
+    }
+    setBusy(true);
+    // Conflict check — if a separate block already exists at the target
+    // bedroom in this shift, ask before creating a duplicate.
+    try {
+      const { data: existing } = await supabase.from('work_blocks')
+        .select('id, end_time')
+        .eq('shift_id', shift.id)
+        .eq('unit_id', newUnit.id)
+        .eq('party_id', newParty.id)
+        .neq('id', activeBlock.id);
+      if (existing && existing.length > 0) {
+        setBusy(false);
+        const hasOpen = existing.some(b => !b.end_time);
+        const msg = hasOpen
+          ? `There's already an OPEN work block at ${newUnit.label} · ${newParty.label} in this shift. Move anyway? You'll end up with two — close one manually after.`
+          : `There's already a completed work block at ${newUnit.label} · ${newParty.label} in this shift. Move anyway?`;
+        if (!confirm(msg)) return;
+        setBusy(true);
+      }
+    } catch (e) {
+      console.warn('[moveActiveBlockTo] conflict check failed', e);
+    }
+    const { error } = await supabase.from('work_blocks')
+      .update({ unit_id: newUnit.id, party_id: newParty.id })
+      .eq('id', activeBlock.id);
+    setBusy(false);
+    if (error) { alert('Could not move work block: ' + error.message); return; }
+    // Refresh activeBlock with the new unit/party labels so the header
+    // updates immediately. Fetch the joined row so we have nested labels.
+    const { data: refreshed } = await supabase.from('work_blocks')
+      .select('*, unit:units(*), party:parties(*), tasks(*, photos(*))')
+      .eq('id', activeBlock.id).single();
+    if (refreshed) {
+      setActiveBlock(refreshed);
+      setTasks(refreshed.tasks || []);
+      setWorkBlocks(prev => prev.map(b => b.id === activeBlock.id ? refreshed : b));
+    }
+  };
+
   // Tapping an assignment from outside a bedroom: take the cleaner to
   // PropertyHub with a "pending start" banner for the target bedroom.
   // We DO NOT create the work_block here — that happens when the cleaner
@@ -2040,6 +2095,20 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       onBack={() => setBedroomHistory(null)} />);
   }
 
+  // Pending-start route: cleaner tapped Start (or Go to this bedroom)
+  // on an assignment but hasn't confirmed yet. Show the bedroom view
+  // with no timer running and a big Start cleaning button.
+  if (isMulti && !activeBlock && pendingStart) {
+    return withIdleModal(<PreparingBlockView shift={shift}
+      pendingStart={pendingStart}
+      employeeName={employee.name} employee={employee}
+      onSignOut={signOutWithCleanup}
+      onCancel={cancelPendingStart}
+      onStart={confirmPendingStart}
+      onOpenMessages={() => setShowMessages(true)}
+      onOpenBedroomHistory={setBedroomHistory}
+      busy={busy} />);
+  }
   if (isMulti && !activeBlock) {
     return withIdleModal(<PropertyHub shift={shift} workBlocks={workBlocks} employeeName={employee.name} employee={employee}
       onSignOut={signOutWithCleanup} onClockOut={clockOut} onSwitchProperty={switchProperty}
@@ -2047,9 +2116,6 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       onOpenMessages={() => setShowMessages(true)}
       onOpenChangePin={() => setShowChangePin(true)}
       onOpenBedroomHistory={setBedroomHistory}
-      pendingStart={pendingStart}
-      onConfirmPendingStart={confirmPendingStart}
-      onCancelPendingStart={cancelPendingStart}
       busy={busy} />);
   }
   if (isMulti && activeBlock) {
@@ -2063,7 +2129,10 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       photoModal={photoModal} onClosePhotoModal={() => setPhotoModal(null)}
       onUploadPhoto={uploadPhoto}
       onOpenMessages={() => setShowMessages(true)}
-      onOpenBedroomHistory={setBedroomHistory} busy={busy} />);
+      onOpenBedroomHistory={setBedroomHistory}
+      onMoveBlock={moveActiveBlockTo}
+      previewMode={previewMode}
+      busy={busy} />);
   }
   return withIdleModal(<SimpleShiftView shift={shift} tasks={tasks} activeTask={activeTask}
     employeeName={employee.name} employee={employee} onSignOut={signOutWithCleanup} onClockOut={clockOut}
@@ -2082,7 +2151,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
 // =================================================================
 // PROPERTY HUB (multi-unit, between work blocks)
 // =================================================================
-function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onClockOut, onSwitchProperty, onStartNew, onReopen, onGoToBedroom, onOpenMessages, onOpenChangePin, onOpenBedroomHistory, pendingStart, onConfirmPendingStart, onCancelPendingStart, busy }) {
+function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onClockOut, onSwitchProperty, onStartNew, onReopen, onGoToBedroom, onOpenMessages, onOpenChangePin, onOpenBedroomHistory, busy }) {
   const [showMenu, setShowMenu] = useState(false);
   const [showAssignmentForm, setShowAssignmentForm] = useState(false);
   useTick(true);
@@ -2128,34 +2197,6 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
           Started {fmtClock(shift.start_time)} · {workBlocks.length} {workBlocks.length === 1 ? 'apartment cleaned' : 'apartments cleaned'}
         </div>
       </div>
-
-      {/* Pending start banner: the cleaner tapped Start (or Go to this
-         bedroom) on an assignment for a bedroom that doesn't have an
-         open block yet. We don't auto-create the block so the clock
-         doesn't start prematurely. The cleaner taps Start cleaning
-         here to actually open the work block. */}
-      {pendingStart && (
-        <div className="mx-4 mt-3 p-4 rounded-2xl bg-amber-50 border-2 border-amber-300">
-          <div className="text-[10px] uppercase tracking-wider font-mono text-amber-700 mb-1">Ready to start?</div>
-          <div className="font-serif text-lg text-stone-900 mb-1 truncate">
-            {pendingStart.unitLabel}{pendingStart.partyLabel && ` · ${pendingStart.partyLabel}`}
-          </div>
-          <div className="text-xs text-stone-600 mb-3">
-            Your clock doesn't start until you tap Start cleaning. Take your time getting ready.
-          </div>
-          <div className="flex gap-2">
-            <button onClick={onConfirmPendingStart} disabled={busy}
-              className="flex-1 h-11 px-3 rounded-xl bg-stone-900 hover:bg-stone-800 text-stone-50 text-sm font-medium flex items-center justify-center gap-2 disabled:opacity-50">
-              {busy ? <div className="w-4 h-4 border-2 border-stone-50 border-t-transparent rounded-full animate-spin" /> : <Play size={14} />}
-              Start cleaning
-            </button>
-            <button onClick={onCancelPendingStart} disabled={busy}
-              className="h-11 px-4 rounded-xl border border-stone-300 hover:bg-stone-50 text-stone-700 text-sm disabled:opacity-50">
-              Not now
-            </button>
-          </div>
-        </div>
-      )}
 
       <AssignmentsPanel propertyId={shift.customer_id} employee={employee} onGoToBedroom={onGoToBedroom} onOpenBedroomHistory={onOpenBedroomHistory} />
 
@@ -2568,14 +2609,101 @@ function OtherCleanersTasksPanel({ block }) {
   );
 }
 
+// =================================================================
+// PREPARING BLOCK VIEW — shown after the cleaner taps Start (or Go to
+// this bedroom) on an assignment but BEFORE the work_block is created.
+// Looks like the bedroom view they're heading into, with the unit and
+// bedroom name displayed, but no timer running and no task input.
+// One big "Start cleaning" button at the bottom commits — at that
+// point we insert the work_block row and switch to the real BlockView.
+//
+// Why a separate component instead of overloading BlockView? BlockView
+// is built around an active work_block (timer, tasks list, photos,
+// pause/done). Conditional rendering inside it for "no block yet"
+// would tangle the logic. Cleaner to have a dedicated screen.
+// =================================================================
+function PreparingBlockView({ shift, pendingStart, employeeName, employee,
+  onSignOut, onCancel, onStart, onOpenMessages, onOpenBedroomHistory, busy }) {
+  const handleLogoClick = () => onCancel();
+
+  return (
+    <div className="min-h-screen bg-stone-50 pb-24">
+      <Header name={employeeName} onSignOut={onSignOut} role={employee?.role} employee={employee}
+        onOpenMessages={onOpenMessages} onLogoClick={handleLogoClick} />
+      <div className="bg-stone-900 text-stone-50 px-5 py-5 sticky top-0 z-10 shadow-md">
+        <div className="flex items-center justify-between mb-3">
+          <button onClick={onCancel}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-50 text-xs font-medium">
+            <Home size={12} /> Property home
+          </button>
+          {/* Bedroom history shortcut so the cleaner can see what was
+             last done here before they start — useful for catching
+             "wrong bedroom" mistakes early. */}
+          {onOpenBedroomHistory && (
+            <button onClick={() => onOpenBedroomHistory({
+                unitId: pendingStart.unitId, unitLabel: pendingStart.unitLabel,
+                partyId: pendingStart.partyId, partyLabel: pendingStart.partyLabel
+              })}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-50 text-xs font-medium">
+              <Clock size={12} /> History
+            </button>
+          )}
+        </div>
+        <div className="text-xs uppercase tracking-widest text-amber-400 font-mono">Ready to start</div>
+        <div className="font-serif text-2xl text-stone-50 leading-tight">
+          {pendingStart.unitLabel} · <span className="italic text-amber-400">{pendingStart.partyLabel}</span>
+        </div>
+        {/* No timer yet — make it explicit so they know the clock isn't running */}
+        <div className="mt-2 text-xs font-mono text-stone-400">
+          Clock not started yet
+        </div>
+      </div>
+
+      <div className="px-5 pt-6">
+        <div className="p-4 rounded-2xl bg-amber-50 border-2 border-amber-300 mb-4">
+          <div className="text-xs text-stone-700 leading-relaxed">
+            You're heading to <strong>{pendingStart.unitLabel} · {pendingStart.partyLabel}</strong>.
+            Take your time getting ready — supplies, walking over, double-checking the bedroom. Your clock only
+            starts when you tap the button below.
+          </div>
+        </div>
+
+        <button onClick={onStart} disabled={busy}
+          className="w-full py-4 rounded-2xl bg-stone-900 hover:bg-stone-800 text-stone-50 text-lg font-medium flex items-center justify-center gap-2 disabled:opacity-50 mb-3">
+          {busy ? <div className="w-5 h-5 border-2 border-stone-50 border-t-transparent rounded-full animate-spin" /> : <Play size={18} />}
+          Start cleaning
+        </button>
+        <button onClick={onCancel} disabled={busy}
+          className="w-full py-3 rounded-2xl border-2 border-stone-300 hover:bg-stone-100 text-stone-700 text-sm font-medium disabled:opacity-50 mb-3">
+          Not now — back to property home
+        </button>
+
+        {/* Show assignment(s) for this bedroom so the cleaner can read
+           the instructions BEFORE starting the clock. Read-only here —
+           status changes happen once they're in the real BlockView. */}
+        <AssignmentBanner propertyId={shift.customer_id}
+          unitId={pendingStart.unitId} partyId={pendingStart.partyId}
+          employee={employee} />
+      </div>
+    </div>
+  );
+}
+
 function BlockView({ shift, block, tasks, activeTask, employeeName, employee, onSignOut, onFinish, onPause,
   newTaskName, setNewTaskName, onStartTask, onStartTasksFromPicker, onStopTask, onResumeTask, onAddPhoto,
-  photoModal, onClosePhotoModal, onUploadPhoto, onOpenMessages, onOpenBedroomHistory, busy }) {
+  photoModal, onClosePhotoModal, onUploadPhoto, onOpenMessages, onOpenBedroomHistory,
+  onMoveBlock, previewMode, busy }) {
   useTick(true);
   const blockElapsed = Date.now() - new Date(block.start_time).getTime();
   const activeTaskObj = tasks.find(t => t.id === activeTask);
   // Task input mode toggle: structured picker (default) vs freeform typing
   const [taskInputMode, setTaskInputMode] = useState('picker'); // 'picker' | 'custom'
+  // "Move bedroom" modal — shown to owners/managers and in preview
+  // mode. Cleaners typically don't see this so they don't accidentally
+  // re-attach their work to the wrong bedroom; managers can fix
+  // mistakes after the fact.
+  const [moveModalOpen, setMoveModalOpen] = useState(false);
+  const canMoveBlock = !!onMoveBlock && (previewMode || employee?.role === 'owner' || employee?.role === 'manager');
 
   // Logo tap: confirm before pausing the block + bouncing to PropertyHub
   const handleLogoClick = () => {
@@ -2601,6 +2729,16 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
           {block.unit?.label} · <span className="italic text-amber-400">{block.party?.label}</span>
         </div>
         {block.party?.full_name && <div className="text-xs text-stone-400 mt-0.5">{block.party.full_name}</div>}
+        {/* Move-bedroom escape hatch — shown to owners/managers and in
+           preview mode. Useful when the cleaner accidentally opened the
+           wrong bedroom and put their work there; instead of re-keying
+           everything, just move the block. */}
+        {canMoveBlock && (
+          <button onClick={() => setMoveModalOpen(true)} disabled={busy}
+            className="mt-1.5 text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-amber-900/40 hover:bg-amber-900/60 text-amber-200 inline-flex items-center gap-1 disabled:opacity-50">
+            <Edit2 size={9} /> Wrong bedroom? Move this work
+          </button>
+        )}
         {block.unit?.kind === 'townhome' && (block.unit?.bedrooms != null || block.unit?.bathrooms != null) && (
           <div className="mt-1.5 flex items-center gap-1.5 flex-wrap">
             {block.unit.bedrooms != null && (
@@ -2713,6 +2851,106 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
           onUpload={(file) => onUploadPhoto(photoModal.taskId, photoModal.kind, file)}
           onClose={onClosePhotoModal} />
       )}
+      {moveModalOpen && (
+        <MoveBlockModalInline
+          block={block}
+          propertyId={shift.customer_id}
+          onSave={async (newUnit, newParty) => {
+            await onMoveBlock(newUnit, newParty);
+            setMoveModalOpen(false);
+          }}
+          onClose={() => setMoveModalOpen(false)} />
+      )}
+    </div>
+  );
+}
+
+// MoveBlockModalInline — used from BlockView (cleaner-side bedroom view)
+// to move the active work block to a different bedroom. Same idea as
+// MoveBlockModal but it calls a parent-supplied onSave with the new
+// unit/party objects so EmployeeApp can update activeBlock in place.
+function MoveBlockModalInline({ block, propertyId, onSave, onClose }) {
+  const [units, setUnits] = useState([]);
+  const [unitId, setUnitId] = useState('');
+  const [partyId, setPartyId] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => { (async () => {
+    const { data } = await supabase.from('units')
+      .select('*, parties(id, label, full_name, active, sort_order)')
+      .eq('customer_id', propertyId).eq('active', true)
+      .order('sort_order').order('label');
+    setUnits((data || []).slice().sort((a, b) => naturalCompare(a.label, b.label)));
+  })(); }, [propertyId]);
+
+  const parties = (units.find(u => u.id === unitId)?.parties || [])
+    .filter(p => p.active).sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0));
+
+  const save = async () => {
+    if (!unitId || !partyId) { setError('Pick a unit and a bedroom.'); return; }
+    const newUnit = units.find(u => u.id === unitId);
+    const newParty = (newUnit?.parties || []).find(p => p.id === partyId);
+    setBusy(true);
+    try {
+      await onSave(newUnit, newParty);
+    } catch (e) {
+      setError(e.message || String(e));
+    }
+    setBusy(false);
+  };
+
+  return (
+    <div className="fixed inset-0 bg-stone-900/80 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
+      <div className="bg-stone-50 w-full sm:max-w-md sm:rounded-3xl rounded-t-3xl flex flex-col">
+        <div className="flex items-center justify-between p-5 border-b border-stone-200">
+          <div>
+            <div className="font-serif text-xl text-stone-900">Move work to a different bedroom</div>
+            <div className="text-xs text-stone-500 font-mono mt-0.5 truncate">
+              Currently: {block.unit?.label}{block.party?.label && ` · ${block.party.label}`}
+            </div>
+          </div>
+          <button onClick={onClose} className="p-2 rounded-full hover:bg-stone-100">
+            <X size={20} className="text-stone-600" />
+          </button>
+        </div>
+        <div className="p-5 space-y-4">
+          <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-900">
+            All notes, tasks, and photos from this work block will move with it. The old bedroom will be left untouched (no leftover data).
+          </div>
+          <div>
+            <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Move to unit</label>
+            <select value={unitId} onChange={(e) => { setUnitId(e.target.value); setPartyId(''); }}
+              className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white">
+              <option value="">— Pick a unit —</option>
+              {units.map(u => <option key={u.id} value={u.id}>{u.label}</option>)}
+            </select>
+          </div>
+          {unitId && (
+            <div>
+              <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Bedroom</label>
+              <select value={partyId} onChange={(e) => setPartyId(e.target.value)}
+                className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white">
+                <option value="">— Pick a bedroom —</option>
+                {parties.map(p => <option key={p.id} value={p.id}>{p.label}{p.full_name ? ` (${p.full_name})` : ''}</option>)}
+              </select>
+            </div>
+          )}
+          {error && (
+            <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-red-700 text-sm flex items-start gap-2">
+              <AlertCircle size={16} className="flex-shrink-0 mt-0.5" /><span>{error}</span>
+            </div>
+          )}
+        </div>
+        <div className="p-5 border-t border-stone-200 flex gap-2">
+          <button onClick={onClose} disabled={busy}
+            className="flex-1 py-3 rounded-2xl bg-stone-100 text-stone-700 font-medium">Cancel</button>
+          <button onClick={save} disabled={busy}
+            className="flex-1 py-3 rounded-2xl bg-stone-900 text-stone-50 font-medium disabled:opacity-50">
+            {busy ? 'Moving…' : 'Move work here'}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

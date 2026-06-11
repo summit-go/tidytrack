@@ -301,8 +301,11 @@ function useAssignmentSync(load, channelKey = 'asgn-sync') {
 //
 // Returns: { showWarning, dismissWarning } — caller renders the warning UI.
 // =================================================================
-const IDLE_WARN_MS = 2 * 60 * 60 * 1000;   // 2 hours
-const IDLE_LIMIT_MS = 5 * 60 * 60 * 1000;  // 5 hours
+// Auto-clock-out behavior: warn at 45min of inactivity, force end at 1hr.
+// 1 hour is the target (per owner preference) — the 45min warning gives
+// the cleaner a chance to dismiss before time is lost.
+const IDLE_WARN_MS = 45 * 60 * 1000;       // 45 minutes
+const IDLE_LIMIT_MS = 60 * 60 * 1000;      // 1 hour
 const ACTIVITY_SAVE_THROTTLE_MS = 60 * 1000; // save to DB at most once per minute
 
 function useIdleDetector({ shift, onAutoClockOut, enabled = true }) {
@@ -1314,6 +1317,15 @@ function EmployeeApp({ employee: employeeInit, onSignOut }) {
   const [photoModal, setPhotoModal] = useState(null);
   const [clockInFlow, setClockInFlow] = useState(null);
   const [blockStartFlow, setBlockStartFlow] = useState(null);
+  // Set when an assignment "Start" or "Go to this bedroom" is tapped from
+  // somewhere outside the bedroom — we navigate the cleaner to that
+  // bedroom but DON'T create a work_block until they confirm. This
+  // separates the "I'm intending to clean here" moment from the "the
+  // billable clock starts now" moment, which matches how cleaners
+  // actually work (they often walk to the bedroom, get supplies, etc.
+  // before they're really ready to start). `null` when no pending start.
+  // Shape: { unitId, partyId, unitLabel, partyLabel }
+  const [pendingStart, setPendingStart] = useState(null);
   const [newTaskName, setNewTaskName] = useState('');
   const [loaded, setLoaded] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -1620,6 +1632,22 @@ function EmployeeApp({ employee: employeeInit, onSignOut }) {
   const onPickBlockParty = async (party, workNotes) => {
     setBusy(true);
     const { unit } = blockStartFlow;
+    // Defensive safety: only one open work block per shift. If another open
+    // block exists (could happen across devices / stale state), close it
+    // first so the new one's start time is correct and we never end up
+    // double-clocked.
+    try {
+      const { data: openBlocks } = await supabase.from('work_blocks')
+        .select('id').eq('shift_id', shift.id).is('end_time', null);
+      if (openBlocks && openBlocks.length > 0) {
+        const ts = new Date().toISOString();
+        await supabase.from('work_blocks')
+          .update({ end_time: ts })
+          .in('id', openBlocks.map(b => b.id));
+      }
+    } catch (e) {
+      console.warn('[onPickBlockParty] could not pre-close open blocks', e);
+    }
     const { data, error } = await supabase.from('work_blocks')
       .insert({
         shift_id: shift.id, unit_id: unit.id, party_id: party.id,
@@ -1629,7 +1657,12 @@ function EmployeeApp({ employee: employeeInit, onSignOut }) {
       .select('*, unit:units(*), party:parties(*), tasks(*, photos(*))').single();
     setBusy(false);
     if (error) { alert('Could not start work block: ' + error.message); return; }
-    setWorkBlocks(prev => [...prev, data]);
+    setWorkBlocks(prev => {
+      // Reflect any pre-closed blocks in local state too
+      const ts = new Date().toISOString();
+      const closed = prev.map(b => (b.end_time ? b : { ...b, end_time: ts }));
+      return [...closed, data];
+    });
     setActiveBlock(data); setTasks(data.tasks || []); setBlockStartFlow(null);
     // Auto-start any pending assignments at this bedroom
     autoStartAssignmentsAtBedroom(unit.id, party.id);
@@ -1649,20 +1682,45 @@ function EmployeeApp({ employee: employeeInit, onSignOut }) {
 
   const reopenBlock = async (block) => {
     setBusy(true);
+    // Make sure we're not ending up with two open blocks. Close any other
+    // open block under this shift before reopening this one.
+    try {
+      const { data: openBlocks } = await supabase.from('work_blocks')
+        .select('id').eq('shift_id', shift.id).is('end_time', null).neq('id', block.id);
+      if (openBlocks && openBlocks.length > 0) {
+        const ts = new Date().toISOString();
+        await supabase.from('work_blocks')
+          .update({ end_time: ts })
+          .in('id', openBlocks.map(b => b.id));
+      }
+    } catch (e) {
+      console.warn('[reopenBlock] could not pre-close open blocks', e);
+    }
     await supabase.from('work_blocks').update({ end_time: null }).eq('id', block.id);
     const { data: blockTasks } = await supabase.from('tasks').select('*, photos(*)')
       .eq('work_block_id', block.id).order('start_time');
     const updated = { ...block, end_time: null, tasks: blockTasks || [] };
-    setWorkBlocks(prev => prev.map(b => b.id === block.id ? updated : b));
+    setWorkBlocks(prev => prev.map(b => {
+      if (b.id === block.id) return updated;
+      // Reflect the pre-closure in local state for any other currently-open blocks
+      if (!b.end_time) return { ...b, end_time: new Date().toISOString() };
+      return b;
+    }));
     setActiveBlock(updated); setTasks(blockTasks || []);
     setBusy(false);
   };
 
-  // Jump straight to a bedroom's work block from an assignment card.
-  // - If same bedroom is already active → just open it
-  // - If a different block is active → confirm switch (close current, start new)
-  // - If a coworker has an open block at this bedroom → join (open the existing one)
-  // - Else create a new block
+  // Tapping an assignment from outside a bedroom: take the cleaner to
+  // PropertyHub with a "pending start" banner for the target bedroom.
+  // We DO NOT create the work_block here — that happens when the cleaner
+  // taps the big Start cleaning button on the banner. This separates
+  // "I'm heading to this bedroom" from "the timer starts now."
+  //
+  // - Same bedroom is already active → just stay there (no-op)
+  // - A different bedroom is active → confirm switch, then close current
+  //   block, then show pending start banner
+  // - A coworker has an open block at this bedroom → join (open the existing one)
+  // - Else → set pendingStart banner; cleaner taps Start to create block
   const goToBedroomForTarget = async (target) => {
     if (!target.unit_id || !target.party_id) {
       alert('This assignment isn\'t tied to a specific bedroom.');
@@ -1685,16 +1743,15 @@ function EmployeeApp({ employee: employeeInit, onSignOut }) {
       const updated = { ...activeBlock, end_time: ts, tasks };
       setWorkBlocks(prev => prev.map(b => b.id === activeBlock.id ? updated : b));
       setActiveBlock(null); setTasks([]); setActiveTask(null);
-      // fall through to open/create logic
-    } else {
-      setBusy(true);
+      setBusy(false);
     }
 
-    // Try to find an existing open block at this bedroom (within this shift, or by another cleaner)
-    // Within THIS shift first (most likely scenario after switching)
+    // Try to find an existing open block at this bedroom (within this
+    // shift). If one exists we open it directly — the cleaner started
+    // earlier and we're just resuming.
     const myOpen = workBlocks.find(b => !b.end_time && b.unit_id === target.unit_id && b.party_id === target.party_id);
     if (myOpen) {
-      // Re-fetch the block with tasks so we have fresh data
+      setBusy(true);
       const { data: refreshed } = await supabase.from('work_blocks')
         .select('*, unit:units(*), party:parties(*), tasks(*, photos(*))')
         .eq('id', myOpen.id).single();
@@ -1707,23 +1764,59 @@ function EmployeeApp({ employee: employeeInit, onSignOut }) {
       return;
     }
 
-    // Else create a new work block for this cleaner at this bedroom
+    // Else show pending start banner — cleaner confirms by tapping Start
+    setPendingStart({
+      unitId: target.unit_id,
+      partyId: target.party_id,
+      unitLabel: target.unit?.label || '',
+      partyLabel: target.party?.label || '',
+    });
+  };
+
+  // Confirm the pending start: actually create the work_block now and
+  // open it as active. Called by the Start button on the PropertyHub
+  // pending banner.
+  const confirmPendingStart = async () => {
+    if (!pendingStart) return;
+    setBusy(true);
+    // Safety: close any other open block under this shift before opening
+    // a new one (mirrors onPickBlockParty's defensive pre-close)
+    try {
+      const { data: openBlocks } = await supabase.from('work_blocks')
+        .select('id').eq('shift_id', shift.id).is('end_time', null);
+      if (openBlocks && openBlocks.length > 0) {
+        const ts = new Date().toISOString();
+        await supabase.from('work_blocks')
+          .update({ end_time: ts })
+          .in('id', openBlocks.map(b => b.id));
+      }
+    } catch (e) {
+      console.warn('[confirmPendingStart] could not pre-close open blocks', e);
+    }
     const { data, error } = await supabase.from('work_blocks')
       .insert({
         shift_id: shift.id,
-        unit_id: target.unit_id,
-        party_id: target.party_id,
-        bill_rate_at_work: shift.customer?.bill_rate_hourly || null
+        unit_id: pendingStart.unitId,
+        party_id: pendingStart.partyId,
+        bill_rate_at_work: shift.customer?.bill_rate_hourly || null,
       })
       .select('*, unit:units(*), party:parties(*), tasks(*, photos(*))').single();
     setBusy(false);
     if (error) { alert('Could not start work block: ' + error.message); return; }
-    setWorkBlocks(prev => [...prev, data]);
+    setWorkBlocks(prev => {
+      const ts = new Date().toISOString();
+      const closed = prev.map(b => (b.end_time ? b : { ...b, end_time: ts }));
+      return [...closed, data];
+    });
     setActiveBlock(data);
     setTasks(data.tasks || []);
+    setPendingStart(null);
     // Auto-start any pending assignments at this bedroom
-    autoStartAssignmentsAtBedroom(target.unit_id, target.party_id);
+    autoStartAssignmentsAtBedroom(pendingStart.unitId, pendingStart.partyId);
   };
+
+  // Cancel the pending start (cleaner decides not to start after all)
+  const cancelPendingStart = () => setPendingStart(null);
 
   // Tasks
   const startTask = async (overrideName = null, category = null, subcategory = null) => {
@@ -1942,7 +2035,11 @@ function EmployeeApp({ employee: employeeInit, onSignOut }) {
       onStartNew={startNewBlock} onReopen={reopenBlock} onGoToBedroom={goToBedroomForTarget}
       onOpenMessages={() => setShowMessages(true)}
       onOpenChangePin={() => setShowChangePin(true)}
-      onOpenBedroomHistory={setBedroomHistory} busy={busy} />);
+      onOpenBedroomHistory={setBedroomHistory}
+      pendingStart={pendingStart}
+      onConfirmPendingStart={confirmPendingStart}
+      onCancelPendingStart={cancelPendingStart}
+      busy={busy} />);
   }
   if (isMulti && activeBlock) {
     return withIdleModal(<BlockView shift={shift} block={activeBlock} tasks={tasks} activeTask={activeTask}
@@ -1974,7 +2071,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut }) {
 // =================================================================
 // PROPERTY HUB (multi-unit, between work blocks)
 // =================================================================
-function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onClockOut, onSwitchProperty, onStartNew, onReopen, onGoToBedroom, onOpenMessages, onOpenChangePin, onOpenBedroomHistory, busy }) {
+function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onClockOut, onSwitchProperty, onStartNew, onReopen, onGoToBedroom, onOpenMessages, onOpenChangePin, onOpenBedroomHistory, pendingStart, onConfirmPendingStart, onCancelPendingStart, busy }) {
   const [showMenu, setShowMenu] = useState(false);
   const [showAssignmentForm, setShowAssignmentForm] = useState(false);
   useTick(true);
@@ -2020,6 +2117,34 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
           Started {fmtClock(shift.start_time)} · {workBlocks.length} {workBlocks.length === 1 ? 'apartment cleaned' : 'apartments cleaned'}
         </div>
       </div>
+
+      {/* Pending start banner: the cleaner tapped Start (or Go to this
+         bedroom) on an assignment for a bedroom that doesn't have an
+         open block yet. We don't auto-create the block so the clock
+         doesn't start prematurely. The cleaner taps Start cleaning
+         here to actually open the work block. */}
+      {pendingStart && (
+        <div className="mx-4 mt-3 p-4 rounded-2xl bg-amber-50 border-2 border-amber-300">
+          <div className="text-[10px] uppercase tracking-wider font-mono text-amber-700 mb-1">Ready to start?</div>
+          <div className="font-serif text-lg text-stone-900 mb-1 truncate">
+            {pendingStart.unitLabel}{pendingStart.partyLabel && ` · ${pendingStart.partyLabel}`}
+          </div>
+          <div className="text-xs text-stone-600 mb-3">
+            Your clock doesn't start until you tap Start cleaning. Take your time getting ready.
+          </div>
+          <div className="flex gap-2">
+            <button onClick={onConfirmPendingStart} disabled={busy}
+              className="flex-1 h-11 px-3 rounded-xl bg-stone-900 hover:bg-stone-800 text-stone-50 text-sm font-medium flex items-center justify-center gap-2 disabled:opacity-50">
+              {busy ? <div className="w-4 h-4 border-2 border-stone-50 border-t-transparent rounded-full animate-spin" /> : <Play size={14} />}
+              Start cleaning
+            </button>
+            <button onClick={onCancelPendingStart} disabled={busy}
+              className="h-11 px-4 rounded-xl border border-stone-300 hover:bg-stone-50 text-stone-700 text-sm disabled:opacity-50">
+              Not now
+            </button>
+          </div>
+        </div>
+      )}
 
       <AssignmentsPanel propertyId={shift.customer_id} employee={employee} onGoToBedroom={onGoToBedroom} onOpenBedroomHistory={onOpenBedroomHistory} />
 
@@ -3691,6 +3816,7 @@ function ManagerDashboard({ employee, onSignOut, onOpenMessages, onLogoClick }) 
 
       {liveSheetOpen && (
         <LiveCleanersSheet
+          viewer={employee}
           onClose={() => setLiveSheetOpen(false)}
           onOpenShift={(s) => { setLiveSheetOpen(false); setSelectedShift(s); setView('detail'); }} />
       )}
@@ -3768,18 +3894,22 @@ function GroupedByPartyView({ shifts, showMoney, onOpenShift }) {
   // properties the user wants to see. Defaults to "all" (empty filter
   // means "show everything").
   const [selectedProperties, setSelectedProperties] = useState(new Set());
+  const [selectedCleaners, setSelectedCleaners] = useState(new Set());
   const [filterOpen, setFilterOpen] = useState(false);
+  const [cleanerFilterOpen, setCleanerFilterOpen] = useState(false);
   const filterRef = useRef(null);
+  const cleanerFilterRef = useRef(null);
 
-  // Click-outside to close the filter dropdown
+  // Click-outside to close the filter dropdowns
   useEffect(() => {
-    if (!filterOpen) return;
+    if (!filterOpen && !cleanerFilterOpen) return;
     const onClick = (e) => {
-      if (filterRef.current && !filterRef.current.contains(e.target)) setFilterOpen(false);
+      if (filterOpen && filterRef.current && !filterRef.current.contains(e.target)) setFilterOpen(false);
+      if (cleanerFilterOpen && cleanerFilterRef.current && !cleanerFilterRef.current.contains(e.target)) setCleanerFilterOpen(false);
     };
     document.addEventListener('mousedown', onClick);
     return () => document.removeEventListener('mousedown', onClick);
-  }, [filterOpen]);
+  }, [filterOpen, cleanerFilterOpen]);
 
   // Flatten every work_block from every shift into a list, plus simple-property shifts as standalone rows
   const allRows = [];
@@ -3814,15 +3944,26 @@ function GroupedByPartyView({ shifts, showMoney, onOpenShift }) {
     }
   });
 
-  // All property names that appear in the period (for the filter dropdown)
+  // All property + cleaner names for the filter dropdowns
   const allPropertyNames = [...new Set(allRows.map(r => r.property))].sort();
-  // Apply filter — empty set means "show everything"
-  const rows = selectedProperties.size === 0
-    ? allRows
-    : allRows.filter(r => selectedProperties.has(r.property));
+  const allCleanerNames = [...new Set(allRows.map(r => r.employee).filter(n => n && n !== '—'))].sort();
+  // Apply filters — empty set means "show everything"
+  const rows = allRows.filter(r => {
+    if (selectedProperties.size > 0 && !selectedProperties.has(r.property)) return false;
+    if (selectedCleaners.size > 0 && !selectedCleaners.has(r.employee)) return false;
+    return true;
+  });
 
   const toggleProperty = (name) => {
     setSelectedProperties(prev => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+  };
+  const toggleCleaner = (name) => {
+    setSelectedCleaners(prev => {
       const next = new Set(prev);
       if (next.has(name)) next.delete(name);
       else next.add(name);
@@ -3862,7 +4003,7 @@ function GroupedByPartyView({ shifts, showMoney, onOpenShift }) {
 
   // Filter dropdown (reused in both empty + populated states)
   const filterDropdown = (
-    <div className="relative" ref={filterRef}>
+    <div className="relative flex-1 min-w-0" ref={filterRef}>
       <button onClick={() => setFilterOpen(o => !o)}
         className={`w-full flex items-center justify-between gap-2 px-3 py-2.5 rounded-xl border ${isFiltered ? 'bg-amber-50 border-amber-300 text-amber-900' : 'bg-white border-stone-300 text-stone-700'} hover:border-stone-500 transition-colors`}>
         <div className="flex items-center gap-2 min-w-0">
@@ -3915,16 +4056,85 @@ function GroupedByPartyView({ shifts, showMoney, onOpenShift }) {
     </div>
   );
 
+  // Cleaner filter dropdown — same pattern but for the "who worked where" view
+  const isCleanerFiltered = selectedCleaners.size > 0;
+  const cleanerFilterLabel = !isCleanerFiltered
+    ? `All ${allCleanerNames.length} ${allCleanerNames.length === 1 ? 'cleaner' : 'cleaners'}`
+    : selectedCleaners.size === 1
+      ? Array.from(selectedCleaners)[0]
+      : `${selectedCleaners.size} of ${allCleanerNames.length} cleaners`;
+  const clearCleanerFilter = () => setSelectedCleaners(new Set());
+  const selectAllCleaners = () => setSelectedCleaners(new Set(allCleanerNames));
+
+  const cleanerFilterDropdown = (
+    <div className="relative flex-1 min-w-0" ref={cleanerFilterRef}>
+      <button onClick={() => setCleanerFilterOpen(o => !o)}
+        className={`w-full flex items-center justify-between gap-2 px-3 py-2.5 rounded-xl border ${isCleanerFiltered ? 'bg-amber-50 border-amber-300 text-amber-900' : 'bg-white border-stone-300 text-stone-700'} hover:border-stone-500 transition-colors`}>
+        <div className="flex items-center gap-2 min-w-0">
+          <Users size={14} className="flex-shrink-0" />
+          <span className="text-sm font-medium truncate">{cleanerFilterLabel}</span>
+        </div>
+        <div className="flex items-center gap-2 flex-shrink-0">
+          {isCleanerFiltered && (
+            <span onClick={(e) => { e.stopPropagation(); clearCleanerFilter(); }}
+              className="text-[10px] uppercase tracking-wider font-mono text-amber-700 hover:text-amber-900 cursor-pointer">
+              Clear
+            </span>
+          )}
+          <ChevronRight size={14} className={`text-stone-400 transition-transform ${cleanerFilterOpen ? 'rotate-90' : ''}`} />
+        </div>
+      </button>
+      {cleanerFilterOpen && (
+        <div className="absolute top-full left-0 right-0 mt-1 z-30 bg-white border border-stone-200 rounded-xl shadow-lg max-h-80 overflow-y-auto">
+          <div className="p-2 sticky top-0 bg-white border-b border-stone-100 flex items-center justify-between">
+            <span className="text-[10px] uppercase tracking-wider font-mono text-stone-500">Pick cleaners to show</span>
+            <div className="flex items-center gap-1.5">
+              <button onClick={selectAllCleaners}
+                className="text-[10px] uppercase tracking-wider font-mono text-stone-600 hover:text-stone-900">
+                All
+              </button>
+              <span className="text-stone-300">·</span>
+              <button onClick={clearCleanerFilter}
+                className="text-[10px] uppercase tracking-wider font-mono text-stone-600 hover:text-stone-900">
+                None
+              </button>
+            </div>
+          </div>
+          {allCleanerNames.length === 0 ? (
+            <div className="px-3 py-4 text-center text-xs text-stone-400 italic">No cleaners to filter.</div>
+          ) : (
+            allCleanerNames.map(name => {
+              const checked = selectedCleaners.has(name);
+              return (
+                <label key={name}
+                  className={`flex items-center gap-2 px-3 py-2.5 cursor-pointer hover:bg-stone-50 ${checked ? 'bg-amber-50' : ''}`}>
+                  <input type="checkbox" checked={checked} onChange={() => toggleCleaner(name)}
+                    className="w-4 h-4 flex-shrink-0 accent-amber-700" />
+                  <span className="text-sm text-stone-900 truncate">{name}</span>
+                </label>
+              );
+            })
+          )}
+        </div>
+      )}
+    </div>
+  );
+
   if (propertyNames.length === 0) {
     // Could be "no work at all" OR "filter excludes everything in scope"
     return (
       <div className="px-5 space-y-4">
-        {allPropertyNames.length > 0 && filterDropdown}
+        {allPropertyNames.length > 0 && (
+          <div className="flex gap-2">
+            {filterDropdown}
+            {allCleanerNames.length > 0 && cleanerFilterDropdown}
+          </div>
+        )}
         <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
-          {isFiltered
-            ? <>No work in this period for the {selectedProperties.size === 1 ? 'selected property' : 'selected properties'}.<br/>
-                <button onClick={clearFilter} className="text-amber-700 hover:text-amber-900 underline mt-2 inline-block">
-                  Clear filter to see all
+          {(isFiltered || isCleanerFiltered)
+            ? <>No work in this period matches your filters.<br/>
+                <button onClick={() => { clearFilter(); clearCleanerFilter(); }} className="text-amber-700 hover:text-amber-900 underline mt-2 inline-block">
+                  Clear filters to see all
                 </button></>
             : 'No work in this period.'}
         </div>
@@ -3934,11 +4144,11 @@ function GroupedByPartyView({ shifts, showMoney, onOpenShift }) {
 
   return (
     <div className="px-5 space-y-6">
-      {/* Property filter dropdown — only shown when there's more than one
-         property in the period (no point filtering with just one). */}
-      {allPropertyNames.length > 1 && (
-        <div className="-mt-2">
-          {filterDropdown}
+      {/* Filters row — property + cleaner dropdowns side by side */}
+      {(allPropertyNames.length > 1 || allCleanerNames.length > 1) && (
+        <div className="-mt-2 flex gap-2 flex-wrap">
+          {allPropertyNames.length > 1 && filterDropdown}
+          {allCleanerNames.length > 1 && cleanerFilterDropdown}
         </div>
       )}
       {propertyNames.map(propName => {
@@ -12229,42 +12439,51 @@ function AssignmentCard({ target, busy, onView, onStart, onDone, onReopen, onBlo
             <div className="text-xs text-red-700 italic mt-1">"{t.status_notes}"</div>
           )}
         </div>
-        <span className={`text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full border ${s.color} flex-shrink-0`}>
-          {s.label}
-        </span>
+        {/* Status + View doc chip side by side. View doc lives here
+           (next to the status) so the action buttons row below stays
+           clean and uniform. */}
+        <div className="flex items-center gap-1.5 flex-shrink-0 flex-wrap justify-end">
+          <span className={`text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full border ${s.color}`}>
+            {s.label}
+          </span>
+          <button onClick={onView}
+            className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-100 hover:bg-stone-200 text-stone-700 flex items-center gap-1">
+            <Eye size={10} /> View doc
+          </button>
+        </div>
       </div>
+      {/* Action buttons row — uniform h-9 / px-3 / text-xs across all
+         so they line up. The exception is the "Go to this bedroom"
+         button below, which is intentionally larger as the primary
+         workflow CTA. */}
       <div className="flex gap-2 flex-wrap">
-        <button onClick={onView}
-          className="px-3 py-1.5 rounded-lg bg-stone-100 hover:bg-stone-200 text-stone-700 text-xs font-medium flex items-center gap-1">
-          <Eye size={12} /> View doc
-        </button>
         {(t.status === 'pending' || t.status === 'blocked' || t.status === 'in_progress') && (
           <button onClick={onStart} disabled={busy}
-            className="px-3 py-1.5 rounded-lg bg-amber-600 text-white text-xs font-medium flex items-center gap-1 disabled:opacity-50">
+            className="h-9 px-3 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-medium flex items-center gap-1 disabled:opacity-50">
             <Play size={12} /> {t.status === 'in_progress' ? 'I\'m on it too' : 'Start'}
           </button>
         )}
         {(t.status === 'pending' || t.status === 'in_progress' || t.status === 'blocked') && (
           <button onClick={onDone} disabled={busy}
-            className="px-3 py-1.5 rounded-lg bg-emerald-600 text-white text-xs font-medium flex items-center gap-1 disabled:opacity-50">
+            className="h-9 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-medium flex items-center gap-1 disabled:opacity-50">
             <Check size={12} /> Done
           </button>
         )}
         {isDone && (
           <button onClick={onReopen} disabled={busy}
-            className="px-3 py-1.5 rounded-lg border border-stone-300 text-stone-700 text-xs font-medium flex items-center gap-1 disabled:opacity-50">
+            className="h-9 px-3 rounded-lg border border-stone-300 hover:bg-stone-50 text-stone-700 text-xs font-medium flex items-center gap-1 disabled:opacity-50">
             <Play size={12} /> Reopen
           </button>
         )}
         {(t.status === 'pending' || t.status === 'in_progress') && (
           <button onClick={onBlocked} disabled={busy}
-            className="px-3 py-1.5 rounded-lg border border-red-200 text-red-700 text-xs font-medium flex items-center gap-1 disabled:opacity-50">
+            className="h-9 px-3 rounded-lg border border-red-200 hover:bg-red-50 text-red-700 text-xs font-medium flex items-center gap-1 disabled:opacity-50">
             <AlertCircle size={12} /> Blocked
           </button>
         )}
         {onReassign && (t.unit_id || t.party_id) && (
           <button onClick={onReassign} disabled={busy}
-            className="px-3 py-1.5 rounded-lg border border-stone-300 text-stone-600 text-xs font-medium flex items-center gap-1 disabled:opacity-50 ml-auto">
+            className="h-9 px-3 rounded-lg border border-stone-300 hover:bg-stone-50 text-stone-600 text-xs font-medium flex items-center gap-1 disabled:opacity-50 ml-auto">
             <Edit2 size={12} /> Reassign
           </button>
         )}
@@ -12273,7 +12492,7 @@ function AssignmentCard({ target, busy, onView, onStart, onDone, onReopen, onBlo
               unitId: t.unit_id, unitLabel: t.unit?.label,
               partyId: t.party_id, partyLabel: t.party?.label
             })} disabled={busy}
-            className={`px-3 py-1.5 rounded-lg bg-stone-100 hover:bg-stone-200 text-stone-700 text-xs font-medium flex items-center gap-1 disabled:opacity-50 ${onReassign ? '' : 'ml-auto'}`}>
+            className={`h-9 px-3 rounded-lg bg-stone-100 hover:bg-stone-200 text-stone-700 text-xs font-medium flex items-center gap-1 disabled:opacity-50 ${onReassign ? '' : 'ml-auto'}`}>
             <Clock size={12} /> History
           </button>
         )}
@@ -12340,7 +12559,13 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
   const [busy, setBusy] = useState(false);
   const [buildingFilter, setBuildingFilter] = useState('all'); // 'all' or a building prefix like 'B3'
   const [collapsedBuildings, setCollapsedBuildings] = useState({}); // { B3: true } = collapsed
-  const [doneSubTab, setDoneSubTab] = useState('recent'); // 'recent' | 'older' | 'archived'
+  const [doneSubTab, setDoneSubTab] = useState('dayOf'); // 'dayOf' | 'last3' | 'older'
+
+  // Filters — apply on top of the loaded targets
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const [filterType, setFilterType] = useState('all');     // 'all' or assignment_type value
+  const [filterCleaner, setFilterCleaner] = useState('all'); // 'all' or employee id
+  const [filterDay, setFilterDay] = useState('all');       // 'all' | 'today' | 'week' | YYYY-MM-DD
 
   const [loadError, setLoadError] = useState(null);
 
@@ -12348,7 +12573,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
     setLoadError(null);
     const { data, error } = await supabase
       .from('assignment_targets')
-      .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, extracted_text, spanish_translation, translation_status), unit:units(id, label), party:parties(id, label), starter:employees!started_by(name), completer:employees!completed_by(name)')
+      .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, extracted_text, spanish_translation, translation_status, assignment_type, scheduled_date), unit:units(id, label), party:parties(id, label), starter:employees!started_by(id, name), completer:employees!completed_by(id, name)')
       .eq('status', statusFilter);
     if (error) {
       console.error('[Assignments] load error:', error);
@@ -12395,6 +12620,18 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
     if (onUpdate) onUpdate();
   };
 
+  // Tapping "Start" on an assignment card should both flag it as
+  // in_progress AND auto-navigate the cleaner to the bedroom (without
+  // actually starting the work-block timer — the cleaner confirms by
+  // tapping Start cleaning on the bedroom screen). The navigation
+  // handler `onGoToBedroom` upstream handles the pending-start UX.
+  const startAndGo = async (target) => {
+    await updateStatus(target, 'in_progress');
+    if (onGoToBedroom && target.unit_id && target.party_id) {
+      onGoToBedroom(target);
+    }
+  };
+
   if (!loaded) return <div className="text-center py-8 text-stone-400 text-xs">Loading…</div>;
   if (loadError) {
     return (
@@ -12420,10 +12657,59 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
     );
   }
 
+  // Apply user filters (type / cleaner / day) before grouping.
+  // We build "filteredTargets" once and feed it to all downstream
+  // grouping/rendering logic.
+  const todayKey = (() => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+  })();
+  const filteredTargets = targets.filter(t => {
+    if (filterType !== 'all' && (t.assignment?.assignment_type || '') !== filterType) return false;
+    if (filterCleaner !== 'all') {
+      // Match against starter OR completer — useful for "show me everything Matias touched"
+      const ids = [t.starter?.id, t.completer?.id].filter(Boolean);
+      if (!ids.includes(filterCleaner)) return false;
+    }
+    if (filterDay !== 'all') {
+      const sd = t.assignment?.scheduled_date;
+      if (filterDay === 'today') {
+        if (sd !== todayKey) return false;
+      } else if (filterDay === 'week') {
+        // Within the next 7 days (inclusive)
+        if (!sd) return false;
+        const d = new Date(sd + 'T00:00:00');
+        const now = new Date(todayKey + 'T00:00:00');
+        const diff = (d - now) / (24 * 60 * 60 * 1000);
+        if (diff < 0 || diff > 7) return false;
+      } else {
+        // Specific date string
+        if (sd !== filterDay) return false;
+      }
+    }
+    return true;
+  });
+
+  // Compute available filter values from the FULL (pre-filter) target set
+  // so dropdowns don't lose options after filtering down.
+  const availableTypes = [...new Set(targets.map(t => t.assignment?.assignment_type).filter(Boolean))];
+  const availableCleaners = (() => {
+    const map = new Map();
+    targets.forEach(t => {
+      if (t.starter?.id) map.set(t.starter.id, t.starter);
+      if (t.completer?.id) map.set(t.completer.id, t.completer);
+    });
+    return Array.from(map.values()).sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+  })();
+  const activeFilterCount =
+    (filterType !== 'all' ? 1 : 0) +
+    (filterCleaner !== 'all' ? 1 : 0) +
+    (filterDay !== 'all' ? 1 : 0);
+
   // Group targets by building, derived from the unit label (e.g. "B3-205" -> "B3")
   // Targets without a unit go into a "No unit" bucket
   const buildings = {};
-  targets.forEach(t => {
+  filteredTargets.forEach(t => {
     const b = buildingFromLabel(t.unit?.label) || '—';
     if (!buildings[b]) buildings[b] = [];
     buildings[b].push(t);
@@ -12432,46 +12718,140 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
   const visibleBuildings = buildingFilter === 'all' ? buildingKeys : buildingKeys.filter(k => k === buildingFilter);
   const toggleCollapse = (b) => setCollapsedBuildings(prev => ({ ...prev, [b]: !prev[b] }));
 
-  // For Done tab: bucket by age — Recent (<24hr), Older (24hr–1 week), Archived (>1 week)
-  // These nest INSIDE building groups when there are multiple buildings.
-  const now = Date.now();
-  const HOUR = 60 * 60 * 1000;
-  const DAY = 24 * HOUR;
+  // For Done tab: bucket by age using local-date math.
+  //   Day of:      completed today (local timezone)
+  //   Last 3 days: completed 1, 2, or 3 days ago
+  //   4+ days:     completed 4+ days ago
+  // Using local-date comparison (not wall-clock subtraction) so a job
+  // completed late last night still shows under "Day of" today.
+  const todayLocal = (() => {
+    const d = new Date();
+    return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  })();
+  const DAY_MS = 24 * 60 * 60 * 1000;
   const bucketByAge = (items) => {
-    const buckets = { recent: [], older: [], archived: [] };
+    const buckets = { dayOf: [], last3: [], older: [] };
     items.forEach(t => {
       const ts = t.completed_at ? new Date(t.completed_at).getTime() : 0;
-      const age = now - ts;
-      if (age < 3 * DAY) buckets.recent.push(t);
-      else if (age < 7 * DAY) buckets.older.push(t);
-      else buckets.archived.push(t);
+      if (!ts) { buckets.older.push(t); return; }
+      const completedLocal = (() => {
+        const d = new Date(ts);
+        return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+      })();
+      const daysAgo = Math.round((todayLocal - completedLocal) / DAY_MS);
+      if (daysAgo <= 0) buckets.dayOf.push(t);
+      else if (daysAgo <= 3) buckets.last3.push(t);
+      else buckets.older.push(t);
     });
     return buckets;
   };
 
-  const renderAssignmentList = (items) => (
-    <div className="space-y-2">
-      {items.map(t => (
-        <AssignmentCard key={t.id} target={t} busy={busy} propertyId={propertyId}
-          onView={() => setOpened(t)}
-          onStart={() => updateStatus(t, 'in_progress')}
-          onDone={() => updateStatus(t, 'done')}
-          onReopen={() => updateStatus(t, 'pending')}
-          onBlocked={() => setStatusModal({ target: t })}
-          onReassign={() => setReassignTarget(t)}
-          onGoToBedroom={onGoToBedroom ? () => onGoToBedroom(t) : null}
-          onOpenBedroomHistory={onOpenBedroomHistory} />
-      ))}
-    </div>
-  );
+  // For Pending view, bundle by unit when there are multiple per unit
+  // ("3 assignments in B1-101"). Single-assignment units stay as plain
+  // cards. The bundle is a collapsible group so the list stays short.
+  const [bundleOpen, setBundleOpen] = useState({}); // { unitId: boolean }
+  const toggleBundle = (unitId) => setBundleOpen(prev => ({ ...prev, [unitId]: !prev[unitId] }));
+
+  const renderAssignmentList = (items) => {
+    // Only bundle on the Pending tab — other views don't need it.
+    if (statusFilter !== 'pending') {
+      return (
+        <div className="space-y-2">
+          {items.map(t => (
+            <AssignmentCard key={t.id} target={t} busy={busy} propertyId={propertyId}
+              onView={() => setOpened(t)}
+              onStart={() => startAndGo(t)}
+              onDone={() => updateStatus(t, 'done')}
+              onReopen={() => updateStatus(t, 'pending')}
+              onBlocked={() => setStatusModal({ target: t })}
+              onReassign={() => setReassignTarget(t)}
+              onGoToBedroom={onGoToBedroom ? () => onGoToBedroom(t) : null}
+              onOpenBedroomHistory={onOpenBedroomHistory} />
+          ))}
+        </div>
+      );
+    }
+
+    // Group by unit_id (apartment). Items without a unit go in their own bucket.
+    const groups = new Map(); // unitId or 'no-unit' -> { unit, items: [] }
+    items.forEach(t => {
+      const key = t.unit_id || 'no-unit';
+      if (!groups.has(key)) {
+        groups.set(key, { unit: t.unit, unitId: t.unit_id, items: [] });
+      }
+      groups.get(key).items.push(t);
+    });
+
+    // Sort: bundles first (more items first), then singles
+    const entries = Array.from(groups.entries()).sort((a, b) => {
+      const lenDiff = b[1].items.length - a[1].items.length;
+      if (lenDiff !== 0) return lenDiff;
+      return naturalCompare(a[1].unit?.label || '', b[1].unit?.label || '');
+    });
+
+    return (
+      <div className="space-y-2">
+        {entries.map(([key, group]) => {
+          // Single-assignment "groups" render as a plain card (no bundling overhead)
+          if (group.items.length === 1) {
+            const t = group.items[0];
+            return (
+              <AssignmentCard key={t.id} target={t} busy={busy} propertyId={propertyId}
+                onView={() => setOpened(t)}
+                onStart={() => startAndGo(t)}
+                onDone={() => updateStatus(t, 'done')}
+                onReopen={() => updateStatus(t, 'pending')}
+                onBlocked={() => setStatusModal({ target: t })}
+                onReassign={() => setReassignTarget(t)}
+                onGoToBedroom={onGoToBedroom ? () => onGoToBedroom(t) : null}
+                onOpenBedroomHistory={onOpenBedroomHistory} />
+            );
+          }
+          // Bundle: collapsible header showing count, expanded shows all cards
+          const isOpen = !!bundleOpen[key];
+          const unitLabel = group.unit?.label || (key === 'no-unit' ? 'No unit' : key);
+          return (
+            <div key={key} className="rounded-xl border-2 border-amber-200 bg-amber-50/40 overflow-hidden">
+              <button onClick={() => toggleBundle(key)}
+                className="w-full px-4 py-3 flex items-center justify-between hover:bg-amber-50">
+                <div className="flex items-center gap-2 min-w-0">
+                  <Building2 size={16} className="text-amber-700 flex-shrink-0" />
+                  <span className="font-serif text-base text-stone-900 truncate">{unitLabel}</span>
+                  <span className="text-xs font-mono px-2 py-0.5 rounded-full bg-amber-600 text-white font-bold flex-shrink-0">
+                    {group.items.length}
+                  </span>
+                </div>
+                <ChevronRight size={14} className={`text-amber-700 flex-shrink-0 transition-transform ${isOpen ? 'rotate-90' : ''}`} />
+              </button>
+              {isOpen && (
+                <div className="px-3 pb-3 space-y-2 border-t border-amber-100 pt-3">
+                  {group.items.map(t => (
+                    <AssignmentCard key={t.id} target={t} busy={busy} propertyId={propertyId}
+                      onView={() => setOpened(t)}
+                      onStart={() => startAndGo(t)}
+                      onDone={() => updateStatus(t, 'done')}
+                      onReopen={() => updateStatus(t, 'pending')}
+                      onBlocked={() => setStatusModal({ target: t })}
+                      onReassign={() => setReassignTarget(t)}
+                      onGoToBedroom={onGoToBedroom ? () => onGoToBedroom(t) : null}
+                      onOpenBedroomHistory={onOpenBedroomHistory} />
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    );
+  };
 
   // For Done: collapsed by default for Older and Archived
   const renderDoneBuckets = (items) => {
     const buckets = bucketByAge(items);
     const subTabs = [
-      { id: 'recent',   label: 'Recent',   hint: '< 72hr',  subtitle: 'Last 72 hours',     items: buckets.recent },
-      { id: 'older',    label: 'Older',    hint: '3–7d',    subtitle: '3–7 days ago',      items: buckets.older },
-      { id: 'archived', label: 'Archived', hint: '> 1wk',   subtitle: 'Over 1 week ago',   items: buckets.archived },
+      { id: 'dayOf', label: 'Day of',    hint: 'today',  subtitle: 'Completed today',          items: buckets.dayOf },
+      { id: 'last3', label: 'Last 3d',   hint: '1-3d',   subtitle: 'Completed in the last 3 days', items: buckets.last3 },
+      { id: 'older', label: '4+ days',   hint: '4d+',    subtitle: 'Completed 4+ days ago',     items: buckets.older },
     ];
     const active = subTabs.find(s => s.id === doneSubTab) || subTabs[0];
     return (
@@ -12505,12 +12885,98 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
 
   return (
     <div>
+      {/* Filters bar: toggle to expand, pills inside. Counts active filters
+         on the button so the user knows when filters are narrowing things. */}
+      {targets.length > 0 && (availableTypes.length > 1 || availableCleaners.length > 0) && (
+        <div className="mb-3">
+          <button onClick={() => setFiltersOpen(o => !o)}
+            className={`w-full flex items-center justify-between px-3 py-2 rounded-xl border transition-colors ${activeFilterCount > 0 ? 'bg-amber-50 border-amber-300 text-amber-900' : 'bg-white border-stone-200 text-stone-600 hover:border-stone-400'}`}>
+            <div className="flex items-center gap-2">
+              <Settings size={14} />
+              <span className="text-xs uppercase tracking-wider font-mono">
+                Filters{activeFilterCount > 0 ? ` (${activeFilterCount})` : ''}
+              </span>
+              <span className="text-[10px] font-mono text-stone-500">
+                Showing {filteredTargets.length} of {targets.length}
+              </span>
+            </div>
+            <ChevronRight size={14} className={`transition-transform ${filtersOpen ? 'rotate-90' : ''}`} />
+          </button>
+          {filtersOpen && (
+            <div className="p-3 rounded-xl bg-stone-50 border border-stone-200 mt-1 space-y-2">
+              {/* Type */}
+              {availableTypes.length > 1 && (
+                <div>
+                  <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1">Cleaning type</div>
+                  <div className="flex gap-1.5 flex-wrap">
+                    <button onClick={() => setFilterType('all')}
+                      className={`px-2.5 py-1 rounded-full text-xs font-mono ${filterType === 'all' ? 'bg-stone-900 text-stone-50' : 'bg-white border border-stone-300 text-stone-600'}`}>
+                      All
+                    </button>
+                    {availableTypes.map(typeVal => (
+                      <button key={typeVal} onClick={() => setFilterType(typeVal)}
+                        className={`px-2.5 py-1 rounded-full text-xs font-mono ${filterType === typeVal ? 'bg-stone-900 text-stone-50' : 'bg-white border border-stone-300 text-stone-600'}`}>
+                        {assignmentTypeLabel(typeVal)}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {/* Cleaner */}
+              {availableCleaners.length > 0 && (
+                <div>
+                  <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1">Cleaner (started or completed)</div>
+                  <div className="flex gap-1.5 flex-wrap">
+                    <button onClick={() => setFilterCleaner('all')}
+                      className={`px-2.5 py-1 rounded-full text-xs font-mono ${filterCleaner === 'all' ? 'bg-stone-900 text-stone-50' : 'bg-white border border-stone-300 text-stone-600'}`}>
+                      All
+                    </button>
+                    {availableCleaners.map(c => (
+                      <button key={c.id} onClick={() => setFilterCleaner(c.id)}
+                        className={`px-2.5 py-1 rounded-full text-xs font-mono ${filterCleaner === c.id ? 'bg-stone-900 text-stone-50' : 'bg-white border border-stone-300 text-stone-600'}`}>
+                        {c.name}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {/* Day */}
+              <div>
+                <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1">Scheduled day</div>
+                <div className="flex gap-1.5 flex-wrap items-center">
+                  {[
+                    { id: 'all',   label: 'Any' },
+                    { id: 'today', label: 'Today' },
+                    { id: 'week',  label: 'Next 7 days' },
+                  ].map(opt => (
+                    <button key={opt.id} onClick={() => setFilterDay(opt.id)}
+                      className={`px-2.5 py-1 rounded-full text-xs font-mono ${filterDay === opt.id ? 'bg-stone-900 text-stone-50' : 'bg-white border border-stone-300 text-stone-600'}`}>
+                      {opt.label}
+                    </button>
+                  ))}
+                  <input type="date"
+                    value={filterDay && filterDay !== 'all' && filterDay !== 'today' && filterDay !== 'week' ? filterDay : ''}
+                    onChange={(e) => setFilterDay(e.target.value || 'all')}
+                    className="px-2 py-1 rounded-full text-xs font-mono bg-white border border-stone-300" />
+                </div>
+              </div>
+              {activeFilterCount > 0 && (
+                <button onClick={() => { setFilterType('all'); setFilterCleaner('all'); setFilterDay('all'); }}
+                  className="text-[10px] uppercase tracking-wider font-mono text-amber-700 hover:text-amber-900">
+                  Clear all filters
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Building filter pills — only show if there's more than 1 building */}
       {buildingKeys.length > 1 && (
         <div className="flex gap-1.5 mb-3 overflow-x-auto pb-1 -mx-1 px-1">
           <button onClick={() => setBuildingFilter('all')}
             className={`px-3 py-1 rounded-full text-xs font-mono whitespace-nowrap ${buildingFilter === 'all' ? 'bg-stone-900 text-stone-50' : 'bg-stone-100 text-stone-600'}`}>
-            All ({targets.length})
+            All ({filteredTargets.length})
           </button>
           {buildingKeys.map(b => (
             <button key={b} onClick={() => setBuildingFilter(b)}
@@ -12751,21 +13217,27 @@ function BlockedNoteModal({ target, onSave, onClose, busy }) {
 // "On the clock" stat card. Lists all active shifts with what each
 // cleaner is doing right now.
 // =================================================================
-function LiveCleanersSheet({ onClose, onOpenShift }) {
+function LiveCleanersSheet({ viewer, onClose, onOpenShift }) {
   const [shifts, setShifts] = useState([]);
   const [loaded, setLoaded] = useState(false);
+  const [busyId, setBusyId] = useState(null);
+  const canForceOut = viewer && (viewer.role === 'owner' || viewer.role === 'manager');
+
+  const loadFn = async () => {
+    const { data } = await supabase
+      .from('shifts')
+      .select('*, employee:employees(id, name), customer:customers(id, name), work_blocks(id, start_time, end_time, unit:units(label), party:parties(label))')
+      .is('end_time', null)
+      .order('start_time', { ascending: true });
+    setShifts(data || []);
+    setLoaded(true);
+  };
 
   useEffect(() => {
     let cancelled = false;
     const load = async () => {
-      const { data } = await supabase
-        .from('shifts')
-        .select('*, employee:employees(id, name), customer:customers(id, name), work_blocks(id, start_time, end_time, unit:units(label), party:parties(label))')
-        .is('end_time', null)
-        .order('start_time', { ascending: true });
       if (cancelled) return;
-      setShifts(data || []);
-      setLoaded(true);
+      await loadFn();
     };
     load();
     // Refresh every 15 seconds to keep the durations live
@@ -12774,6 +13246,25 @@ function LiveCleanersSheet({ onClose, onOpenShift }) {
   }, []);
 
   useTick(true);
+
+  // Force-end someone's shift. Ends any open work block first, then
+  // closes the shift. Confirmed because it's irreversible without a
+  // manual reopen.
+  const forceClockOut = async (s) => {
+    if (!confirm(`Force clock out ${s.employee?.name || 'this cleaner'}? Any active work block will end now.`)) return;
+    setBusyId(s.id);
+    try {
+      const activeBlock = (s.work_blocks || []).find(b => !b.end_time);
+      if (activeBlock) {
+        await supabase.from('work_blocks').update({ end_time: new Date().toISOString() }).eq('id', activeBlock.id);
+      }
+      await supabase.from('shifts').update({ end_time: new Date().toISOString() }).eq('id', s.id);
+      await loadFn();
+    } catch (e) {
+      alert('Could not clock out: ' + (e.message || e));
+    }
+    setBusyId(null);
+  };
 
   return (
     <div className="fixed inset-0 bg-stone-900/80 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
@@ -12802,14 +13293,15 @@ function LiveCleanersSheet({ onClose, onOpenShift }) {
                 const activeBlock = (s.work_blocks || []).find(b => !b.end_time);
                 const blockDur = activeBlock ? Date.now() - new Date(activeBlock.start_time).getTime() : 0;
                 const completedBlocks = (s.work_blocks || []).filter(b => b.end_time).length;
+                const isBusy = busyId === s.id;
                 return (
-                  <button key={s.id} onClick={() => onOpenShift(s)}
+                  <div key={s.id}
                     className="w-full text-left p-4 rounded-2xl bg-white border border-stone-200 hover:border-stone-400 transition-colors">
                     <div className="flex items-start justify-between mb-2 gap-2">
-                      <div className="flex items-center gap-2 min-w-0 flex-1">
+                      <button onClick={() => onOpenShift(s)} className="flex items-center gap-2 min-w-0 flex-1 text-left">
                         <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse flex-shrink-0" />
                         <span className="font-serif text-lg text-stone-900 truncate">{s.employee?.name}</span>
-                      </div>
+                      </button>
                       <span className="text-xs font-mono text-stone-500 flex-shrink-0">
                         {fmtTimeShort(shiftDur)}
                       </span>
@@ -12833,7 +13325,21 @@ function LiveCleanersSheet({ onClose, onOpenShift }) {
                         {completedBlocks > 0 && ` · ${completedBlocks} ${completedBlocks === 1 ? 'apt cleaned' : 'apts cleaned'}`}
                       </div>
                     )}
-                  </button>
+                    {/* Owner/manager action bar — force clock-out + open shift detail */}
+                    {canForceOut && (
+                      <div className="mt-3 pt-3 border-t border-stone-100 flex items-center justify-between gap-2">
+                        <button onClick={() => onOpenShift(s)}
+                          className="text-[10px] uppercase tracking-wider font-mono text-stone-600 hover:text-stone-900 flex items-center gap-1">
+                          Open shift <ChevronRight size={10} />
+                        </button>
+                        <button onClick={() => forceClockOut(s)} disabled={isBusy}
+                          className="h-9 px-3 rounded-lg border border-red-200 hover:bg-red-50 text-red-700 text-xs font-medium flex items-center gap-1 disabled:opacity-50">
+                          {isBusy ? <div className="w-3 h-3 border-2 border-red-700 border-t-transparent rounded-full animate-spin" /> : <LogOut size={12} />}
+                          Force clock out
+                        </button>
+                      </div>
+                    )}
+                  </div>
                 );
               })}
             </div>

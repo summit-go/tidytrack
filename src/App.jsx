@@ -12601,6 +12601,14 @@ function AssignmentList({ property, employee, onBack, onNew, onOpen }) {
   const [collapsedBuildings, setCollapsedBuildings] = useState({});
   // Which apartment dropdowns are open inside a building
   const [openApartments, setOpenApartments] = useState({}); // { 'B1-101': true }
+  // Filters — priority and cleaning type. Expandable panel keeps the
+  // controls compact when not in use.
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const [priorityOnly, setPriorityOnly] = useState(false);
+  const [filterTypes, setFilterTypes] = useState(new Set()); // assignment_type values
+  // Track which row is currently saving a priority toggle so we can
+  // disable the button + show a busy state.
+  const [togglingId, setTogglingId] = useState(null);
 
   const load = async () => {
     // Pull targets so we can group by unit and surface priority/type
@@ -12613,6 +12621,29 @@ function AssignmentList({ property, employee, onBack, onNew, onOpen }) {
   };
   useEffect(() => { load(); }, [property.id]);
   useAssignmentSync(load, 'asgn-list');
+
+  // Flip priority on the WHOLE assignment (all its targets). If any
+  // target is currently priority, sweep them all off; otherwise sweep
+  // them all on. Saves a click compared to opening the detail page.
+  const togglePriority = async (assignment) => {
+    if (togglingId) return; // already busy with another
+    const targetIds = (assignment.targets || []).map(t => t.id);
+    if (targetIds.length === 0) return;
+    const newPriority = !assignment.hasPriority;
+    setTogglingId(assignment.id);
+    // Optimistic update so the chip flips instantly
+    setAssignments(prev => prev.map(a => a.id === assignment.id ? {
+      ...a,
+      targets: (a.targets || []).map(t => ({ ...t, priority: newPriority }))
+    } : a));
+    const { error } = await supabase.from('assignment_targets')
+      .update({ priority: newPriority }).in('id', targetIds);
+    setTogglingId(null);
+    if (error) {
+      alert('Could not update priority: ' + error.message);
+      load(); // re-fetch authoritative state
+    }
+  };
 
   // Aggregate status + flags per assignment
   const decorated = (assignments || []).map(a => {
@@ -12646,7 +12677,25 @@ function AssignmentList({ property, employee, onBack, onNew, onOpen }) {
 
   const visible = decorated
     .filter(a => filter === 'open' ? (!a.allDone && a.active) : true)
+    .filter(a => !priorityOnly || (a.hasPriority && !a.allDone))
+    .filter(a => filterTypes.size === 0 || filterTypes.has(a.assignment_type))
     .filter(matchesSearch);
+
+  // Available cleaning types for the type filter chips — derived from
+  // the current assignments so we don't offer types that don't exist.
+  const availableTypes = (() => {
+    const set = new Set();
+    decorated.forEach(a => { if (a.assignment_type) set.add(a.assignment_type); });
+    return [...set];
+  })();
+
+  const activeFilterCount = (priorityOnly ? 1 : 0) + filterTypes.size;
+  const toggleType = (typ) => setFilterTypes(prev => {
+    const next = new Set(prev);
+    if (next.has(typ)) next.delete(typ); else next.add(typ);
+    return next;
+  });
+  const clearFilters = () => { setPriorityOnly(false); setFilterTypes(new Set()); };
 
   // Group by building. Property-level (no unit) goes into "Whole property".
   // Within each building, sub-group by unit label so when one unit has
@@ -12673,32 +12722,53 @@ function AssignmentList({ property, employee, onBack, onNew, onOpen }) {
   // Render a single assignment row (used inside apartment groups). Pulled
   // into a helper so the apartment-dropdown and single-card paths share
   // identical visual treatment.
-  const renderAssignmentRow = (a) => (
-    <button key={a.id} onClick={() => onOpen(a)}
-      className={`w-full text-left p-3 rounded-xl border ${a.allDone ? 'bg-stone-100 border-stone-200 opacity-70' : a.blocked > 0 ? 'bg-red-50/50 border-red-200' : 'bg-white border-stone-200'} hover:border-stone-400 transition-colors`}>
-      <div className="flex items-start justify-between gap-2">
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 mb-1 flex-wrap">
-            {a.file_kind === 'pdf'
-              ? <FileText size={14} className="text-stone-500 flex-shrink-0" />
-              : <ImageIcon size={14} className="text-stone-500 flex-shrink-0" />}
-            <span className="font-serif text-base text-stone-900 truncate">{a.title}</span>
+  // NOTE: we use a div+onClick (not <button>) so the priority toggle
+  // can be a nested <button> without HTML-invalid nested-interactive
+  // elements. Keyboard a11y maintained via tabIndex + onKeyDown.
+  const renderAssignmentRow = (a) => {
+    const isToggling = togglingId === a.id;
+    return (
+      <div key={a.id} onClick={() => onOpen(a)}
+        tabIndex={0}
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onOpen(a); } }}
+        role="button"
+        className={`w-full text-left p-3 rounded-xl border cursor-pointer ${a.allDone ? 'bg-stone-100 border-stone-200 opacity-70' : a.blocked > 0 ? 'bg-red-50/50 border-red-200' : 'bg-white border-stone-200'} hover:border-stone-400 transition-colors`}>
+        <div className="flex items-start justify-between gap-2">
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2 mb-1 flex-wrap">
+              {a.file_kind === 'pdf'
+                ? <FileText size={14} className="text-stone-500 flex-shrink-0" />
+                : <ImageIcon size={14} className="text-stone-500 flex-shrink-0" />}
+              <span className="font-serif text-base text-stone-900 truncate">{a.title}</span>
+            </div>
+            <div className="flex items-center gap-1.5 flex-wrap mt-1">
+              {/* Priority TOGGLE — click flips ALL targets of this
+                 assignment between priority on/off. stopPropagation
+                 so the row click (open detail) doesn't also fire. */}
+              {!a.allDone && (
+                <button
+                  onClick={(e) => { e.stopPropagation(); togglePriority(a); }}
+                  disabled={isToggling}
+                  className={`text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full border inline-flex items-center gap-1 transition-colors disabled:opacity-50 ${a.hasPriority
+                      ? 'bg-red-100 text-red-800 border-red-300 font-bold hover:bg-red-200'
+                      : 'bg-stone-100 text-stone-500 border-stone-200 hover:bg-stone-200'}`}>
+                  <AlertCircle size={10} /> {a.hasPriority ? 'Priority' : 'Mark priority'}
+                </button>
+              )}
+              <AssignmentTypeChip type={a.assignment_type} />
+              {a.allDone && <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 border border-emerald-300">Done</span>}
+              {a.blocked > 0 && <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-red-100 text-red-700 border border-red-300">⚠ Blocked</span>}
+            </div>
+            <div className="text-xs text-stone-500 font-mono mt-1">
+              {fmtDate(a.created_at)} · {a.done}/{a.total} done{a.inProgress > 0 && `, ${a.inProgress} in progress`}
+            </div>
+            {a.notes && <div className="text-xs text-stone-600 mt-1 line-clamp-1">{a.notes}</div>}
           </div>
-          <div className="flex items-center gap-1.5 flex-wrap mt-1">
-            <PriorityChip on={a.hasPriority && !a.allDone} />
-            <AssignmentTypeChip type={a.assignment_type} />
-            {a.allDone && <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 border border-emerald-300">Done</span>}
-            {a.blocked > 0 && <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-red-100 text-red-700 border border-red-300">⚠ Blocked</span>}
-          </div>
-          <div className="text-xs text-stone-500 font-mono mt-1">
-            {fmtDate(a.created_at)} · {a.done}/{a.total} done{a.inProgress > 0 && `, ${a.inProgress} in progress`}
-          </div>
-          {a.notes && <div className="text-xs text-stone-600 mt-1 line-clamp-1">{a.notes}</div>}
+          <ChevronRight size={14} className="text-stone-400 flex-shrink-0 mt-1" />
         </div>
-        <ChevronRight size={14} className="text-stone-400 flex-shrink-0 mt-1" />
       </div>
-    </button>
-  );
+    );
+  };
 
   return (
     <div className="pb-24">
@@ -12732,6 +12802,62 @@ function AssignmentList({ property, employee, onBack, onNew, onOpen }) {
           </div>
         )}
 
+        {/* Filter panel — collapsible. Lets the owner narrow the list
+           to priority-only or specific cleaning types. Counts active
+           filters on the button so it's clear something's narrowing. */}
+        {assignments.length > 0 && (
+          <div className="mb-3">
+            <button onClick={() => setFiltersOpen(o => !o)}
+              className={`w-full flex items-center justify-between px-3 py-2 rounded-xl border transition-colors ${activeFilterCount > 0 ? 'bg-amber-50 border-amber-300 text-amber-900' : 'bg-white border-stone-200 text-stone-600 hover:border-stone-400'}`}>
+              <div className="flex items-center gap-2">
+                <Settings size={14} />
+                <span className="text-xs uppercase tracking-wider font-mono">
+                  Filters{activeFilterCount > 0 ? ` (${activeFilterCount})` : ''}
+                </span>
+                <span className="text-[10px] font-mono text-stone-500">
+                  Showing {visible.length} of {decorated.length}
+                </span>
+              </div>
+              <ChevronRight size={14} className={`transition-transform ${filtersOpen ? 'rotate-90' : ''}`} />
+            </button>
+            {filtersOpen && (
+              <div className="p-3 rounded-xl bg-stone-50 border border-stone-200 mt-1 space-y-3">
+                <div>
+                  <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1.5">Priority</div>
+                  <button onClick={() => setPriorityOnly(p => !p)}
+                    className={`px-3 py-1.5 rounded-full text-xs font-mono inline-flex items-center gap-1.5 transition-colors ${priorityOnly ? 'bg-red-100 text-red-800 border border-red-300 font-bold' : 'bg-white border border-stone-300 text-stone-600 hover:border-stone-500'}`}>
+                    {priorityOnly && <Check size={11} />}
+                    <AlertCircle size={11} /> Priority only
+                  </button>
+                </div>
+                {availableTypes.length > 1 && (
+                  <div>
+                    <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1.5">Cleaning type</div>
+                    <div className="flex gap-1.5 flex-wrap">
+                      {availableTypes.map(typ => {
+                        const active = filterTypes.has(typ);
+                        return (
+                          <button key={typ} onClick={() => toggleType(typ)}
+                            className={`px-2.5 py-1 rounded-full text-xs font-mono flex items-center gap-1 transition-colors ${active ? 'bg-stone-900 text-stone-50' : 'bg-white border border-stone-300 text-stone-600 hover:border-stone-500'}`}>
+                            {active && <Check size={10} />}
+                            {assignmentTypeLabel(typ)}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+                {activeFilterCount > 0 && (
+                  <button onClick={clearFilters}
+                    className="text-xs text-stone-600 hover:text-stone-900 font-mono underline">
+                    Clear all filters
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
         <div className="flex gap-2 mb-4">
           <button onClick={() => setFilter('open')}
             className={`px-4 py-2 rounded-full text-sm font-medium ${filter === 'open' ? 'bg-stone-900 text-stone-50' : 'bg-stone-100 text-stone-600'}`}>
@@ -12747,7 +12873,14 @@ function AssignmentList({ property, employee, onBack, onNew, onOpen }) {
           <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
             {q
               ? `No assignments match "${search}".`
-              : filter === 'open' ? 'No open assignments. Tap "Upload new assignment" to add one.' : 'No assignments yet.'}
+              : (priorityOnly || filterTypes.size > 0)
+                ? <>No assignments match the current filters.
+                    <button onClick={clearFilters}
+                      className="block mx-auto mt-2 text-xs text-stone-700 hover:text-stone-900 font-mono underline">
+                      Clear all filters
+                    </button>
+                  </>
+                : filter === 'open' ? 'No open assignments. Tap "Upload new assignment" to add one.' : 'No assignments yet.'}
           </div>
         ) : (
           <div className="space-y-4">

@@ -10722,6 +10722,13 @@ function PortalUnitDay({ property, unitId, date, portalUser, onBack }) {
   const [selectMode, setSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState(new Set());
   const [bulkBusy, setBulkBusy] = useState(false);
+  // Bedroom tab — when a unit has multiple bedrooms cleaned on the same
+  // day, the PM needs to see photos isolated by bedroom. Without this,
+  // pictures from 3 different bedrooms all merge into one stream which
+  // makes it impossible to tell which photo belongs to which bedroom.
+  // Default '' = "All bedrooms" (merged view, kept as an option but
+  // not the default once we know there are multiple bedrooms).
+  const [bedroomTab, setBedroomTab] = useState('');
 
   const toggleSelectOne = (photoId) => {
     setSelectedIds(prev => {
@@ -10779,16 +10786,38 @@ function PortalUnitDay({ property, unitId, date, portalUser, onBack }) {
     setLoaded(true);
   })(); }, [unitId, date, property.id]);
 
+  // Compute the list of bedrooms (parties) that were cleaned on this
+  // day. When there's more than one, we default the tab to the first
+  // bedroom alphabetically so photos appear isolated by default. The
+  // PM can switch to "All bedrooms" if they want the merged view.
+  const partyLabels = (() => {
+    const labels = [...new Set(blocks.map(b => b.party?.label).filter(Boolean))];
+    return labels.sort(naturalCompare);
+  })();
+  // Auto-pick the first bedroom on initial load if there are multiple.
+  // Doesn't override a user's choice — only sets when bedroomTab is empty.
+  useEffect(() => {
+    if (partyLabels.length > 1 && !bedroomTab) {
+      setBedroomTab(partyLabels[0]);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [blocks]);
+
   if (!loaded) return <Splash text="Loading…" />;
 
   // Aggregate all photos for this unit/day, separated by kind.
   // We also tag each photo with the task's category/subcategory so
   // the "By section" view can group on them.
+  // Bedroom-tab filter: when the PM picks a specific bedroom, only
+  // include blocks for that party. '' means All bedrooms (no filter).
+  const visibleBlocks = bedroomTab
+    ? blocks.filter(b => b.party?.label === bedroomTab)
+    : blocks;
   const allBefore = [];
   const allAfter = [];
   const allDamageActive = []; // unresolved damage — shows in red banner
   const allDamageResolved = []; // resolved damage — collapsed history below
-  blocks.forEach(b => (b.tasks || []).forEach(t => (t.photos || []).forEach(p => {
+  visibleBlocks.forEach(b => (b.tasks || []).forEach(t => (t.photos || []).forEach(p => {
     const enriched = {
       ...p,
       taskName: t.name,
@@ -10884,21 +10913,43 @@ function PortalUnitDay({ property, unitId, date, portalUser, onBack }) {
         </div>
         <h1 className="font-serif text-3xl text-stone-900 mb-1">{unit?.label || property.name}</h1>
         <div className="text-sm text-stone-600 mb-2">{property.name}</div>
-        {(() => {
-          // List of distinct bedrooms/parties cleaned on this day
-          const partyLabels = [...new Set(blocks.map(b => b.party?.label).filter(Boolean))];
-          if (partyLabels.length === 0) return null;
-          return (
-            <div className="flex items-center flex-wrap gap-1.5 mt-3">
-              <span className="text-xs uppercase tracking-wider font-mono text-stone-500">Cleaned:</span>
-              {partyLabels.map(label => (
-                <span key={label} className="text-xs font-mono px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200">
-                  {label}
-                </span>
-              ))}
+        {/* Bedroom selector — always a clickable strip (never a static
+           "Cleaned: chips" line). When there's only one bedroom, the
+           strip shows just that one button (selected by default).
+           When there are multiple, each bedroom is a tab that filters
+           the photo grid below. The "All bedrooms" tab preserves the
+           merged view as an option. */}
+        {partyLabels.length > 0 && (
+          <div className="mt-4 p-3 rounded-2xl bg-amber-50 border-2 border-amber-300">
+            <div className="text-[10px] uppercase tracking-wider font-mono text-amber-800 mb-2 font-bold">
+              {partyLabels.length === 1 ? 'Bedroom cleaned' : `Tap a bedroom (${partyLabels.length} cleaned this day)`}
             </div>
-          );
-        })()}
+            <div className="flex gap-1.5 overflow-x-auto pb-1 -mx-3 px-3">
+              {partyLabels.map(label => {
+                const active = bedroomTab === label || (partyLabels.length === 1 && !bedroomTab);
+                return (
+                  <button key={label} onClick={() => setBedroomTab(label)}
+                    className={`px-4 py-2.5 rounded-xl text-sm font-medium whitespace-nowrap flex-shrink-0 transition-colors ${active ? 'bg-stone-900 text-stone-50 border-2 border-stone-900 shadow-sm' : 'bg-white text-stone-700 border-2 border-stone-200 hover:border-stone-400'}`}>
+                    {label}
+                  </button>
+                );
+              })}
+              {partyLabels.length > 1 && (
+                <button onClick={() => setBedroomTab('')}
+                  className={`px-4 py-2.5 rounded-xl text-sm font-medium whitespace-nowrap flex-shrink-0 transition-colors ${bedroomTab === '' ? 'bg-stone-900 text-stone-50 border-2 border-stone-900 shadow-sm' : 'bg-white text-stone-600 border-2 border-stone-200 hover:border-stone-400'}`}>
+                  All bedrooms
+                </button>
+              )}
+            </div>
+            {/* Always show "Viewing: X" so user knows which bedroom is active */}
+            <div className="mt-2.5 text-xs text-amber-900">
+              <span className="uppercase tracking-wider font-mono text-amber-700 mr-1.5">Viewing:</span>
+              <span className="font-medium">
+                {bedroomTab || (partyLabels.length === 1 ? partyLabels[0] : 'All bedrooms (merged)')}
+              </span>
+            </div>
+          </div>
+        )}
       </div>
 
       <div className="px-5 pt-6 space-y-6">
@@ -14266,6 +14317,16 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
   const visibleBuildings = buildingFilter === 'all' ? buildingKeys : buildingKeys.filter(k => k === buildingFilter);
   const toggleCollapse = (b) => setCollapsedBuildings(prev => ({ ...prev, [b]: !prev[b] }));
 
+  // GLOBAL PRIORITY BLOCK (Pending tab only): pull priority items out
+  // of their per-building bucket and show them as one section at the
+  // top. Without this, priority items get hidden inside each building
+  // (e.g. priority in B2 stuck behind 5 normal B1 items). Building
+  // filter still applies so filtering to "Building 1" only shows B1's
+  // priority at the top.
+  const globalPriorityItems = statusFilter === 'pending'
+    ? visibleBuildings.flatMap(b => buildings[b]).filter(t => t.priority)
+    : [];
+
   // For Done tab: bucket by age using local-date math.
   //   Day of:      completed today (local timezone)
   //   Last 3 days: completed 1, 2, or 3 days ago
@@ -14615,8 +14676,57 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
       )}
 
       <div className="space-y-4">
+        {/* Global priority section — shows all priority items across
+           buildings as a single block at the top of Pending. Pulled out
+           of the per-building loop so they're never hidden behind a
+           building they don't belong to.
+           CRITICAL: priority items render as FLAT CARDS (no bundling,
+           no collapse). The whole point of priority is "do this first" —
+           if we hide priority items inside collapsed apartment bundles,
+           the user has to tap to find them. Flat cards = every priority
+           visible at a glance. */}
+        {globalPriorityItems.length > 0 && (
+          <div className="rounded-2xl border-2 border-red-300 bg-red-50/50 p-3">
+            <div className="flex items-center gap-2 mb-2 px-1">
+              <AlertCircle size={14} className="text-red-700 flex-shrink-0" />
+              <span className="text-xs uppercase tracking-wider font-mono font-bold text-red-700">
+                Priority — do these first ({globalPriorityItems.length})
+              </span>
+              <div className="flex-1 h-px bg-red-200" />
+            </div>
+            <div className="space-y-2">
+              {[...globalPriorityItems]
+                .sort((a, b) =>
+                  naturalCompare(a.unit?.label || '', b.unit?.label || '')
+                  || naturalCompare(a.party?.label || '', b.party?.label || '')
+                )
+                .map(t => (
+                  <AssignmentCard key={t.id} target={t} busy={busy} propertyId={propertyId}
+                    onView={() => setOpened(t)}
+                    onStart={() => startAndGo(t)}
+                    onPause={() => updateStatus(t, 'paused')}
+                    onMoveToPending={() => updateStatus(t, 'pending')}
+                    onDone={() => updateStatus(t, 'done')}
+                    onReopen={() => updateStatus(t, 'pending')}
+                    onBlocked={() => setStatusModal({ target: t })}
+                    onReassign={() => setReassignTarget(t)}
+                    onGoToBedroom={onGoToBedroom ? () => startAndGo(t) : null}
+                    onOpenBedroomHistory={onOpenBedroomHistory} />
+                ))}
+            </div>
+          </div>
+        )}
+
         {visibleBuildings.map(b => {
           const items = buildings[b];
+          // When global priority section is showing, exclude priority
+          // items from the building loop so they don't appear twice.
+          const itemsForBuilding = globalPriorityItems.length > 0
+            ? items.filter(t => !t.priority)
+            : items;
+          // If a building has ONLY priority items, skip rendering its
+          // section entirely — its items are all in the top block.
+          if (itemsForBuilding.length === 0) return null;
           const collapsed = !!collapsedBuildings[b];
           // Only show group header if there's more than 1 building total
           const showHeader = buildingKeys.length > 1;
@@ -14630,15 +14740,15 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                     <span className="text-xs uppercase tracking-wider font-mono text-stone-600">
                       {b === '—' ? 'No unit' : `Building ${b.replace(/^B/i, '')}`}
                     </span>
-                    <span className="text-xs font-mono text-stone-400">({items.length})</span>
+                    <span className="text-xs font-mono text-stone-400">({itemsForBuilding.length})</span>
                   </div>
                   <ChevronRight size={14} className={`text-stone-400 transition-transform ${collapsed ? '' : 'rotate-90'}`} />
                 </button>
               )}
               {!collapsed && (
                 statusFilter === 'done'
-                  ? renderDoneBuckets(items)
-                  : renderAssignmentList(items)
+                  ? renderDoneBuckets(itemsForBuilding)
+                  : renderAssignmentList(itemsForBuilding)
               )}
             </div>
           );

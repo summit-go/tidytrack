@@ -4144,7 +4144,7 @@ async function deleteMessagePhoto(path) {
   try { await supabase.storage.from(MESSAGE_BUCKET).remove([path]); } catch {}
 }
 
-function Header({ name, onSignOut, role, employee, onOpenMessages, onLogoClick }) {
+function Header({ name, onSignOut, role, employee, onOpenMessages, onLogoClick, onBack }) {
   // Messages icon in header for all signed-in roles (cleaner/manager/owner)
   const showMessagesIcon = !!(onOpenMessages && employee);
   const unread = useUnreadCount({ employee: showMessagesIcon ? employee : null });
@@ -4173,11 +4173,24 @@ function Header({ name, onSignOut, role, employee, onOpenMessages, onLogoClick }
 
   return (
     <div className="flex items-center justify-between px-5 py-3 bg-stone-900 border-b border-stone-900">
-      {onLogoClick ? (
-        <button onClick={onLogoClick} className="active:scale-95 transition-transform" title="Home">
-          {logoBlock}
-        </button>
-      ) : logoBlock}
+      <div className="flex items-center gap-2 min-w-0">
+        {/* Back button — pure history step, not "home". Shown only when
+           the parent provides onBack. Keeps the logo's "go home" role
+           distinct so users know exactly what each does. */}
+        {onBack && (
+          <button onClick={onBack}
+            className="p-1.5 -ml-1 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-50 active:scale-95 transition-transform flex items-center gap-1 pr-2.5"
+            title="Back">
+            <ArrowLeft size={16} />
+            <span className="text-xs font-mono">Back</span>
+          </button>
+        )}
+        {onLogoClick ? (
+          <button onClick={onLogoClick} className="active:scale-95 transition-transform flex items-center gap-1" title="Home">
+            {logoBlock}
+          </button>
+        ) : logoBlock}
+      </div>
       <div className="flex items-center gap-2">
         {showMessagesIcon && (
           <button onClick={onOpenMessages}
@@ -13277,11 +13290,7 @@ function AssignmentDetail({ property, assignment: assignmentInit, employee, onBa
       </div>
       {(assignment.assignment_type || assignment.scheduled_date) && (
         <div className="flex gap-2 flex-wrap px-5 pt-3">
-          {assignment.assignment_type && (
-            <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-amber-100 text-amber-900 text-xs font-mono">
-              {assignmentTypeLabel(assignment.assignment_type)}
-            </span>
-          )}
+          <AssignmentTypeChip type={assignment.assignment_type} />
           {assignment.scheduled_date && (
             <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-stone-200 text-stone-800 text-xs font-mono">
               <Calendar size={11} /> {fmtDateWithDay(assignment.scheduled_date)}
@@ -13504,6 +13513,15 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
       patch.completed_at = null;
       patch.completed_by = null;
     }
+    // Move-to-pending from any started/in-progress/paused state should
+    // clear the started_by/started_at so the assignment appears fully
+    // unstarted in the Pending tab — matches the "undo a mistaken start"
+    // mental model. Without this the Pending card would still show
+    // "Started by X" which is misleading.
+    if (newStatus === 'pending' && (target.status === 'paused' || target.status === 'in_progress' || target.status === 'blocked')) {
+      patch.started_at = null;
+      patch.started_by = null;
+    }
     if (statusNotes !== undefined) patch.status_notes = statusNotes || null;
 
     const { error } = await supabase.from('assignment_targets').update(patch).eq('id', target.id);
@@ -13533,6 +13551,7 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
               onView={() => setOpened(t)}
               onStart={() => updateStatus(t, 'in_progress')}
               onPause={() => updateStatus(t, 'paused')}
+              onMoveToPending={() => updateStatus(t, 'pending')}
               onDone={() => updateStatus(t, 'done')}
               onReopen={() => updateStatus(t, 'pending')}
               onBlocked={() => setStatusModal({ target: t })}
@@ -13559,7 +13578,7 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
 }
 
 // Reusable card for one assignment target, used in banner + panel
-function AssignmentCard({ target, busy, onView, onStart, onPause, onDone, onReopen, onBlocked, onReassign, onGoToBedroom, onOpenBedroomHistory, propertyId }) {
+function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPending, onDone, onReopen, onBlocked, onReassign, onGoToBedroom, onOpenBedroomHistory, propertyId }) {
   const t = target;
   const s = ASSIGNMENT_STATUSES[t.status] || ASSIGNMENT_STATUSES.pending;
   const isDone = t.status === 'done';
@@ -13690,6 +13709,16 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onDone, onReop
           <button onClick={onPause} disabled={busy}
             className="h-9 px-3 rounded-lg border border-blue-200 hover:bg-blue-50 text-blue-700 text-xs font-medium flex items-center gap-1 disabled:opacity-50">
             <Pause size={12} /> Pause
+          </button>
+        )}
+        {/* Paused → Pending: undo a mistaken start. Cleaner gets the
+           assignment back into the unstarted queue. Use this when the
+           pause was a mistake; if the cleaner actually did some of
+           the work and wants to come back to it, they should Resume. */}
+        {onMoveToPending && t.status === 'paused' && (
+          <button onClick={onMoveToPending} disabled={busy}
+            className="h-9 px-3 rounded-lg border border-stone-300 hover:bg-stone-50 text-stone-700 text-xs font-medium flex items-center gap-1 disabled:opacity-50">
+            <ArrowLeft size={12} /> Move to pending
           </button>
         )}
         {(t.status === 'pending' || t.status === 'in_progress' || t.status === 'blocked' || t.status === 'paused') && (
@@ -13888,6 +13917,12 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
       patch.completed_by = employee?.id || null;
     } else if (target.status === 'done') {
       patch.completed_at = null; patch.completed_by = null;
+    }
+    // Move-to-pending wipes started_by/at so the assignment appears
+    // fully unstarted in the Pending tab.
+    if (newStatus === 'pending' && (target.status === 'paused' || target.status === 'in_progress' || target.status === 'blocked')) {
+      patch.started_at = null;
+      patch.started_by = null;
     }
     if (statusNotes !== undefined) patch.status_notes = statusNotes || null;
     const { error } = await supabase.from('assignment_targets').update(patch).eq('id', target.id);
@@ -14098,6 +14133,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                 onView={() => setOpened(t)}
                 onStart={() => startAndGo(t)}
                 onPause={() => updateStatus(t, 'paused')}
+              onMoveToPending={() => updateStatus(t, 'pending')}
                 onDone={() => updateStatus(t, 'done')}
                 onReopen={() => updateStatus(t, 'pending')}
                 onBlocked={() => setStatusModal({ target: t })}
@@ -14134,6 +14170,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                       onView={() => setOpened(t)}
                       onStart={() => startAndGo(t)}
                       onPause={() => updateStatus(t, 'paused')}
+              onMoveToPending={() => updateStatus(t, 'pending')}
                       onDone={() => updateStatus(t, 'done')}
                       onReopen={() => updateStatus(t, 'pending')}
                       onBlocked={() => setStatusModal({ target: t })}
@@ -14160,6 +14197,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
               onView={() => setOpened(t)}
               onStart={() => startAndGo(t)}
               onPause={() => updateStatus(t, 'paused')}
+              onMoveToPending={() => updateStatus(t, 'pending')}
               onDone={() => updateStatus(t, 'done')}
               onReopen={() => updateStatus(t, 'pending')}
               onBlocked={() => setStatusModal({ target: t })}
@@ -15461,6 +15499,14 @@ function PortalAssignmentSection({ title, subtitle, items, color, onOpen }) {
                     : <ImageIcon size={14} className="text-stone-600 flex-shrink-0" />}
                   <span className="font-serif text-base text-stone-900 truncate">{a.title}</span>
                 </div>
+                {/* Priority + cleaning-type chips so PMs see urgency
+                   and what kind of clean was requested at a glance. */}
+                {(a.hasPriority || a.assignment_type) && (
+                  <div className="flex items-center gap-1.5 flex-wrap mb-1">
+                    <PriorityChip on={a.hasPriority} />
+                    <AssignmentTypeChip type={a.assignment_type} />
+                  </div>
+                )}
                 <div className="text-xs text-stone-500 font-mono">
                   {fmtDate(a.created_at)} · {a.targets?.length || 0} {a.targets?.length === 1 ? 'target' : 'targets'}
                 </div>
@@ -16076,11 +16122,7 @@ function PortalAssignmentDetail({ property, assignment, onBack, onEdit }) {
       </div>
       {(assignment.assignment_type || assignment.scheduled_date) && (
         <div className="flex gap-2 flex-wrap px-5 pt-3">
-          {assignment.assignment_type && (
-            <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-amber-100 text-amber-900 text-xs font-mono">
-              {assignmentTypeLabel(assignment.assignment_type)}
-            </span>
-          )}
+          <AssignmentTypeChip type={assignment.assignment_type} />
           {assignment.scheduled_date && (
             <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-stone-200 text-stone-800 text-xs font-mono">
               <Calendar size={11} /> {fmtDateWithDay(assignment.scheduled_date)}

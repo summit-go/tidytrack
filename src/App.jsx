@@ -1724,7 +1724,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   // that data entry, we just relabel the block by updating its unit_id
   // + party_id. Tasks/photos follow via foreign keys. The old bedroom
   // is left clean (no leftover row).
-  const moveActiveBlockTo = async (newUnit, newParty) => {
+  const moveActiveBlockTo = async (newUnit, newParty, resetIds = []) => {
     if (!activeBlock) return;
     if (!newUnit?.id || !newParty?.id) {
       alert('Pick a unit and bedroom.');
@@ -1761,6 +1761,23 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       .eq('id', activeBlock.id);
     setBusy(false);
     if (error) { alert('Could not move work block: ' + error.message); return; }
+
+    // Reset old-bedroom assignments to Pending if the cleaner asked
+    // for it. Wipes started_by/completed_by/started_at/completed_at so
+    // the assignment looks untouched in reports too. status_notes is
+    // preserved (might be a Blocked note the manager still wants to
+    // see). Failure here is non-fatal — the move already happened.
+    if (resetIds && resetIds.length > 0) {
+      const { error: resetErr } = await supabase.from('assignment_targets')
+        .update({
+          status: 'pending',
+          started_by: null, started_at: null,
+          completed_by: null, completed_at: null,
+        })
+        .in('id', resetIds);
+      if (resetErr) console.warn('[moveActiveBlockTo] reset failed:', resetErr);
+    }
+
     // Refresh activeBlock with the new unit/party labels so the header
     // updates immediately. Fetch the joined row so we have nested labels.
     const { data: refreshed } = await supabase.from('work_blocks')
@@ -1809,25 +1826,26 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       setBusy(false);
     }
 
-    // Try to find an existing open block at this bedroom (within this
-    // shift). If one exists we open it directly — the cleaner started
-    // earlier and we're just resuming.
+    // If THIS cleaner has their own open block at this bedroom, close it
+    // first (stop the running timer) and route through the pending-start
+    // screen. We don't want "go to this bedroom" to land them in a
+    // timer-running view — the user has been explicit about this. The
+    // earlier work time stays preserved in the closed block; a fresh
+    // block gets created when they tap Start cleaning.
     const myOpen = workBlocks.find(b => !b.end_time && b.unit_id === target.unit_id && b.party_id === target.party_id);
     if (myOpen) {
       setBusy(true);
-      const { data: refreshed } = await supabase.from('work_blocks')
-        .select('*, unit:units(*), party:parties(*), tasks(*, photos(*))')
-        .eq('id', myOpen.id).single();
-      if (refreshed) {
-        setWorkBlocks(prev => prev.map(b => b.id === myOpen.id ? refreshed : b));
-        setActiveBlock(refreshed);
-        setTasks(refreshed.tasks || []);
+      if (activeTask) await stopTask(activeTask, false);
+      const ts = new Date().toISOString();
+      await supabase.from('work_blocks').update({ end_time: ts }).eq('id', myOpen.id);
+      setWorkBlocks(prev => prev.map(b => b.id === myOpen.id ? { ...b, end_time: ts } : b));
+      if (activeBlock?.id === myOpen.id) {
+        setActiveBlock(null); setTasks([]); setActiveTask(null);
       }
       setBusy(false);
-      return;
     }
 
-    // Else show pending start banner — cleaner confirms by tapping Start
+    // Show the pending start screen — cleaner confirms by tapping Start
     setPendingStart({
       unitId: target.unit_id,
       partyId: target.party_id,
@@ -2703,7 +2721,12 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
   // re-attach their work to the wrong bedroom; managers can fix
   // mistakes after the fact.
   const [moveModalOpen, setMoveModalOpen] = useState(false);
-  const canMoveBlock = !!onMoveBlock && (previewMode || employee?.role === 'owner' || employee?.role === 'manager');
+  // Move bedroom is available to anyone with an onMoveBlock handler.
+  // Cleaners need to be able to fix their own mistakes (wrong bedroom
+  // opened, photos/tasks added to the wrong work block) without
+  // bothering a manager. The move flow asks at confirmation time
+  // whether to also reset the old bedroom's assignment to Pending.
+  const canMoveBlock = !!onMoveBlock;
 
   // Logo tap: confirm before pausing the block + bouncing to PropertyHub
   const handleLogoClick = () => {
@@ -2855,8 +2878,9 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
         <MoveBlockModalInline
           block={block}
           propertyId={shift.customer_id}
-          onSave={async (newUnit, newParty) => {
-            await onMoveBlock(newUnit, newParty);
+          currentEmployeeId={employee?.id}
+          onSave={async (newUnit, newParty, resetIds) => {
+            await onMoveBlock(newUnit, newParty, resetIds);
             setMoveModalOpen(false);
           }}
           onClose={() => setMoveModalOpen(false)} />
@@ -2869,10 +2893,16 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
 // to move the active work block to a different bedroom. Same idea as
 // MoveBlockModal but it calls a parent-supplied onSave with the new
 // unit/party objects so EmployeeApp can update activeBlock in place.
-function MoveBlockModalInline({ block, propertyId, onSave, onClose }) {
+function MoveBlockModalInline({ block, propertyId, currentEmployeeId, onSave, onClose }) {
   const [units, setUnits] = useState([]);
   const [unitId, setUnitId] = useState('');
   const [partyId, setPartyId] = useState('');
+  // Any assignment_targets at the OLD bedroom that this cleaner has
+  // touched (started or completed) — those are the ones that, after
+  // the move, would point at a bedroom they didn't actually work.
+  // We surface them so the cleaner can opt-in to resetting them.
+  const [touchedAssignments, setTouchedAssignments] = useState([]);
+  const [resetOldAssignments, setResetOldAssignments] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
@@ -2884,6 +2914,27 @@ function MoveBlockModalInline({ block, propertyId, onSave, onClose }) {
     setUnits((data || []).slice().sort((a, b) => naturalCompare(a.label, b.label)));
   })(); }, [propertyId]);
 
+  // When this modal opens, check if there are assignments at the OLD
+  // bedroom that the current cleaner has touched (started_by or
+  // completed_by). If yes, offer to reset them to Pending after the
+  // move. Default is checked — most common case is "I worked here by
+  // mistake, please undo the assignment too."
+  useEffect(() => {
+    if (!block.unit_id || !block.party_id || !currentEmployeeId) {
+      setTouchedAssignments([]);
+      return;
+    }
+    (async () => {
+      const { data } = await supabase.from('assignment_targets')
+        .select('id, status, assignment:assignments(title)')
+        .eq('unit_id', block.unit_id)
+        .eq('party_id', block.party_id)
+        .or(`started_by.eq.${currentEmployeeId},completed_by.eq.${currentEmployeeId}`)
+        .in('status', ['in_progress', 'paused', 'done']);
+      setTouchedAssignments(data || []);
+    })();
+  }, [block.unit_id, block.party_id, currentEmployeeId]);
+
   const parties = (units.find(u => u.id === unitId)?.parties || [])
     .filter(p => p.active).sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0));
 
@@ -2893,7 +2944,11 @@ function MoveBlockModalInline({ block, propertyId, onSave, onClose }) {
     const newParty = (newUnit?.parties || []).find(p => p.id === partyId);
     setBusy(true);
     try {
-      await onSave(newUnit, newParty);
+      // Pass the reset choice + touched assignment IDs back to the
+      // parent so it can do both the move and the resets atomically.
+      const resetIds = (resetOldAssignments && touchedAssignments.length > 0)
+        ? touchedAssignments.map(t => t.id) : [];
+      await onSave(newUnit, newParty, resetIds);
     } catch (e) {
       setError(e.message || String(e));
     }
@@ -2902,7 +2957,7 @@ function MoveBlockModalInline({ block, propertyId, onSave, onClose }) {
 
   return (
     <div className="fixed inset-0 bg-stone-900/80 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
-      <div className="bg-stone-50 w-full sm:max-w-md sm:rounded-3xl rounded-t-3xl flex flex-col">
+      <div className="bg-stone-50 w-full sm:max-w-md sm:rounded-3xl rounded-t-3xl flex flex-col max-h-[90vh]">
         <div className="flex items-center justify-between p-5 border-b border-stone-200">
           <div>
             <div className="font-serif text-xl text-stone-900">Move work to a different bedroom</div>
@@ -2914,7 +2969,7 @@ function MoveBlockModalInline({ block, propertyId, onSave, onClose }) {
             <X size={20} className="text-stone-600" />
           </button>
         </div>
-        <div className="p-5 space-y-4">
+        <div className="p-5 space-y-4 overflow-y-auto">
           <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-900">
             All notes, tasks, and photos from this work block will move with it. The old bedroom will be left untouched (no leftover data).
           </div>
@@ -2936,6 +2991,32 @@ function MoveBlockModalInline({ block, propertyId, onSave, onClose }) {
               </select>
             </div>
           )}
+
+          {/* If the cleaner has touched assignments at the OLD bedroom,
+             offer to reset them to Pending after the move. Default
+             on — usually they want this; the work was at the wrong
+             bedroom and the assignment status reflects that mistake. */}
+          {touchedAssignments.length > 0 && (
+            <label className="flex items-start gap-3 p-3 rounded-xl bg-blue-50 border border-blue-200 cursor-pointer">
+              <input type="checkbox"
+                checked={resetOldAssignments}
+                onChange={(e) => setResetOldAssignments(e.target.checked)}
+                className="mt-0.5 w-4 h-4 rounded border-blue-400 text-blue-600 focus:ring-blue-500 flex-shrink-0" />
+              <div className="flex-1 min-w-0">
+                <div className="text-sm text-blue-900 font-medium">
+                  Also reset {touchedAssignments.length} assignment{touchedAssignments.length === 1 ? '' : 's'} at the old bedroom to Pending
+                </div>
+                <div className="text-[11px] text-blue-800 mt-0.5">
+                  {touchedAssignments.slice(0, 3).map(t => t.assignment?.title || '—').join(', ')}
+                  {touchedAssignments.length > 3 && ` +${touchedAssignments.length - 3} more`}
+                </div>
+                <div className="text-[11px] text-blue-700 mt-1 italic">
+                  Recommended — these were marked started/done because of work that's now moving to the new bedroom. Resetting them keeps the assignment status honest.
+                </div>
+              </div>
+            </label>
+          )}
+
           {error && (
             <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-red-700 text-sm flex items-start gap-2">
               <AlertCircle size={16} className="flex-shrink-0 mt-0.5" /><span>{error}</span>
@@ -3123,6 +3204,7 @@ function PropertyPicker({ onPick, onCancel, busy, title, subtitle, viewOnly = fa
   const [assignmentCounts, setAssignmentCounts] = useState({}); // { customer_id: number }
   const [loaded, setLoaded] = useState(false);
   const [showAllOthers, setShowAllOthers] = useState(false);
+  const [search, setSearch] = useState('');
 
   useEffect(() => { (async () => {
     // Load active properties AND open assignment counts in parallel.
@@ -3149,11 +3231,15 @@ function PropertyPicker({ onPick, onCancel, busy, title, subtitle, viewOnly = fa
   // Split into two buckets: properties with open assignments (top) and
   // everything else (collapsed dropdown). Both lists are alphabetical
   // by name.
+  const q = search.trim().toLowerCase();
+  const matchesSearch = (p) => !q
+    || (p.name || '').toLowerCase().includes(q)
+    || (p.address || '').toLowerCase().includes(q);
   const withAssignments = properties
-    .filter(p => (assignmentCounts[p.id] || 0) > 0)
+    .filter(p => (assignmentCounts[p.id] || 0) > 0 && matchesSearch(p))
     .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
   const others = properties
-    .filter(p => (assignmentCounts[p.id] || 0) === 0)
+    .filter(p => (assignmentCounts[p.id] || 0) === 0 && matchesSearch(p))
     .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
 
   // Reusable row renderer so both buckets look the same
@@ -3202,6 +3288,18 @@ function PropertyPicker({ onPick, onCancel, busy, title, subtitle, viewOnly = fa
               <div className="text-center py-12 text-stone-400 text-sm">No properties yet.</div>
             ) : (
               <>
+                {/* Search box for quick filtering when there are many properties */}
+                {properties.length > 3 && (
+                  <div className="mb-4">
+                    <input
+                      type="text"
+                      value={search}
+                      onChange={(e) => { setSearch(e.target.value); if (e.target.value && others.length > 0) setShowAllOthers(true); }}
+                      placeholder={`Search ${properties.length} properties…`}
+                      className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white focus:outline-none focus:border-stone-900 text-stone-900"
+                    />
+                  </div>
+                )}
                 {/* Top section: properties with open assignments — shown
                    as cards so cleaners can immediately tap the one they
                    need to work on. */}
@@ -3462,16 +3560,16 @@ function UnitPicker({ property, onPick, onBack, busy, title = "Pick a unit" }) {
         </div>
       </div>
 
-      {/* Search bar — only shows up when there are enough units to make it useful */}
-      {units.length >= 8 && (
+      {/* Search bar — always show so the user can quickly find by typing
+         instead of scrolling. Helpful even with 4-5 units. */}
+      {units.length > 1 && (
         <div className="px-5 pt-4">
           <input
             type="text"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder={`Search ${units.length} units (e.g. "1-1" for Building 1, floor 1)…`}
+            placeholder={`Search ${units.length} ${units.length === 1 ? 'unit' : 'units'}…`}
             className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white focus:outline-none focus:border-stone-900 text-stone-900"
-            autoFocus
           />
         </div>
       )}
@@ -3511,12 +3609,18 @@ function PartyPicker({ property, unit, onPick, onBack, busy }) {
   const [loaded, setLoaded] = useState(false);
   const [picked, setPicked] = useState(null);
   const [notes, setNotes] = useState('');
+  const [search, setSearch] = useState('');
   useEffect(() => { (async () => {
     const { data } = await supabase.from('parties').select('*')
       .eq('unit_id', unit.id).eq('active', true)
       .order('sort_order').order('label');
     setParties(data || []); setLoaded(true);
   })(); }, [unit.id]);
+
+  const q = search.trim().toLowerCase();
+  const filteredParties = q
+    ? parties.filter(p => (p.label || '').toLowerCase().includes(q) || (p.full_name || '').toLowerCase().includes(q))
+    : parties;
 
   if (picked) {
     return (
@@ -3558,14 +3662,30 @@ function PartyPicker({ property, unit, onPick, onBack, busy }) {
           <div className="font-serif text-xl text-stone-900">Whose portion?</div>
         </div>
       </div>
+      {/* Search box when there are more than 2 parties — saves scrolling */}
+      {parties.length > 2 && (
+        <div className="px-5 pt-4">
+          <input
+            type="text"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder={`Search ${parties.length} ${parties.length === 1 ? 'bedroom' : 'bedrooms'}…`}
+            className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white focus:outline-none focus:border-stone-900 text-stone-900"
+          />
+        </div>
+      )}
       <div className="flex-1 px-5 py-6 overflow-y-auto">
         {!loaded ? <Splash text="Loading…" /> : parties.length === 0 ? (
           <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
             No parties configured for this unit yet.
           </div>
+        ) : filteredParties.length === 0 ? (
+          <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
+            No bedrooms match "{search}".
+          </div>
         ) : (
           <div className="space-y-2">
-            {parties.map(p => (
+            {filteredParties.map(p => (
               <button key={p.id} onClick={() => setPicked(p)} disabled={busy}
                 className="w-full text-left p-4 rounded-2xl bg-white border-2 border-stone-200 hover:border-stone-900 active:scale-98 transition-all disabled:opacity-50">
                 <div className="flex items-center justify-between">
@@ -4464,6 +4584,23 @@ function GroupedByPartyView({ shifts, showMoney, onOpenShift }) {
           {allCleanerNames.length > 1 && cleanerFilterDropdown}
         </div>
       )}
+      {/* When filters are active, show a banner with exact counts so the
+         user can confirm filtering is taking effect. If anything looks
+         off (e.g. they expected 3 Jessica blocks but see 5), this makes
+         the discrepancy visible. */}
+      {(isFiltered || isCleanerFiltered) && (
+        <div className="-mt-3 p-2.5 rounded-lg bg-amber-50 border border-amber-200 text-[11px] font-mono text-amber-900 flex items-center gap-2 flex-wrap">
+          <Settings size={11} />
+          <span>Filtered:</span>
+          {isCleanerFiltered && (
+            <span>{selectedCleaners.size} cleaner{selectedCleaners.size === 1 ? '' : 's'} ({Array.from(selectedCleaners).slice(0, 3).join(', ')}{selectedCleaners.size > 3 ? ` +${selectedCleaners.size - 3}` : ''})</span>
+          )}
+          {isFiltered && (
+            <span>· {selectedProperties.size} propert{selectedProperties.size === 1 ? 'y' : 'ies'}</span>
+          )}
+          <span className="text-amber-700">→ Showing {rows.length} of {allRows.length} work blocks</span>
+        </div>
+      )}
       {propertyNames.map(propName => {
         const propGroups = byProperty[propName];
         const propTotalMs = propGroups.reduce((sum, g) =>
@@ -4525,6 +4662,12 @@ function GroupedByPartyView({ shifts, showMoney, onOpenShift }) {
                     {/* Per-employee rows */}
                     <div className="mt-3 space-y-1.5">
                       {g.entries.map((e, i) => {
+                        // Defense-in-depth: if a filter is active and this
+                        // entry doesn't match, skip rendering. The group-
+                        // building step should have already filtered, but
+                        // this guards against any future regressions.
+                        if (isCleanerFiltered && !selectedCleaners.has(e.employee)) return null;
+                        if (isFiltered && !selectedProperties.has(e.property)) return null;
                         const dur = (e.end ? new Date(e.end) : new Date()) - new Date(e.start);
                         const billable = showMoney && e.end ? (dur / 1000 / 3600) * (e.rate || 0) : 0;
                         return (
@@ -12073,6 +12216,9 @@ function AssignmentForm({ property, employee, onCancel, onSaved }) {
   // Each row: { id, file, title, notes, propertyId, scope, unitId, partyId, multipleTargets }
   const [rows, setRows] = useState([]);
   const [allProperties, setAllProperties] = useState([]);
+  // Active employees for the "Assign to" dropdown — managers and
+  // owners shouldn't get assigned cleaning work, so we limit to role=employee.
+  const [employees, setEmployees] = useState([]);
   // Cache of units per property: { [propertyId]: [{id, label, parties:[...]}] }
   const [unitsByProperty, setUnitsByProperty] = useState({});
   const [busy, setBusy] = useState(false);
@@ -12084,6 +12230,10 @@ function AssignmentForm({ property, employee, onCancel, onSaved }) {
       const { data } = await supabase.from('customers').select('*')
         .eq('active', true).order('name');
       setAllProperties(data || []);
+      const { data: emps } = await supabase.from('employees')
+        .select('id, name, role').eq('active', true)
+        .in('role', ['employee', 'manager']).order('name');
+      setEmployees(emps || []);
     })();
   }, []);
 
@@ -12137,6 +12287,13 @@ function AssignmentForm({ property, employee, onCancel, onSaved }) {
         assignmentType: '',
         // Optional target date for when this assignment should be done
         scheduledDate: '',
+        // Priority flag — flagged assignments sort to the top of the
+        // cleaner's list and show with a red urgent badge.
+        priority: false,
+        // Optional employee ID — when set, this assignment shows as
+        // assigned to a specific cleaner. Others can still see it but
+        // it surfaces with their name attached as a recommendation.
+        assignedTo: '',
       };
     });
     setRows(prev => [...prev, ...newRows]);
@@ -12327,6 +12484,8 @@ function AssignmentForm({ property, employee, onCancel, onSaved }) {
             unit_id: target.unit_id,
             party_id: target.party_id,
             status: 'pending',
+            priority: !!r.priority,
+            assigned_to: r.assignedTo || null,
           });
           if (te) throw te;
           totalCreated++;
@@ -12422,6 +12581,36 @@ function AssignmentForm({ property, employee, onCancel, onSaved }) {
                       <input type="date" value={row.scheduledDate}
                         onChange={(e) => updateRow(row.id, { scheduledDate: e.target.value })}
                         className="w-full px-3 py-2 rounded-lg border border-stone-300 bg-white text-sm" />
+                    </div>
+                  </div>
+
+                  {/* Priority + Assignee — both optional. Priority sorts to
+                     top of cleaner lists and shows urgent badge. Assignee
+                     pins to a specific cleaner (others can still see it). */}
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="text-[10px] uppercase tracking-wider text-stone-500 font-mono mb-1 block">
+                        Priority
+                      </label>
+                      <button type="button"
+                        onClick={() => updateRow(row.id, { priority: !row.priority })}
+                        className={`w-full px-3 py-2 rounded-lg border text-sm flex items-center justify-center gap-1.5 transition-colors ${row.priority ? 'border-red-400 bg-red-50 text-red-800' : 'border-stone-300 bg-white text-stone-500'}`}>
+                        {row.priority ? <AlertCircle size={14} /> : null}
+                        {row.priority ? 'Priority — do first' : 'Mark as priority'}
+                      </button>
+                    </div>
+                    <div>
+                      <label className="text-[10px] uppercase tracking-wider text-stone-500 font-mono mb-1 block">
+                        Assign to <span className="text-stone-400 normal-case">(optional)</span>
+                      </label>
+                      <select value={row.assignedTo}
+                        onChange={(e) => updateRow(row.id, { assignedTo: e.target.value })}
+                        className="w-full px-3 py-2 rounded-lg border border-stone-300 bg-white text-sm">
+                        <option value="">Anyone</option>
+                        {employees.map(e => (
+                          <option key={e.id} value={e.id}>{e.name}{e.role === 'manager' ? ' (manager)' : ''}</option>
+                        ))}
+                      </select>
                     </div>
                   </div>
 
@@ -12616,6 +12805,7 @@ function AssignmentForm({ property, employee, onCancel, onSaved }) {
 function AssignmentDetail({ property, assignment: assignmentInit, employee, onBack }) {
   const [assignment, setAssignment] = useState(assignmentInit);
   const [targets, setTargets] = useState([]);
+  const [employees, setEmployees] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [busy, setBusy] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
@@ -12625,11 +12815,43 @@ function AssignmentDetail({ property, assignment: assignmentInit, employee, onBa
     if (a) setAssignment(a);
     const { data: ts, error: tErr } = await supabase
       .from('assignment_targets')
-      .select('*, unit:units(label), party:parties(label, full_name), completer:employees!completed_by(name)')
+      .select('*, unit:units(label), party:parties(label, full_name), completer:employees!completed_by(name), assignedTo:employees!assigned_to(id, name)')
       .eq('assignment_id', assignmentInit.id);
     if (tErr) console.error('[AssignmentDetail] targets load error:', tErr);
     setTargets(ts || []);
+    // Load employees for the assign-to dropdown (active only)
+    const { data: emps } = await supabase.from('employees')
+      .select('id, name, role').eq('active', true)
+      .in('role', ['employee', 'manager']).order('name');
+    setEmployees(emps || []);
     setLoaded(true);
+  };
+
+  // Toggle priority on a single target — instant DB write + local update.
+  const togglePriority = async (target) => {
+    const next = !target.priority;
+    setTargets(prev => prev.map(t => t.id === target.id ? { ...t, priority: next } : t));
+    const { error } = await supabase.from('assignment_targets')
+      .update({ priority: next }).eq('id', target.id);
+    if (error) {
+      alert('Could not update priority: ' + error.message);
+      setTargets(prev => prev.map(t => t.id === target.id ? { ...t, priority: !next } : t));
+    }
+  };
+
+  // Change assignee on a single target. Empty string = unassign (anyone).
+  const updateAssignee = async (target, employeeId) => {
+    const newAssigneeId = employeeId || null;
+    const newAssignee = newAssigneeId ? employees.find(e => e.id === newAssigneeId) : null;
+    setTargets(prev => prev.map(t => t.id === target.id
+      ? { ...t, assigned_to: newAssigneeId, assignedTo: newAssignee || null }
+      : t));
+    const { error } = await supabase.from('assignment_targets')
+      .update({ assigned_to: newAssigneeId }).eq('id', target.id);
+    if (error) {
+      alert('Could not update assignee: ' + error.message);
+      reload(); // rollback by reloading
+    }
   };
   useEffect(() => { reload(); /* eslint-disable-next-line */ }, []);
   useAssignmentSync(reload, 'asgn-detail');
@@ -12748,6 +12970,25 @@ function AssignmentDetail({ property, assignment: assignmentInit, employee, onBa
                         {s.label}
                       </span>
                     </div>
+                    {/* Owner controls for priority + assignee. Hidden when
+                       the target is already done (no point flagging done
+                       work as priority). */}
+                    {t.status !== 'done' && (
+                      <div className="mt-2 pt-2 border-t border-stone-100 flex items-center gap-2 flex-wrap">
+                        <button onClick={() => togglePriority(t)}
+                          className={`text-[10px] uppercase tracking-wider font-mono px-2 py-1 rounded-full inline-flex items-center gap-1 transition-colors ${t.priority ? 'bg-red-100 text-red-800 border border-red-300 font-bold' : 'bg-stone-100 text-stone-500 border border-stone-200 hover:bg-stone-200'}`}>
+                          <AlertCircle size={10} /> {t.priority ? 'Priority' : 'Mark priority'}
+                        </button>
+                        <select value={t.assigned_to || ''}
+                          onChange={(e) => updateAssignee(t, e.target.value)}
+                          className="text-[10px] uppercase tracking-wider font-mono px-2 py-1 rounded-full bg-white border border-stone-300 text-stone-700">
+                          <option value="">Assign to: Anyone</option>
+                          {employees.map(emp => (
+                            <option key={emp.id} value={emp.id}>{emp.name}{emp.role === 'manager' ? ' (manager)' : ''}</option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
                   </div>
                 );
               })}
@@ -12800,7 +13041,7 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
   const load = async () => {
     let q = supabase
       .from('assignment_targets')
-      .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, extracted_text, spanish_translation, translation_status), unit:units(id, label), party:parties(id, label), starter:employees!started_by(name), completer:employees!completed_by(name)');
+      .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, extracted_text, spanish_translation, translation_status), unit:units(id, label), party:parties(id, label), starter:employees!started_by(name), completer:employees!completed_by(name), assignedTo:employees!assigned_to(id, name)');
 
     if (!showDone) q = q.neq('status', 'done');
 
@@ -12822,6 +13063,13 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
       t.assignment?.active &&
       (t.assignment?.source !== 'pm' || t.assignment?.pm_status === 'approved')
     );
+    // Priority items first, then by status (pending/in_progress before done)
+    filtered.sort((a, b) => {
+      const ap = a.priority ? 1 : 0;
+      const bp = b.priority ? 1 : 0;
+      if (ap !== bp) return bp - ap;
+      return 0;
+    });
     setTargets(filtered);
     setLoaded(true);
   };
@@ -12925,7 +13173,10 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onDone, onReop
   const t = target;
   const s = ASSIGNMENT_STATUSES[t.status] || ASSIGNMENT_STATUSES.pending;
   const isDone = t.status === 'done';
-  const canGo = onGoToBedroom && t.unit_id && t.party_id && !isDone;
+  // Title is always tappable as long as we have a bedroom to navigate
+  // to — even Done assignments. Tapping a Done one is useful for
+  // peeking at history or re-checking the bedroom.
+  const canGo = onGoToBedroom && t.unit_id && t.party_id;
   const [activeCleaners, setActiveCleaners] = useState([]);
 
   // Pull who's currently working at this target's unit+party (active work blocks today)
@@ -12953,7 +13204,35 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onDone, onReop
     <div className={`p-3 rounded-xl border ${isDone ? 'bg-stone-50 border-stone-200 opacity-90' : 'bg-white border-stone-200'}`}>
       <div className="flex items-start justify-between gap-2 mb-2">
         <div className="flex-1 min-w-0">
-          <div className="font-serif text-base text-stone-900 truncate">{t.assignment?.title}</div>
+          {/* Title is a tap target when we have a way to go to the
+             bedroom AND the target IS tied to a bedroom. Falls back to
+             plain text on the owner-side admin list where no
+             onGoToBedroom is wired. */}
+          {canGo ? (
+            <button onClick={onGoToBedroom} disabled={busy}
+              className="text-left w-full font-serif text-base text-stone-900 truncate hover:underline disabled:opacity-50">
+              {t.assignment?.title}
+            </button>
+          ) : (
+            <div className="font-serif text-base text-stone-900 truncate">{t.assignment?.title}</div>
+          )}
+          {/* Priority + assignee chips — priority is loud red, assignee
+             is a quieter purple. Both placed right under the title so
+             a cleaner scanning the list sees urgency immediately. */}
+          {(t.priority || t.assignedTo) && !isDone && (
+            <div className="mt-1 flex items-center gap-1.5 flex-wrap">
+              {t.priority && (
+                <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-red-100 text-red-800 border border-red-300 inline-flex items-center gap-1 font-bold">
+                  <AlertCircle size={10} /> Priority
+                </span>
+              )}
+              {t.assignedTo?.name && (
+                <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-purple-100 text-purple-800 border border-purple-300 inline-flex items-center gap-1">
+                  <User size={10} /> {t.assignedTo.name}
+                </span>
+              )}
+            </div>
+          )}
           {(t.unit?.label || t.party?.label) && (
             <div className="text-xs font-mono text-stone-500 mt-0.5">
               {t.unit?.label}{t.party?.label && ` · ${t.party.label}`}
@@ -12965,6 +13244,12 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onDone, onReop
           {t.status === 'in_progress' && t.starter?.name && (
             <div className="text-xs text-amber-700 font-mono mt-1">
               Started by {t.starter.name}{t.started_at && ` · ${fmtClock(t.started_at)}`}
+            </div>
+          )}
+          {t.status === 'paused' && t.starter?.name && (
+            <div className="text-xs text-blue-700 font-mono mt-1 flex items-center gap-1">
+              <Pause size={10} />
+              Paused by {t.starter.name}
             </div>
           )}
           {activeCleaners.length > 0 && (
@@ -13045,7 +13330,7 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onDone, onReop
           </button>
         )}
       </div>
-      {canGo && (
+      {canGo && !isDone && (
         <button onClick={onGoToBedroom} disabled={busy}
           className="mt-2 w-full px-3 py-2.5 rounded-lg bg-stone-900 hover:bg-stone-800 text-stone-50 text-sm font-medium flex items-center justify-center gap-2 disabled:opacity-50">
           Go to this bedroom <ChevronRight size={14} />
@@ -13056,17 +13341,17 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onDone, onReop
 }
 
 // AssignmentsPanel — full tabbed view for the property hub.
-// Tabs: Pending | In Progress | Done
+// Tabs: Pending | Paused | In Progress | Done
 function AssignmentsPanel({ propertyId, employee, refreshKey, onGoToBedroom, onOpenBedroomHistory }) {
   const [tab, setTab] = useState('pending');
-  const [counts, setCounts] = useState({ pending: 0, in_progress: 0, done: 0, blocked: 0 });
+  const [counts, setCounts] = useState({ pending: 0, paused: 0, in_progress: 0, done: 0, blocked: 0 });
 
   const loadCounts = async () => {
     const { data } = await supabase
       .from('assignment_targets')
       .select('status, assignment:assignments!inner(customer_id, active)');
     const filtered = (data || []).filter(t => t.assignment?.customer_id === propertyId && t.assignment?.active);
-    const c = { pending: 0, in_progress: 0, done: 0, blocked: 0 };
+    const c = { pending: 0, paused: 0, in_progress: 0, done: 0, blocked: 0 };
     filtered.forEach(t => { c[t.status] = (c[t.status] || 0) + 1; });
     setCounts(c);
   };
@@ -13078,17 +13363,21 @@ function AssignmentsPanel({ propertyId, employee, refreshKey, onGoToBedroom, onO
         <FileText size={14} className="text-stone-500" />
         <span className="text-xs uppercase tracking-wider text-stone-500 font-mono">Assignments</span>
       </div>
-      <div className="flex gap-1 mb-3 bg-stone-100 p-1 rounded-xl">
+      <div className="flex gap-1 mb-3 bg-stone-100 p-1 rounded-xl overflow-x-auto">
         <button onClick={() => setTab('pending')}
-          className={`flex-1 py-2 px-2 rounded-lg text-xs font-medium transition-colors ${tab === 'pending' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+          className={`flex-1 min-w-fit py-2 px-2 rounded-lg text-xs font-medium transition-colors whitespace-nowrap ${tab === 'pending' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
           Pending{counts.pending > 0 && ` (${counts.pending})`}
         </button>
+        <button onClick={() => setTab('paused')}
+          className={`flex-1 min-w-fit py-2 px-2 rounded-lg text-xs font-medium transition-colors whitespace-nowrap ${tab === 'paused' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+          Paused{counts.paused > 0 && ` (${counts.paused})`}
+        </button>
         <button onClick={() => setTab('in_progress')}
-          className={`flex-1 py-2 px-2 rounded-lg text-xs font-medium transition-colors ${tab === 'in_progress' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+          className={`flex-1 min-w-fit py-2 px-2 rounded-lg text-xs font-medium transition-colors whitespace-nowrap ${tab === 'in_progress' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
           In progress{counts.in_progress > 0 && ` (${counts.in_progress})`}
         </button>
         <button onClick={() => setTab('done')}
-          className={`flex-1 py-2 px-2 rounded-lg text-xs font-medium transition-colors ${tab === 'done' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+          className={`flex-1 min-w-fit py-2 px-2 rounded-lg text-xs font-medium transition-colors whitespace-nowrap ${tab === 'done' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
           Done{counts.done > 0 && ` (${counts.done})`}
         </button>
       </div>
@@ -13127,7 +13416,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
     setLoadError(null);
     const { data, error } = await supabase
       .from('assignment_targets')
-      .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, extracted_text, spanish_translation, translation_status, assignment_type, scheduled_date), unit:units(id, label), party:parties(id, label), starter:employees!started_by(id, name), completer:employees!completed_by(id, name)')
+      .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, extracted_text, spanish_translation, translation_status, assignment_type, scheduled_date), unit:units(id, label), party:parties(id, label), starter:employees!started_by(id, name), completer:employees!completed_by(id, name), assignedTo:employees!assigned_to(id, name)')
       .eq('status', statusFilter);
     if (error) {
       console.error('[Assignments] load error:', error);
@@ -13143,8 +13432,32 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
     );
     if (statusFilter === 'done') {
       filtered.sort((a, b) => new Date(b.completed_at || 0) - new Date(a.completed_at || 0));
+    } else if (statusFilter === 'paused') {
+      // Paused tab: assignments paused BY the current user sort to the
+      // top (most useful — they can resume their own work first), then
+      // everyone else's paused work alphabetically by unit/party.
+      // "Paused by" is inferred from started_by since the cleaner who
+      // started is the one who paused. Priority still wins overall.
+      const myId = employee?.id;
+      filtered.sort((a, b) => {
+        const ap = a.priority ? 1 : 0;
+        const bp = b.priority ? 1 : 0;
+        if (ap !== bp) return bp - ap;
+        const aMine = myId && a.started_by === myId ? 0 : 1;
+        const bMine = myId && b.started_by === myId ? 0 : 1;
+        if (aMine !== bMine) return aMine - bMine;
+        return naturalCompare(a.unit?.label || '', b.unit?.label || '')
+          || naturalCompare(a.party?.label || '', b.party?.label || '');
+      });
     } else {
-      filtered.sort((a, b) => naturalCompare(a.unit?.label || '', b.unit?.label || '') || naturalCompare(a.party?.label || '', b.party?.label || ''));
+      // Priority items sort to the top, then natural unit/party order.
+      filtered.sort((a, b) => {
+        const ap = a.priority ? 1 : 0;
+        const bp = b.priority ? 1 : 0;
+        if (ap !== bp) return bp - ap;
+        return naturalCompare(a.unit?.label || '', b.unit?.label || '')
+          || naturalCompare(a.party?.label || '', b.party?.label || '');
+      });
     }
     setTargets(filtered);
     setLoaded(true);
@@ -13225,6 +13538,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
   if (targets.length === 0) {
     const empties = {
       pending: 'No pending assignments.',
+      paused: 'No paused assignments.',
       in_progress: 'No assignments are in progress.',
       done: 'No completed assignments yet.'
     };
@@ -14712,6 +15026,10 @@ function PortalAssignmentForm({ property, assignment, portalKind, onCancel, onSa
   const [scheduledDate, setScheduledDate] = useState(assignment?.scheduled_date || '');
   const [file, setFile] = useState(null); // a NEW file (replaces existing)
   const [keepExistingFile, setKeepExistingFile] = useState(isEdit);
+  // Priority — PMs can flag urgent submissions. Carries through to the
+  // cleaner's view once the owner approves. Owner can still un-flag
+  // during approval if they disagree with the urgency.
+  const [priority, setPriority] = useState(false);
   // Scope: 'specific' (single bedroom), 'multiple' (several bedrooms),
   // 'property' (whole property). Multi mode added to mirror the owner-side
   // form so PMs can fan out one assignment to many bedrooms at once.
@@ -14726,6 +15044,17 @@ function PortalAssignmentForm({ property, assignment, portalKind, onCancel, onSa
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState('');
   const [error, setError] = useState('');
+
+  // On edit, load priority from any of the existing targets
+  // (all targets of one assignment share priority in practice)
+  useEffect(() => {
+    if (!isEdit || !assignment?.id) return;
+    (async () => {
+      const { data } = await supabase.from('assignment_targets')
+        .select('priority').eq('assignment_id', assignment.id).limit(1).maybeSingle();
+      if (data?.priority) setPriority(true);
+    })();
+  }, [isEdit, assignment?.id]);
 
   const toggleTarget = (uId, pId) => {
     setMultipleTargets(prev => {
@@ -14866,13 +15195,13 @@ function PortalAssignmentForm({ property, assignment, portalKind, onCancel, onSa
         await supabase.from('assignment_targets').delete().eq('assignment_id', assignment.id);
         let targetRows;
         if (!isMulti || scope === 'property') {
-          targetRows = [{ assignment_id: assignment.id, unit_id: null, party_id: null, status: 'pending' }];
+          targetRows = [{ assignment_id: assignment.id, unit_id: null, party_id: null, status: 'pending', priority }];
         } else if (scope === 'multiple') {
           targetRows = multipleTargets.map(t => ({
-            assignment_id: assignment.id, unit_id: t.unitId, party_id: t.partyId, status: 'pending'
+            assignment_id: assignment.id, unit_id: t.unitId, party_id: t.partyId, status: 'pending', priority
           }));
         } else {
-          targetRows = [{ assignment_id: assignment.id, unit_id: unitId, party_id: partyId, status: 'pending' }];
+          targetRows = [{ assignment_id: assignment.id, unit_id: unitId, party_id: partyId, status: 'pending', priority }];
         }
         const { error: e2 } = await supabase.from('assignment_targets').insert(targetRows);
         if (e2) throw e2;
@@ -14936,6 +15265,7 @@ function PortalAssignmentForm({ property, assignment, portalKind, onCancel, onSa
             unit_id: target.unit_id,
             party_id: target.party_id,
             status: 'pending',
+            priority,
           });
           if (e2) throw e2;
         }
@@ -15019,6 +15349,22 @@ function PortalAssignmentForm({ property, assignment, portalKind, onCancel, onSa
             className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white" />
           <div className="text-[11px] text-stone-500 mt-1">
             The Summit Clean team can adjust this if needed.
+          </div>
+        </div>
+
+        {/* Priority toggle — PM flags urgency. Owner can un-flag during
+           approval if they disagree. */}
+        <div>
+          <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">
+            Urgency
+          </label>
+          <button type="button" onClick={() => setPriority(p => !p)}
+            className={`w-full px-4 py-3 rounded-xl border text-sm flex items-center justify-center gap-2 transition-colors ${priority ? 'border-red-400 bg-red-50 text-red-800' : 'border-stone-300 bg-white text-stone-600'}`}>
+            {priority ? <AlertCircle size={14} /> : null}
+            {priority ? 'Marked as priority — please do first' : 'Mark as priority (optional)'}
+          </button>
+          <div className="text-[11px] text-stone-500 mt-1">
+            Use sparingly. The team gets a red badge on priority items and they sort to the top.
           </div>
         </div>
 

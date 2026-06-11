@@ -33,11 +33,11 @@ const ASSIGNMENT_MAX_SIZE_MB = 20; // sanity cap on upload size
 // The set of assignment types PMs can pick from when uploading.
 // Owners/managers can change the type when approving.
 const ASSIGNMENT_TYPES = [
-  { value: 'cleaning_check', label: 'Cleaning check', short: 'Check',     color: 'bg-sky-100 text-sky-800 border-sky-300' },
-  { value: 'deep',           label: 'Deep clean',     short: 'Deep',      color: 'bg-purple-100 text-purple-800 border-purple-300' },
-  { value: 'move_out_check', label: 'Move-out check', short: 'Move-out',  color: 'bg-orange-100 text-orange-800 border-orange-300' },
-  { value: 'reclean',        label: 'Reclean',        short: 'Reclean',   color: 'bg-yellow-100 text-yellow-800 border-yellow-300' },
-  { value: 'standard',       label: 'Standard clean', short: 'Standard',  color: 'bg-emerald-100 text-emerald-800 border-emerald-300' },
+  { value: 'cleaning_check', label: 'Cleaning check', short: 'Cleaning check', color: 'bg-sky-100 text-sky-800 border-sky-300' },
+  { value: 'deep',           label: 'Deep clean',     short: 'Deep clean',     color: 'bg-purple-100 text-purple-800 border-purple-300' },
+  { value: 'move_out_check', label: 'Move-out check', short: 'Move-out check', color: 'bg-orange-100 text-orange-800 border-orange-300' },
+  { value: 'reclean',        label: 'Reclean',        short: 'Reclean',        color: 'bg-yellow-100 text-yellow-800 border-yellow-300' },
+  { value: 'standard',       label: 'Standard clean', short: 'Standard clean', color: 'bg-emerald-100 text-emerald-800 border-emerald-300' },
 ];
 const assignmentTypeLabel = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value)?.label || value || '';
@@ -10320,14 +10320,73 @@ function PortalHome({ property, portalKind, portalUser, hasMultipleProperties, o
 
 // History tab — the original PortalHome content extracted
 function PortalHistoryTab({ property, groups, loaded, filter, setFilter, onOpenUnitDay }) {
-  const totalPhotos = groups.reduce((sum, g) => sum + g.units.reduce((s, u) => s + u.photoCount, 0), 0);
-  const damageCount = groups.reduce((sum, g) => sum + g.units.filter(u => u.hasDamage).length, 0);
-  const resolvedDamageCount = groups.reduce((sum, g) => sum + g.units.filter(u => u.hasResolvedDamage).length, 0);
-  const totalCleanings = groups.reduce((sum, g) => sum + g.units.length, 0);
+  // Filters — PM-appropriate. Date, building, and apartment. We
+  // intentionally don't expose category/cleaner filters here because PMs
+  // shouldn't be slicing by who did the work or by task type.
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const [filterDate, setFilterDate] = useState('');        // YYYY-MM-DD or '' for all
+  const [filterBuildings, setFilterBuildings] = useState(new Set()); // multi-select of building keys
+  const [apartmentSearch, setApartmentSearch] = useState('');
+
+  // Build the set of available buildings and dates from the loaded
+  // groups so the filter UI only offers options that actually have
+  // cleanings. Empty Set = show all.
+  const availableBuildings = (() => {
+    const set = new Set();
+    groups.forEach(g => g.units.forEach(u => {
+      const b = buildingFromLabel(u.label);
+      if (b) set.add(b);
+    }));
+    return [...set].sort(naturalCompare);
+  })();
+  const availableDates = (() => {
+    const set = new Set();
+    groups.forEach(g => set.add(g.date));
+    return [...set].sort().reverse(); // newest first
+  })();
+
+  // Apply filters to the displayed groups. Order: date → building →
+  // apartment. We filter inside each group rather than dropping whole
+  // dates so the user can see exactly which units match across a date.
+  const aq = apartmentSearch.trim().toLowerCase();
+  const filteredGroups = groups
+    .filter(g => !filterDate || g.date === filterDate)
+    .map(g => ({
+      ...g,
+      units: g.units.filter(u => {
+        if (filterBuildings.size > 0) {
+          const b = buildingFromLabel(u.label);
+          if (!b || !filterBuildings.has(b)) return false;
+        }
+        if (aq) {
+          if (!(u.label || '').toLowerCase().includes(aq)) return false;
+        }
+        return true;
+      })
+    }))
+    .filter(g => g.units.length > 0);
+
+  const activeFilterCount = (filterDate ? 1 : 0) + filterBuildings.size + (aq ? 1 : 0);
+  const toggleBuilding = (b) => setFilterBuildings(prev => {
+    const next = new Set(prev);
+    if (next.has(b)) next.delete(b); else next.add(b);
+    return next;
+  });
+  const clearFilters = () => {
+    setFilterDate(''); setFilterBuildings(new Set()); setApartmentSearch('');
+  };
+
+  // Stats use filtered groups so the numbers reflect what's actually
+  // on screen — otherwise the PM sees "12 cleanings" while only 3 rows
+  // are visible after filtering.
+  const totalPhotos = filteredGroups.reduce((sum, g) => sum + g.units.reduce((s, u) => s + u.photoCount, 0), 0);
+  const damageCount = filteredGroups.reduce((sum, g) => sum + g.units.filter(u => u.hasDamage).length, 0);
+  const resolvedDamageCount = filteredGroups.reduce((sum, g) => sum + g.units.filter(u => u.hasResolvedDamage).length, 0);
+  const totalCleanings = filteredGroups.reduce((sum, g) => sum + g.units.length, 0);
   // Build the list of damage entries (date + unit) for the expandable view
   const damageEntries = [];
   const resolvedDamageEntries = [];
-  groups.forEach(g => g.units.forEach(u => {
+  filteredGroups.forEach(g => g.units.forEach(u => {
     if (u.hasDamage) damageEntries.push({ date: g.date, unitId: u.unitId, label: u.label });
     if (u.hasResolvedDamage) resolvedDamageEntries.push({ date: g.date, unitId: u.unitId, label: u.label });
   }));
@@ -10476,7 +10535,7 @@ function PortalHistoryTab({ property, groups, loaded, filter, setFilter, onOpenU
         </div>
       )}
 
-      <div className="mb-4 flex gap-2 mt-3">
+      <div className="mb-3 flex gap-2 mt-3 flex-wrap">
         {[{ id: '7d', label: '7 days' }, { id: '30d', label: '30 days' }, { id: '1y', label: '1 year' }].map(f => (
           <button key={f.id} onClick={() => setFilter(f.id)}
             className={`px-4 py-2 rounded-full text-sm font-medium transition-colors ${
@@ -10487,13 +10546,116 @@ function PortalHistoryTab({ property, groups, loaded, filter, setFilter, onOpenU
         ))}
       </div>
 
+      {/* Filters panel — PM-appropriate: date / building / apartment.
+         The date list only shows dates where cleanings were actually
+         done (the "signify which dates have work" affordance), with
+         counts so the PM knows how many units to expect. Building and
+         apartment filters narrow the list further. */}
+      {groups.length > 0 && (
+        <div className="mb-4">
+          <button onClick={() => setFiltersOpen(o => !o)}
+            className={`w-full flex items-center justify-between px-3 py-2 rounded-xl border transition-colors ${activeFilterCount > 0 ? 'bg-amber-50 border-amber-300 text-amber-900' : 'bg-white border-stone-200 text-stone-600 hover:border-stone-400'}`}>
+            <div className="flex items-center gap-2">
+              <Settings size={14} />
+              <span className="text-xs uppercase tracking-wider font-mono">
+                Filters{activeFilterCount > 0 ? ` (${activeFilterCount})` : ''}
+              </span>
+              <span className="text-[10px] font-mono text-stone-500">
+                Showing {filteredGroups.reduce((s, g) => s + g.units.length, 0)} of {groups.reduce((s, g) => s + g.units.length, 0)}
+              </span>
+            </div>
+            <ChevronRight size={14} className={`transition-transform ${filtersOpen ? 'rotate-90' : ''}`} />
+          </button>
+          {filtersOpen && (
+            <div className="p-3 rounded-xl bg-stone-50 border border-stone-200 mt-1 space-y-3">
+              {/* Date filter — list of dates with cleanings, count each.
+                 Single-select: tap a date to drill down, tap again to clear. */}
+              {availableDates.length > 0 && (
+                <div>
+                  <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1.5">
+                    Dates with cleanings ({availableDates.length})
+                  </div>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    {availableDates.map(date => {
+                      const dateGroup = groups.find(g => g.date === date);
+                      const count = dateGroup?.units.length || 0;
+                      const isActive = filterDate === date;
+                      return (
+                        <button key={date}
+                          onClick={() => setFilterDate(isActive ? '' : date)}
+                          className={`px-2.5 py-2 rounded-lg text-left text-xs transition-colors ${isActive ? 'bg-stone-900 text-stone-50' : 'bg-white border border-stone-200 text-stone-700 hover:border-stone-400'}`}>
+                          <div className="flex items-center justify-between gap-1">
+                            <span className="font-mono truncate">
+                              {new Date(date + 'T12:00:00').toLocaleDateString('en-US', { month:'short', day:'numeric', weekday:'short' })}
+                            </span>
+                            <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded-full flex-shrink-0 ${isActive ? 'bg-stone-700 text-stone-100' : 'bg-emerald-100 text-emerald-800'}`}>
+                              {count}
+                            </span>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* Building filter — chips, multi-select. Only shown when
+                 there's more than one building in the data. */}
+              {availableBuildings.length > 1 && (
+                <div>
+                  <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1.5">Building</div>
+                  <div className="flex gap-1.5 flex-wrap">
+                    {availableBuildings.map(b => {
+                      const active = filterBuildings.has(b);
+                      return (
+                        <button key={b} onClick={() => toggleBuilding(b)}
+                          className={`px-2.5 py-1 rounded-full text-xs font-mono flex items-center gap-1 transition-colors ${active ? 'bg-stone-900 text-stone-50' : 'bg-white border border-stone-300 text-stone-600 hover:border-stone-500'}`}>
+                          {active && <Check size={10} />}
+                          {b}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* Apartment search — fast text filter on unit label. */}
+              <div>
+                <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1.5">Apartment</div>
+                <input type="text" value={apartmentSearch}
+                  onChange={(e) => setApartmentSearch(e.target.value)}
+                  placeholder="e.g. 305"
+                  className="w-full px-3 py-2 rounded-lg border border-stone-300 bg-white text-sm focus:outline-none focus:border-stone-900" />
+              </div>
+
+              {activeFilterCount > 0 && (
+                <button onClick={clearFilters}
+                  className="text-xs text-stone-600 hover:text-stone-900 font-mono underline">
+                  Clear all filters
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
       {!loaded ? <Splash text="Loading…" /> : groups.length === 0 ? (
         <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
           No cleanings in this period.
         </div>
+      ) : filteredGroups.length === 0 ? (
+        <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
+          No cleanings match the current filters.
+          {activeFilterCount > 0 && (
+            <button onClick={clearFilters}
+              className="block mx-auto mt-2 text-xs text-stone-700 hover:text-stone-900 font-mono underline">
+              Clear all filters
+            </button>
+          )}
+        </div>
       ) : (
         <div className="space-y-6">
-          {groups.map(g => (
+          {filteredGroups.map(g => (
             <div key={g.date}>
               <div className="text-sm font-mono text-stone-500 mb-2 uppercase tracking-wider">
                 {new Date(g.date + 'T12:00:00').toLocaleDateString('en-US', { weekday:'long', month:'long', day:'numeric', year:'numeric' })}
@@ -13544,22 +13706,51 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
         </span>
         <ChevronRight size={14} className={`text-blue-700 transition-transform ${collapsed ? '' : 'rotate-90'}`} />
       </button>
-      {!collapsed && (
-        <div className="space-y-2">
-          {targets.map(t => (
-            <AssignmentCard key={t.id} target={t} busy={busy} propertyId={propertyId}
-              onView={() => setOpened(t)}
-              onStart={() => updateStatus(t, 'in_progress')}
-              onPause={() => updateStatus(t, 'paused')}
-              onMoveToPending={() => updateStatus(t, 'pending')}
-              onDone={() => updateStatus(t, 'done')}
-              onReopen={() => updateStatus(t, 'pending')}
-              onBlocked={() => setStatusModal({ target: t })}
-              onReassign={() => setReassignTarget(t)}
-              onOpenBedroomHistory={onOpenBedroomHistory} />
-          ))}
-        </div>
-      )}
+      {!collapsed && (() => {
+        // Split priority and non-priority so the visual divider matches
+        // the rest of the app — priority items live at the top, then a
+        // small "everything else" separator. When there's no priority
+        // (or no non-priority) the divider doesn't render — single-group
+        // case is just a flat list.
+        const priorityT = targets.filter(t => t.priority && t.status !== 'done');
+        const restT = targets.filter(t => !(t.priority && t.status !== 'done'));
+        const renderCard = (t) => (
+          <AssignmentCard key={t.id} target={t} busy={busy} propertyId={propertyId}
+            onView={() => setOpened(t)}
+            onStart={() => updateStatus(t, 'in_progress')}
+            onPause={() => updateStatus(t, 'paused')}
+            onMoveToPending={() => updateStatus(t, 'pending')}
+            onDone={() => updateStatus(t, 'done')}
+            onReopen={() => updateStatus(t, 'pending')}
+            onBlocked={() => setStatusModal({ target: t })}
+            onReassign={() => setReassignTarget(t)}
+            onOpenBedroomHistory={onOpenBedroomHistory} />
+        );
+        return (
+          <div className="space-y-2">
+            {priorityT.length > 0 && (
+              <>
+                <div className="flex items-center gap-2 px-1">
+                  <AlertCircle size={12} className="text-red-700 flex-shrink-0" />
+                  <span className="text-[10px] uppercase tracking-wider font-mono font-bold text-red-700">
+                    Priority — do these first ({priorityT.length})
+                  </span>
+                  <div className="flex-1 h-px bg-red-200" />
+                </div>
+                {priorityT.map(renderCard)}
+              </>
+            )}
+            {priorityT.length > 0 && restT.length > 0 && (
+              <div className="py-1 flex items-center gap-2 px-1">
+                <div className="flex-1 h-px bg-blue-200" />
+                <span className="text-[10px] uppercase tracking-wider font-mono text-blue-700">Everything else</span>
+                <div className="flex-1 h-px bg-blue-200" />
+              </div>
+            )}
+            {restT.map(renderCard)}
+          </div>
+        );
+      })()}
 
       {opened && <AssignmentViewer target={opened} onClose={() => setOpened(null)} />}
       {statusModal && (
@@ -13847,7 +14038,16 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
       (t.assignment?.source !== 'pm' || t.assignment?.pm_status === 'approved')
     );
     if (statusFilter === 'done') {
-      filtered.sort((a, b) => new Date(b.completed_at || 0) - new Date(a.completed_at || 0));
+      // Sort Done by building → unit → bedroom (natural compare on the
+      // unit label so "B1-101" comes before "B1-102" before "B2-101").
+      // Owner uses Done to verify specific apartments, so spatial order
+      // beats temporal order for findability. Time-bucketing (Day of /
+      // Last 3d / Older) still groups by date — within each bucket the
+      // items are now ordered by apartment.
+      filtered.sort((a, b) =>
+        naturalCompare(a.unit?.label || '', b.unit?.label || '')
+        || naturalCompare(a.party?.label || '', b.party?.label || '')
+      );
     } else if (statusFilter === 'paused') {
       // Paused tab: assignments paused BY the current user sort to the
       // top (most useful — they can resume their own work first), then

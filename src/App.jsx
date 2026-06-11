@@ -1306,7 +1306,7 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
 // =================================================================
 // EMPLOYEE APP — three-state machine
 // =================================================================
-function EmployeeApp({ employee: employeeInit, onSignOut }) {
+function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false }) {
   // Track the employee locally so PIN changes update the live session
   const [employee, setEmployee] = useState(employeeInit);
   const [shift, setShift] = useState(null);
@@ -1339,10 +1339,15 @@ function EmployeeApp({ employee: employeeInit, onSignOut }) {
   useEffect(() => { reload(); /* eslint-disable-next-line */ }, []);
 
   const reload = async () => {
+    // Only re-attach to shifts matching the current mode. Without this,
+    // an owner who left a preview shift open and then opened the app
+    // normally would resume the preview shift as a real one (or vice
+    // versa). Strict mode-match prevents that.
     const { data: activeShift } = await supabase
       .from('shifts')
       .select('*, customer:customers(*)')
       .eq('employee_id', employee.id)
+      .eq('is_preview', previewMode)
       .is('end_time', null)
       .order('start_time', { ascending: false })
       .limit(1).maybeSingle();
@@ -1400,7 +1405,9 @@ function EmployeeApp({ employee: employeeInit, onSignOut }) {
       .insert({
         employee_id: employee.id,
         customer_id: customerId || null,
-        bill_rate_at_work: propertyType === 'simple' ? billRate : null
+        bill_rate_at_work: propertyType === 'simple' ? billRate : null,
+        // Tag preview-mode shifts so reports/payroll exclude them
+        is_preview: previewMode,
       })
       .select('*, customer:customers(*)').single();
     setBusy(false);
@@ -1652,7 +1659,8 @@ function EmployeeApp({ employee: employeeInit, onSignOut }) {
       .insert({
         shift_id: shift.id, unit_id: unit.id, party_id: party.id,
         bill_rate_at_work: shift.customer?.bill_rate_hourly || null,
-        work_notes: workNotes || null
+        work_notes: workNotes || null,
+        is_preview: previewMode,
       })
       .select('*, unit:units(*), party:parties(*), tasks(*, photos(*))').single();
     setBusy(false);
@@ -1799,6 +1807,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut }) {
         unit_id: pendingStart.unitId,
         party_id: pendingStart.partyId,
         bill_rate_at_work: shift.customer?.bill_rate_hourly || null,
+        is_preview: previewMode,
       })
       .select('*, unit:units(*), party:parties(*), tasks(*, photos(*))').single();
     setBusy(false);
@@ -1823,7 +1832,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut }) {
     const nameToUse = (overrideName || newTaskName || '').trim();
     if (!nameToUse) return;
     if (activeTask) await stopTask(activeTask, false);
-    const insert = { shift_id: shift.id, name: nameToUse };
+    const insert = { shift_id: shift.id, name: nameToUse, is_preview: previewMode };
     if (activeBlock) insert.work_block_id = activeBlock.id;
     if (category) insert.category = category;
     if (subcategory) insert.subcategory = subcategory;
@@ -1847,6 +1856,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut }) {
       name: first.name,
       category: first.category || null,
       subcategory: first.subcategory || null,
+      is_preview: previewMode,
     };
     if (activeBlock) firstInsert.work_block_id = activeBlock.id;
     const { data: firstRow, error: firstErr } = await supabase.from('tasks')
@@ -1868,6 +1878,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut }) {
         name: t.name,
         category: t.category || null,
         subcategory: t.subcategory || null,
+        is_preview: previewMode,
         // Start them at a stable future-ish moment so order is preserved,
         // then immediately stop. They'll appear as "Resume" cards.
         start_time: new Date(now.getTime() + (i + 1) * 1000).toISOString(),
@@ -1905,7 +1916,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut }) {
     if (upErr) { alert('Upload failed: ' + upErr.message); return; }
     const { data: { publicUrl } } = supabase.storage.from(PHOTO_BUCKET).getPublicUrl(path);
     const { data: photo, error: pErr } = await supabase.from('photos')
-      .insert({ task_id: taskId, kind, storage_path: path, public_url: publicUrl }).select().single();
+      .insert({ task_id: taskId, kind, storage_path: path, public_url: publicUrl, is_preview: previewMode }).select().single();
     if (pErr) { alert('Could not save photo: ' + pErr.message); return; }
     setTasks(prev => prev.map(t => t.id === taskId ? { ...t, photos: [...(t.photos || []), photo] } : t));
   };
@@ -3513,6 +3524,7 @@ function compressImage(file) {
 const ASSIGNMENT_STATUSES = {
   pending:      { label: 'Pending',     color: 'bg-stone-100 text-stone-700 border-stone-300' },
   in_progress:  { label: 'In progress', color: 'bg-amber-100 text-amber-800 border-amber-300' },
+  paused:       { label: 'Paused',      color: 'bg-blue-100 text-blue-800 border-blue-300' },
   done:         { label: 'Done',        color: 'bg-emerald-100 text-emerald-800 border-emerald-300' },
   blocked:      { label: 'Blocked',     color: 'bg-red-100 text-red-700 border-red-300' },
 };
@@ -3654,6 +3666,12 @@ function Header({ name, onSignOut, role, employee, onOpenMessages, onLogoClick }
 function ManagerShell({ employee, onSignOut }) {
   const [tab, setTab] = useState('daily');
   const [showMessages, setShowMessages] = useState(false);
+  // "Preview as cleaner" mode — owner can browse the cleaner UI as
+  // themselves (replaces the need for a dummy "Beta" account). All
+  // their actions in this mode go to the database under their own
+  // employee record, just like a normal cleaner shift. They can
+  // exit any time via the banner.
+  const [previewMode, setPreviewMode] = useState(false);
   const showMoneyTabs = canSeeMoney(employee); // owner only
 
   // If a manager somehow lands on the money tab (e.g. via stale state), bounce them home
@@ -3666,6 +3684,53 @@ function ManagerShell({ employee, onSignOut }) {
   const openMessages = () => setShowMessages(true);
   const goHome = () => setTab('daily');
 
+  // Exiting preview mode: gracefully close any open preview-mode shift
+  // / work_block so we don't leave dangling rows. They're flagged
+  // is_preview so reports already ignore them, but cleaning them up
+  // keeps the DB tidy and avoids the next preview session "resuming"
+  // the stale one.
+  const exitPreviewMode = async () => {
+    try {
+      const ts = new Date().toISOString();
+      const { data: openShifts } = await supabase.from('shifts')
+        .select('id').eq('employee_id', employee.id)
+        .eq('is_preview', true).is('end_time', null);
+      if (openShifts && openShifts.length > 0) {
+        const ids = openShifts.map(s => s.id);
+        await supabase.from('work_blocks').update({ end_time: ts })
+          .in('shift_id', ids).is('end_time', null);
+        await supabase.from('shifts').update({ end_time: ts })
+          .in('id', ids);
+      }
+    } catch (e) {
+      console.warn('[exitPreviewMode] cleanup failed', e);
+    }
+    setPreviewMode(false);
+  };
+
+  // Preview mode: render the cleaner-side EmployeeApp with a sticky
+  // banner that lets the owner return to the manager view. In preview
+  // mode every write (shift, work_block, task, photo) carries
+  // is_preview=true so reports, payroll, and the live-cleaners sheet
+  // filter the noise out.
+  if (previewMode) {
+    return (
+      <div className="min-h-screen bg-stone-50">
+        <div className="bg-amber-600 text-white px-4 py-2 text-xs font-mono flex items-center justify-between sticky top-0 z-50">
+          <div className="flex items-center gap-2">
+            <Eye size={12} /> Preview as cleaner — actions don't affect reports or payroll
+          </div>
+          <button onClick={exitPreviewMode}
+            className="px-2 py-0.5 rounded bg-white/20 hover:bg-white/30">
+            Exit preview
+          </button>
+        </div>
+        <EmployeeApp employee={employee} previewMode={true}
+          onSignOut={exitPreviewMode} />
+      </div>
+    );
+  }
+
   // Messages takes over the whole screen as an overlay
   if (showMessages) {
     return <StaffMessagesTab employee={employee} onClose={() => setShowMessages(false)} />;
@@ -3673,6 +3738,15 @@ function ManagerShell({ employee, onSignOut }) {
 
   return (
     <div className="min-h-screen bg-stone-50">
+      {/* Floating "Preview as cleaner" button for owners only — bottom-right,
+         above the tab bar. Lets them see the app as a cleaner would. */}
+      {employee?.role === 'owner' && (
+        <button onClick={() => setPreviewMode(true)}
+          className="fixed bottom-20 right-4 z-40 px-3 py-2 rounded-full bg-stone-900 hover:bg-stone-800 text-stone-50 text-xs font-mono shadow-lg flex items-center gap-1.5">
+          <Eye size={12} /> Preview as cleaner
+        </button>
+      )}
+
       {tab === 'daily'       && <DailyView         employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} onLogoClick={goHome} />}
       {tab === 'dashboard'   && <ManagerDashboard  employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} onLogoClick={goHome} />}
       {tab === 'team'        && <EmployeeAdmin    employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} onLogoClick={goHome} />}
@@ -3729,6 +3803,7 @@ function ManagerDashboard({ employee, onSignOut, onOpenMessages, onLogoClick }) 
       .from('shifts')
       .select('*, employee:employees(id,name), customer:customers(id,name,property_type,bill_rate_hourly), work_blocks(id, end_time, start_time, bill_rate_at_work, unit:units(label), party:parties(label))')
       .gte('start_time', since)
+      .eq('is_preview', false)  // Hide preview-mode shifts from the dashboard
       .order('start_time', { ascending: false });
     setShifts(data || []); setLoaded(true);
   }, [filter]);
@@ -4275,6 +4350,7 @@ function ShiftDetail({ shiftId, viewerRole, viewerEmployee, onBack }) {
   const [deletingShift, setDeletingShift] = useState(false);
   const [editingBlock, setEditingBlock] = useState(null); // block obj
   const [deletingBlock, setDeletingBlock] = useState(null); // block obj
+  const [movingBlock, setMovingBlock] = useState(null); // block obj for MoveBlockModal
   const [editingAdjustment, setEditingAdjustment] = useState(false);
   const [bedroomHistory, setBedroomHistory] = useState(null); // params for history view
   const [busy, setBusy] = useState(false);
@@ -4474,6 +4550,7 @@ function ShiftDetail({ shiftId, viewerRole, viewerEmployee, onBack }) {
                   propertyId={shift.customer_id}
                   onEdit={() => setEditingBlock(b)}
                   onDelete={() => setDeletingBlock(b)}
+                  onMove={() => setMovingBlock(b)}
                   onOpenBedroomHistory={setBedroomHistory} />)}
               </div>
             )}
@@ -4550,6 +4627,13 @@ function ShiftDetail({ shiftId, viewerRole, viewerEmployee, onBack }) {
           busy={busy}
           onConfirm={() => deleteBlock(deletingBlock)}
           onClose={() => setDeletingBlock(null)} />
+      )}
+      {movingBlock && (
+        <MoveBlockModal
+          block={movingBlock}
+          propertyId={shift?.customer_id}
+          onSaved={() => { setMovingBlock(null); reload(); }}
+          onClose={() => setMovingBlock(null)} />
       )}
       {editingAdjustment && shift && (
         <AdjustmentModal
@@ -4928,7 +5012,7 @@ function WorkBlockAssignmentLink({ block, propertyId, compact = false }) {
   );
 }
 
-function WorkBlockDetail({ block, rate, showMoney, canEdit, onEdit, onDelete, propertyId, onOpenBedroomHistory }) {
+function WorkBlockDetail({ block, rate, showMoney, canEdit, onEdit, onDelete, onMove, propertyId, onOpenBedroomHistory }) {
   const dur = (block.end_time ? new Date(block.end_time) : new Date()) - new Date(block.start_time);
   const blockRate = block.bill_rate_at_work || rate || 0;
   const billable = block.end_time ? (dur / 1000 / 3600) * blockRate : 0;
@@ -4970,12 +5054,18 @@ function WorkBlockDetail({ block, rate, showMoney, canEdit, onEdit, onDelete, pr
           {block.tasks.map(t => <TaskDetail key={t.id} task={t} compact />)}
         </div>
       )}
-      {canEdit && (onEdit || onDelete) && (
-        <div className="mt-3 pt-3 border-t border-stone-100 flex gap-2">
+      {canEdit && (onEdit || onDelete || onMove) && (
+        <div className="mt-3 pt-3 border-t border-stone-100 flex gap-2 flex-wrap">
           {onEdit && (
             <button onClick={onEdit}
               className="flex-1 py-2 rounded-xl bg-stone-50 hover:bg-stone-100 text-stone-700 text-xs font-medium flex items-center justify-center gap-1.5">
               <Edit2 size={12} /> Edit times
+            </button>
+          )}
+          {onMove && (
+            <button onClick={onMove}
+              className="flex-1 py-2 rounded-xl bg-amber-50 hover:bg-amber-100 text-amber-800 text-xs font-medium flex items-center justify-center gap-1.5">
+              <ChevronRight size={12} /> Move bedroom
             </button>
           )}
           {onDelete && (
@@ -7927,6 +8017,7 @@ function InvoiceView({ employee, onSignOut, onOpenMessages, onLogoClick, topTogg
       .select('*, shift:shifts!inner(employee:employees(name), customer_id), unit:units(label), party:parties(*)')
       .gte('start_time', start + 'T00:00:00')
       .lte('start_time', end + 'T23:59:59')
+      .eq('is_preview', false)  // Never bill for preview-mode work
       .not('end_time', 'is', null);
     const propBlocks = (blocks || []).filter(b => b.shift?.customer_id === selectedId);
     const blocksByParty = {};
@@ -8137,6 +8228,7 @@ function ExportView({ employee, onSignOut, onOpenMessages, onLogoClick, topToggl
       .select('start_time, end_time, bill_rate_at_work, idle_seconds, manual_adjustment_seconds, auto_clocked_out, adjustment_notes, employee:employees(name), customer:customers(name, property_type, bill_rate_hourly), work_blocks(start_time, end_time, bill_rate_at_work)')
       .gte('start_time', start + 'T00:00:00')
       .lte('start_time', end + 'T23:59:59')
+      .eq('is_preview', false)  // Never include preview shifts in payroll
       .not('end_time', 'is', null)
       .order('start_time');
     const rows = (data || []).map(s => {
@@ -9430,6 +9522,7 @@ function PortalHome({ property, portalKind, portalUser, hasMultipleProperties, o
       const { data: shifts } = await supabase.from('shifts')
         .select('id, start_time, end_time, tasks(id, photos(kind, resolved_at))')
         .eq('customer_id', property.id)
+        .eq('is_preview', false)
         .gte('start_time', since)
         .order('start_time', { ascending: false });
       const out = (shifts || []).map(s => {
@@ -9845,6 +9938,7 @@ function PortalUnitDay({ property, unitId, date, portalUser, onBack }) {
         .from('work_blocks')
         .select('*, party:parties(label,full_name), shift:shifts!inner(customer_id), tasks(*, photos(*))')
         .eq('unit_id', unitId)
+        .eq('is_preview', false)
         .gte('start_time', dayStart).lte('start_time', dayEnd)
         .order('start_time');
       const filtered = (bs || []).filter(b => b.shift?.customer_id === property.id);
@@ -9855,6 +9949,7 @@ function PortalUnitDay({ property, unitId, date, portalUser, onBack }) {
         .from('shifts')
         .select('*, tasks(*, photos(*))')
         .eq('customer_id', property.id)
+        .eq('is_preview', false)
         .gte('start_time', dayStart).lte('start_time', dayEnd)
         .order('start_time');
       // Wrap each shift as a "block" for uniform display
@@ -10438,7 +10533,8 @@ function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenMess
         .from('shifts')
         .select('id, start_time, customer_id')
         .gte('start_time', start)
-        .lt('start_time', end);
+        .lt('start_time', end)
+        .eq('is_preview', false);  // Don't mark calendar days for preview-only activity
       if (sErr) { console.error('[DailyCalendar] shifts error:', sErr); }
       if (cancelled) return;
 
@@ -10630,22 +10726,38 @@ function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenMess
 // Day detail: shows all properties + units cleaned on this date
 function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit }) {
   const [data, setData] = useState(null);
+  // Filters — multi-select for cleaners + properties so the owner can
+  // zoom into a specific person or building's day. Empty Set = "no filter".
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const [filterCleaners, setFilterCleaners] = useState(new Set());
+  const [filterProperties, setFilterProperties] = useState(new Set());
+  const [filterCategories, setFilterCategories] = useState(new Set());
 
   useEffect(() => { (async () => {
     const dayStart = `${date}T00:00:00`;
     const dayEnd   = `${date}T23:59:59`;
 
-    // Get all shifts that started this day
+    // Get all shifts that started this day. Include idle_seconds so the
+    // per-cleaner breakdown can show clocked-in time + idle adjustments.
+    // Exclude preview-mode shifts (owner using "Preview as cleaner").
     const { data: shifts } = await supabase
       .from('shifts')
-      .select('*, employee:employees(id,name), customer:customers(id,name,property_type,bill_rate_hourly), work_blocks(id, start_time, end_time, bill_rate_at_work, unit:units(id, label), party:parties(id, label, full_name), tasks(*, photos(*)))')
+      .select('id, start_time, end_time, customer_id, idle_seconds, employee:employees(id,name), customer:customers(id,name,property_type,bill_rate_hourly), work_blocks(id, start_time, end_time, bill_rate_at_work, unit:units(id, label), party:parties(id, label, full_name), tasks(*, photos(*)))')
       .gte('start_time', dayStart)
       .lte('start_time', dayEnd)
+      .eq('is_preview', false)
       .order('start_time');
 
     // Group by property → unit
     // For multi_unit shifts we use work_blocks. For simple shifts, group by property only.
     const groups = {};  // { propertyId: { property, units: { unitId: { unitLabel, employees: Set, totalMs, hasDamage, photoCount } } } }
+
+    // Per-cleaner aggregate: { employeeId: { name, totalActiveMs, totalShiftMs, idleSeconds, hasOpenShift, units: Set, categories: Set } }
+    // - totalActiveMs = sum of work_block durations (the time they were billing for)
+    // - totalShiftMs = sum of shift durations (total clocked-in time)
+    // - idleSeconds = sum of idle_seconds across shifts (DB-detected inactivity)
+    // - hasOpenShift = at least one shift still active (no end_time)
+    const byCleaner = {};
 
     (shifts || []).forEach(s => {
       if (!s.customer_id) return;
@@ -10654,6 +10766,23 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit }) {
         groups[propId] = { property: s.customer, units: {}, simpleShifts: [] };
       }
       const propGroup = groups[propId];
+
+      // Per-cleaner aggregation
+      const eId = s.employee?.id || 'unknown';
+      if (!byCleaner[eId]) {
+        byCleaner[eId] = {
+          employeeId: eId, name: s.employee?.name || '—',
+          totalActiveMs: 0, totalShiftMs: 0, idleSeconds: 0,
+          hasOpenShift: false, units: new Set(), categories: new Set(),
+          properties: new Set(),
+        };
+      }
+      const c = byCleaner[eId];
+      const shiftMs = (s.end_time ? new Date(s.end_time) : new Date()) - new Date(s.start_time);
+      c.totalShiftMs += shiftMs;
+      c.idleSeconds += (s.idle_seconds || 0);
+      if (!s.end_time) c.hasOpenShift = true;
+      c.properties.add(s.customer?.name || '—');
 
       if (s.customer.property_type === 'multi_unit') {
         (s.work_blocks || []).forEach(b => {
@@ -10668,22 +10797,29 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit }) {
           const ug = propGroup.units[uId];
           ug.employees.add(s.employee?.name || '?');
           ug.blocks.push({ block: b, employee: s.employee, rate: s.customer.bill_rate_hourly });
-          if (b.end_time) {
-            ug.totalMs += new Date(b.end_time) - new Date(b.start_time);
-          } else {
-            ug.totalMs += new Date() - new Date(b.start_time);
-          }
-          (b.tasks || []).forEach(t => (t.photos || []).forEach(p => {
-            ug.photoCount++;
-            if (p.kind === 'damage') ug.hasDamage = true;
-          }));
+          const blockMs = b.end_time
+            ? new Date(b.end_time) - new Date(b.start_time)
+            : new Date() - new Date(b.start_time);
+          ug.totalMs += blockMs;
+          c.totalActiveMs += blockMs;
+          c.units.add(b.unit.label);
+          (b.tasks || []).forEach(t => {
+            if (t.category) c.categories.add(t.category);
+            (t.photos || []).forEach(p => {
+              ug.photoCount++;
+              if (p.kind === 'damage') ug.hasDamage = true;
+            });
+          });
         });
       } else {
         propGroup.simpleShifts.push(s);
+        // For simple-property shifts there's no work_block breakdown,
+        // so active time equals shift time
+        c.totalActiveMs += shiftMs;
       }
     });
 
-    setData({ groups, shifts: shifts || [] });
+    setData({ groups, shifts: shifts || [], byCleaner });
   })(); }, [date]);
 
   if (!data) return <Splash text="Loading…" />;
@@ -10711,6 +10847,173 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit }) {
       </div>
 
       <div className="px-5 pt-6">
+        {/* Filters + per-cleaner breakdown live above the property
+           grouping so the owner can quickly see "who worked how long"
+           before drilling into specific properties/units. */}
+        {data.shifts.length > 0 && (() => {
+          // Compute filter options from the unfiltered data
+          const allCleaners = Object.values(data.byCleaner).map(c => ({ id: c.employeeId, name: c.name }))
+            .sort((a, b) => a.name.localeCompare(b.name));
+          const allProperties = Object.values(data.groups).map(g => g.property?.name).filter(Boolean);
+          const uniqueProps = [...new Set(allProperties)].sort();
+          const allCategories = new Set();
+          Object.values(data.byCleaner).forEach(c => c.categories.forEach(cat => allCategories.add(cat)));
+          const availableCategories = TASK_CATEGORIES.filter(c => allCategories.has(c.id));
+
+          // Apply filters to per-cleaner list
+          const cleanersFiltered = Object.values(data.byCleaner).filter(c => {
+            if (filterCleaners.size > 0 && !filterCleaners.has(c.employeeId)) return false;
+            if (filterProperties.size > 0) {
+              const hit = [...c.properties].some(p => filterProperties.has(p));
+              if (!hit) return false;
+            }
+            if (filterCategories.size > 0) {
+              const hit = [...c.categories].some(cat => filterCategories.has(cat));
+              if (!hit) return false;
+            }
+            return true;
+          }).sort((a, b) => b.totalActiveMs - a.totalActiveMs);
+
+          const activeFilterCount = filterCleaners.size + filterProperties.size + filterCategories.size;
+          const toggleSet = (setter) => (value) => setter(prev => {
+            const next = new Set(prev);
+            if (next.has(value)) next.delete(value);
+            else next.add(value);
+            return next;
+          });
+          return (
+            <>
+              {(allCleaners.length > 0 || uniqueProps.length > 1 || availableCategories.length > 0) && (
+                <div className="mb-4">
+                  <button onClick={() => setFiltersOpen(o => !o)}
+                    className={`w-full flex items-center justify-between px-3 py-2 rounded-xl border ${activeFilterCount > 0 ? 'bg-amber-50 border-amber-300 text-amber-900' : 'bg-white border-stone-200 text-stone-600'}`}>
+                    <div className="flex items-center gap-2">
+                      <Settings size={14} />
+                      <span className="text-xs uppercase tracking-wider font-mono">
+                        Filters{activeFilterCount > 0 ? ` (${activeFilterCount})` : ''}
+                      </span>
+                    </div>
+                    <ChevronRight size={14} className={`transition-transform ${filtersOpen ? 'rotate-90' : ''}`} />
+                  </button>
+                  {filtersOpen && (
+                    <div className="p-3 rounded-xl bg-stone-50 border border-stone-200 mt-1 space-y-3">
+                      {allCleaners.length > 0 && (
+                        <div>
+                          <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1">Cleaner</div>
+                          <div className="flex gap-1.5 flex-wrap">
+                            {allCleaners.map(c => {
+                              const active = filterCleaners.has(c.id);
+                              return (
+                                <button key={c.id} onClick={() => toggleSet(setFilterCleaners)(c.id)}
+                                  className={`px-2.5 py-1 rounded-full text-xs font-mono flex items-center gap-1 ${active ? 'bg-stone-900 text-stone-50' : 'bg-white border border-stone-300 text-stone-600'}`}>
+                                  {active && <Check size={10} />} {c.name}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+                      {uniqueProps.length > 1 && (
+                        <div>
+                          <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1">Property</div>
+                          <div className="flex gap-1.5 flex-wrap">
+                            {uniqueProps.map(name => {
+                              const active = filterProperties.has(name);
+                              return (
+                                <button key={name} onClick={() => toggleSet(setFilterProperties)(name)}
+                                  className={`px-2.5 py-1 rounded-full text-xs font-mono flex items-center gap-1 ${active ? 'bg-stone-900 text-stone-50' : 'bg-white border border-stone-300 text-stone-600'}`}>
+                                  {active && <Check size={10} />} {name}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+                      {availableCategories.length > 0 && (
+                        <div>
+                          <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1">Task category</div>
+                          <div className="flex gap-1.5 flex-wrap">
+                            {availableCategories.map(c => {
+                              const active = filterCategories.has(c.id);
+                              return (
+                                <button key={c.id} onClick={() => toggleSet(setFilterCategories)(c.id)}
+                                  className={`px-2.5 py-1 rounded-full text-xs font-mono flex items-center gap-1 ${active ? 'bg-stone-900 text-stone-50' : 'bg-white border border-stone-300 text-stone-600'}`}>
+                                  {active && <Check size={10} />} {c.label}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+                      {activeFilterCount > 0 && (
+                        <button onClick={() => { setFilterCleaners(new Set()); setFilterProperties(new Set()); setFilterCategories(new Set()); }}
+                          className="text-[10px] uppercase tracking-wider font-mono text-amber-700 hover:text-amber-900">
+                          Clear all filters
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Per-cleaner breakdown card */}
+              {cleanersFiltered.length > 0 && (
+                <div className="mb-6 p-4 rounded-2xl bg-stone-900 text-stone-50">
+                  <div className="text-xs uppercase tracking-wider text-stone-400 font-mono mb-3 flex items-center gap-2">
+                    <Users size={12} /> By cleaner
+                  </div>
+                  <div className="space-y-2">
+                    {cleanersFiltered.map(c => {
+                      // Idle handling: subtract idle from clocked-in to get an
+                      // "adjusted" billable estimate. Flag excessive idle (over
+                      // 15% of shift time, or more than 30 min) so the owner
+                      // can review.
+                      const idleMs = (c.idleSeconds || 0) * 1000;
+                      const adjustedMs = Math.max(0, c.totalShiftMs - idleMs);
+                      const idlePct = c.totalShiftMs > 0 ? (idleMs / c.totalShiftMs) : 0;
+                      const idleHighlight = idleMs > 30 * 60 * 1000 || idlePct > 0.15;
+                      return (
+                        <div key={c.employeeId} className="flex items-start justify-between gap-3 py-1.5 border-b border-stone-800 last:border-0">
+                          <div className="flex-1 min-w-0">
+                            <div className="font-serif text-base truncate flex items-center gap-2">
+                              {c.name}
+                              {c.hasOpenShift && <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />}
+                            </div>
+                            <div className="text-[11px] font-mono text-stone-400 mt-0.5">
+                              {[...c.units].slice(0, 4).join(', ')}{c.units.size > 4 && ` +${c.units.size - 4} more`}
+                            </div>
+                          </div>
+                          <div className="text-right flex-shrink-0">
+                            {/* Active work time first, then total clocked-in in parens. */}
+                            <div className="font-mono text-sm">
+                              {fmtTimeShort(c.totalActiveMs)}
+                              <span className="text-stone-400 ml-1">({fmtTimeShort(c.totalShiftMs)})</span>
+                            </div>
+                            {idleHighlight && (
+                              <div className="text-[10px] font-mono text-amber-300 mt-0.5 flex items-center justify-end gap-1">
+                                <AlertCircle size={10} />
+                                {fmtTimeShort(idleMs)} idle · adj {fmtTimeShort(adjustedMs)}
+                              </div>
+                            )}
+                            {!idleHighlight && idleMs > 0 && (
+                              <div className="text-[10px] font-mono text-stone-500 mt-0.5">
+                                {fmtTimeShort(idleMs)} idle
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <div className="mt-2 pt-2 text-[10px] text-stone-500 font-mono">
+                    Active = sum of work blocks. (Clocked-in) = total shift time. Adj = adjusted for idle.
+                  </div>
+                </div>
+              )}
+            </>
+          );
+        })()}
+
         {propIds.length === 0 ? (
           <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
             No cleanings on this date.
@@ -12353,6 +12656,7 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
             <AssignmentCard key={t.id} target={t} busy={busy} propertyId={propertyId}
               onView={() => setOpened(t)}
               onStart={() => updateStatus(t, 'in_progress')}
+              onPause={() => updateStatus(t, 'paused')}
               onDone={() => updateStatus(t, 'done')}
               onReopen={() => updateStatus(t, 'pending')}
               onBlocked={() => setStatusModal({ target: t })}
@@ -12379,7 +12683,7 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
 }
 
 // Reusable card for one assignment target, used in banner + panel
-function AssignmentCard({ target, busy, onView, onStart, onDone, onReopen, onBlocked, onReassign, onGoToBedroom, onOpenBedroomHistory, propertyId }) {
+function AssignmentCard({ target, busy, onView, onStart, onPause, onDone, onReopen, onBlocked, onReassign, onGoToBedroom, onOpenBedroomHistory, propertyId }) {
   const t = target;
   const s = ASSIGNMENT_STATUSES[t.status] || ASSIGNMENT_STATUSES.pending;
   const isDone = t.status === 'done';
@@ -12395,6 +12699,7 @@ function AssignmentCard({ target, busy, onView, onStart, onDone, onReopen, onBlo
         .from('work_blocks')
         .select('id, end_time, shift:shifts!inner(employee:employees(id, name), customer_id)')
         .eq('unit_id', t.unit_id).eq('party_id', t.party_id)
+        .eq('is_preview', false)
         .gte('start_time', todayStart.toISOString())
         .is('end_time', null);
       const cleaners = (data || [])
@@ -12439,9 +12744,8 @@ function AssignmentCard({ target, busy, onView, onStart, onDone, onReopen, onBlo
             <div className="text-xs text-red-700 italic mt-1">"{t.status_notes}"</div>
           )}
         </div>
-        {/* Status + View doc chip side by side. View doc lives here
-           (next to the status) so the action buttons row below stays
-           clean and uniform. */}
+        {/* Status + chips row: View doc + History live as small pills next
+           to the status. Keeps the action-button row uniform below. */}
         <div className="flex items-center gap-1.5 flex-shrink-0 flex-wrap justify-end">
           <span className={`text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full border ${s.color}`}>
             {s.label}
@@ -12450,20 +12754,35 @@ function AssignmentCard({ target, busy, onView, onStart, onDone, onReopen, onBlo
             className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-100 hover:bg-stone-200 text-stone-700 flex items-center gap-1">
             <Eye size={10} /> View doc
           </button>
+          {onOpenBedroomHistory && t.unit_id && t.party_id && (
+            <button onClick={() => onOpenBedroomHistory({
+                unitId: t.unit_id, unitLabel: t.unit?.label,
+                partyId: t.party_id, partyLabel: t.party?.label
+              })} disabled={busy}
+              className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-100 hover:bg-stone-200 text-stone-700 flex items-center gap-1 disabled:opacity-50">
+              <Clock size={10} /> History
+            </button>
+          )}
         </div>
       </div>
       {/* Action buttons row — uniform h-9 / px-3 / text-xs across all
-         so they line up. The exception is the "Go to this bedroom"
-         button below, which is intentionally larger as the primary
-         workflow CTA. */}
+         so they line up. Start / Pause / Done / Blocked / Reassign.
+         The "Go to this bedroom" button below is intentionally larger
+         as the primary workflow CTA. */}
       <div className="flex gap-2 flex-wrap">
-        {(t.status === 'pending' || t.status === 'blocked' || t.status === 'in_progress') && (
+        {(t.status === 'pending' || t.status === 'blocked' || t.status === 'in_progress' || t.status === 'paused') && (
           <button onClick={onStart} disabled={busy}
             className="h-9 px-3 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-medium flex items-center gap-1 disabled:opacity-50">
-            <Play size={12} /> {t.status === 'in_progress' ? 'I\'m on it too' : 'Start'}
+            <Play size={12} /> {t.status === 'in_progress' ? 'I\'m on it too' : (t.status === 'paused' ? 'Resume' : 'Start')}
           </button>
         )}
-        {(t.status === 'pending' || t.status === 'in_progress' || t.status === 'blocked') && (
+        {onPause && (t.status === 'in_progress') && (
+          <button onClick={onPause} disabled={busy}
+            className="h-9 px-3 rounded-lg border border-blue-200 hover:bg-blue-50 text-blue-700 text-xs font-medium flex items-center gap-1 disabled:opacity-50">
+            <Pause size={12} /> Pause
+          </button>
+        )}
+        {(t.status === 'pending' || t.status === 'in_progress' || t.status === 'blocked' || t.status === 'paused') && (
           <button onClick={onDone} disabled={busy}
             className="h-9 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-medium flex items-center gap-1 disabled:opacity-50">
             <Check size={12} /> Done
@@ -12475,7 +12794,7 @@ function AssignmentCard({ target, busy, onView, onStart, onDone, onReopen, onBlo
             <Play size={12} /> Reopen
           </button>
         )}
-        {(t.status === 'pending' || t.status === 'in_progress') && (
+        {(t.status === 'pending' || t.status === 'in_progress' || t.status === 'paused') && (
           <button onClick={onBlocked} disabled={busy}
             className="h-9 px-3 rounded-lg border border-red-200 hover:bg-red-50 text-red-700 text-xs font-medium flex items-center gap-1 disabled:opacity-50">
             <AlertCircle size={12} /> Blocked
@@ -12485,15 +12804,6 @@ function AssignmentCard({ target, busy, onView, onStart, onDone, onReopen, onBlo
           <button onClick={onReassign} disabled={busy}
             className="h-9 px-3 rounded-lg border border-stone-300 hover:bg-stone-50 text-stone-600 text-xs font-medium flex items-center gap-1 disabled:opacity-50 ml-auto">
             <Edit2 size={12} /> Reassign
-          </button>
-        )}
-        {onOpenBedroomHistory && t.unit_id && t.party_id && (
-          <button onClick={() => onOpenBedroomHistory({
-              unitId: t.unit_id, unitLabel: t.unit?.label,
-              partyId: t.party_id, partyLabel: t.party?.label
-            })} disabled={busy}
-            className={`h-9 px-3 rounded-lg bg-stone-100 hover:bg-stone-200 text-stone-700 text-xs font-medium flex items-center gap-1 disabled:opacity-50 ${onReassign ? '' : 'ml-auto'}`}>
-            <Clock size={12} /> History
           </button>
         )}
       </div>
@@ -12563,9 +12873,12 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
 
   // Filters — apply on top of the loaded targets
   const [filtersOpen, setFiltersOpen] = useState(false);
-  const [filterType, setFilterType] = useState('all');     // 'all' or assignment_type value
-  const [filterCleaner, setFilterCleaner] = useState('all'); // 'all' or employee id
-  const [filterDay, setFilterDay] = useState('all');       // 'all' | 'today' | 'week' | YYYY-MM-DD
+  // Filters use Sets so the user can pick multiple values at once
+  // (e.g. "show both Matias and Eli"). Empty Set means "no filter".
+  const [filterTypes, setFilterTypes] = useState(new Set());        // assignment_type values
+  const [filterCleaners, setFilterCleaners] = useState(new Set());  // employee ids
+  const [filterDays, setFilterDays] = useState(new Set());          // 'today' | 'week' | YYYY-MM-DD strings
+  const [filterCategories, setFilterCategories] = useState(new Set()); // task categories like 'bedroom'
 
   // Track which unit-bundles are expanded on the Pending view
   const [bundleOpen, setBundleOpen] = useState({}); // { unitId: boolean }
@@ -12600,6 +12913,30 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
   };
   useEffect(() => { load(); /* eslint-disable-next-line */ }, [propertyId, statusFilter]);
   useAssignmentSync(load, 'asgn-tab');
+
+  // Map of "<unit_id>:<party_id>" → Set of task categories ever worked
+  // at that bedroom for this property. Used by the category filter so
+  // the owner can ask "show me bedrooms where bathroom work happened."
+  const [tasksByBedroom, setTasksByBedroom] = useState({});
+  useEffect(() => {
+    if (!propertyId) return;
+    (async () => {
+      // Pull every task for this property via the work_block → shift chain
+      const { data } = await supabase.from('tasks')
+        .select('category, work_block:work_blocks!inner(unit_id, party_id, shift:shifts!inner(customer_id))')
+        .not('category', 'is', null);
+      const map = {};
+      (data || []).forEach(t => {
+        const wb = t.work_block;
+        if (!wb || wb.shift?.customer_id !== propertyId) return;
+        if (!wb.unit_id || !wb.party_id) return;
+        const key = `${wb.unit_id}:${wb.party_id}`;
+        if (!map[key]) map[key] = new Set();
+        map[key].add(t.category);
+      });
+      setTasksByBedroom(map);
+    })();
+  }, [propertyId, targets.length]);
 
   const updateStatus = async (target, newStatus, statusNotes) => {
     setBusy(true);
@@ -12668,27 +13005,42 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
     return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
   })();
   const filteredTargets = targets.filter(t => {
-    if (filterType !== 'all' && (t.assignment?.assignment_type || '') !== filterType) return false;
-    if (filterCleaner !== 'all') {
-      // Match against starter OR completer — useful for "show me everything Matias touched"
-      const ids = [t.starter?.id, t.completer?.id].filter(Boolean);
-      if (!ids.includes(filterCleaner)) return false;
+    // Type filter (multi-select)
+    if (filterTypes.size > 0) {
+      const typ = t.assignment?.assignment_type || '';
+      if (!filterTypes.has(typ)) return false;
     }
-    if (filterDay !== 'all') {
+    // Cleaner filter — matches starter OR completer
+    if (filterCleaners.size > 0) {
+      const ids = [t.starter?.id, t.completer?.id].filter(Boolean);
+      const hit = ids.some(id => filterCleaners.has(id));
+      if (!hit) return false;
+    }
+    // Day filter (multi-select). 'today' / 'week' / specific date string.
+    if (filterDays.size > 0) {
       const sd = t.assignment?.scheduled_date;
-      if (filterDay === 'today') {
-        if (sd !== todayKey) return false;
-      } else if (filterDay === 'week') {
-        // Within the next 7 days (inclusive)
-        if (!sd) return false;
-        const d = new Date(sd + 'T00:00:00');
-        const now = new Date(todayKey + 'T00:00:00');
-        const diff = (d - now) / (24 * 60 * 60 * 1000);
-        if (diff < 0 || diff > 7) return false;
-      } else {
-        // Specific date string
-        if (sd !== filterDay) return false;
+      let matched = false;
+      for (const day of filterDays) {
+        if (day === 'today' && sd === todayKey) { matched = true; break; }
+        if (day === 'week') {
+          if (!sd) continue;
+          const d = new Date(sd + 'T00:00:00');
+          const now = new Date(todayKey + 'T00:00:00');
+          const diff = (d - now) / (24 * 60 * 60 * 1000);
+          if (diff >= 0 && diff <= 7) { matched = true; break; }
+        }
+        if (sd && day === sd) { matched = true; break; }
       }
+      if (!matched) return false;
+    }
+    // Category filter — checks if any task at this bedroom matches
+    if (filterCategories.size > 0) {
+      if (!t.unit_id || !t.party_id) return false;
+      const key = `${t.unit_id}:${t.party_id}`;
+      const cats = tasksByBedroom[key];
+      if (!cats) return false;
+      const hit = Array.from(filterCategories).some(c => cats.has(c));
+      if (!hit) return false;
     }
     return true;
   });
@@ -12704,10 +13056,29 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
     });
     return Array.from(map.values()).sort((a, b) => (a.name || '').localeCompare(b.name || ''));
   })();
+  const availableCategories = (() => {
+    const cats = new Set();
+    Object.values(tasksByBedroom).forEach(s => s.forEach(c => cats.add(c)));
+    // Only show categories that actually exist in the data
+    return TASK_CATEGORIES.filter(c => cats.has(c.id));
+  })();
   const activeFilterCount =
-    (filterType !== 'all' ? 1 : 0) +
-    (filterCleaner !== 'all' ? 1 : 0) +
-    (filterDay !== 'all' ? 1 : 0);
+    (filterTypes.size > 0 ? 1 : 0) +
+    (filterCleaners.size > 0 ? 1 : 0) +
+    (filterDays.size > 0 ? 1 : 0) +
+    (filterCategories.size > 0 ? 1 : 0);
+
+  // Toggle helpers — add/remove a value from a Set state
+  const toggleSetValue = (setter) => (value) => setter(prev => {
+    const next = new Set(prev);
+    if (next.has(value)) next.delete(value);
+    else next.add(value);
+    return next;
+  });
+  const toggleType = toggleSetValue(setFilterTypes);
+  const toggleCleaner = toggleSetValue(setFilterCleaners);
+  const toggleDay = toggleSetValue(setFilterDays);
+  const toggleCategory = toggleSetValue(setFilterCategories);
 
   // Group targets by building, derived from the unit label (e.g. "B3-205" -> "B3")
   // Targets without a unit go into a "No unit" bucket
@@ -12763,11 +13134,12 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
             <AssignmentCard key={t.id} target={t} busy={busy} propertyId={propertyId}
               onView={() => setOpened(t)}
               onStart={() => startAndGo(t)}
+              onPause={() => updateStatus(t, 'paused')}
               onDone={() => updateStatus(t, 'done')}
               onReopen={() => updateStatus(t, 'pending')}
               onBlocked={() => setStatusModal({ target: t })}
               onReassign={() => setReassignTarget(t)}
-              onGoToBedroom={onGoToBedroom ? () => onGoToBedroom(t) : null}
+              onGoToBedroom={onGoToBedroom ? () => startAndGo(t) : null}
               onOpenBedroomHistory={onOpenBedroomHistory} />
           ))}
         </div>
@@ -12801,11 +13173,12 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
               <AssignmentCard key={t.id} target={t} busy={busy} propertyId={propertyId}
                 onView={() => setOpened(t)}
                 onStart={() => startAndGo(t)}
+              onPause={() => updateStatus(t, 'paused')}
                 onDone={() => updateStatus(t, 'done')}
                 onReopen={() => updateStatus(t, 'pending')}
                 onBlocked={() => setStatusModal({ target: t })}
                 onReassign={() => setReassignTarget(t)}
-                onGoToBedroom={onGoToBedroom ? () => onGoToBedroom(t) : null}
+                onGoToBedroom={onGoToBedroom ? () => startAndGo(t) : null}
                 onOpenBedroomHistory={onOpenBedroomHistory} />
             );
           }
@@ -12831,11 +13204,12 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                     <AssignmentCard key={t.id} target={t} busy={busy} propertyId={propertyId}
                       onView={() => setOpened(t)}
                       onStart={() => startAndGo(t)}
+              onPause={() => updateStatus(t, 'paused')}
                       onDone={() => updateStatus(t, 'done')}
                       onReopen={() => updateStatus(t, 'pending')}
                       onBlocked={() => setStatusModal({ target: t })}
                       onReassign={() => setReassignTarget(t)}
-                      onGoToBedroom={onGoToBedroom ? () => onGoToBedroom(t) : null}
+                      onGoToBedroom={onGoToBedroom ? () => startAndGo(t) : null}
                       onOpenBedroomHistory={onOpenBedroomHistory} />
                   ))}
                 </div>
@@ -12889,7 +13263,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
     <div>
       {/* Filters bar: toggle to expand, pills inside. Counts active filters
          on the button so the user knows when filters are narrowing things. */}
-      {targets.length > 0 && (availableTypes.length > 1 || availableCleaners.length > 0) && (
+      {targets.length > 0 && (availableTypes.length > 1 || availableCleaners.length > 0 || availableCategories.length > 0) && (
         <div className="mb-3">
           <button onClick={() => setFiltersOpen(o => !o)}
             className={`w-full flex items-center justify-between px-3 py-2 rounded-xl border transition-colors ${activeFilterCount > 0 ? 'bg-amber-50 border-amber-300 text-amber-900' : 'bg-white border-stone-200 text-stone-600 hover:border-stone-400'}`}>
@@ -12905,65 +13279,98 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
             <ChevronRight size={14} className={`transition-transform ${filtersOpen ? 'rotate-90' : ''}`} />
           </button>
           {filtersOpen && (
-            <div className="p-3 rounded-xl bg-stone-50 border border-stone-200 mt-1 space-y-2">
-              {/* Type */}
+            <div className="p-3 rounded-xl bg-stone-50 border border-stone-200 mt-1 space-y-3">
+              {/* Type — multi-select chips. Click to add/remove from filter. */}
               {availableTypes.length > 1 && (
                 <div>
                   <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1">Cleaning type</div>
                   <div className="flex gap-1.5 flex-wrap">
-                    <button onClick={() => setFilterType('all')}
-                      className={`px-2.5 py-1 rounded-full text-xs font-mono ${filterType === 'all' ? 'bg-stone-900 text-stone-50' : 'bg-white border border-stone-300 text-stone-600'}`}>
-                      All
-                    </button>
-                    {availableTypes.map(typeVal => (
-                      <button key={typeVal} onClick={() => setFilterType(typeVal)}
-                        className={`px-2.5 py-1 rounded-full text-xs font-mono ${filterType === typeVal ? 'bg-stone-900 text-stone-50' : 'bg-white border border-stone-300 text-stone-600'}`}>
-                        {assignmentTypeLabel(typeVal)}
-                      </button>
-                    ))}
+                    {availableTypes.map(typeVal => {
+                      const active = filterTypes.has(typeVal);
+                      return (
+                        <button key={typeVal} onClick={() => toggleType(typeVal)}
+                          className={`px-2.5 py-1 rounded-full text-xs font-mono flex items-center gap-1 ${active ? 'bg-stone-900 text-stone-50' : 'bg-white border border-stone-300 text-stone-600'}`}>
+                          {active && <Check size={10} />}
+                          {assignmentTypeLabel(typeVal)}
+                        </button>
+                      );
+                    })}
                   </div>
                 </div>
               )}
-              {/* Cleaner */}
+              {/* Cleaner — multi-select chips */}
               {availableCleaners.length > 0 && (
                 <div>
                   <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1">Cleaner (started or completed)</div>
                   <div className="flex gap-1.5 flex-wrap">
-                    <button onClick={() => setFilterCleaner('all')}
-                      className={`px-2.5 py-1 rounded-full text-xs font-mono ${filterCleaner === 'all' ? 'bg-stone-900 text-stone-50' : 'bg-white border border-stone-300 text-stone-600'}`}>
-                      All
-                    </button>
-                    {availableCleaners.map(c => (
-                      <button key={c.id} onClick={() => setFilterCleaner(c.id)}
-                        className={`px-2.5 py-1 rounded-full text-xs font-mono ${filterCleaner === c.id ? 'bg-stone-900 text-stone-50' : 'bg-white border border-stone-300 text-stone-600'}`}>
-                        {c.name}
-                      </button>
-                    ))}
+                    {availableCleaners.map(c => {
+                      const active = filterCleaners.has(c.id);
+                      return (
+                        <button key={c.id} onClick={() => toggleCleaner(c.id)}
+                          className={`px-2.5 py-1 rounded-full text-xs font-mono flex items-center gap-1 ${active ? 'bg-stone-900 text-stone-50' : 'bg-white border border-stone-300 text-stone-600'}`}>
+                          {active && <Check size={10} />}
+                          {c.name}
+                        </button>
+                      );
+                    })}
                   </div>
                 </div>
               )}
-              {/* Day */}
+              {/* Task category — what kind of work happened at the bedroom */}
+              {availableCategories.length > 0 && (
+                <div>
+                  <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1">
+                    Task category (where work was logged)
+                  </div>
+                  <div className="flex gap-1.5 flex-wrap">
+                    {availableCategories.map(c => {
+                      const active = filterCategories.has(c.id);
+                      return (
+                        <button key={c.id} onClick={() => toggleCategory(c.id)}
+                          className={`px-2.5 py-1 rounded-full text-xs font-mono flex items-center gap-1 ${active ? 'bg-stone-900 text-stone-50' : 'bg-white border border-stone-300 text-stone-600'}`}>
+                          {active && <Check size={10} />}
+                          {c.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+              {/* Day — multi-select */}
               <div>
                 <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1">Scheduled day</div>
                 <div className="flex gap-1.5 flex-wrap items-center">
                   {[
-                    { id: 'all',   label: 'Any' },
                     { id: 'today', label: 'Today' },
                     { id: 'week',  label: 'Next 7 days' },
-                  ].map(opt => (
-                    <button key={opt.id} onClick={() => setFilterDay(opt.id)}
-                      className={`px-2.5 py-1 rounded-full text-xs font-mono ${filterDay === opt.id ? 'bg-stone-900 text-stone-50' : 'bg-white border border-stone-300 text-stone-600'}`}>
-                      {opt.label}
+                  ].map(opt => {
+                    const active = filterDays.has(opt.id);
+                    return (
+                      <button key={opt.id} onClick={() => toggleDay(opt.id)}
+                        className={`px-2.5 py-1 rounded-full text-xs font-mono flex items-center gap-1 ${active ? 'bg-stone-900 text-stone-50' : 'bg-white border border-stone-300 text-stone-600'}`}>
+                        {active && <Check size={10} />}
+                        {opt.label}
+                      </button>
+                    );
+                  })}
+                  {/* Specific date — adds to the filter Set as a YYYY-MM-DD string */}
+                  <input type="date"
+                    onChange={(e) => { if (e.target.value) toggleDay(e.target.value); e.target.value = ''; }}
+                    className="px-2 py-1 rounded-full text-xs font-mono bg-white border border-stone-300" />
+                  {/* Show any selected specific dates as removable chips */}
+                  {Array.from(filterDays).filter(d => d !== 'today' && d !== 'week').map(d => (
+                    <button key={d} onClick={() => toggleDay(d)}
+                      className="px-2.5 py-1 rounded-full text-xs font-mono flex items-center gap-1 bg-stone-900 text-stone-50">
+                      <Check size={10} /> {d}
                     </button>
                   ))}
-                  <input type="date"
-                    value={filterDay && filterDay !== 'all' && filterDay !== 'today' && filterDay !== 'week' ? filterDay : ''}
-                    onChange={(e) => setFilterDay(e.target.value || 'all')}
-                    className="px-2 py-1 rounded-full text-xs font-mono bg-white border border-stone-300" />
                 </div>
               </div>
               {activeFilterCount > 0 && (
-                <button onClick={() => { setFilterType('all'); setFilterCleaner('all'); setFilterDay('all'); }}
+                <button onClick={() => {
+                  setFilterTypes(new Set()); setFilterCleaners(new Set());
+                  setFilterDays(new Set()); setFilterCategories(new Set());
+                }}
                   className="text-[10px] uppercase tracking-wider font-mono text-amber-700 hover:text-amber-900">
                   Clear all filters
                 </button>
@@ -13119,6 +13526,116 @@ function ReassignModal({ target, propertyId, onSaved, onClose }) {
   );
 }
 
+// MoveBlockModal — move a work_block's data (notes, tasks, photos) from
+// one bedroom to another by updating its unit_id + party_id. Useful
+// when a cleaner opened the wrong bedroom and put their work there.
+// Tasks/photos cascade via foreign keys so they follow the block.
+function MoveBlockModal({ block, propertyId, onSaved, onClose }) {
+  const [units, setUnits] = useState([]);
+  const [unitId, setUnitId] = useState('');
+  const [partyId, setPartyId] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => { (async () => {
+    const { data } = await supabase.from('units')
+      .select('*, parties(id, label, full_name, active, sort_order)')
+      .eq('customer_id', propertyId).eq('active', true)
+      .order('sort_order').order('label');
+    setUnits((data || []).slice().sort((a, b) => naturalCompare(a.label, b.label)));
+  })(); }, [propertyId]);
+
+  const parties = (units.find(u => u.id === unitId)?.parties || [])
+    .filter(p => p.active).sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0));
+
+  const save = async () => {
+    if (!unitId || !partyId) { setError('Pick a unit and a bedroom.'); return; }
+    if (unitId === block.unit_id && partyId === block.party_id) {
+      setError("That's already where this block is. Pick a different bedroom.");
+      return;
+    }
+    setBusy(true);
+    // Conflict check: if there's already a work_block under this shift
+    // at the target bedroom, ask before merging the two histories.
+    // The user can always close one out manually first if they want
+    // separate records.
+    const { data: existing } = await supabase.from('work_blocks')
+      .select('id, end_time, start_time')
+      .eq('shift_id', block.shift_id)
+      .eq('unit_id', unitId)
+      .eq('party_id', partyId);
+    if (existing && existing.length > 0) {
+      setBusy(false);
+      const hasOpen = existing.some(b => !b.end_time);
+      const msg = hasOpen
+        ? `There's already an OPEN work block at this bedroom in this shift. Move anyway? You'll end up with two blocks there — close one manually after.`
+        : `There's already a completed work block at this bedroom in this shift. Move anyway? You'll end up with two blocks there.`;
+      if (!confirm(msg)) return;
+      setBusy(true);
+    }
+    const { error: e } = await supabase.from('work_blocks')
+      .update({ unit_id: unitId, party_id: partyId })
+      .eq('id', block.id);
+    setBusy(false);
+    if (e) { setError(e.message); return; }
+    onSaved();
+  };
+
+  return (
+    <div className="fixed inset-0 bg-stone-900/80 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
+      <div className="bg-stone-50 w-full sm:max-w-md sm:rounded-3xl rounded-t-3xl flex flex-col">
+        <div className="flex items-center justify-between p-5 border-b border-stone-200">
+          <div>
+            <div className="font-serif text-xl text-stone-900">Move work to a different bedroom</div>
+            <div className="text-xs text-stone-500 font-mono mt-0.5 truncate">
+              Currently: {block.unit?.label}{block.party?.label && ` · ${block.party.label}`}
+            </div>
+          </div>
+          <button onClick={onClose} className="p-2 rounded-full hover:bg-stone-100">
+            <X size={20} className="text-stone-600" />
+          </button>
+        </div>
+        <div className="p-5 space-y-4">
+          <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-900">
+            All notes, tasks, and photos from this work block will move with it. The old bedroom will be left as-is (no leftover data).
+          </div>
+          <div>
+            <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Move to unit</label>
+            <select value={unitId} onChange={(e) => { setUnitId(e.target.value); setPartyId(''); }}
+              className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white">
+              <option value="">— Pick a unit —</option>
+              {units.map(u => <option key={u.id} value={u.id}>{u.label}</option>)}
+            </select>
+          </div>
+          {unitId && (
+            <div>
+              <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Bedroom</label>
+              <select value={partyId} onChange={(e) => setPartyId(e.target.value)}
+                className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white">
+                <option value="">— Pick a bedroom —</option>
+                {parties.map(p => <option key={p.id} value={p.id}>{p.label}{p.full_name ? ` (${p.full_name})` : ''}</option>)}
+              </select>
+            </div>
+          )}
+          {error && (
+            <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-red-700 text-sm flex items-start gap-2">
+              <AlertCircle size={16} className="flex-shrink-0 mt-0.5" /><span>{error}</span>
+            </div>
+          )}
+        </div>
+        <div className="p-5 border-t border-stone-200 flex gap-2">
+          <button onClick={onClose} disabled={busy}
+            className="flex-1 py-3 rounded-2xl bg-stone-100 text-stone-700 font-medium">Cancel</button>
+          <button onClick={save} disabled={busy}
+            className="flex-1 py-3 rounded-2xl bg-stone-900 text-stone-50 font-medium disabled:opacity-50">
+            {busy ? 'Moving…' : 'Move work here'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // =================================================================
 // ZOOMABLE IMAGE — image viewer that fits the screen by default
 // and lets the user toggle to actual size for scroll/zoom inspection.
@@ -13230,6 +13747,7 @@ function LiveCleanersSheet({ viewer, onClose, onOpenShift }) {
       .from('shifts')
       .select('*, employee:employees(id, name), customer:customers(id, name), work_blocks(id, start_time, end_time, unit:units(label), party:parties(label))')
       .is('end_time', null)
+      .eq('is_preview', false)  // Don't show preview shifts as on-the-clock
       .order('start_time', { ascending: true });
     setShifts(data || []);
     setLoaded(true);

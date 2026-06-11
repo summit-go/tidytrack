@@ -12567,6 +12567,9 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
   const [filterCleaner, setFilterCleaner] = useState('all'); // 'all' or employee id
   const [filterDay, setFilterDay] = useState('all');       // 'all' | 'today' | 'week' | YYYY-MM-DD
 
+  // Track which unit-bundles are expanded on the Pending view
+  const [bundleOpen, setBundleOpen] = useState({}); // { unitId: boolean }
+
   const [loadError, setLoadError] = useState(null);
 
   const load = async () => {
@@ -12749,7 +12752,6 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
   // For Pending view, bundle by unit when there are multiple per unit
   // ("3 assignments in B1-101"). Single-assignment units stay as plain
   // cards. The bundle is a collapsible group so the list stays short.
-  const [bundleOpen, setBundleOpen] = useState({}); // { unitId: boolean }
   const toggleBundle = (unitId) => setBundleOpen(prev => ({ ...prev, [unitId]: !prev[unitId] }));
 
   const renderAssignmentList = (items) => {

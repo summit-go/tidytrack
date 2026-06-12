@@ -917,6 +917,157 @@ function ProgressBar({ steps, currentStep, complete = false }) {
 }
 
 // =================================================================
+// CLEANER PROGRESS BAR — always-visible bar that lives below the
+// Header during a cleaner's session. Shows where they are in their
+// workflow at a glance and lets them jump backward by tapping a
+// segment.
+//
+// 5 segments (left to right):
+//   1. Property   — filled once shift.customer exists
+//   2. Assignment — filled once they've opened a specific bedroom
+//   3. Items      — filled once they've claimed (in_progress) items
+//   4. Working    — filled once there's an active work block
+//   5. Complete   — filled once the active assignment is fully done
+//
+// `segments` is computed by the parent screen and passed in. Each
+// segment is `{ label, filled, onClick, isCurrent }`.
+//
+// When the cleaner is inside an active work block (`inActiveWork`
+// is true) and they tap a segment that would leave the work block,
+// we open `LeaveWorkblockModal` first to ask: Mark done, Stay here,
+// or Pause. The cleaner's choice dictates the next action.
+// =================================================================
+function CleanerProgressBar({ segments, inActiveWork = false, onLeaveDecision }) {
+  const [pendingNavigation, setPendingNavigation] = useState(null);
+
+  if (!segments || segments.length === 0) return null;
+
+  const handleClick = (segment) => {
+    if (!segment.onClick) return;
+    // If they're inside an active work block AND the segment they
+    // tapped isn't the "working" segment they're currently on,
+    // intercept with the warning modal first.
+    if (inActiveWork && !segment.isCurrent) {
+      setPendingNavigation(() => segment.onClick);
+      return;
+    }
+    segment.onClick();
+  };
+
+  return (
+    <>
+      <div className="bg-stone-50 border-b border-stone-200 px-3 py-2.5" data-no-translate-children="false">
+        <div className="flex items-center gap-1">
+          {segments.map((segment, i) => {
+            const isLast = i === segments.length - 1;
+            const isComplete = !!segments[i + 1]?.filled || segment.complete;
+            // Color logic:
+            // - complete (later segment filled too) → emerald
+            // - filled current → amber
+            // - filled but not current → tan
+            // - empty → gray
+            let fillClass;
+            if (segment.complete) fillClass = 'bg-emerald-500';
+            else if (segment.isCurrent && segment.filled) fillClass = 'bg-amber-500';
+            else if (segment.filled) fillClass = 'bg-amber-400';
+            else fillClass = 'bg-stone-200';
+
+            return (
+              <button key={i}
+                onClick={() => handleClick(segment)}
+                disabled={!segment.onClick}
+                className={`flex-1 group ${segment.onClick ? 'cursor-pointer' : 'cursor-default'}`}>
+                <div className={`h-1.5 rounded-full transition-colors ${fillClass} ${segment.onClick ? 'group-hover:opacity-80' : ''}`} />
+                <div className={`text-[8px] sm:text-[9px] uppercase tracking-wider font-mono mt-1 text-center truncate ${
+                  segment.complete ? 'text-emerald-700 font-bold'
+                  : segment.isCurrent ? 'text-stone-900 font-bold'
+                  : segment.filled ? 'text-stone-700 font-medium'
+                  : 'text-stone-400'
+                }`}>
+                  {segment.label}
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+      {pendingNavigation && (
+        <LeaveWorkblockModal
+          onChoose={(decision) => {
+            const nav = pendingNavigation;
+            setPendingNavigation(null);
+            if (decision === 'stay') return;
+            // 'done' or 'pause' — bubble up the decision so the parent
+            // can finish/pause the work block, THEN run the navigation.
+            if (onLeaveDecision) {
+              Promise.resolve(onLeaveDecision(decision)).then(() => nav());
+            } else {
+              nav();
+            }
+          }}
+          onClose={() => setPendingNavigation(null)} />
+      )}
+    </>
+  );
+}
+
+// =================================================================
+// LEAVE WORKBLOCK MODAL — confirmation popup when the cleaner taps
+// somewhere that would take them away from their active work block.
+// Three options:
+//   1. Done — finish the work block (mark assignments complete)
+//   2. Stay — close the modal, keep cleaning
+//   3. Pause — pause the work block so they can come back later
+// =================================================================
+function LeaveWorkblockModal({ onChoose, onClose }) {
+  return (
+    <div className="fixed inset-0 bg-stone-900/80 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
+      <div className="bg-stone-50 w-full sm:max-w-md sm:rounded-3xl rounded-t-3xl flex flex-col">
+        <div className="p-5 border-b border-stone-200">
+          <div className="flex items-center gap-2 mb-2">
+            <AlertCircle size={20} className="text-amber-600" />
+            <div className="font-serif text-xl text-stone-900 font-bold">You're in active work</div>
+          </div>
+          <div className="text-sm text-stone-600">
+            You're about to leave your current work block. What do you want to do?
+          </div>
+        </div>
+        <div className="p-3 space-y-2">
+          <button onClick={() => onChoose('done')}
+            className="w-full p-4 rounded-2xl bg-emerald-600 hover:bg-emerald-700 text-white text-left flex items-start gap-3 active:scale-98">
+            <Check size={20} className="flex-shrink-0 mt-0.5" />
+            <div>
+              <div className="font-bold text-sm">Mark it done</div>
+              <div className="text-xs text-emerald-100 mt-0.5">Finish this work block and continue</div>
+            </div>
+          </button>
+          <button onClick={() => onChoose('stay')}
+            className="w-full p-4 rounded-2xl bg-stone-900 hover:bg-stone-800 text-stone-50 text-left flex items-start gap-3 active:scale-98">
+            <ArrowLeft size={20} className="flex-shrink-0 mt-0.5" />
+            <div>
+              <div className="font-bold text-sm">Stay and complete it</div>
+              <div className="text-xs text-stone-400 mt-0.5">Keep working — don't leave</div>
+            </div>
+          </button>
+          <button onClick={() => onChoose('pause')}
+            className="w-full p-4 rounded-2xl bg-amber-100 hover:bg-amber-200 text-amber-900 text-left flex items-start gap-3 active:scale-98">
+            <Pause size={20} className="flex-shrink-0 mt-0.5" />
+            <div>
+              <div className="font-bold text-sm">Pause and come back</div>
+              <div className="text-xs text-amber-800 mt-0.5">Save your progress, return later</div>
+            </div>
+          </button>
+        </div>
+        <button onClick={onClose}
+          className="py-3 text-sm font-mono text-stone-500 hover:bg-stone-100 border-t border-stone-200">
+          Close
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// =================================================================
 // PAGE PERSISTENCE — remember the cleaner's current page so refreshing
 // or reopening the app drops them back where they were. Stored per-
 // device in localStorage under a key the caller picks.
@@ -2549,6 +2700,19 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
   return (
     <div className="min-h-screen bg-stone-50 pb-24">
       <Header name={employeeName} onSignOut={onSignOut} role={employee?.role} employee={employee} onOpenMessages={onOpenMessages} />
+      {/* Global progress bar — visible during the whole cleaner session.
+         At PropertyHub the cleaner is on segment 1 (Property). Tapping
+         "Property" switches to a different property. Later segments
+         aren't yet reachable so they have no onClick handler. */}
+      <CleanerProgressBar
+        segments={[
+          { label: 'Property', filled: true, isCurrent: true, onClick: onSwitchProperty },
+          { label: 'Assignment', filled: false },
+          { label: 'Items', filled: false },
+          { label: 'Working', filled: false },
+          { label: 'Complete', filled: false },
+        ]}
+        inActiveWork={false} />
       <div className="bg-stone-900 text-stone-50 px-5 py-5 sticky top-0 z-10 shadow-md">
         <div className="flex items-start justify-between mb-3 gap-2">
           <div>
@@ -3031,6 +3195,18 @@ function PreparingBlockView({ shift, pendingStart, employeeName, employee,
     <div className="min-h-screen bg-stone-50 pb-24">
       <Header name={employeeName} onSignOut={onSignOut} role={employee?.role} employee={employee}
         onOpenMessages={onOpenMessages} onLogoClick={handleLogoClick} />
+      {/* Cleaner has navigated to a specific bedroom. They've chosen the
+         property + assignment. They're about to claim items / start
+         working. Tapping Property or Assignment goes back. */}
+      <CleanerProgressBar
+        segments={[
+          { label: 'Property', filled: true, onClick: onCancel },
+          { label: 'Assignment', filled: true, onClick: onCancel },
+          { label: 'Items', filled: false, isCurrent: true },
+          { label: 'Working', filled: false },
+          { label: 'Complete', filled: false },
+        ]}
+        inActiveWork={false} />
       <div className="bg-stone-900 text-stone-50 px-5 py-5 sticky top-0 z-10 shadow-md">
         <div className="flex items-center justify-between mb-3 gap-2 flex-wrap">
           <button onClick={onCancel}
@@ -3159,6 +3335,23 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
   return (
     <div className="min-h-screen bg-stone-50 pb-24">
       <Header name={employeeName} onSignOut={onSignOut} role={employee?.role} employee={employee} onOpenMessages={onOpenMessages} onLogoClick={handleLogoClick} />
+      {/* Cleaner is INSIDE an active work block. Tapping any other
+         segment triggers the leave-warning modal. The decision they
+         choose (Done / Stay / Pause) is forwarded back here so we
+         can finish or pause the block before navigating. */}
+      <CleanerProgressBar
+        segments={[
+          { label: 'Property', filled: true },
+          { label: 'Assignment', filled: true },
+          { label: 'Items', filled: true },
+          { label: 'Working', filled: true, isCurrent: true },
+          { label: 'Complete', filled: false },
+        ]}
+        inActiveWork={true}
+        onLeaveDecision={(decision) => {
+          if (decision === 'done') return onFinish();
+          if (decision === 'pause') return onPause();
+        }} />
       <div className="bg-stone-900 text-stone-50 px-5 py-5 sticky top-0 z-10 shadow-md">
         <div className="flex items-center justify-between mb-3">
           <button onClick={onPause}
@@ -13980,16 +14173,18 @@ function AssignmentForm({ property, employee, onCancel, onSaved }) {
 // sheet if they want.
 // =================================================================
 function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
-  // Step 0..4. We persist nothing across reloads here — the wizard is
-  // short enough that an accidental refresh just starts over.
+  // 6 steps total. The wizard is short enough that an accidental
+  // refresh just starts over — no state persistence here.
   const [step, setStep] = useState(0);
 
-  // === Step 0: pick the apartment (unit) ===
+  // === Step 1: pick the apartment + upload mode ===
   const [units, setUnits] = useState([]);
   const [selectedUnit, setSelectedUnit] = useState(null);
   const [unitSearch, setUnitSearch] = useState('');
+  // 'single' = one bedroom only · 'multi' = up to 4 bedrooms at once
+  const [uploadMode, setUploadMode] = useState(null);
 
-  // === Step 1: pick the bedrooms (parties) ===
+  // === Step 3: pick the bedrooms (parties) ===
   const [parties, setParties] = useState([]);
   // Map of partyId → true if selected for this upload
   const [selectedParties, setSelectedParties] = useState({});
@@ -13997,16 +14192,16 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
   // === Step 2: sheet type ===
   const [sheetType, setSheetType] = useState(null); // 'cleaning_check' | 'move_out_clean'
 
-  // === Step 3: per-bedroom configuration ===
+  // === Step 4: per-bedroom configuration ===
   // { [partyId]: { mode: 'configure' | 'pass' | 'fail_entire',
   //                bathroomVariant: 'a' | 'b',
   //                generalVariant: 'a' | 'b' | 'c' | 'd',
   //                checked: { '<section>:<itemKey>': true } } }
   const [config, setConfig] = useState({});
-  // Which party we're currently editing inside step 3
+  // Which party we're currently editing inside step 4
   const [activePartyId, setActivePartyId] = useState(null);
 
-  // Optional sheet image attachment
+  // === Step 0: sheet image attachment (optional) ===
   const [sheetFile, setSheetFile] = useState(null);
   const [sheetPreviewUrl, setSheetPreviewUrl] = useState(null);
 
@@ -14109,7 +14304,7 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
 
   // For configure step: pick the active party, default to first selected
   useEffect(() => {
-    if (step !== 3) return;
+    if (step !== 4) return;
     const ids = Object.keys(selectedParties).filter(k => selectedParties[k]);
     if (ids.length === 0) return;
     if (!activePartyId || !selectedParties[activePartyId]) {
@@ -14118,13 +14313,14 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
   }, [step, selectedParties, activePartyId]);
 
   // -----------------------------------------------------------------
-  // Toggle a bedroom on/off in the multi-select. Auto-creates a default
-  // configuration shell when toggled on so step 3 has something to edit.
+  // Toggle a bedroom on/off. In single mode the uploader can only have
+  // ONE bedroom selected at a time — picking a new bedroom replaces
+  // the previous one. Multi mode allows up to all 4 bedrooms.
   // -----------------------------------------------------------------
   const togglePartySelection = (partyId) => {
     setSelectedParties(prev => {
-      const next = { ...prev };
-      if (next[partyId]) { delete next[partyId]; }
+      const next = uploadMode === 'single' ? {} : { ...prev };
+      if (prev[partyId] && uploadMode !== 'single') { delete next[partyId]; }
       else { next[partyId] = true; }
       return next;
     });
@@ -14233,12 +14429,24 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
 
   // -----------------------------------------------------------------
   // Validation per step
+  //   0 = sheet upload (optional, always passes)
+  //   1 = apartment + mode picked
+  //   2 = sheet type picked
+  //   3 = at least one bedroom selected
+  //   4 = every selected bedroom configured (Pass OR variants+items)
+  //   5 = review (no advance, only submit)
   // -----------------------------------------------------------------
   const canAdvanceFromStep = () => {
-    if (step === 0) return !!selectedUnit;
-    if (step === 1) return Object.keys(selectedParties).some(k => selectedParties[k]);
+    if (step === 0) return true; // sheet upload is optional
+    if (step === 1) return !!selectedUnit && !!uploadMode;
     if (step === 2) return !!sheetType;
     if (step === 3) {
+      const ids = Object.keys(selectedParties).filter(k => selectedParties[k]);
+      if (ids.length === 0) return false;
+      if (uploadMode === 'single' && ids.length > 1) return false;
+      return true;
+    }
+    if (step === 4) {
       // Every selected bedroom needs to be either passed or have a
       // non-pass configuration with at least one item checked.
       const ids = Object.keys(selectedParties).filter(k => selectedParties[k]);
@@ -14333,8 +14541,14 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
     }
   };
 
-  // Steps for the progress bar
-  const stepLabels = ['Apartment', 'Bedrooms', 'Sheet', 'Configure', 'Done'];
+  // Steps for the progress bar. New order per owner request:
+  //   0. Sheet upload (optional — attach the paper sheet image)
+  //   1. Apartment + mode (single bedroom or multi-bedroom)
+  //   2. Sheet type (cleaning check vs move-out clean)
+  //   3. Bedrooms (multi-select — capped at 1 if mode = single)
+  //   4. Configure each bedroom (bathroom, general, items)
+  //   5. Review + submit
+  const stepLabels = ['Sheet', 'Apartment', 'Type', 'Bedrooms', 'Configure', 'Done'];
 
   // === Render ======================================================
   if (templateLoading) return <Splash text="Loading templates…" />;
@@ -14351,16 +14565,78 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
     );
   }
 
+  // -----------------------------------------------------------------
+  // Step 0 — Sheet upload (optional). Owners told us they want this
+  // FIRST so they can reference the paper sheet while configuring.
+  // -----------------------------------------------------------------
+  const renderSheetUpload = () => {
+    return (
+      <div>
+        <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-1">Step 1 · Attach the paper sheet (optional)</div>
+        <div className="text-sm text-stone-600 mb-4">
+          Take a photo or attach a PDF of the inspection sheet. Cleaners can view it from inside the assignment for reference.
+          You can skip this and configure manually.
+        </div>
+        <label className="block">
+          <input type="file" accept="image/*,application/pdf" className="hidden"
+            onChange={e => setSheetFile(e.target.files?.[0] || null)} />
+          <div className={`px-4 py-6 rounded-2xl border-2 border-dashed text-center cursor-pointer ${sheetFile ? 'bg-emerald-50 border-emerald-400 text-emerald-800' : 'border-stone-300 text-stone-600 hover:border-stone-500'}`}>
+            {sheetFile ? (
+              <>
+                <Check size={20} className="mx-auto mb-2" />
+                <div className="font-medium text-sm">{sheetFile.name}</div>
+                <div className="text-xs mt-1">Tap to replace</div>
+              </>
+            ) : (
+              <>
+                <Camera size={24} className="mx-auto mb-2 text-stone-400" />
+                <div className="font-medium text-sm">Tap to attach sheet photo or PDF</div>
+                <div className="text-xs mt-1 text-stone-500">Or skip this step</div>
+              </>
+            )}
+          </div>
+        </label>
+        {sheetPreviewUrl && sheetFile?.type?.startsWith('image/') && (
+          <img src={sheetPreviewUrl} alt="" className="mt-3 max-h-64 rounded-xl mx-auto" />
+        )}
+        {sheetFile && (
+          <button onClick={() => setSheetFile(null)}
+            className="mt-3 w-full px-3 py-2 rounded-lg border border-stone-300 text-stone-600 text-sm font-medium">
+            Remove attachment
+          </button>
+        )}
+      </div>
+    );
+  };
+
+  // -----------------------------------------------------------------
+  // Step 1 — Apartment + mode (single bedroom vs multi-bedroom)
+  // -----------------------------------------------------------------
   const renderUnitPicker = () => {
     const q = unitSearch.trim().toLowerCase();
     const visible = units.filter(u => !q || (u.label || '').toLowerCase().includes(q));
     return (
       <div>
-        <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-2">Step 1 · Pick the apartment</div>
+        <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-1">Step 2 · Apartment + mode</div>
+        {/* Mode picker first — sets expectation for how many bedrooms */}
+        <div className="text-sm text-stone-600 mb-2">Are you uploading for one bedroom or multiple bedrooms in this apartment?</div>
+        <div className="grid grid-cols-2 gap-2 mb-4">
+          <button onClick={() => setUploadMode('single')}
+            className={`px-4 py-3 rounded-xl border-2 transition-colors ${uploadMode === 'single' ? 'bg-amber-50 border-amber-500 text-amber-900' : 'bg-white border-stone-200 text-stone-700'}`}>
+            <div className="font-bold">Single bedroom</div>
+            <div className="text-[10px] font-mono text-stone-500 mt-1">One person's checkout / spot check</div>
+          </button>
+          <button onClick={() => setUploadMode('multi')}
+            className={`px-4 py-3 rounded-xl border-2 transition-colors ${uploadMode === 'multi' ? 'bg-amber-50 border-amber-500 text-amber-900' : 'bg-white border-stone-200 text-stone-700'}`}>
+            <div className="font-bold">Multi-bedroom</div>
+            <div className="text-[10px] font-mono text-stone-500 mt-1">Up to 4 roommates / full apartment</div>
+          </button>
+        </div>
+        <div className="text-sm text-stone-600 mb-2">Search for the apartment.</div>
         <input value={unitSearch} onChange={e => setUnitSearch(e.target.value)}
           placeholder={`Search ${units.length} apartments…`}
           className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white text-sm mb-3" />
-        <div className="space-y-2 max-h-[60vh] overflow-y-auto">
+        <div className="space-y-2 max-h-[50vh] overflow-y-auto">
           {visible.map(u => (
             <button key={u.id} onClick={() => setSelectedUnit(u)}
               className={`w-full text-left px-4 py-3 rounded-xl border transition-colors ${selectedUnit?.id === u.id ? 'bg-amber-50 border-amber-400' : 'bg-white border-stone-200 hover:border-stone-400'}`}>
@@ -14378,8 +14654,12 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
   const renderPartyPicker = () => {
     return (
       <div>
-        <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-1">Step 2 · Which bedrooms?</div>
-        <div className="text-sm text-stone-600 mb-3">Tap each bedroom that needs work. You can pick more than one — one assignment will be created per bedroom.</div>
+        <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-1">Step 4 · Which bedrooms?</div>
+        <div className="text-sm text-stone-600 mb-3">
+          {uploadMode === 'single'
+            ? 'Pick the one bedroom that needs work. One assignment will be created.'
+            : 'Tap each bedroom that needs work. One assignment will be created per bedroom.'}
+        </div>
         <div className="space-y-2">
           {parties.map(p => {
             const selected = !!selectedParties[p.id];
@@ -14414,7 +14694,7 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
   const renderSheetTypePicker = () => {
     return (
       <div>
-        <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-3">Step 3 · Which sheet?</div>
+        <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-3">Step 3 · Which sheet type?</div>
         <div className="space-y-3">
           <button onClick={() => setSheetType('cleaning_check')}
             className={`w-full text-left p-4 rounded-2xl border-2 transition-colors ${sheetType === 'cleaning_check' ? 'bg-amber-50 border-amber-500' : 'bg-white border-stone-200 hover:border-stone-400'}`}>
@@ -14427,30 +14707,16 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
             <div className="text-sm text-stone-600">Final white-glove inspection at move-out. Failed items get cleaned by Summit Clean.</div>
           </button>
         </div>
-        <div className="mt-6 pt-4 border-t border-stone-200">
-          <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-2">Optional sheet photo</div>
-          <div className="text-xs text-stone-500 mb-2">Attach the original paper sheet so cleaners can view it if they want.</div>
-          <label className="block">
-            <input type="file" accept="image/*,application/pdf" className="hidden"
-              onChange={e => setSheetFile(e.target.files?.[0] || null)} />
-            <div className="px-3 py-2 rounded-xl border-2 border-dashed border-stone-300 text-center text-stone-600 text-sm hover:border-stone-500 cursor-pointer">
-              {sheetFile ? `📄 ${sheetFile.name} (tap to replace)` : 'Tap to attach sheet photo or PDF'}
-            </div>
-          </label>
-          {sheetPreviewUrl && sheetFile?.type?.startsWith('image/') && (
-            <img src={sheetPreviewUrl} alt="" className="mt-2 max-h-48 rounded-lg" />
-          )}
-        </div>
       </div>
     );
   };
 
-  // -- Step 4: Configure ------------------------------------------------
+  // -- Step 5: Configure ------------------------------------------------
   const renderConfigure = () => {
     const selectedIds = Object.keys(selectedParties).filter(k => selectedParties[k]);
     return (
       <div>
-        <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-1">Step 4 · Configure each bedroom</div>
+        <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-1">Step 5 · Configure each bedroom</div>
         <div className="text-sm text-stone-600 mb-3">Pick the bathroom and general area for each bedroom, then check the items that need cleaning.</div>
         {/* Bedroom tabs */}
         <div className="flex gap-2 mb-3 overflow-x-auto pb-1">
@@ -14600,15 +14866,18 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
       </div>
 
       <div className="px-5 py-5">
-        {step === 0 && renderUnitPicker()}
-        {step === 1 && renderPartyPicker()}
+        {step === 0 && renderSheetUpload()}
+        {step === 1 && renderUnitPicker()}
         {step === 2 && renderSheetTypePicker()}
-        {step === 3 && renderConfigure()}
-        {step === 4 && (
+        {step === 3 && renderPartyPicker()}
+        {step === 4 && renderConfigure()}
+        {step === 5 && (
           <div>
-            <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-2">Step 5 · Review</div>
+            <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-2">Step 6 · Review</div>
             <div className="space-y-2 mb-4">
+              {sheetFile && <ReviewLine label="Sheet attached" value={sheetFile.name} />}
               <ReviewLine label="Apartment" value={selectedUnit?.label || '—'} />
+              <ReviewLine label="Mode" value={uploadMode === 'single' ? 'Single bedroom' : 'Multi-bedroom'} />
               <ReviewLine label="Sheet type" value={sheetType === 'cleaning_check' ? 'Cleaning check' : 'Move-out clean'} />
               <ReviewLine label="Bedrooms" value={
                 Object.keys(selectedParties).filter(k => selectedParties[k]).map(k => {
@@ -14619,7 +14888,6 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
                   return `${p?.label} (${n} items)`;
                 }).join(', ')
               } />
-              {sheetFile && <ReviewLine label="Sheet attached" value={sheetFile.name} />}
             </div>
             {error && (
               <div className="mb-3 p-3 rounded-xl bg-red-50 border border-red-200 text-red-700 text-sm flex items-start gap-2">
@@ -14643,13 +14911,13 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
             Back
           </button>
         )}
-        {step < 4 && (
+        {step < 5 && (
           <button onClick={() => setStep(step + 1)} disabled={!canAdvanceFromStep()}
             className="flex-1 py-3 rounded-xl bg-stone-900 text-stone-50 text-sm font-medium disabled:opacity-50">
-            Next
+            {step === 0 && !sheetFile ? 'Skip & continue' : 'Next'}
           </button>
         )}
-        {step === 4 && !submitted && (
+        {step === 5 && !submitted && (
           <button onClick={submit} disabled={busy}
             className="flex-1 py-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-medium disabled:opacity-50">
             {busy ? 'Creating…' : 'Create assignments'}
@@ -16757,6 +17025,20 @@ function ChecklistAssignmentView({ assignment, employee, onClose, onOpenSheet })
 
   return (
     <div className="fixed inset-0 bg-stone-50 z-50 flex flex-col">
+      {/* Global cleaner progress bar — same 5 segments as the rest of
+         the app. Inside an assignment the cleaner has filled the first
+         3 segments (Property, Assignment, Items). "Working" is filled
+         when they have items in progress; "Complete" turns green when
+         everything is done. */}
+      <CleanerProgressBar
+        segments={[
+          { label: 'Property', filled: true, onClick: onClose },
+          { label: 'Assignment', filled: true, onClick: onClose },
+          { label: 'Items', filled: doneCount > 0 || counts.in_progress > 0, isCurrent: !isAllDone },
+          { label: 'Working', filled: counts.in_progress > 0 || doneCount > 0 },
+          { label: 'Complete', filled: isAllDone, complete: isAllDone },
+        ]}
+        inActiveWork={counts.in_progress > 0} />
       {/* Header */}
       <div className="bg-stone-900 text-stone-50 px-5 py-4 sticky top-0 z-10">
         <div className="flex items-center justify-between mb-2">
@@ -16785,17 +17067,12 @@ function ChecklistAssignmentView({ assignment, employee, onClose, onOpenSheet })
             Bathroom {bathroomNum} (shared between bedrooms {bathroomNum === 1 ? '1 & 2' : '3 & 4'})
           </div>
         )}
-        {/* Progress bar — green when fully done */}
-        <div className="mt-3">
-          <ProgressBar
-            steps={['Started', 'Items claimed', 'All done']}
-            currentStep={doneCount === 0 ? 0 : isAllDone ? 2 : 1}
-            complete={isAllDone}
-          />
-          <div className="text-[10px] font-mono text-stone-400 mt-1.5">
-            {doneCount} of {total} items done
-            {counts.in_progress > 0 && ` · ${counts.in_progress} in progress`}
-          </div>
+        {/* Inline progress text — replaces the previous per-assignment
+           progress bar since the global bar now shows workflow state. */}
+        <div className="mt-3 text-[11px] font-mono text-stone-400">
+          {doneCount} of {total} items done
+          {counts.in_progress > 0 && ` · ${counts.in_progress} in progress`}
+          {isAllDone && <span className="text-emerald-400 font-bold ml-1">✓ All done!</span>}
         </div>
       </div>
 

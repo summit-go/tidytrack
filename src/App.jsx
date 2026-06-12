@@ -1664,6 +1664,13 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
   // combined display name. Parent advances those targets to
   // in_progress AND creates a linked task in one shot.
   onStartChecklistItems,
+  // Handler called when the cleaner taps the X on an in-progress
+  // item in the Active tab — "I bit off more than I could chew,
+  // put this back". Parent flips the target from in_progress / paused
+  // back to pending and clears started_at / started_by. The item
+  // becomes visible in Not started so the cleaner (or a coworker)
+  // can grab it again.
+  onReleaseTargets,
 }) {
   const [category, setCategory] = useState(null); // 'bedroom'|'bathroom'|'vanity'|'general'|null
   const [selectedSubs, setSelectedSubs] = useState(new Set()); // for 'general' only
@@ -1686,24 +1693,30 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
   // follows the same rule but the legacy picker doesn't split
   // bathroom by variant so it's informational only here.
   const checklistMode = !!(customerId && unitId && partyId);
-  useEffect(() => {
+  const loadChecklistTargets = async () => {
     if (!checklistMode) { setChecklistTargets([]); return; }
-    (async () => {
-      const { data } = await supabase.from('assignment_targets')
-        .select('*, assignment:assignments!inner(id, customer_id, active, source, pm_status, sheet_type, template_set_id, bathroom_variant, general_variant)')
-        .eq('unit_id', unitId).eq('party_id', partyId)
-        .neq('status', 'done');
-      const open = (data || []).filter(t =>
-        t.assignment?.customer_id === customerId &&
-        t.assignment?.active &&
-        (t.assignment?.source !== 'pm' || t.assignment?.pm_status === 'approved') &&
-        // Only template-based checklist targets — legacy single-row
-        // assignments don't have item-level granularity to pick from.
-        !!t.assignment?.template_set_id
-      );
-      setChecklistTargets(open);
-    })();
+    const { data } = await supabase.from('assignment_targets')
+      .select('*, assignment:assignments!inner(id, customer_id, active, source, pm_status, sheet_type, template_set_id, bathroom_variant, general_variant)')
+      .eq('unit_id', unitId).eq('party_id', partyId)
+      .neq('status', 'done');
+    const open = (data || []).filter(t =>
+      t.assignment?.customer_id === customerId &&
+      t.assignment?.active &&
+      (t.assignment?.source !== 'pm' || t.assignment?.pm_status === 'approved') &&
+      // Only template-based checklist targets — legacy single-row
+      // assignments don't have item-level granularity to pick from.
+      !!t.assignment?.template_set_id
+    );
+    setChecklistTargets(open);
+  };
+  useEffect(() => {
+    loadChecklistTargets();
+    /* eslint-disable-next-line */
   }, [checklistMode, customerId, unitId, partyId]);
+  // Realtime sync — when a coworker grabs/releases an item at this
+  // same bedroom, the picker should refresh so the cleaner sees who
+  // else is on it without needing to refresh manually.
+  useAssignmentSync(loadChecklistTargets, 'task-picker');
 
   // Friendly label for a target — uses status_notes (custom request
   // text) when present, else the template_item_key in a humanized
@@ -1848,10 +1861,15 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
         );
       })()}
 
-      {/* ACTIVE TAB — flat list of in-progress / paused / blocked
-         items, grouped by section, with in_progress at the top and
-         paused / blocked below. Tapping an item opens the bulk
-         actions; multi-pick + Start re-flips paused→in_progress. */}
+      {/* ACTIVE TAB — shows one "workblock" per section that has
+         in-progress / paused / blocked items. Each workblock is
+         numbered for readability ("Workblock 1", "Workblock 2", …)
+         and shows the items the cleaner picked up plus a small
+         "anyone can help with these" row of the pending items still
+         in the same section. The X on each item releases it back to
+         Pending (status='pending') so the cleaner can drop items
+         they took on without finishing. Coworkers see the
+         in-progress items via realtime sync and can tap to help. */}
       {checklistMode && checklistTargets.length > 0 && pickerTab === 'active' && (() => {
         const activeItems = checklistTargets.filter(t =>
           t.status === 'in_progress' || t.status === 'paused' || t.status === 'blocked'
@@ -1864,9 +1882,10 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
             </div>
           );
         }
-        // Group by section so cleaners see a clean Bedroom / Vanity /
-        // Bathroom / General layout. Within each section: in_progress
-        // first, then paused, then blocked.
+        // Group by section so each workblock corresponds to one of
+        // the 4 main sections. Within a section: in_progress first,
+        // then paused, then blocked. Workblock number = order in the
+        // sectionOrder array (deterministic so refreshes don't shuffle).
         const sectionOrder = ['bedroom', 'vanity', 'bathroom', 'general'];
         const sectionLabels = { bedroom: 'Bedroom', vanity: 'Vanity', bathroom: 'Bathroom', general: 'General' };
         const statusRank = { in_progress: 0, paused: 1, blocked: 2 };
@@ -1879,48 +1898,112 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
         Object.keys(bySection).forEach(sec => {
           bySection[sec].sort((a, b) => (statusRank[a.status] ?? 99) - (statusRank[b.status] ?? 99));
         });
+        // Pending items for the "anyone can help" row at the bottom
+        // of each workblock card.
+        const pendingBySection = { bedroom: [], vanity: [], bathroom: [], general: [] };
+        checklistTargets.forEach(t => {
+          if (t.status !== 'pending') return;
+          const sec = (t.template_section || '').toLowerCase();
+          if (sec in pendingBySection) pendingBySection[sec].push(t);
+        });
+        // Number workblocks 1..N by sectionOrder
+        const activeSections = sectionOrder.filter(sec => bySection[sec]?.length);
         return (
           <div className="space-y-3">
-            {sectionOrder.filter(sec => bySection[sec]?.length).map(sec => (
-              <div key={sec}>
-                <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1.5 px-1">
-                  {sectionLabels[sec]} <span className="text-stone-400">· {bySection[sec].length}</span>
-                </div>
-                <div className="grid grid-cols-2 gap-1.5">
-                  {bySection[sec].map(t => {
-                    const checked = selectedTargetIds.has(t.id);
-                    const inProg = t.status === 'in_progress';
-                    const paused = t.status === 'paused';
-                    const blocked = t.status === 'blocked';
-                    const statusChip = inProg ? { label: 'In progress', cls: 'bg-amber-100 text-amber-800 border-amber-300' }
-                      : paused ? { label: 'Paused', cls: 'bg-blue-100 text-blue-800 border-blue-300' }
-                      : blocked ? { label: 'Blocked', cls: 'bg-red-100 text-red-800 border-red-300' }
-                      : null;
-                    return (
-                      <button key={t.id} type="button" onClick={() => toggleTarget(t.id)}
-                        className={`flex items-start gap-2 px-3 py-2.5 rounded-xl border-2 text-left transition-all ${checked ? 'border-amber-600 bg-amber-50' : 'border-stone-200 bg-white hover:border-stone-400'}`}>
-                        <div className={`mt-0.5 w-4 h-4 rounded border-2 flex-shrink-0 flex items-center justify-center ${checked ? 'border-amber-600 bg-amber-600' : 'border-stone-300'}`}>
-                          {checked && <Check size={11} className="text-white" />}
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <div className="text-sm text-stone-900 mb-0.5">{labelForTarget(t)}</div>
-                          {statusChip && (
-                            <span className={`inline-block text-[9px] uppercase tracking-wider font-mono px-1.5 py-0.5 rounded-full border ${statusChip.cls}`}>
-                              {statusChip.label}
-                            </span>
+            {activeSections.map((sec, idx) => {
+              const items = bySection[sec];
+              const remaining = pendingBySection[sec] || [];
+              const workblockNum = idx + 1;
+              return (
+                <div key={sec} className="rounded-2xl bg-amber-50 border-2 border-amber-200 p-3">
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className="text-xs uppercase tracking-wider font-mono font-bold text-amber-900">
+                      Workblock {workblockNum}
+                    </span>
+                    <span className="text-[11px] font-mono text-amber-800">·</span>
+                    <span className="text-xs font-mono text-amber-800">{sectionLabels[sec]}</span>
+                    <span className="text-[10px] font-mono text-amber-700 ml-auto">
+                      {items.length} item{items.length === 1 ? '' : 's'}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-1.5 mb-2">
+                    {items.map(t => {
+                      const checked = selectedTargetIds.has(t.id);
+                      const inProg = t.status === 'in_progress';
+                      const paused = t.status === 'paused';
+                      const blocked = t.status === 'blocked';
+                      const statusChip = inProg ? { label: 'In progress', cls: 'bg-amber-100 text-amber-800 border-amber-300' }
+                        : paused ? { label: 'Paused', cls: 'bg-blue-100 text-blue-800 border-blue-300' }
+                        : blocked ? { label: 'Blocked', cls: 'bg-red-100 text-red-800 border-red-300' }
+                        : null;
+                      return (
+                        <div key={t.id} className={`relative flex items-start gap-2 px-3 py-2.5 rounded-xl border-2 transition-all ${checked ? 'border-amber-600 bg-amber-50' : 'border-stone-200 bg-white'}`}>
+                          <button type="button" onClick={() => toggleTarget(t.id)}
+                            className="flex items-start gap-2 flex-1 min-w-0 text-left">
+                            <div className={`mt-0.5 w-4 h-4 rounded border-2 flex-shrink-0 flex items-center justify-center ${checked ? 'border-amber-600 bg-amber-600' : 'border-stone-300'}`}>
+                              {checked && <Check size={11} className="text-white" />}
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <div className="text-sm text-stone-900 mb-0.5">{labelForTarget(t)}</div>
+                              {statusChip && (
+                                <span className={`inline-block text-[9px] uppercase tracking-wider font-mono px-1.5 py-0.5 rounded-full border ${statusChip.cls}`}>
+                                  {statusChip.label}
+                                </span>
+                              )}
+                              {t.priority && (
+                                <span className="ml-1 inline-block text-[9px] uppercase tracking-wider font-mono px-1.5 py-0.5 rounded-full bg-red-50 border border-red-200 text-red-700 font-bold">
+                                  Priority
+                                </span>
+                              )}
+                            </div>
+                          </button>
+                          {/* Remove (X) button — releases the item back to
+                             Pending so the cleaner can drop one they
+                             can't finish without leaving the others
+                             stranded as 'in progress'. */}
+                          {onReleaseTargets && (
+                            <button type="button"
+                              onClick={async () => {
+                                if (!confirm(`Remove "${labelForTarget(t)}" from your workblock? It goes back to Pending so someone else can grab it.`)) return;
+                                await onReleaseTargets([t]);
+                              }}
+                              title="Remove from workblock — back to Pending"
+                              className="flex-shrink-0 p-1 rounded-full hover:bg-red-100 text-stone-400 hover:text-red-600">
+                              <X size={14} />
+                            </button>
                           )}
-                          {t.priority && (
-                            <span className="ml-1 inline-block text-[9px] uppercase tracking-wider font-mono px-1.5 py-0.5 rounded-full bg-red-50 border border-red-200 text-red-700 font-bold">
-                              Priority
-                            </span>
-                          )}
                         </div>
-                      </button>
-                    );
-                  })}
+                      );
+                    })}
+                  </div>
+                  {/* "Anyone can help" row — pending items in this
+                     section, visible to coworkers via realtime sync.
+                     Tapping one selects it; tap Start at the bottom to
+                     pull it into the workblock. */}
+                  {remaining.length > 0 && (
+                    <div className="pt-2 border-t border-amber-200">
+                      <div className="text-[10px] uppercase tracking-wider font-mono text-amber-800 mb-1">
+                        Still needs help in {sectionLabels[sec]} ({remaining.length})
+                      </div>
+                      <div className="grid grid-cols-2 gap-1.5">
+                        {remaining.map(t => {
+                          const checked = selectedTargetIds.has(t.id);
+                          return (
+                            <button key={t.id} type="button" onClick={() => toggleTarget(t.id)}
+                              className={`flex items-start gap-2 px-2.5 py-2 rounded-lg border text-left transition-all ${checked ? 'border-amber-600 bg-amber-100' : 'border-stone-200 bg-white hover:border-stone-400'}`}>
+                              <div className={`mt-0.5 w-3.5 h-3.5 rounded border-2 flex-shrink-0 flex items-center justify-center ${checked ? 'border-amber-600 bg-amber-600' : 'border-stone-300'}`}>
+                                {checked && <Check size={10} className="text-white" />}
+                              </div>
+                              <span className="text-xs text-stone-700 truncate">{labelForTarget(t)}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         );
       })()}
@@ -2756,6 +2839,24 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     setNewTaskName('');
   };
 
+  // "I bit off more than I could chew" — cleaner taps the X on an
+  // item in the Active tab and wants it back in the Pending pool so
+  // a coworker (or future-self) can grab it without finishing the
+  // current workblock. Flips status → pending and clears the
+  // started_at / started_by stamps so the next person picks it up
+  // cleanly. Does NOT touch the related task; that task may still
+  // be active with other items in it.
+  const releaseTargetsFromWorkblock = async (targets) => {
+    if (!targets || targets.length === 0) return;
+    const ids = targets.map(t => t.id);
+    const { error } = await supabase.from('assignment_targets')
+      .update({ status: 'pending', started_at: null, started_by: null })
+      .in('id', ids);
+    if (error) {
+      alert('Could not release: ' + error.message);
+    }
+  };
+
   // Tapping an assignment from outside a bedroom: take the cleaner to
   // PropertyHub with a "pending start" banner for the target bedroom.
   // We DO NOT create the work_block here — that happens when the cleaner
@@ -3164,6 +3265,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       newTaskName={newTaskName} setNewTaskName={setNewTaskName}
       onStartTask={startTask} onStartTasksFromPicker={startTasksFromPicker}
       onStartChecklistItems={startTasksFromChecklistItems}
+      onReleaseTargets={releaseTargetsFromWorkblock}
       onStopTask={stopTask} onResumeTask={resumeTask}
       onAddPhoto={(taskId, kind) => setPhotoModal({ taskId, kind })}
       photoModal={photoModal} onClosePhotoModal={() => setPhotoModal(null)}
@@ -3182,6 +3284,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     newTaskName={newTaskName} setNewTaskName={setNewTaskName}
     onStartTask={startTask} onStartTasksFromPicker={startTasksFromPicker}
     onStartChecklistItems={startTasksFromChecklistItems}
+    onReleaseTargets={releaseTargetsFromWorkblock}
     onStopTask={stopTask} onResumeTask={resumeTask}
     onAddPhoto={(taskId, kind) => setPhotoModal({ taskId, kind })}
     photoModal={photoModal} onClosePhotoModal={() => setPhotoModal(null)}
@@ -3857,7 +3960,7 @@ function PreparingBlockView({ shift, pendingStart, employeeName, employee,
 }
 
 function BlockView({ shift, block, tasks, activeTask, employeeName, employee, onSignOut, onFinish, onPause,
-  newTaskName, setNewTaskName, onStartTask, onStartTasksFromPicker, onStartChecklistItems, onStopTask, onResumeTask, onAddPhoto,
+  newTaskName, setNewTaskName, onStartTask, onStartTasksFromPicker, onStartChecklistItems, onReleaseTargets, onStopTask, onResumeTask, onAddPhoto,
   photoModal, onClosePhotoModal, onUploadPhoto, onSavePhotoNote, onOpenMessages, onOpenBedroomHistory,
   onMoveBlock, previewMode, busy }) {
   useTick(true);
@@ -4030,6 +4133,7 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
               onStartOne={(name, category, subcategory) => onStartTask(name, category, subcategory)}
               onStartMany={onStartTasksFromPicker}
               onStartChecklistItems={onStartChecklistItems}
+              onReleaseTargets={onReleaseTargets}
               customerId={shift.customer_id}
               unitId={block.unit_id}
               partyId={block.party_id}
@@ -4242,7 +4346,7 @@ function MoveBlockModalInline({ block, propertyId, currentEmployeeId, onSave, on
 // SIMPLE SHIFT VIEW (single-bill properties)
 // =================================================================
 function SimpleShiftView({ shift, tasks, activeTask, employeeName, employee, onSignOut, onClockOut, onSwitchProperty, onAttachProperty,
-  newTaskName, setNewTaskName, onStartTask, onStartTasksFromPicker, onStartChecklistItems, onStopTask, onResumeTask, onAddPhoto,
+  newTaskName, setNewTaskName, onStartTask, onStartTasksFromPicker, onStartChecklistItems, onReleaseTargets, onStopTask, onResumeTask, onAddPhoto,
   photoModal, onClosePhotoModal, onUploadPhoto, onSavePhotoNote, onOpenMessages, onOpenChangePin, busy }) {
   const [showMenu, setShowMenu] = useState(false);
   const [taskInputMode, setTaskInputMode] = useState('picker'); // 'picker' | 'custom'
@@ -4342,6 +4446,7 @@ function SimpleShiftView({ shift, tasks, activeTask, employeeName, employee, onS
               onStartOne={(name, category, subcategory) => onStartTask(name, category, subcategory)}
               onStartMany={onStartTasksFromPicker}
               onStartChecklistItems={onStartChecklistItems}
+              onReleaseTargets={onReleaseTargets}
               customerId={shift.customer_id}
               employee={employee}
               defaultName={newTaskName}

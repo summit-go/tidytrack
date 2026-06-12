@@ -8815,11 +8815,19 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
       onSaved={() => { setView('open'); load(); }} />;
   }
 
+  // Picked property + Upload-checklist sub-view → render new wizard
+  if (picked && view === 'upload-checklist') {
+    return <ChecklistAssignmentWizard property={picked} employee={employee}
+      onCancel={() => setView('open')}
+      onSaved={() => { setView('open'); load(); }} />;
+  }
+
   // Picked property + Open sub-view → render list
   if (picked && view === 'open') {
     return <AssignmentList property={picked} employee={employee}
       onBack={() => { setPicked(null); load(); }}
       onNew={() => setView('upload')}
+      onNewChecklist={() => setView('upload-checklist')}
       onOpen={(a) => { setDetail(a); setView('detail'); }} />;
   }
 

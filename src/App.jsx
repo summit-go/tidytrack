@@ -2332,6 +2332,14 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   const [showMessages, setShowMessages] = useState(false);
   const [showChangePin, setShowChangePin] = useState(false);
   const [bedroomHistory, setBedroomHistory] = useState(null); // params for BedroomHistoryView
+  // When the cleaner taps a different bedroom while one is open, we
+  // surface a 3-button modal (Stay / Pause + switch / Finish + switch)
+  // instead of a native confirm. Shape: { target, fromLabel, toLabel }.
+  const [switchPending, setSwitchPending] = useState(null);
+  // After the cleaner finishes a bedroom we show a "Next up" suggestion
+  // modal listing other bedrooms in the same apartment → floor → building
+  // → next building (3rd floor down). Shape: { fromUnit, fromParty }.
+  const [nextUpPrompt, setNextUpPrompt] = useState(null);
   const [viewOnlySession, setViewOnlySession] = useState(null); // { id, started_at } if viewing without clocking in
   const [viewOnlyProperty, setViewOnlyProperty] = useState(null); // the property they picked to view
 
@@ -2689,8 +2697,20 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     await supabase.from('work_blocks').update({ end_time: ts }).eq('id', activeBlock.id);
     const updated = { ...activeBlock, end_time: ts, tasks };
     setWorkBlocks(prev => prev.map(b => b.id === activeBlock.id ? updated : b));
+    // Capture the bedroom we just finished so the NextUpPrompt knows
+    // which apartment / floor / building to suggest from.
+    const finishedFrom = {
+      unitId: activeBlock.unit_id,
+      unitLabel: activeBlock.unit?.label,
+      partyId: activeBlock.party_id,
+      partyLabel: activeBlock.party?.label,
+      propertyId: shift.customer_id,
+    };
     setActiveBlock(null); setTasks([]); setActiveTask(null);
     setBusy(false);
+    // Surface the "what's next?" prompt. The modal will fetch the
+    // candidate bedrooms itself.
+    setNextUpPrompt(finishedFrom);
   };
 
   // Generic end-block — closes ANY block by id, including the one
@@ -2908,40 +2928,19 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       return; // already there
     }
 
-    // Active block but on a different bedroom — ask before switching.
-    // Switching auto-pauses any in_progress items at the current
-    // bedroom so the cleaner can resume them later, and closes the
-    // current work block. Without this guard a cleaner could end up
-    // with two open blocks across two bedrooms which the model can't
-    // represent.
+    // Active block but on a different bedroom — open the
+    // SwitchBedroomModal with 3 options instead of a native confirm.
+    // The modal will call back into resolveSwitchTo* helpers below
+    // depending on which button the cleaner taps.
     if (activeBlock && !activeBlock.end_time) {
-      const fromLabel = `${activeBlock.unit?.label || ''} · ${activeBlock.party?.label || ''}`;
-      const toLabel   = `${target.unit?.label   || ''} · ${target.party?.label   || ''}`;
-      const switchMsg = `You're already in ${fromLabel}. Switching to ${toLabel} will pause any items you started in ${fromLabel} (you can resume them later) and end the current work block.\n\nSwitch?`;
-      if (!confirm(switchMsg)) return;
-      setBusy(true);
-      if (activeTask) await stopTask(activeTask, false);
-      // Pause any in-progress items the cleaner started at the
-      // current bedroom — they show up as Paused so they can pick
-      // them back up when they return.
-      if (employee?.id && activeBlock.unit_id && activeBlock.party_id) {
-        try {
-          await supabase.from('assignment_targets')
-            .update({ status: 'paused' })
-            .eq('unit_id', activeBlock.unit_id)
-            .eq('party_id', activeBlock.party_id)
-            .eq('started_by', employee.id)
-            .eq('status', 'in_progress');
-        } catch (e) {
-          console.warn('[switch bedroom] could not pause in-progress items', e);
-        }
-      }
-      const ts = new Date().toISOString();
-      await supabase.from('work_blocks').update({ end_time: ts }).eq('id', activeBlock.id);
-      const updated = { ...activeBlock, end_time: ts, tasks };
-      setWorkBlocks(prev => prev.map(b => b.id === activeBlock.id ? updated : b));
-      setActiveBlock(null); setTasks([]); setActiveTask(null);
-      setBusy(false);
+      setSwitchPending({
+        target,
+        fromUnitLabel: activeBlock.unit?.label || '',
+        fromPartyLabel: activeBlock.party?.label || '',
+        toUnitLabel: target.unit?.label || '',
+        toPartyLabel: target.party?.label || '',
+      });
+      return;
     }
 
     // If THIS cleaner has their own open block at this bedroom, close it
@@ -2971,6 +2970,56 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       partyLabel: target.party?.label || '',
     });
   };
+
+  // ----- SwitchBedroomModal callbacks -----
+  // The modal hands the cleaner three explicit actions for "I want
+  // to switch to a different bedroom while one is open":
+  //   - Stay        (close the modal, do nothing)
+  //   - Pause + go  (pause in_progress items, end the block, route to new)
+  //   - Finish + go (mark in_progress items DONE, end the block, route to new)
+  // Both Pause and Finish then call goToBedroomForTarget for the new
+  // target — which by then has no active block so it falls through to
+  // the pendingStart branch and routes the cleaner to the bedroom
+  // landing page.
+  const closeCurrentBlockAndSwitch = async ({ markStatus, target }) => {
+    setSwitchPending(null);
+    if (!activeBlock || activeBlock.end_time) {
+      // Block already gone — just route.
+      await goToBedroomForTarget(target);
+      return;
+    }
+    setBusy(true);
+    if (activeTask) await stopTask(activeTask, false);
+    // Update the cleaner's open items at the current bedroom to the
+    // chosen status (paused for resume, done for finish).
+    if (employee?.id && activeBlock.unit_id && activeBlock.party_id) {
+      try {
+        const patch = { status: markStatus };
+        if (markStatus === 'done') {
+          patch.completed_at = new Date().toISOString();
+          patch.completed_by = employee.id;
+        }
+        await supabase.from('assignment_targets')
+          .update(patch)
+          .eq('unit_id', activeBlock.unit_id)
+          .eq('party_id', activeBlock.party_id)
+          .eq('started_by', employee.id)
+          .eq('status', 'in_progress');
+      } catch (e) {
+        console.warn(`[switch bedroom] could not ${markStatus} in-progress items`, e);
+      }
+    }
+    const ts = new Date().toISOString();
+    await supabase.from('work_blocks').update({ end_time: ts }).eq('id', activeBlock.id);
+    const updated = { ...activeBlock, end_time: ts, tasks };
+    setWorkBlocks(prev => prev.map(b => b.id === activeBlock.id ? updated : b));
+    setActiveBlock(null); setTasks([]); setActiveTask(null);
+    setBusy(false);
+    // Now route into the requested bedroom (fall-through to pendingStart).
+    await goToBedroomForTarget(target);
+  };
+  const resolveSwitchPause = async (target) => closeCurrentBlockAndSwitch({ markStatus: 'paused', target });
+  const resolveSwitchFinish = async (target) => closeCurrentBlockAndSwitch({ markStatus: 'done', target });
 
   // Confirm the pending start: actually create the work_block now and
   // open it as active. Called by the Start button on the PropertyHub
@@ -3185,6 +3234,57 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
             setShowChangePin(false);
           }} />
       )}
+      {/* Switch-bedroom modal — shown when a cleaner taps a different
+         bedroom while one is open. Three explicit options: Stay /
+         Pause + switch / Finish + switch. */}
+      {switchPending && (
+        <SwitchBedroomModal
+          fromUnitLabel={switchPending.fromUnitLabel}
+          fromPartyLabel={switchPending.fromPartyLabel}
+          toUnitLabel={switchPending.toUnitLabel}
+          toPartyLabel={switchPending.toPartyLabel}
+          busy={busy}
+          onStay={() => setSwitchPending(null)}
+          onPause={() => resolveSwitchPause(switchPending.target)}
+          onFinish={() => resolveSwitchFinish(switchPending.target)} />
+      )}
+      {/* Bedroom history overlay — rendered as a fixed-position layer
+         on top of whatever the cleaner was looking at, NOT a route
+         replacement. Tapping Back closes it and the underlying screen
+         comes right back with its tab/filter/scroll state intact. */}
+      {bedroomHistory && (
+        <BedroomHistoryView
+          propertyId={shift?.customer_id || viewOnlyProperty?.id}
+          propertyName={shift?.customer?.name || viewOnlyProperty?.name || ''}
+          unitId={bedroomHistory.unitId}
+          unitLabel={bedroomHistory.unitLabel}
+          partyId={bedroomHistory.partyId}
+          partyLabel={bedroomHistory.partyLabel}
+          employee={employee}
+          onBack={() => setBedroomHistory(null)} />
+      )}
+      {/* Next-up prompt — shown after the cleaner finishes a bedroom.
+         Suggests where to go next (same apt → same floor → same
+         building → other building starting on the 3rd floor). Picking
+         a suggestion routes through the pending-start flow so the
+         cleaner still has to tap Start cleaning on the next landing. */}
+      {nextUpPrompt && (
+        <NextUpModal
+          from={nextUpPrompt}
+          employeeId={employee?.id}
+          onClose={() => setNextUpPrompt(null)}
+          onPick={(c) => {
+            setNextUpPrompt(null);
+            // Reuse the existing pending-start route — no work block
+            // gets created until the cleaner taps Start cleaning.
+            setPendingStart({
+              unitId: c.unitId,
+              partyId: c.partyId,
+              unitLabel: c.unitLabel,
+              partyLabel: c.partyLabel,
+            });
+          }} />
+      )}
     </>
   );
 
@@ -3194,17 +3294,6 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   }
 
   // View-only mode: cleaner is browsing without a real shift
-  if (viewOnlySession && bedroomHistory) {
-    return <BedroomHistoryView
-      propertyId={viewOnlyProperty?.id}
-      propertyName={viewOnlyProperty?.name || ''}
-      unitId={bedroomHistory.unitId}
-      unitLabel={bedroomHistory.unitLabel}
-      partyId={bedroomHistory.partyId}
-      partyLabel={bedroomHistory.partyLabel}
-      employee={employee}
-      onBack={() => setBedroomHistory(null)} />;
-  }
   if (viewOnlySession) {
     return <ViewOnlyDashboard
       employee={employee}
@@ -3275,18 +3364,6 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   }
 
   const isMulti = shift.customer?.property_type === 'multi_unit';
-
-  if (bedroomHistory) {
-    return withIdleModal(<BedroomHistoryView
-      propertyId={shift.customer_id}
-      propertyName={shift.customer?.name || ''}
-      unitId={bedroomHistory.unitId}
-      unitLabel={bedroomHistory.unitLabel}
-      partyId={bedroomHistory.partyId}
-      partyLabel={bedroomHistory.partyLabel}
-      employee={employee}
-      onBack={() => setBedroomHistory(null)} />);
-  }
 
   // Pending-start route: cleaner tapped Start (or Go to this bedroom)
   // on an assignment but hasn't confirmed yet. Show the bedroom view
@@ -13533,33 +13610,30 @@ function BedroomHistoryView({ propertyId, propertyName, unitId, unitLabel, party
   const isStaff = employee?.role === 'owner' || employee?.role === 'manager';
   const [data, setData] = useState({ days: [], loading: true });
   const [openedAssignment, setOpenedAssignment] = useState(null);
-  const [filterDays, setFilterDays] = useState(30); // default last 30 days
-  const FILTER_OPTIONS = isStaff
-    ? [7, 30, 90, 365, 'all']
-    : [7, 30, 90, 180]; // cleaners capped at 180
-
-  const filterLabel = (d) => d === 'all' ? 'All time' : `Last ${d} days`;
+  // Pull a wide window in one query so the date pills can show
+  // which days have work. The user picks ONE day to focus on
+  // (default: today). Cleaners are capped at 180 days.
+  const WINDOW_DAYS = isStaff ? 365 : 180;
+  // selectedDay = null → "all days in window"
+  //            = 'today' → today only
+  //            = 'YYYY-MM-DD' → that specific date
+  const todayKey = (() => {
+    const d = new Date(); d.setHours(0, 0, 0, 0);
+    return d.toISOString().slice(0, 10);
+  })();
+  const [selectedDay, setSelectedDay] = useState('today');
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
       setData(d => ({ ...d, loading: true }));
-      // Date window
-      let sinceISO = null;
-      if (filterDays !== 'all') {
-        const since = new Date();
-        since.setDate(since.getDate() - Number(filterDays));
-        since.setHours(0, 0, 0, 0);
-        sinceISO = since.toISOString();
-      }
-      // For cleaners, hard cap to 180 days
-      if (!isStaff) {
-        const cap = new Date();
-        cap.setDate(cap.getDate() - 180);
-        cap.setHours(0, 0, 0, 0);
-        const capISO = cap.toISOString();
-        if (!sinceISO || sinceISO < capISO) sinceISO = capISO;
-      }
+      // Load the full window in one go. The "selected day" is a
+      // display filter only; we want the pill row to show every day
+      // that has activity so the cleaner can browse between them.
+      const since = new Date();
+      since.setDate(since.getDate() - WINDOW_DAYS);
+      since.setHours(0, 0, 0, 0);
+      const sinceISO = since.toISOString();
 
       // Fetch work blocks at this bedroom in the window
       let blocksQ = supabase.from('work_blocks')
@@ -13624,11 +13698,12 @@ function BedroomHistoryView({ propertyId, propertyName, unitId, unitLabel, party
       setData({ days, loading: false });
     })();
     return () => { cancelled = true; };
-  }, [propertyId, unitId, partyId, filterDays, isStaff]);
+  }, [propertyId, unitId, partyId, WINDOW_DAYS, isStaff]);
 
   return (
-    <div className="pb-24 min-h-screen bg-stone-50">
-      <div className="flex items-center gap-3 px-5 py-4 border-b border-stone-200 bg-white">
+    <div className="fixed inset-0 z-40 bg-stone-50 overflow-y-auto">
+      <div className="pb-24 min-h-screen">
+      <div className="flex items-center gap-3 px-5 py-4 border-b border-stone-200 bg-white sticky top-0 z-10">
         <button onClick={onBack} className="p-2 -ml-2 rounded-full hover:bg-stone-100">
           <ArrowLeft size={20} className="text-stone-700" />
         </button>
@@ -13642,18 +13717,68 @@ function BedroomHistoryView({ propertyId, propertyName, unitId, unitLabel, party
       </div>
 
       <div className="px-5 pt-4">
-        <div className="flex gap-1.5 mb-4 overflow-x-auto pb-1">
-          {FILTER_OPTIONS.map(opt => (
-            <button key={opt} onClick={() => setFilterDays(opt)}
-              className={`px-3 py-1.5 rounded-full text-xs font-mono whitespace-nowrap ${
-                filterDays === opt
-                  ? 'bg-stone-900 text-stone-50'
-                  : 'bg-white border border-stone-200 text-stone-600 hover:border-stone-400'
-              }`}>
-              {filterLabel(opt)}
-            </button>
-          ))}
-        </div>
+        {(() => {
+          // Build a pill set: Today + every day that has activity
+          // (work blocks OR targets) within the window. Days are
+          // sorted newest-first. The first pill is always "Today"
+          // (highlighted as default). If today itself has activity
+          // it's not duplicated.
+          const dayKeys = data.days.map(d => d.key);
+          const set = new Set(dayKeys);
+          set.add(todayKey);
+          const allKeys = Array.from(set).sort((a, b) => b.localeCompare(a));
+          // Render
+          return (
+            <div className="flex gap-1.5 mb-4 overflow-x-auto pb-1">
+              <button onClick={() => setSelectedDay(null)}
+                className={`px-3 py-1.5 rounded-full text-xs font-mono whitespace-nowrap ${
+                  selectedDay === null
+                    ? 'bg-stone-900 text-stone-50'
+                    : 'bg-white border border-stone-200 text-stone-600 hover:border-stone-400'
+                }`}>
+                All ({data.days.length})
+              </button>
+              {allKeys.map(dk => {
+                const isToday = dk === todayKey;
+                const hasActivity = dayKeys.includes(dk);
+                const dayData = data.days.find(d => d.key === dk);
+                const count = dayData ? (dayData.blocks.length + dayData.targets.length) : 0;
+                const active = (selectedDay === 'today' && isToday) || selectedDay === dk;
+                const label = isToday ? 'Today' : (() => {
+                  const d = new Date(dk + 'T12:00:00');
+                  const yesterday = new Date(); yesterday.setDate(yesterday.getDate() - 1); yesterday.setHours(0, 0, 0, 0);
+                  const yKey = yesterday.toISOString().slice(0, 10);
+                  if (dk === yKey) return 'Yesterday';
+                  return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+                })();
+                return (
+                  <button key={dk} onClick={() => setSelectedDay(isToday ? 'today' : dk)}
+                    className={`px-3 py-1.5 rounded-full text-xs font-mono whitespace-nowrap flex items-center gap-1 ${
+                      active ? 'bg-stone-900 text-stone-50'
+                        : hasActivity ? 'bg-white border border-stone-200 text-stone-700 hover:border-stone-400'
+                        : 'bg-stone-50 border border-stone-200 text-stone-400'
+                    }`}>
+                    <span>{label}</span>
+                    {count > 0 && (
+                      <span className={`text-[9px] px-1.5 py-0.5 rounded-full ${active ? 'bg-stone-700 text-stone-50' : 'bg-stone-200 text-stone-600'}`}>
+                        {count}
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+              {/* Pick a specific date — opens native picker. */}
+              <label className="px-3 py-1.5 rounded-full text-xs font-mono whitespace-nowrap bg-white border border-stone-200 text-stone-600 flex items-center gap-1 cursor-pointer hover:bg-stone-50">
+                <Calendar size={11} />
+                <span>Pick date</span>
+                <input type="date"
+                  max={todayKey}
+                  onChange={(e) => { if (e.target.value) setSelectedDay(e.target.value); e.target.value = ''; }}
+                  className="sr-only" />
+              </label>
+            </div>
+          );
+        })()}
         {!isStaff && (
           <div className="text-[11px] text-stone-500 italic mb-3">
             Cleaners can view up to 6 months of history.
@@ -13662,13 +13787,25 @@ function BedroomHistoryView({ propertyId, propertyName, unitId, unitLabel, party
 
         {data.loading ? (
           <div className="text-center py-12 text-stone-400 text-sm">Loading history…</div>
-        ) : data.days.length === 0 ? (
-          <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
-            No activity for this bedroom in the selected window.
-          </div>
-        ) : (
-          <div className="space-y-6">
-            {data.days.map(day => (
+        ) : (() => {
+          // Filter days to the picked one (or show all)
+          const days = selectedDay === null ? data.days
+            : selectedDay === 'today'
+              ? data.days.filter(d => d.key === todayKey)
+              : data.days.filter(d => d.key === selectedDay);
+          if (days.length === 0) {
+            const dayLabel = selectedDay === 'today' ? 'today' :
+              selectedDay ? new Date(selectedDay + 'T12:00:00').toLocaleDateString([], { month: 'long', day: 'numeric' }) :
+              'this window';
+            return (
+              <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
+                No activity for this bedroom on {dayLabel}.
+              </div>
+            );
+          }
+          return (
+            <div className="space-y-6">
+              {days.map(day => (
               <div key={day.key}>
                 <div className="sticky top-0 bg-stone-50 py-2 z-10 border-b border-stone-200 mb-3">
                   <div className="font-serif text-lg text-stone-900">
@@ -13761,12 +13898,14 @@ function BedroomHistoryView({ propertyId, propertyName, unitId, unitLabel, party
               </div>
             ))}
           </div>
-        )}
+          );
+        })()}
       </div>
 
       {openedAssignment && (
         <AssignmentViewer target={openedAssignment} onClose={() => setOpenedAssignment(null)} />
       )}
+      </div>
     </div>
   );
 }
@@ -18029,6 +18168,10 @@ function AssignmentsPanel({ propertyId, employee, refreshKey, onGoToBedroom, onO
           className={`flex-1 min-w-fit py-2 px-2 rounded-lg text-xs font-medium transition-colors whitespace-nowrap ${tab === 'pending' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
           Pending{counts.pending > 0 && ` (${counts.pending})`}
         </button>
+        <button onClick={() => setTab('suggested')}
+          className={`flex-1 min-w-fit py-2 px-2 rounded-lg text-xs font-medium transition-colors whitespace-nowrap ${tab === 'suggested' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+          Suggested
+        </button>
         <button onClick={() => setTab('paused')}
           className={`flex-1 min-w-fit py-2 px-2 rounded-lg text-xs font-medium transition-colors whitespace-nowrap ${tab === 'paused' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
           Paused{counts.paused > 0 && ` (${counts.paused})`}
@@ -18051,8 +18194,491 @@ function AssignmentsPanel({ propertyId, employee, refreshKey, onGoToBedroom, onO
           </button>
         )}
       </div>
-      <AssignmentTabContent propertyId={propertyId} employee={employee} statusFilter={tab}
-        onUpdate={loadCounts} onGoToBedroom={onGoToBedroom} onOpenBedroomHistory={onOpenBedroomHistory} />
+      {tab === 'suggested' ? (
+        // Suggested tab uses a different content component — it doesn't
+        // list pending targets, it ranks BEDROOMS by proximity to the
+        // cleaner's last work block, same algorithm as the post-finish
+        // NextUpModal but always available.
+        <SuggestedTabContent propertyId={propertyId} employee={employee}
+          onGoToBedroom={onGoToBedroom} onOpenBedroomHistory={onOpenBedroomHistory} />
+      ) : (
+        <AssignmentTabContent propertyId={propertyId} employee={employee} statusFilter={tab}
+          onUpdate={loadCounts} onGoToBedroom={onGoToBedroom} onOpenBedroomHistory={onOpenBedroomHistory} />
+      )}
+    </div>
+  );
+}
+
+// SuggestedTabContent — proximity-ranked "what to clean next" view.
+// Anchors on the cleaner's most-recent work block (open or closed today)
+// and ranks suggestions: same apartment → same floor → same building →
+// other building starting on floor 3. If no anchor exists, defaults to
+// floor-3 first across the property.
+function SuggestedTabContent({ propertyId, employee, onGoToBedroom, onOpenBedroomHistory }) {
+  const [loaded, setLoaded] = useState(false);
+  const [anchor, setAnchor] = useState(null);
+  const [groups, setGroups] = useState({ sameApt: [], sameFloor: [], sameBuilding: [], otherBuilding: [] });
+  const [busy, setBusy] = useState(false);
+  // Action modals — one bedroom card at a time may want to open a Blocked-note
+  // modal or a Reassign modal. We hold them here at the tab level since the
+  // cards themselves are just renderers.
+  const [opened, setOpened] = useState(null);     // representative target for View Doc
+  const [statusModal, setStatusModal] = useState(null);   // { target, bulkRows }
+  const [reassignTarget, setReassignTarget] = useState(null);
+  // Per-section collapse. Same apartment + Same floor open by default,
+  // Same building + Other buildings collapsed.
+  const [collapsed, setCollapsed] = useState({
+    sameApt: false, sameFloor: false, sameBuilding: true, otherBuilding: true,
+  });
+  const [reloadKey, setReloadKey] = useState(0);
+  const reload = () => setReloadKey(k => k + 1);
+
+  // Label parsers — same as NextUpModal
+  const buildingFromLabel = (label) => {
+    if (!label) return null;
+    const m = label.match(/^B(\d+)/i);
+    return m ? m[1] : null;
+  };
+  const unitNumberFromLabel = (label) => {
+    if (!label) return null;
+    const m = label.match(/-(\d+)/);
+    return m ? parseInt(m[1], 10) : null;
+  };
+
+  useEffect(() => {
+    if (!propertyId || !employee?.id) return;
+    (async () => {
+      setLoaded(false);
+      // 1) Anchor — cleaner's most recent block at this property
+      const { data: myBlocks } = await supabase
+        .from('work_blocks')
+        .select('id, unit_id, party_id, end_time, start_time, unit:units(label), party:parties(label), shift:shifts!inner(customer_id, employee_id)')
+        .order('start_time', { ascending: false })
+        .limit(20);
+      const mine = (myBlocks || []).filter(b =>
+        b.shift?.customer_id === propertyId && b.shift?.employee_id === employee.id
+      );
+      const recent = mine[0];
+      const anchorObj = recent ? {
+        unitId: recent.unit_id,
+        partyId: recent.party_id,
+        unitLabel: recent.unit?.label || '',
+        partyLabel: recent.party?.label || '',
+        building: buildingFromLabel(recent.unit?.label),
+        floor: floorFromLabel(recent.unit?.label),
+        unitNum: unitNumberFromLabel(recent.unit?.label),
+        wasOpen: !recent.end_time,
+      } : null;
+
+      // 2) Units + parties + full target detail + open work blocks
+      const [unitsRes, partiesRes, targetsRes, blocksRes] = await Promise.all([
+        supabase.from('units').select('id, label, active').eq('customer_id', propertyId).eq('active', true),
+        supabase.from('parties').select('id, label, unit_id, sort_order, active'),
+        supabase.from('assignment_targets')
+          .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, assignment_type, template_set_id, sheet_type, general_variant, bathroom_variant, created_at), unit:units(id, label), party:parties(id, label), starter:employees!started_by(name), completer:employees!completed_by(name), assignedTo:employees!assigned_to(id, name)')
+          .neq('status', 'done'),
+        // Open work blocks property-wide for the "who's here" chips
+        supabase.from('work_blocks')
+          .select('id, unit_id, party_id, shift:shifts!inner(customer_id, employee:employees(id, name))')
+          .is('end_time', null),
+      ]);
+      const units = unitsRes.data || [];
+      const parties = (partiesRes.data || []).filter(p => p.active !== false);
+      const openTargets = (targetsRes.data || []).filter(t => {
+        const a = t.assignment;
+        if (!a || a.customer_id !== propertyId) return false;
+        if (a.active === false) return false;
+        if (a.source === 'pm' && a.pm_status !== 'approved') return false;
+        return true;
+      });
+      const openBlocks = (blocksRes.data || []).filter(b =>
+        b.shift?.customer_id === propertyId &&
+        b.shift?.employee?.id && b.shift.employee.id !== employee.id
+      );
+
+      // Group open targets by bedroom (party_id)
+      const targetsByParty = new Map();
+      openTargets.forEach(t => {
+        if (!t.party_id) return;
+        if (!targetsByParty.has(t.party_id)) targetsByParty.set(t.party_id, []);
+        targetsByParty.get(t.party_id).push(t);
+      });
+      // Build "who's here" map — keyed by party_id, contains [{ name, partyLabel(if relevant) }]
+      // For the chip we just need the cleaner's name; the bedroom IS the card.
+      const whosHereByParty = new Map();
+      openBlocks.forEach(b => {
+        if (!b.party_id) return;
+        if (!whosHereByParty.has(b.party_id)) whosHereByParty.set(b.party_id, []);
+        whosHereByParty.get(b.party_id).push({ name: b.shift.employee.name });
+      });
+
+      const unitMap = new Map(units.map(u => [u.id, u]));
+      const candidates = parties
+        .filter(p => targetsByParty.has(p.id))
+        .filter(p => !anchorObj || p.id !== anchorObj.partyId)
+        .map(p => {
+          const unit = unitMap.get(p.unit_id);
+          if (!unit) return null;
+          const items = targetsByParty.get(p.id) || [];
+          const hasPriority = items.some(i => i.priority);
+          return {
+            partyId: p.id,
+            partyLabel: p.label,
+            unitId: unit.id,
+            unitLabel: unit.label,
+            building: buildingFromLabel(unit.label),
+            floor: floorFromLabel(unit.label),
+            unitNum: unitNumberFromLabel(unit.label),
+            items,
+            hasPriority,
+            whosHere: whosHereByParty.get(p.id) || [],
+          };
+        })
+        .filter(Boolean);
+
+      // Bucket
+      const sameApt = anchorObj ? candidates.filter(c => c.unitId === anchorObj.unitId) : [];
+      const sameFloor = anchorObj ? candidates.filter(c =>
+        c.unitId !== anchorObj.unitId && c.building === anchorObj.building && c.floor === anchorObj.floor
+      ) : [];
+      const sameBuilding = anchorObj ? candidates.filter(c =>
+        c.building === anchorObj.building && c.floor !== anchorObj.floor
+      ) : [];
+      const otherBuilding = anchorObj ? candidates.filter(c => c.building !== anchorObj.building) : [...candidates];
+
+      // Sorts (same as before)
+      sameFloor.sort((a, b) => {
+        if (a.hasPriority !== b.hasPriority) return a.hasPriority ? -1 : 1;
+        const da = Math.abs((a.unitNum || 0) - (anchorObj?.unitNum || 0));
+        const db = Math.abs((b.unitNum || 0) - (anchorObj?.unitNum || 0));
+        return da - db;
+      });
+      sameBuilding.sort((a, b) => {
+        if (a.hasPriority !== b.hasPriority) return a.hasPriority ? -1 : 1;
+        const fa = Math.abs((a.floor ?? 99) - (anchorObj?.floor ?? 0));
+        const fb = Math.abs((b.floor ?? 99) - (anchorObj?.floor ?? 0));
+        if (fa !== fb) return fa - fb;
+        return (a.unitNum || 0) - (b.unitNum || 0);
+      });
+      const distFromThree = (f) => {
+        if (f == null) return 99;
+        if (f === 3) return 0;
+        if (f < 3) return 3 - f;
+        return (f - 3) + 3;
+      };
+      otherBuilding.sort((a, b) => {
+        if (a.hasPriority !== b.hasPriority) return a.hasPriority ? -1 : 1;
+        if (a.building !== b.building) return (a.building || '').localeCompare(b.building || '');
+        const da = distFromThree(a.floor);
+        const db = distFromThree(b.floor);
+        if (da !== db) return da - db;
+        return (a.unitNum || 0) - (b.unitNum || 0);
+      });
+
+      setAnchor(anchorObj);
+      setGroups({ sameApt, sameFloor, sameBuilding, otherBuilding });
+      setLoaded(true);
+    })();
+  }, [propertyId, employee?.id, reloadKey]);
+
+  // Bulk handlers — operate on a single bedroom's items. Mirror of the
+  // helpers in AssignmentBanner/AssignmentTabContent. Optimistic + single
+  // DB write, then trigger a reload so counts settle.
+  const bulkUpdateStatus = async (rows, newStatus, statusNotes) => {
+    if (!rows || rows.length === 0) return;
+    const ids = rows.map(r => r.id);
+    setBusy(true);
+    const patch = { status: newStatus };
+    if (newStatus === 'in_progress') {
+      patch.started_at = new Date().toISOString();
+      patch.started_by = employee?.id || null;
+    }
+    if (newStatus === 'done') {
+      patch.completed_at = new Date().toISOString();
+      patch.completed_by = employee?.id || null;
+    } else {
+      patch.completed_at = null; patch.completed_by = null;
+    }
+    if (newStatus === 'pending') { patch.started_at = null; patch.started_by = null; }
+    if (statusNotes !== undefined) patch.status_notes = statusNotes || null;
+    const { error } = await supabase.from('assignment_targets').update(patch).in('id', ids);
+    setBusy(false);
+    if (error) { alert('Could not update: ' + error.message); reload(); return; }
+    reload();
+  };
+  const bulkTogglePriority = async (rows) => {
+    if (!rows || rows.length === 0) return;
+    const anyOn = rows.some(r => r.priority);
+    const next = !anyOn;
+    const ids = rows.map(r => r.id);
+    const { error } = await supabase.from('assignment_targets').update({ priority: next }).in('id', ids);
+    if (error) { alert('Could not update priority: ' + error.message); }
+    reload();
+  };
+
+  // Bedroom card — matches renderChecklistGroupCard from AssignmentBanner.
+  // Shows the full bulk-card chrome plus the "{name} is here" chip when
+  // another cleaner has an open block at this bedroom.
+  const renderBedroomCard = (c) => {
+    const items = c.items;
+    const rep = items[0];
+    if (!rep) return null;
+    const counts = {
+      pending:     items.filter(i => i.status === 'pending').length,
+      in_progress: items.filter(i => i.status === 'in_progress').length,
+      paused:      items.filter(i => i.status === 'paused').length,
+      blocked:     items.filter(i => i.status === 'blocked').length,
+      done:        0,
+    };
+    const total = items.length;
+    const sectionCounts = {
+      bedroom:  items.filter(i => (i.template_section || '').toLowerCase() === 'bedroom').length,
+      vanity:   items.filter(i => (i.template_section || '').toLowerCase() === 'vanity').length,
+      bathroom: items.filter(i => (i.template_section || '').toLowerCase() === 'bathroom').length,
+      general:  items.filter(i => (i.template_section || '').toLowerCase() === 'general').length,
+    };
+    const knownSectioned = sectionCounts.bedroom + sectionCounts.vanity + sectionCounts.bathroom + sectionCounts.general;
+    const otherCount = total - knownSectioned;
+    const sectionBits = [];
+    if (sectionCounts.bedroom)  sectionBits.push(`Bedroom (${sectionCounts.bedroom})`);
+    if (sectionCounts.vanity)   sectionBits.push(`Vanity (${sectionCounts.vanity})`);
+    if (sectionCounts.bathroom) sectionBits.push(`Bathroom (${sectionCounts.bathroom})`);
+    if (sectionCounts.general)  sectionBits.push(`General (${sectionCounts.general})`);
+    if (otherCount > 0)         sectionBits.push(`Other (${otherCount})`);
+    const statusOrder = ['pending', 'in_progress', 'paused', 'blocked'];
+    const dominantStatus = statusOrder.find(s => items.some(i => i.status === s)) || 'pending';
+    const statusPill = ASSIGNMENT_STATUSES[dominantStatus] || ASSIGNMENT_STATUSES.pending;
+    const goTo = () => {
+      if (!onGoToBedroom) return;
+      onGoToBedroom({
+        unit_id: c.unitId,
+        party_id: c.partyId,
+        unit: { id: c.unitId, label: c.unitLabel },
+        party: { id: c.partyId, label: c.partyLabel },
+      });
+    };
+    return (
+      <div key={c.partyId} className="p-3 sm:p-4 rounded-xl bg-white border border-stone-200">
+        {/* === HEADER === */}
+        <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-1.5 sm:gap-2 mb-2">
+          <div className="flex-1 min-w-0">
+            <button onClick={goTo} disabled={busy}
+              className="block text-left w-full font-serif text-lg text-stone-900 leading-tight break-words hover:underline disabled:opacity-50">
+              <span className="font-bold">{c.unitLabel}</span>
+              <span className="text-stone-400 mx-1.5">·</span>
+              <span className="italic">{c.partyLabel}</span>
+            </button>
+          </div>
+          <div className="flex flex-col sm:flex-row sm:items-center gap-1.5 flex-shrink-0 sm:max-w-[60%]">
+            <div className="flex items-center gap-1.5 flex-wrap justify-end">
+              <button onClick={(e) => { e.stopPropagation(); bulkTogglePriority(items); }} disabled={busy}
+                className={`text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full border inline-flex items-center gap-1 transition-colors disabled:opacity-50 ${c.hasPriority
+                    ? 'bg-red-100 text-red-800 border-red-300 font-bold hover:bg-red-200'
+                    : 'bg-stone-100 text-stone-500 border-stone-200 hover:bg-stone-200'}`}>
+                <AlertCircle size={10} /> {c.hasPriority ? 'Priority' : 'Mark priority'}
+              </button>
+              <span className={`text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full border ${statusPill.color}`}>
+                {statusPill.label}
+              </span>
+            </div>
+            <div className="flex items-center gap-1.5 flex-wrap justify-end">
+              <button onClick={() => setOpened(rep)}
+                className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-100 hover:bg-stone-200 text-stone-700 flex items-center gap-1">
+                <Eye size={10} /> View doc
+              </button>
+              {onOpenBedroomHistory && (
+                <button onClick={() => onOpenBedroomHistory({
+                    unitId: c.unitId, unitLabel: c.unitLabel,
+                    partyId: c.partyId, partyLabel: c.partyLabel,
+                  })} disabled={busy}
+                  className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-100 hover:bg-stone-200 text-stone-700 flex items-center gap-1 disabled:opacity-50">
+                  <Clock size={10} /> History
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* "Who's here" chip — shown when another cleaner has an open block
+           at this bedroom. Compact pill row above the title/breakdown. */}
+        {c.whosHere && c.whosHere.length > 0 && (
+          <div className="mb-2 flex items-center gap-1.5 flex-wrap">
+            <span className="text-[10px] uppercase tracking-wider font-mono text-amber-900 font-bold">
+              ●
+            </span>
+            {c.whosHere.map((w, i) => (
+              <span key={i} className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-amber-100 text-amber-900 border border-amber-300 font-bold">
+                {w.name} is here
+              </span>
+            ))}
+          </div>
+        )}
+
+        {/* === TITLE + TYPE + SECTION BREAKDOWN === */}
+        <div className="mb-2">
+          <div className="font-serif text-sm text-stone-700">{rep.assignment?.title || 'Checklist assignment'}</div>
+          {rep.assignment?.assignment_type && (
+            <div className="mt-1">
+              <AssignmentTypeChip type={rep.assignment.assignment_type} />
+            </div>
+          )}
+          <div className="text-[11px] font-mono text-stone-500 mt-1">
+            {total} {total === 1 ? 'item' : 'items'}
+            {sectionBits.length > 0 && <> · {sectionBits.join(' · ')}</>}
+          </div>
+        </div>
+
+        {/* === Status chips row === */}
+        <div className="flex flex-wrap gap-1.5 mb-3">
+          {counts.in_progress > 0 && (
+            <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-amber-100 text-amber-800">
+              {counts.in_progress} in progress
+            </span>
+          )}
+          {counts.pending > 0 && (
+            <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-stone-100 text-stone-600">
+              {counts.pending} pending
+            </span>
+          )}
+          {counts.paused > 0 && (
+            <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-blue-100 text-blue-700">
+              {counts.paused} paused
+            </span>
+          )}
+          {counts.blocked > 0 && (
+            <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-red-100 text-red-700">
+              {counts.blocked} blocked
+            </span>
+          )}
+        </div>
+
+        {/* === Action buttons === */}
+        <div className="flex gap-2 flex-wrap mb-3">
+          {(can(employee, 'mark_assignments_done')) && (
+            <button onClick={() => {
+              if (confirm(`Mark all ${items.length} item${items.length === 1 ? '' : 's'} at ${c.unitLabel} · ${c.partyLabel} complete?`)) {
+                bulkUpdateStatus(items, 'done');
+              }
+            }} disabled={busy}
+              className="h-9 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-medium flex items-center gap-1 disabled:opacity-50">
+              <Check size={12} /> Mark complete
+            </button>
+          )}
+          <button onClick={() => setStatusModal({ target: rep, bulkRows: items })} disabled={busy}
+            className="h-9 px-3 rounded-lg border border-red-200 hover:bg-red-50 text-red-700 text-xs font-medium flex items-center gap-1 disabled:opacity-50">
+            <AlertCircle size={12} /> Blocked
+          </button>
+          <button onClick={() => setReassignTarget(rep)} disabled={busy}
+            className="h-9 px-3 rounded-lg border border-stone-300 hover:bg-stone-50 text-stone-700 text-xs font-medium flex items-center gap-1 disabled:opacity-50">
+            <User size={12} /> Reassign
+          </button>
+        </div>
+
+        {/* Go to this bedroom — primary action bar */}
+        <button onClick={goTo}
+          className="w-full py-2.5 rounded-lg bg-stone-900 text-stone-50 text-sm font-medium flex items-center justify-center gap-1.5 active:scale-98 transition-transform">
+          Go to this bedroom <ChevronRight size={14} />
+        </button>
+      </div>
+    );
+  };
+
+  // Collapsible section
+  const Section = ({ id, title, items, limit = 5 }) => {
+    if (!items || items.length === 0) return null;
+    const isOpen = !collapsed[id];
+    const shown = items.slice(0, limit);
+    return (
+      <div>
+        <button onClick={() => setCollapsed(prev => ({ ...prev, [id]: !prev[id] }))}
+          className="w-full flex items-center gap-2 mb-2 px-1 py-1.5 hover:bg-stone-50 rounded transition-colors text-left">
+          <ChevronRight size={14} className={`text-stone-500 flex-shrink-0 transition-transform ${isOpen ? 'rotate-90' : ''}`} />
+          <span className="text-sm font-bold text-stone-800 tracking-wide">{title}</span>
+          <span className="text-xs font-mono text-stone-500">({items.length})</span>
+          <div className="flex-1 h-px bg-stone-300" />
+        </button>
+        {isOpen && (
+          <div className="space-y-2">
+            {shown.map(renderBedroomCard)}
+            {items.length > limit && (
+              <div className="text-[11px] font-mono text-stone-500 italic px-1 py-1">
+                + {items.length - limit} more bedroom{items.length - limit === 1 ? '' : 's'}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  if (!loaded) return <div className="text-center py-12 text-stone-400 text-sm">Finding the closest work…</div>;
+
+  const total = groups.sameApt.length + groups.sameFloor.length + groups.sameBuilding.length + groups.otherBuilding.length;
+  if (total === 0) {
+    return (
+      <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
+        Nothing else to clean at this property. Nice work!
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* Anchor banner */}
+      {anchor ? (
+        <div className="p-3 rounded-xl bg-stone-100 border border-stone-200">
+          <div className="text-[10px] uppercase tracking-wider font-mono text-stone-600 mb-0.5">
+            Suggesting from
+          </div>
+          <div className="text-sm text-stone-900">
+            <span className="font-bold">{anchor.unitLabel}</span>
+            {anchor.partyLabel && <> · <span className="italic">{anchor.partyLabel}</span></>}
+            <span className="text-stone-500 text-xs ml-2">
+              {anchor.wasOpen ? '(your current bedroom)' : '(your most recent bedroom)'}
+            </span>
+          </div>
+        </div>
+      ) : (
+        <div className="p-3 rounded-xl bg-stone-100 border border-stone-200">
+          <div className="text-xs text-stone-700">
+            You haven't started yet today. We're suggesting the 3rd floor of each building first, then working down.
+          </div>
+        </div>
+      )}
+      <Section id="sameApt"      title={anchor ? `Same apartment (${anchor.unitLabel})` : 'Start here'} items={groups.sameApt} />
+      <Section id="sameFloor"    title="Same floor"        items={groups.sameFloor} />
+      <Section id="sameBuilding" title="Same building"     items={groups.sameBuilding} />
+      <Section id="otherBuilding" title={anchor ? 'Other buildings — starting on floor 3' : 'All buildings — starting on floor 3'} items={groups.otherBuilding} />
+
+      {/* Modals */}
+      {opened && (
+        opened.assignment?.template_set_id
+          ? <ChecklistAssignmentView assignment={opened.assignment}
+              employee={employee}
+              onClose={() => setOpened(null)}
+              onOpenSheet={opened.assignment?.file_url
+                ? () => window.open(opened.assignment.file_url, '_blank', 'noopener')
+                : null} />
+          : <AssignmentViewer target={opened} onClose={() => setOpened(null)} />
+      )}
+      {statusModal && (
+        <BlockedNoteModal target={statusModal.target}
+          onSave={(notes) => {
+            if (statusModal.bulkRows && statusModal.bulkRows.length > 0) {
+              bulkUpdateStatus(statusModal.bulkRows, 'blocked', notes);
+            } else {
+              bulkUpdateStatus([statusModal.target], 'blocked', notes);
+            }
+            setStatusModal(null);
+          }}
+          onClose={() => setStatusModal(null)}
+          busy={busy} />
+      )}
+      {reassignTarget && (
+        <ReassignModal target={reassignTarget} propertyId={propertyId}
+          onSaved={() => { setReassignTarget(null); reload(); }}
+          onClose={() => setReassignTarget(null)} />
+      )}
     </div>
   );
 }
@@ -19207,6 +19833,281 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
 }
 
 // ReassignModal — change unit/party for an assignment target
+// SwitchBedroomModal — shown when a cleaner taps a different bedroom
+// while they already have an open work block. Gives 3 explicit
+// choices: Stay (cancel), Pause and switch (resumable), Finish and
+// switch (close out the current bedroom).
+// NextUpModal — appears after a cleaner finishes a bedroom. Suggests
+// what to clean next, ranked: (1) same apartment, (2) same floor,
+// (3) same building, (4) next building starting on the third floor.
+// "Who's here" — also surfaces other cleaners working at the same
+// apartment so the cleaner can walk over and help.
+function NextUpModal({ from, employeeId, onPick, onClose }) {
+  const [data, setData] = useState({ loading: true, sameApt: [], sameFloor: [], sameBuilding: [], otherBuilding: [], otherCleaners: [] });
+
+  // Pull a parsing helper for building/floor out of a label like B3-205
+  // (B<building>-<floor><unit>). We use the existing floorFromLabel
+  // for floor, and a tiny inline regex for building.
+  const buildingFromLabel = (label) => {
+    if (!label) return null;
+    const m = label.match(/^B(\d+)/i);
+    return m ? m[1] : null;
+  };
+  const unitNumberFromLabel = (label) => {
+    if (!label) return null;
+    // Number after the dash, e.g. "B3-205" → 205
+    const m = label.match(/-(\d+)/);
+    return m ? parseInt(m[1], 10) : null;
+  };
+  const fromBuilding = buildingFromLabel(from.unitLabel);
+  const fromFloor = floorFromLabel(from.unitLabel);
+  const fromUnitNum = unitNumberFromLabel(from.unitLabel);
+
+  useEffect(() => {
+    if (!from?.propertyId) return;
+    (async () => {
+      // 1) Load every unit + party for the property so we can compute
+      //    which bedrooms still have open targets and where they live.
+      const [unitsRes, partiesRes, targetsRes, blocksRes] = await Promise.all([
+        supabase.from('units')
+          .select('id, label, active')
+          .eq('customer_id', from.propertyId).eq('active', true),
+        supabase.from('parties')
+          .select('id, label, unit_id, sort_order, active'),
+        supabase.from('assignment_targets')
+          .select('unit_id, party_id, status, assignment:assignments!inner(customer_id, active, source, pm_status)')
+          .neq('status', 'done'),
+        // Open work blocks at this property so we can show "who's here"
+        supabase.from('work_blocks')
+          .select('unit_id, party_id, shift:shifts!inner(customer_id, employee:employees(id, name))')
+          .is('end_time', null),
+      ]);
+      const units = (unitsRes.data || []);
+      const parties = (partiesRes.data || []).filter(p => p.active !== false);
+      // Filter targets to active + this property
+      const openTargets = (targetsRes.data || []).filter(t => {
+        const a = t.assignment;
+        if (!a || a.customer_id !== from.propertyId) return false;
+        if (a.active === false) return false;
+        if (a.source === 'pm' && a.pm_status !== 'approved') return false;
+        return true;
+      });
+      // Bedrooms with open work (party_id set)
+      const bedroomsWithWork = new Set();
+      openTargets.forEach(t => { if (t.party_id) bedroomsWithWork.add(t.party_id); });
+      // Map unit → unit label
+      const unitMap = new Map(units.map(u => [u.id, u]));
+      // Build candidate list: parties in apartments at this property
+      // that have open work, EXCLUDING the bedroom we just finished.
+      const candidates = parties
+        .filter(p => p.id !== from.partyId)
+        .filter(p => bedroomsWithWork.has(p.id))
+        .map(p => {
+          const unit = unitMap.get(p.unit_id);
+          if (!unit) return null;
+          return {
+            partyId: p.id,
+            partyLabel: p.label,
+            unitId: unit.id,
+            unitLabel: unit.label,
+            building: buildingFromLabel(unit.label),
+            floor: floorFromLabel(unit.label),
+            unitNum: unitNumberFromLabel(unit.label),
+          };
+        })
+        .filter(Boolean);
+
+      // Bucket
+      const sameApt = candidates.filter(c => c.unitId === from.unitId);
+      const sameFloor = candidates.filter(c => c.unitId !== from.unitId && c.building === fromBuilding && c.floor === fromFloor);
+      const sameBuilding = candidates.filter(c => c.building === fromBuilding && c.floor !== fromFloor);
+      const otherBuilding = candidates.filter(c => c.building !== fromBuilding);
+
+      // Same-floor: sort by closest unit number
+      sameFloor.sort((a, b) => {
+        const da = Math.abs((a.unitNum || 0) - (fromUnitNum || 0));
+        const db = Math.abs((b.unitNum || 0) - (fromUnitNum || 0));
+        return da - db;
+      });
+      // Same-building (different floor): nearest floor first, then unit
+      sameBuilding.sort((a, b) => {
+        const fa = Math.abs((a.floor ?? 99) - (fromFloor ?? 0));
+        const fb = Math.abs((b.floor ?? 99) - (fromFloor ?? 0));
+        if (fa !== fb) return fa - fb;
+        return (a.unitNum || 0) - (b.unitNum || 0);
+      });
+      // Other-building: per user's request — start on 3rd floor, then
+      // descend (3 → 2 → 1 → 4+). Sort by abs distance from floor 3.
+      const distanceFromThree = (f) => {
+        if (f == null) return 99;
+        // Penalty for going above 3 so we prefer 3,2,1 order then 4,5,…
+        if (f === 3) return 0;
+        if (f < 3) return 3 - f;        // 2 → 1, 1 → 2
+        return (f - 3) + 3;              // 4 → 4, 5 → 5 (after 3,2,1)
+      };
+      otherBuilding.sort((a, b) => {
+        if (a.building !== b.building) return (a.building || '').localeCompare(b.building || '');
+        const da = distanceFromThree(a.floor);
+        const db = distanceFromThree(b.floor);
+        if (da !== db) return da - db;
+        return (a.unitNum || 0) - (b.unitNum || 0);
+      });
+
+      // Who else is here — cleaners with open blocks in the same apt
+      const otherCleaners = (blocksRes.data || [])
+        .filter(b => b.shift?.customer_id === from.propertyId)
+        .filter(b => b.unit_id === from.unitId)
+        .filter(b => b.shift?.employee?.id && b.shift.employee.id !== employeeId)
+        .map(b => ({
+          name: b.shift.employee.name,
+          partyId: b.party_id,
+          partyLabel: parties.find(p => p.id === b.party_id)?.label || '',
+        }));
+
+      setData({ loading: false, sameApt, sameFloor, sameBuilding, otherBuilding, otherCleaners });
+    })();
+  }, [from?.propertyId, from?.unitId, from?.partyId, employeeId]);
+
+  const Bucket = ({ title, items, limit = 5 }) => {
+    if (!items || items.length === 0) return null;
+    const shown = items.slice(0, limit);
+    return (
+      <div>
+        <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1 px-1">
+          {title} <span className="text-stone-400">· {items.length}</span>
+        </div>
+        <div className="space-y-1.5">
+          {shown.map(c => (
+            <button key={c.partyId} onClick={() => onPick(c)}
+              className="w-full p-3 rounded-xl bg-white border border-stone-200 hover:border-stone-900 text-left active:scale-98 transition-all">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 min-w-0">
+                  <span className="font-serif text-sm text-stone-900 font-bold">{c.unitLabel}</span>
+                  <span className="text-stone-400">·</span>
+                  <span className="italic text-stone-700">{c.partyLabel}</span>
+                </div>
+                <ChevronRight size={14} className="text-stone-400 flex-shrink-0" />
+              </div>
+            </button>
+          ))}
+          {items.length > limit && (
+            <div className="text-[10px] font-mono text-stone-500 italic px-1">
+              + {items.length - limit} more
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <div className="fixed inset-0 bg-stone-900/80 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
+      <div className="bg-stone-50 w-full sm:max-w-md sm:rounded-3xl rounded-t-3xl flex flex-col max-h-[90vh]">
+        <div className="p-5 border-b border-stone-200">
+          <div className="font-serif text-xl text-stone-900 mb-1">Nice work in {from.partyLabel}</div>
+          <div className="text-sm text-stone-600">
+            What's next? Closer suggestions are at the top.
+          </div>
+        </div>
+        <div className="flex-1 overflow-y-auto p-5 space-y-4">
+          {data.loading ? (
+            <div className="text-center py-8 text-stone-400 text-sm">Finding next bedrooms…</div>
+          ) : (
+            <>
+              {/* Who else is at this apartment — comes first per user's request */}
+              {data.otherCleaners.length > 0 && (
+                <div className="p-3 rounded-xl bg-amber-50 border border-amber-200">
+                  <div className="text-[10px] uppercase tracking-wider font-mono text-amber-900 font-bold mb-1">
+                    Who's at {from.unitLabel}
+                  </div>
+                  <div className="space-y-0.5">
+                    {data.otherCleaners.map((c, i) => (
+                      <div key={i} className="text-sm text-stone-800">
+                        <span className="font-bold">{c.name}</span>
+                        {c.partyLabel && <span className="text-stone-600"> · {c.partyLabel}</span>}
+                      </div>
+                    ))}
+                  </div>
+                  <div className="text-[11px] text-amber-800 mt-1.5 italic">
+                    You could walk over and ask if they need help.
+                  </div>
+                </div>
+              )}
+              <Bucket title={`Same apartment (${from.unitLabel})`} items={data.sameApt} />
+              <Bucket title={`Same floor`} items={data.sameFloor} />
+              <Bucket title={`Same building`} items={data.sameBuilding} />
+              <Bucket title={`Other buildings — starting on floor 3`} items={data.otherBuilding} />
+              {data.sameApt.length + data.sameFloor.length + data.sameBuilding.length + data.otherBuilding.length === 0 && (
+                <div className="text-center py-8 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
+                  Looks like all the bedrooms are taken care of. Nice job!
+                </div>
+              )}
+            </>
+          )}
+        </div>
+        <div className="p-5 border-t border-stone-200">
+          <button onClick={onClose}
+            className="w-full py-3 rounded-2xl border-2 border-stone-300 hover:bg-stone-100 text-stone-700 text-sm font-medium">
+            Back to assignments
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SwitchBedroomModal({ fromUnitLabel, fromPartyLabel, toUnitLabel, toPartyLabel, onStay, onPause, onFinish, busy }) {
+  const from = `${fromUnitLabel || ''}${fromUnitLabel && fromPartyLabel ? ' · ' : ''}${fromPartyLabel || ''}`;
+  const to   = `${toUnitLabel   || ''}${toUnitLabel   && toPartyLabel   ? ' · ' : ''}${toPartyLabel   || ''}`;
+  return (
+    <div className="fixed inset-0 bg-stone-900/80 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
+      <div className="bg-stone-50 w-full sm:max-w-md sm:rounded-3xl rounded-t-3xl flex flex-col">
+        <div className="p-5 border-b border-stone-200">
+          <div className="font-serif text-xl text-stone-900 mb-1">You're still in {from}</div>
+          <div className="text-sm text-stone-600">
+            Switching to <span className="font-bold text-stone-900">{to}</span> will end the work block in {from}. Pick what to do with the items you started there.
+          </div>
+        </div>
+        <div className="p-5 space-y-2.5">
+          {/* Finish — close the current bedroom out for good */}
+          <button onClick={onFinish} disabled={busy}
+            className="w-full p-4 rounded-2xl border-2 border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-left disabled:opacity-50">
+            <div className="flex items-center gap-2 mb-1">
+              <Check size={16} className="text-emerald-700" />
+              <span className="font-serif text-base text-stone-900 font-bold">Finish in {fromPartyLabel || 'this bedroom'}</span>
+            </div>
+            <div className="text-xs text-stone-600">
+              Mark every item you started in {from} as complete, end the work block, then take me to {to}.
+            </div>
+          </button>
+          {/* Pause — close the block but keep items resumable */}
+          <button onClick={onPause} disabled={busy}
+            className="w-full p-4 rounded-2xl border-2 border-blue-300 bg-blue-50 hover:bg-blue-100 text-left disabled:opacity-50">
+            <div className="flex items-center gap-2 mb-1">
+              <Pause size={16} className="text-blue-700" />
+              <span className="font-serif text-base text-stone-900 font-bold">Pause and switch</span>
+            </div>
+            <div className="text-xs text-stone-600">
+              Pause the items you started in {from} (you can resume them later), end the work block, then take me to {to}.
+            </div>
+          </button>
+          {/* Stay — cancel the switch */}
+          <button onClick={onStay} disabled={busy}
+            className="w-full p-4 rounded-2xl border-2 border-stone-300 bg-white hover:bg-stone-50 text-left disabled:opacity-50">
+            <div className="flex items-center gap-2 mb-1">
+              <ArrowLeft size={16} className="text-stone-700" />
+              <span className="font-serif text-base text-stone-900 font-bold">Stay in {fromPartyLabel || 'this bedroom'}</span>
+            </div>
+            <div className="text-xs text-stone-600">
+              Keep working on {from}. Nothing changes.
+            </div>
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ReassignModal({ target, propertyId, onSaved, onClose }) {
   const [units, setUnits] = useState([]);
   const [unitId, setUnitId] = useState(target.unit_id || '');

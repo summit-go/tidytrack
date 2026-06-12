@@ -1416,22 +1416,41 @@ const TASK_CATEGORIES = [
   { id: 'bedroom',  label: 'Bedroom',  subcategories: null },
   { id: 'bathroom', label: 'Bathroom', subcategories: null },
   { id: 'vanity',   label: 'Vanity',   subcategories: null },
+  // General is split into the 4 inspection-sheet groups (A/B/C/D)
+  // that exist on the paper Carriage Cove White-Glove form — each
+  // bedroom's sheet has its OWN General section, so a 4-bedroom unit
+  // covers all 4 variants between roommates. Items inside a group
+  // can be multi-selected and will collapse into a single combined
+  // task at submit (see startTasksFromPicker).
+  //
+  //   A — Bedroom 1 sheet: Living Room, Patio, Water Heater Closet
+  //   B — Bedroom 2 sheet: Refrigerator, Freezer, Microwave, Breezeway
+  //   C — Bedroom 3 sheet: Hallway Vents, Stove, Oven, Dishwasher
+  //   D — Bedroom 4 sheet: Kitchen Area
   { id: 'general',  label: 'General',  subcategories: [
-    { id: 'kitchen',      label: 'Kitchen' },
-    { id: 'living_room',  label: 'Living room' },
-    { id: 'patio',        label: 'Patio' },
-    { id: 'water_heater', label: 'Water heater' },
-    { id: 'hallways',     label: 'Hallways' },
-    { id: 'vents',        label: 'Vents' },
-    { id: 'stove',        label: 'Stove' },
-    { id: 'oven',         label: 'Oven' },
-    { id: 'dishwasher',   label: 'Dishwasher' },
-    { id: 'refrigerator', label: 'Refrigerator' },
-    { id: 'freezer',      label: 'Freezer' },
-    { id: 'microwave',    label: 'Microwave' },
-    { id: 'breezeway',    label: 'Breezeway' },
+    // Group A — Living Room / Patio / Water Heater
+    { id: 'living_room',  label: 'Living room',  group: 'a', groupLabel: 'LR / Patio / Water Heater' },
+    { id: 'patio',        label: 'Patio',        group: 'a', groupLabel: 'LR / Patio / Water Heater' },
+    { id: 'water_heater', label: 'Water heater', group: 'a', groupLabel: 'LR / Patio / Water Heater' },
+    { id: 'hallways',     label: 'Hallway',      group: 'a', groupLabel: 'LR / Patio / Water Heater' },
+    // Group B — Refrigerator / Freezer / Microwave / Breezeway
+    { id: 'refrigerator', label: 'Refrigerator', group: 'b', groupLabel: 'Fridge / Microwave / Breezeway' },
+    { id: 'freezer',      label: 'Freezer',      group: 'b', groupLabel: 'Fridge / Microwave / Breezeway' },
+    { id: 'microwave',    label: 'Microwave',    group: 'b', groupLabel: 'Fridge / Microwave / Breezeway' },
+    { id: 'breezeway',    label: 'Breezeway',    group: 'b', groupLabel: 'Fridge / Microwave / Breezeway' },
+    // Group C — Hallway Vents / Stove / Oven / Dishwasher
+    { id: 'vents',        label: 'Hallway vents', group: 'c', groupLabel: 'Vents / Stove / Oven / Dishwasher' },
+    { id: 'stove',        label: 'Stove',         group: 'c', groupLabel: 'Vents / Stove / Oven / Dishwasher' },
+    { id: 'oven',         label: 'Oven',          group: 'c', groupLabel: 'Vents / Stove / Oven / Dishwasher' },
+    { id: 'dishwasher',   label: 'Dishwasher',    group: 'c', groupLabel: 'Vents / Stove / Oven / Dishwasher' },
+    // Group D — Kitchen
+    { id: 'kitchen',      label: 'Kitchen',       group: 'd', groupLabel: 'Kitchen' },
   ]},
 ];
+
+// Ordered list of General group keys, used so the UI renders them
+// consistently (A → D) regardless of insertion order above.
+const GENERAL_GROUP_ORDER = ['a', 'b', 'c', 'd'];
 
 // Look up a friendly label for category/subcategory ids
 const taskCategoryLabel = (category, subcategory) => {
@@ -1667,10 +1686,9 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
     if (!canSubmit) return;
     const customTrimmed = customName.trim();
 
-    // SIMPLE single-task path
+    // SIMPLE single-task path: non-General OR General with 0/1 sub
     if (!isGeneral || selectedSubs.size <= 1) {
       const subId = isGeneral && selectedSubs.size === 1 ? Array.from(selectedSubs)[0] : null;
-      // Default name: subcategory label > category label
       const sub = subId ? cat.subcategories.find(s => s.id === subId) : null;
       const autoName = sub ? sub.label : cat.label;
       const finalName = customTrimmed || autoName;
@@ -1679,22 +1697,18 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
       return;
     }
 
-    // MULTI-SELECT general path — create one task per selected sub
-    const taskInputs = Array.from(selectedSubs).map(subId => {
-      const sub = cat.subcategories.find(s => s.id === subId);
-      return {
-        name: customTrimmed ? `${customTrimmed} — ${sub.label}` : sub.label,
-        category: 'general',
-        subcategory: subId,
-      };
-    });
-    if (onStartMany) {
-      await onStartMany(taskInputs);
-    } else {
-      // Fallback: just start the first one if multi handler not provided
-      const first = taskInputs[0];
-      await onStartOne(first.name, first.category, first.subcategory);
-    }
+    // MULTI-SELECT general path — combine all picked items into ONE
+    // task per main section. We sort the selected subs by their group
+    // and label so the combined name reads predictably, then use the
+    // FIRST sub's id for the subcategory column (so category/sub-style
+    // queries still work). The task name shows every picked item so
+    // PMs can see what was covered.
+    const orderedSubs = cat.subcategories
+      .filter(s => selectedSubs.has(s.id));
+    const labels = orderedSubs.map(s => s.label);
+    const combinedName = customTrimmed || labels.join(' + ');
+    const primarySubId = orderedSubs[0]?.id || null;
+    await onStartOne(combinedName, 'general', primarySubId);
     reset();
   };
 
@@ -1718,19 +1732,36 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
       {isGeneral && cat.subcategories && (
         <div>
           <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">
-            Pick one or more areas {selectedSubs.size > 1 && <span className="normal-case text-amber-700">· creates {selectedSubs.size} tasks</span>}
+            Pick one or more areas {selectedSubs.size > 1 && <span className="normal-case text-amber-700">· creates 1 combined task</span>}
           </label>
-          <div className="grid grid-cols-2 gap-1.5">
-            {cat.subcategories.map(s => {
-              const checked = selectedSubs.has(s.id);
+          {/* Render items grouped by their A/B/C/D/Other group — mirrors
+             the upload wizard's General variant structure so cleaners
+             see the same mental model on both sides. */}
+          <div className="space-y-3">
+            {GENERAL_GROUP_ORDER.map(groupKey => {
+              const groupItems = cat.subcategories.filter(s => s.group === groupKey);
+              if (groupItems.length === 0) return null;
+              const groupLabel = groupItems[0].groupLabel;
               return (
-                <button key={s.id} type="button" onClick={() => toggleSub(s.id)}
-                  className={`flex items-center gap-2 px-3 py-2.5 rounded-xl border-2 text-left transition-all ${checked ? 'border-amber-600 bg-amber-50' : 'border-stone-200 bg-white hover:border-stone-400'}`}>
-                  <div className={`w-4 h-4 rounded border-2 flex-shrink-0 flex items-center justify-center ${checked ? 'border-amber-600 bg-amber-600' : 'border-stone-300'}`}>
-                    {checked && <Check size={11} className="text-white" />}
+                <div key={groupKey}>
+                  <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1.5 px-1">
+                    {groupLabel}
                   </div>
-                  <span className="text-sm text-stone-900 truncate">{s.label}</span>
-                </button>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    {groupItems.map(s => {
+                      const checked = selectedSubs.has(s.id);
+                      return (
+                        <button key={s.id} type="button" onClick={() => toggleSub(s.id)}
+                          className={`flex items-center gap-2 px-3 py-2.5 rounded-xl border-2 text-left transition-all ${checked ? 'border-amber-600 bg-amber-50' : 'border-stone-200 bg-white hover:border-stone-400'}`}>
+                          <div className={`w-4 h-4 rounded border-2 flex-shrink-0 flex items-center justify-center ${checked ? 'border-amber-600 bg-amber-600' : 'border-stone-300'}`}>
+                            {checked && <Check size={11} className="text-white" />}
+                          </div>
+                          <span className="text-sm text-stone-900 truncate">{s.label}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
               );
             })}
           </div>
@@ -1757,7 +1788,7 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
         <button onClick={submit} disabled={!canSubmit}
           className="flex-1 py-3 rounded-xl bg-stone-900 text-stone-50 font-medium text-sm disabled:opacity-50 flex items-center justify-center gap-1.5">
           <Play size={14} />
-          {isGeneral && selectedSubs.size > 1 ? `Start ${selectedSubs.size} tasks` : 'Start task'}
+          {isGeneral && selectedSubs.size > 1 ? `Start 1 task (${selectedSubs.size} areas)` : 'Start task'}
         </button>
         {category && (
           <button onClick={reset} disabled={busy} type="button"
@@ -2155,6 +2186,28 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     const updated = { ...activeBlock, end_time: ts, tasks };
     setWorkBlocks(prev => prev.map(b => b.id === activeBlock.id ? updated : b));
     setActiveBlock(null); setTasks([]); setActiveTask(null);
+    setBusy(false);
+  };
+
+  // Generic end-block — closes ANY block by id, including the one
+  // surfaced in the PropertyHub resume banner. Differs from
+  // finishBlock above which only operates on the currently-active
+  // block (held in state).
+  const endBlock = async (block) => {
+    if (!block) return;
+    if (!confirm(`End work block at ${block.unit?.label} · ${block.party?.label}?`)) return;
+    setBusy(true);
+    // If they're ending the block that happens to be active right now,
+    // stop any running task too so we don't leave orphaned timing.
+    if (activeBlock?.id === block.id && activeTask) {
+      await stopTask(activeTask, false);
+    }
+    const ts = new Date().toISOString();
+    await supabase.from('work_blocks').update({ end_time: ts }).eq('id', block.id);
+    setWorkBlocks(prev => prev.map(b => b.id === block.id ? { ...b, end_time: ts } : b));
+    if (activeBlock?.id === block.id) {
+      setActiveBlock(null); setTasks([]); setActiveTask(null);
+    }
     setBusy(false);
   };
 
@@ -2655,7 +2708,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   if (isMulti && !activeBlock) {
     return withIdleModal(<PropertyHub shift={shift} workBlocks={workBlocks} employeeName={employee.name} employee={employee}
       onSignOut={signOutWithCleanup} onClockOut={clockOut} onSwitchProperty={switchProperty}
-      onStartNew={startNewBlock} onReopen={reopenBlock} onGoToBedroom={goToBedroomForTarget}
+      onStartNew={startNewBlock} onReopen={reopenBlock} onEndBlock={endBlock} onGoToBedroom={goToBedroomForTarget}
       onOpenMessages={() => setShowMessages(true)}
       onOpenChangePin={() => setShowChangePin(true)}
       onOpenBedroomHistory={setBedroomHistory}
@@ -2696,9 +2749,14 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
 // =================================================================
 // PROPERTY HUB (multi-unit, between work blocks)
 // =================================================================
-function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onClockOut, onSwitchProperty, onStartNew, onReopen, onGoToBedroom, onOpenMessages, onOpenChangePin, onOpenBedroomHistory, busy }) {
+function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onClockOut, onSwitchProperty, onStartNew, onReopen, onEndBlock, onGoToBedroom, onOpenMessages, onOpenChangePin, onOpenBedroomHistory, busy }) {
   const [showMenu, setShowMenu] = useState(false);
   const [showAssignmentForm, setShowAssignmentForm] = useState(false);
+  // Block IDs the cleaner has tapped "Pause" on. Banner is hidden for
+  // these. Component-local so the banner reappears on next mount or
+  // refresh — that's intentional: pausing is a soft dismiss, not a
+  // permanent hide. The block is still open in the DB.
+  const [dismissedBannerIds, setDismissedBannerIds] = useState(() => new Set());
   useTick(true);
   const elapsed = Date.now() - new Date(shift.start_time).getTime();
 
@@ -2757,33 +2815,54 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
       </div>
 
       {/* Active work resume banner — only shows when there's an open
-         work block (one without an end_time) for THIS shift. Tapping
-         the banner reopens that block so the cleaner picks up exactly
-         where they left off. Useful after an accidental back tap or a
-         browser refresh that lands them here. */}
+         work block (no end_time) for THIS shift AND the user hasn't
+         tapped Pause on it this session. Three actions:
+           Resume      → navigate back into the block
+           Pause       → soft-dismiss the banner for this session;
+                         the block stays open in the DB
+           End block   → close the block (set end_time); confirms
+                         before doing anything destructive */}
       {(() => {
-        const openBlock = workBlocks.find(b => !b.end_time);
+        const openBlock = workBlocks.find(b => !b.end_time && !dismissedBannerIds.has(b.id));
         if (!openBlock) return null;
         const partyLabel = openBlock.party?.label || 'a bedroom';
         const unitLabel = openBlock.unit?.label || '';
         return (
-          <div className="mx-4 mt-4 p-4 rounded-2xl bg-amber-100 border-2 border-amber-500 shadow-sm flex items-center gap-3">
-            <div className="w-10 h-10 rounded-full bg-amber-500 text-white flex items-center justify-center flex-shrink-0">
-              <Play size={18} />
-            </div>
-            <div className="flex-1 min-w-0">
-              <div className="text-[10px] uppercase tracking-wider font-mono text-amber-700">Resume your work</div>
-              <div className="text-base font-serif text-amber-900 truncate">
-                {unitLabel} · {partyLabel}
+          <div className="mx-4 mt-4 p-4 rounded-2xl bg-amber-100 border-2 border-amber-500 shadow-sm">
+            <div className="flex items-center gap-3 mb-3">
+              <div className="w-10 h-10 rounded-full bg-amber-500 text-white flex items-center justify-center flex-shrink-0">
+                <Play size={18} />
               </div>
-              <div className="text-[11px] font-mono text-amber-700">
-                Started {fmtClock(openBlock.start_time)}
+              <div className="flex-1 min-w-0">
+                <div className="text-[10px] uppercase tracking-wider font-mono text-amber-700">Open work block</div>
+                <div className="text-base font-serif text-amber-900 truncate">
+                  {unitLabel} · {partyLabel}
+                </div>
+                <div className="text-[11px] font-mono text-amber-700">
+                  Started {fmtClock(openBlock.start_time)}
+                </div>
               </div>
             </div>
-            <button onClick={() => onReopen(openBlock)} disabled={busy}
-              className="px-4 py-2 rounded-full bg-amber-700 hover:bg-amber-800 text-white text-sm font-bold flex items-center gap-1.5 active:scale-95 disabled:opacity-50">
-              <ChevronRight size={14} /> Resume
-            </button>
+            <div className="grid grid-cols-3 gap-2">
+              <button onClick={() => onReopen(openBlock)} disabled={busy}
+                className="py-2.5 rounded-xl bg-amber-700 hover:bg-amber-800 text-white text-sm font-bold flex items-center justify-center gap-1.5 active:scale-95 disabled:opacity-50">
+                <Play size={14} /> Resume
+              </button>
+              <button
+                onClick={() => setDismissedBannerIds(prev => {
+                  const next = new Set(prev);
+                  next.add(openBlock.id);
+                  return next;
+                })}
+                disabled={busy}
+                className="py-2.5 rounded-xl bg-stone-200 hover:bg-stone-300 text-stone-800 text-sm font-bold flex items-center justify-center gap-1.5 active:scale-95 disabled:opacity-50">
+                <Pause size={14} /> Pause
+              </button>
+              <button onClick={() => onEndBlock && onEndBlock(openBlock)} disabled={busy}
+                className="py-2.5 rounded-xl bg-red-100 hover:bg-red-200 text-red-700 border border-red-300 text-sm font-bold flex items-center justify-center gap-1.5 active:scale-95 disabled:opacity-50">
+                <Square size={14} /> End block
+              </button>
+            </div>
           </div>
         );
       })()}
@@ -4546,9 +4625,14 @@ function PhotoModal({ kind, taskName, existing, onUpload, onSaveNote, onClose })
              cleaner uploads a photo. Pre-upload, it's a hint message;
              post-upload, it becomes a real save-note input pointing at
              the photo they just took. */}
-          {kind === 'damage' && lastUploaded && onSaveNote && (
-            <div className="mb-3 p-3 rounded-xl bg-amber-50 border border-amber-200">
-              <div className="text-xs uppercase tracking-wider text-amber-800 font-mono mb-1.5">
+          {/* Note prompt — appears after any photo upload (before /
+             after / damage / etc.). Notes are always optional but
+             useful context for the PM/owner to see alongside the
+             image. Damage notes use the most assertive copy since
+             they're the highest-priority reason to add one. */}
+          {lastUploaded && onSaveNote && (
+            <div className={`mb-3 p-3 rounded-xl border ${kind === 'damage' ? 'bg-amber-50 border-amber-200' : 'bg-stone-50 border-stone-200'}`}>
+              <div className={`text-xs uppercase tracking-wider font-mono mb-1.5 ${kind === 'damage' ? 'text-amber-800' : 'text-stone-700'}`}>
                 Add a note (optional)
               </div>
               <textarea
@@ -4556,11 +4640,17 @@ function PhotoModal({ kind, taskName, existing, onUpload, onSaveNote, onClose })
                 onChange={(e) => { setNoteDraft(e.target.value); setNoteSaved(false); }}
                 disabled={savingNote}
                 rows={3}
-                placeholder="What's damaged? Where exactly? Any context that helps the PM understand."
-                className="w-full px-3 py-2 rounded-lg border border-amber-300 bg-white text-sm focus:outline-none focus:border-amber-600 resize-none disabled:opacity-60" />
+                placeholder={kind === 'damage'
+                  ? "What's damaged? Where exactly? Any context that helps the PM understand."
+                  : kind === 'before'
+                    ? 'Any details about the state when you started.'
+                    : kind === 'after'
+                      ? 'Any details about what you cleaned or special handling.'
+                      : 'A short note about this photo.'}
+                className={`w-full px-3 py-2 rounded-lg border bg-white text-sm focus:outline-none resize-none disabled:opacity-60 ${kind === 'damage' ? 'border-amber-300 focus:border-amber-600' : 'border-stone-300 focus:border-stone-600'}`} />
               <div className="mt-2 flex items-center gap-2">
                 <button onClick={saveNote} disabled={savingNote || !noteDraft.trim()}
-                  className="px-3 py-1.5 rounded-lg bg-amber-700 hover:bg-amber-800 text-white text-xs font-medium disabled:opacity-50">
+                  className={`px-3 py-1.5 rounded-lg text-white text-xs font-medium disabled:opacity-50 ${kind === 'damage' ? 'bg-amber-700 hover:bg-amber-800' : 'bg-stone-700 hover:bg-stone-800'}`}>
                   {savingNote ? 'Saving…' : noteSaved ? 'Saved' : 'Save note'}
                 </button>
                 {noteSaved && (
@@ -4568,7 +4658,7 @@ function PhotoModal({ kind, taskName, existing, onUpload, onSaveNote, onClose })
                     <Check size={11} /> Attached to the photo
                   </span>
                 )}
-                <span className="text-[11px] text-amber-700 ml-auto">Skipping is fine</span>
+                <span className="text-[11px] text-stone-500 ml-auto">Skipping is fine</span>
               </div>
             </div>
           )}
@@ -15267,16 +15357,17 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
         {sheetFiles.length > 0 && (
           <div className="mb-3 p-2 bg-stone-100 rounded-xl">
             <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1.5 px-1">
-              Sheets — tap to assign to {parties.find(p => p.id === activePartyId)?.label || 'active bedroom'}
+              Sheets — tap card to assign to {parties.find(p => p.id === activePartyId)?.label || 'active bedroom'}
             </div>
             <div className="flex gap-2 overflow-x-auto pb-1">
               {sheetFiles.map((f, idx) => {
                 const isImage = f.type && f.type.startsWith('image/');
                 const previewUrl = sheetPreviews[f.name];
                 const assignedToActive = activePartyId && config[activePartyId]?.sheetFileName === f.name;
+                const isRenaming = renamingIdx === idx;
                 return (
                   <div key={`${f.name}-${idx}`}
-                    className={`flex-shrink-0 w-28 rounded-lg border-2 overflow-hidden bg-white transition-colors ${
+                    className={`flex-shrink-0 w-32 rounded-lg border-2 overflow-hidden bg-white transition-colors ${
                       assignedToActive ? 'border-amber-500' : 'border-stone-200'
                     }`}>
                     <button
@@ -15295,23 +15386,73 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
                           <FileText size={28} className="text-stone-400" />
                         )}
                       </div>
+                    </button>
+                    {/* Inline rename input OR truncated filename label */}
+                    {isRenaming ? (
+                      <input autoFocus
+                        value={renamingValue}
+                        onChange={e => setRenamingValue(e.target.value)}
+                        onBlur={() => { renameSheetFile(idx, renamingValue); setRenamingIdx(null); }}
+                        onKeyDown={e => {
+                          if (e.key === 'Enter') { renameSheetFile(idx, renamingValue); setRenamingIdx(null); }
+                          if (e.key === 'Escape') setRenamingIdx(null);
+                        }}
+                        className="w-full px-1.5 py-1 text-[10px] font-mono border-y border-stone-300 bg-white text-stone-900" />
+                    ) : (
                       <div className="px-1.5 py-1 text-[10px] font-mono truncate text-stone-700">
                         {f.name}
                       </div>
-                    </button>
-                    <div className="flex items-center border-t border-stone-200">
+                    )}
+                    {/* Action row: quick view + rename + replace.
+                       Replace opens a hidden file input so the user
+                       can swap the image without re-doing the whole
+                       upload step. The new file inherits the assigned
+                       bedroom selection. */}
+                    <div className="flex items-stretch border-t border-stone-200">
                       <button
                         onClick={() => setQuickView({ file: f, url: previewUrl || (f.type ? URL.createObjectURL(f) : null) })}
                         className="flex-1 py-1.5 hover:bg-stone-50 flex items-center justify-center"
                         title="Quick view">
                         <Eye size={12} className="text-stone-600" />
                       </button>
-                      <div className="w-px h-4 bg-stone-200" />
-                      <div className="flex-1 py-1.5 flex items-center justify-center text-[10px] font-mono">
-                        {assignedToActive
-                          ? <span className="text-amber-700">✓ assigned</span>
-                          : <span className="text-stone-400">tap card</span>}
-                      </div>
+                      <div className="w-px bg-stone-200" />
+                      <button
+                        onClick={() => { setRenamingIdx(idx); setRenamingValue(f.name.replace(/\.[^.]+$/, '')); }}
+                        className="flex-1 py-1.5 hover:bg-stone-50 flex items-center justify-center"
+                        title="Rename">
+                        <Edit2 size={12} className="text-stone-600" />
+                      </button>
+                      <div className="w-px bg-stone-200" />
+                      <label
+                        className="flex-1 py-1.5 hover:bg-stone-50 flex items-center justify-center cursor-pointer"
+                        title="Replace">
+                        <input type="file" accept="image/*,application/pdf" className="hidden"
+                          onChange={e => {
+                            const replacement = e.target.files?.[0];
+                            e.target.value = '';
+                            if (!replacement) return;
+                            // Preserve the original NAME so any bedroom
+                            // sheet assignments still point at the
+                            // right entry. Wrap the new file with the
+                            // existing name + extension.
+                            const origName = f.name;
+                            const wrapped = new File([replacement], origName, {
+                              type: replacement.type,
+                              lastModified: replacement.lastModified,
+                            });
+                            setSheetFiles(prev => {
+                              const next = [...prev];
+                              next[idx] = wrapped;
+                              return next;
+                            });
+                          }} />
+                        <Camera size={12} className="text-stone-600" />
+                      </label>
+                    </div>
+                    <div className="px-1.5 py-1 text-[9px] font-mono text-center bg-stone-50 border-t border-stone-200">
+                      {assignedToActive
+                        ? <span className="text-amber-700">✓ assigned</span>
+                        : <span className="text-stone-400">tap card</span>}
                     </div>
                   </div>
                 );
@@ -15331,6 +15472,13 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
             const isFailAll = c?.mode === 'fail_entire';
             const checkCount = c?.checked ? Object.keys(c.checked).length : 0;
             const passedSecs = Object.keys(c?.passedSections || {}).length;
+            // Bedroom is incomplete if any of its 4 sections isn't done.
+            // We surface the red dot on the tab itself so the uploader
+            // can see WHICH bedrooms still need work without having to
+            // click into each one. Mirrors the per-section dot logic
+            // and is gated by nextAttempted for the same reason.
+            const bedroomIncomplete = !sectionsForBedroomComplete(id).every(Boolean);
+            const showBedroomError = nextAttempted && bedroomIncomplete;
             const labelExtra = isPass ? '· Pass'
               : isFailAll ? '· Fail all'
               : checkCount > 0 ? `· ${checkCount} items`
@@ -15338,12 +15486,15 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
               : '';
             return (
               <button key={id} onClick={() => setActivePartyId(id)}
-                className={`px-3 py-2 rounded-xl border-2 text-sm whitespace-nowrap flex-shrink-0 transition-colors ${
+                className={`relative px-3 py-2 rounded-xl border-2 text-sm whitespace-nowrap flex-shrink-0 transition-colors ${
                   isActive ? 'bg-amber-50 border-amber-500'
                   : isPass ? 'bg-emerald-50 border-emerald-300'
                   : isFailAll ? 'bg-red-50 border-red-300'
                   : 'bg-white border-stone-200'
                 }`}>
+                {showBedroomError && (
+                  <span className="absolute top-1 right-1 w-2.5 h-2.5 rounded-full bg-red-500" title="Needs attention" />
+                )}
                 {showAptLabel && (
                   <div className="text-[9px] font-mono text-stone-500 uppercase tracking-wider">{u?.label}</div>
                 )}
@@ -15700,10 +15851,16 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
 
       {/* Action bar — fixed above the manager tab bar (~64px tall)
          when this wizard renders inside ManagerShell. z-30 matches
-         the manager bar so they stack predictably without overlap.
-         No Back button here: the arrow at the top header handles that
-         to avoid two redundant back affordances. */}
+      {/* Bottom action bar. Stays above the manager tab bar via the
+         z-30 + bottom-[64px] offset. Back button is on the left so the
+         user can step back one wizard step without hunting for the
+         tiny arrow at the top header. */}
       <div className="fixed bottom-[64px] left-0 right-0 bg-white border-t border-stone-200 px-5 py-3 flex gap-2 z-30 shadow-[0_-4px_12px_rgba(0,0,0,0.06)]">
+        <button
+          onClick={() => { if (step > 0) setStep(step - 1); else onCancel(); }}
+          className="px-4 py-3 rounded-xl bg-stone-100 hover:bg-stone-200 text-stone-700 text-sm font-medium flex items-center gap-1.5 active:scale-95">
+          <ArrowLeft size={14} /> Back
+        </button>
         {step < 4 && (
           <button
             onClick={() => {

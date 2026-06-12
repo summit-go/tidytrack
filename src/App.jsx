@@ -2908,12 +2908,34 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       return; // already there
     }
 
-    // Active block but on a different bedroom — ask before switching
+    // Active block but on a different bedroom — ask before switching.
+    // Switching auto-pauses any in_progress items at the current
+    // bedroom so the cleaner can resume them later, and closes the
+    // current work block. Without this guard a cleaner could end up
+    // with two open blocks across two bedrooms which the model can't
+    // represent.
     if (activeBlock && !activeBlock.end_time) {
-      const switchMsg = `You're already cleaning ${activeBlock.unit?.label || ''} · ${activeBlock.party?.label || ''}. Switch to ${target.unit?.label || ''} · ${target.party?.label || ''}?`;
+      const fromLabel = `${activeBlock.unit?.label || ''} · ${activeBlock.party?.label || ''}`;
+      const toLabel   = `${target.unit?.label   || ''} · ${target.party?.label   || ''}`;
+      const switchMsg = `You're already in ${fromLabel}. Switching to ${toLabel} will pause any items you started in ${fromLabel} (you can resume them later) and end the current work block.\n\nSwitch?`;
       if (!confirm(switchMsg)) return;
       setBusy(true);
       if (activeTask) await stopTask(activeTask, false);
+      // Pause any in-progress items the cleaner started at the
+      // current bedroom — they show up as Paused so they can pick
+      // them back up when they return.
+      if (employee?.id && activeBlock.unit_id && activeBlock.party_id) {
+        try {
+          await supabase.from('assignment_targets')
+            .update({ status: 'paused' })
+            .eq('unit_id', activeBlock.unit_id)
+            .eq('party_id', activeBlock.party_id)
+            .eq('started_by', employee.id)
+            .eq('status', 'in_progress');
+        } catch (e) {
+          console.warn('[switch bedroom] could not pause in-progress items', e);
+        }
+      }
       const ts = new Date().toISOString();
       await supabase.from('work_blocks').update({ end_time: ts }).eq('id', activeBlock.id);
       const updated = { ...activeBlock, end_time: ts, tasks };
@@ -14030,6 +14052,16 @@ function AssignmentList({ property, employee, onBack, onNew, onNewChecklist, onO
   const [search, setSearch] = useState('');
   // Which building groups are collapsed (default expanded)
   const [collapsedBuildings, setCollapsedBuildings] = useState({});
+  // Which floor groups inside a building are collapsed (default expanded).
+  // Keyed by `${buildingKey}::${floorKey}` so two buildings can both
+  // have a Floor 1 without colliding.
+  const [collapsedFloors, setCollapsedFloors] = useState({});
+  // Bulk-delete selection set — only available to users with the
+  // archive_assignments permission. Tracks assignment IDs the user
+  // has ticked for deletion. The mode flag turns the checkboxes
+  // on/off so the layout doesn't grow checkboxes for everyone.
+  const [bulkMode, setBulkMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState(new Set());
   // Which apartment dropdowns are open inside a building
   const [openApartments, setOpenApartments] = useState({}); // { 'B1-101': true }
   // Filters — priority and cleaning type. Expandable panel keeps the
@@ -14158,13 +14190,38 @@ function AssignmentList({ property, employee, onBack, onNew, onNewChecklist, onO
   // elements. Keyboard a11y maintained via tabIndex + onKeyDown.
   const renderAssignmentRow = (a) => {
     const isToggling = togglingId === a.id;
+    const isSelected = selectedIds.has(a.id);
+    const handleRowClick = () => {
+      // In bulk mode the row tap toggles selection; otherwise it
+      // opens the detail view as it did before.
+      if (bulkMode) {
+        setSelectedIds(prev => {
+          const next = new Set(prev);
+          if (next.has(a.id)) next.delete(a.id);
+          else next.add(a.id);
+          return next;
+        });
+      } else {
+        onOpen(a);
+      }
+    };
     return (
-      <div key={a.id} onClick={() => onOpen(a)}
+      <div key={a.id} onClick={handleRowClick}
         tabIndex={0}
-        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onOpen(a); } }}
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleRowClick(); } }}
         role="button"
-        className={`w-full text-left p-3 rounded-xl border cursor-pointer ${a.allDone ? 'bg-stone-100 border-stone-200 opacity-70' : a.blocked > 0 ? 'bg-red-50/50 border-red-200' : 'bg-white border-stone-200'} hover:border-stone-400 transition-colors`}>
+        className={`w-full text-left p-3 rounded-xl border cursor-pointer ${
+          bulkMode && isSelected ? 'bg-amber-50 border-amber-400 ring-2 ring-amber-300' :
+          a.allDone ? 'bg-stone-100 border-stone-200 opacity-70' :
+          a.blocked > 0 ? 'bg-red-50/50 border-red-200' :
+          'bg-white border-stone-200'} hover:border-stone-400 transition-colors`}>
         <div className="flex items-start justify-between gap-2">
+          {/* Checkbox cell (bulk mode only) */}
+          {bulkMode && (
+            <div className={`mt-0.5 w-5 h-5 rounded border-2 flex-shrink-0 flex items-center justify-center ${isSelected ? 'border-amber-600 bg-amber-600' : 'border-stone-300 bg-white'}`}>
+              {isSelected && <Check size={12} className="text-white" />}
+            </div>
+          )}
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2 mb-1 flex-wrap">
               {a.file_kind === 'pdf'
@@ -14176,7 +14233,7 @@ function AssignmentList({ property, employee, onBack, onNew, onNewChecklist, onO
               {/* Priority TOGGLE — click flips ALL targets of this
                  assignment between priority on/off. stopPropagation
                  so the row click (open detail) doesn't also fire. */}
-              {!a.allDone && (
+              {!a.allDone && !bulkMode && (
                 <button
                   onClick={(e) => { e.stopPropagation(); togglePriority(a); }}
                   disabled={isToggling}
@@ -14195,7 +14252,7 @@ function AssignmentList({ property, employee, onBack, onNew, onNewChecklist, onO
             </div>
             {a.notes && <div className="text-xs text-stone-600 mt-1 line-clamp-1">{a.notes}</div>}
           </div>
-          <ChevronRight size={14} className="text-stone-400 flex-shrink-0 mt-1" />
+          {!bulkMode && <ChevronRight size={14} className="text-stone-400 flex-shrink-0 mt-1" />}
         </div>
       </div>
     );
@@ -14211,7 +14268,59 @@ function AssignmentList({ property, employee, onBack, onNew, onNewChecklist, onO
           <div className="text-xs uppercase tracking-wider text-stone-500 font-mono truncate">{property.name}</div>
           <div className="font-serif text-xl text-stone-900">Assignments</div>
         </div>
+        {/* Select-mode toggle — only owners / uploaders see this since
+           it gates bulk deletion. Toggling exits and clears selection. */}
+        {can(employee, 'upload_assignments') && assignments.length > 0 && (
+          <button onClick={() => { setBulkMode(m => !m); setSelectedIds(new Set()); }}
+            className={`px-3 py-1.5 rounded-full text-xs font-medium ${bulkMode ? 'bg-stone-900 text-stone-50' : 'bg-stone-100 text-stone-700 hover:bg-stone-200'}`}>
+            {bulkMode ? 'Cancel' : 'Select'}
+          </button>
+        )}
       </div>
+
+      {/* Bulk-action toolbar — sticky-ish row that appears just under
+         the header whenever the owner has tapped Select. Shows the
+         selected count + Select all + Delete in one row. */}
+      {bulkMode && (() => {
+        // Show counts based on what's actually visible after search/filter
+        // so "select all" feels like it acts on what the user sees.
+        const visibleIds = []; // populated below from decorated/filtered list
+        try {
+          const ids = (typeof decorated !== 'undefined' ? decorated : []).map(d => d.assignment.id);
+          visibleIds.push(...ids);
+        } catch (e) { /* decorated not in scope yet during render — fine */ }
+        const allSelected = visibleIds.length > 0 && visibleIds.every(id => selectedIds.has(id));
+        const handleDelete = async () => {
+          if (selectedIds.size === 0) return;
+          if (!confirm(`Delete ${selectedIds.size} assignment${selectedIds.size === 1 ? '' : 's'}? They'll be archived (recoverable from the DB if needed).`)) return;
+          const { error } = await supabase.from('assignments')
+            .update({ active: false })
+            .in('id', Array.from(selectedIds));
+          if (error) { alert('Could not delete: ' + error.message); return; }
+          setSelectedIds(new Set());
+          setBulkMode(false);
+          await load();
+        };
+        return (
+          <div className="sticky top-0 z-20 bg-amber-50 border-b border-amber-200 px-5 py-2.5 flex items-center gap-2 flex-wrap">
+            <span className="text-xs font-mono text-amber-900 font-bold">
+              {selectedIds.size} selected
+            </span>
+            <button onClick={() => {
+              if (allSelected) setSelectedIds(new Set());
+              else setSelectedIds(new Set(visibleIds));
+            }} className="text-[11px] font-mono px-2 py-1 rounded-full bg-white border border-amber-300 text-amber-900 hover:bg-amber-100">
+              {allSelected ? 'Clear all' : `Select all visible (${visibleIds.length})`}
+            </button>
+            <div className="flex-1" />
+            <button onClick={handleDelete} disabled={selectedIds.size === 0}
+              className="text-xs font-medium px-3 py-1.5 rounded-full bg-red-600 text-white hover:bg-red-700 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1">
+              <X size={12} /> Delete selected
+            </button>
+          </div>
+        );
+      })()}
+
       <div className="px-5 pt-6">
         {can(employee, 'upload_assignments') && (
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-4">
@@ -14399,20 +14508,29 @@ function AssignmentList({ property, employee, onBack, onNew, onNewChecklist, onO
                           // Single-floor building — no floor headers, just the apartments
                           return unitKeys.map(renderUnitKey);
                         }
-                        return floorKeys.map(fk => (
-                          <div key={fk}>
-                            <div className="flex items-center gap-2 mb-1.5 px-1">
-                              <span className="text-sm font-bold text-stone-800 tracking-wide">
-                                {fk === '—' ? 'Other' : `Floor ${fk}`}
-                              </span>
-                              <span className="text-xs font-mono text-stone-500">({byFloor[fk].length})</span>
-                              <div className="flex-1 h-px bg-stone-300" />
+                        return floorKeys.map(fk => {
+                          const floorKey = `${b.key}::${fk}`;
+                          const floorOpen = !collapsedFloors[floorKey];
+                          return (
+                            <div key={fk}>
+                              <button
+                                onClick={() => setCollapsedFloors(prev => ({ ...prev, [floorKey]: !prev[floorKey] }))}
+                                className="w-full flex items-center gap-2 mb-1.5 px-1 hover:bg-stone-50 rounded transition-colors text-left">
+                                <ChevronRight size={12} className={`text-stone-500 flex-shrink-0 transition-transform ${floorOpen ? 'rotate-90' : ''}`} />
+                                <span className="text-sm font-bold text-stone-800 tracking-wide">
+                                  {fk === '—' ? 'Other' : `Floor ${fk}`}
+                                </span>
+                                <span className="text-xs font-mono text-stone-500">({byFloor[fk].length})</span>
+                                <div className="flex-1 h-px bg-stone-300" />
+                              </button>
+                              {floorOpen && (
+                                <div className="space-y-2">
+                                  {byFloor[fk].map(renderUnitKey)}
+                                </div>
+                              )}
                             </div>
-                            <div className="space-y-2">
-                              {byFloor[fk].map(renderUnitKey)}
-                            </div>
-                          </div>
-                        ));
+                          );
+                        });
                       })()}
                     </div>
                   )}
@@ -17346,6 +17464,7 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
             onReassign={() => setReassignTarget(t)}
             onTogglePriority={togglePriority}
               canMarkDone={can(employee, 'mark_assignments_done') || t.started_by === employee?.id}
+              canMarkDoneAlways={can(employee, 'mark_assignments_done')}
               currentEmployeeId={employee?.id}
             onOpenBedroomHistory={onOpenBedroomHistory} />
         );
@@ -17608,7 +17727,7 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
 }
 
 // Reusable card for one assignment target, used in banner + panel
-function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPending, onDone, onReopen, onBlocked, onReassign, onGoToBedroom, onOpenBedroomHistory, onTogglePriority, canMarkDone = true, currentEmployeeId, propertyId }) {
+function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPending, onDone, onReopen, onBlocked, onReassign, onGoToBedroom, onOpenBedroomHistory, onTogglePriority, canMarkDone = true, canMarkDoneAlways = false, currentEmployeeId, propertyId }) {
   const t = target;
   const s = ASSIGNMENT_STATUSES[t.status] || ASSIGNMENT_STATUSES.pending;
   const isDone = t.status === 'done';
@@ -17826,7 +17945,10 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
           // On Pending we keep the button VISIBLE but disabled — the
           // cleaner sees the action exists, just needs to Start first.
           // This avoids the confusing "button vanished" feeling.
-          const pendingDisabled = t.status === 'pending';
+          // EXCEPTION: users with full mark_assignments_done permission
+          // (owners / managers) can mark complete WITHOUT starting first,
+          // so we never disable the button for them.
+          const pendingDisabled = t.status === 'pending' && !canMarkDoneAlways;
           return (
             <button onClick={onDone} disabled={busy || pendingDisabled}
               title={pendingDisabled ? 'Start this assignment before marking it complete' : ''}
@@ -17944,6 +18066,8 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
   const [busy, setBusy] = useState(false);
   const [buildingFilter, setBuildingFilter] = useState('all'); // 'all' or a building prefix like 'B3'
   const [collapsedBuildings, setCollapsedBuildings] = useState({}); // { B3: true } = collapsed
+  // Floor collapse keyed by `${building}::${floor}`. Default expanded.
+  const [collapsedFloors, setCollapsedFloors] = useState({});
   const [doneSubTab, setDoneSubTab] = useState('dayOf'); // 'dayOf' | 'last3' | 'older'
 
   // Filters — apply on top of the loaded targets
@@ -18234,19 +18358,25 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
       if (!hit) return false;
     }
     // Day filter (multi-select). 'today' / 'week' / specific date string.
+    // Filters on COMPLETED day (when the work was actually done) so the
+    // owner can see "what got cleaned today" cleanly. Items without a
+    // completed_at are excluded from this filter — they show up under
+    // the Pending tab anyway.
     if (filterDays.size > 0) {
-      const sd = t.assignment?.scheduled_date;
+      const completed = t.completed_at;
+      const cd = completed ? new Date(completed).toISOString().slice(0, 10) : null;
       let matched = false;
       for (const day of filterDays) {
-        if (day === 'today' && sd === todayKey) { matched = true; break; }
+        if (day === 'today' && cd === todayKey) { matched = true; break; }
         if (day === 'week') {
-          if (!sd) continue;
-          const d = new Date(sd + 'T00:00:00');
+          if (!cd) continue;
+          const d = new Date(cd + 'T00:00:00');
           const now = new Date(todayKey + 'T00:00:00');
-          const diff = (d - now) / (24 * 60 * 60 * 1000);
+          const diff = (now - d) / (24 * 60 * 60 * 1000);
+          // Last 7 days (inclusive)
           if (diff >= 0 && diff <= 7) { matched = true; break; }
         }
-        if (sd && day === sd) { matched = true; break; }
+        if (cd && day === cd) { matched = true; break; }
       }
       if (!matched) return false;
     }
@@ -18404,6 +18534,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                 onReassign={() => setReassignTarget(t)}
                 onTogglePriority={togglePriority}
               canMarkDone={can(employee, 'mark_assignments_done') || t.started_by === employee?.id}
+              canMarkDoneAlways={can(employee, 'mark_assignments_done')}
               currentEmployeeId={employee?.id}
                 onGoToBedroom={onGoToBedroom ? () => startAndGo(t) : null}
                 onOpenBedroomHistory={onOpenBedroomHistory} />
@@ -18649,6 +18780,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                             onReassign={() => setReassignTarget(t)}
                             onTogglePriority={togglePriority}
                             canMarkDone={can(employee, 'mark_assignments_done') || t.started_by === employee?.id}
+              canMarkDoneAlways={can(employee, 'mark_assignments_done')}
                             currentEmployeeId={employee?.id}
                             onGoToBedroom={onGoToBedroom ? () => startAndGo(t) : null}
                             onOpenBedroomHistory={onOpenBedroomHistory} />
@@ -18686,6 +18818,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
               onReassign={() => setReassignTarget(t)}
               onTogglePriority={togglePriority}
               canMarkDone={can(employee, 'mark_assignments_done') || t.started_by === employee?.id}
+              canMarkDoneAlways={can(employee, 'mark_assignments_done')}
               currentEmployeeId={employee?.id}
                 onGoToBedroom={onGoToBedroom ? () => startAndGo(t) : null}
               onOpenBedroomHistory={onOpenBedroomHistory} />
@@ -18839,13 +18972,14 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                   </div>
                 </div>
               )}
-              {/* Day — multi-select */}
+              {/* Day — multi-select. Filters by COMPLETED day so the
+                 owner sees what got cleaned on the picked day(s). */}
               <div>
-                <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1">Scheduled day</div>
+                <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1">Completed day</div>
                 <div className="flex gap-1.5 flex-wrap items-center">
                   {[
                     { id: 'today', label: 'Today' },
-                    { id: 'week',  label: 'Next 7 days' },
+                    { id: 'week',  label: 'Last 7 days' },
                   ].map(opt => {
                     const active = filterDays.has(opt.id);
                     return (
@@ -18856,10 +18990,16 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                       </button>
                     );
                   })}
-                  {/* Specific date — adds to the filter Set as a YYYY-MM-DD string */}
-                  <input type="date"
-                    onChange={(e) => { if (e.target.value) toggleDay(e.target.value); e.target.value = ''; }}
-                    className="px-2 py-1 rounded-full text-xs font-mono bg-white border border-stone-300" />
+                  {/* Pick-a-date affordance — wrapped in a label so the
+                     "Pick date" text is clickable and opens the native
+                     date picker. */}
+                  <label className="px-2.5 py-1 rounded-full text-xs font-mono bg-white border border-stone-300 text-stone-600 flex items-center gap-1 cursor-pointer hover:bg-stone-50">
+                    <Calendar size={10} />
+                    <span>Pick date</span>
+                    <input type="date"
+                      onChange={(e) => { if (e.target.value) toggleDay(e.target.value); e.target.value = ''; }}
+                      className="sr-only" />
+                  </label>
                   {/* Show any selected specific dates as removable chips */}
                   {Array.from(filterDays).filter(d => d !== 'today' && d !== 'week').map(d => (
                     <button key={d} onClick={() => toggleDay(d)}
@@ -18936,6 +19076,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                     onReassign={() => setReassignTarget(t)}
                     onTogglePriority={togglePriority}
               canMarkDone={can(employee, 'mark_assignments_done') || t.started_by === employee?.id}
+              canMarkDoneAlways={can(employee, 'mark_assignments_done')}
               currentEmployeeId={employee?.id}
                 onGoToBedroom={onGoToBedroom ? () => startAndGo(t) : null}
                     onOpenBedroomHistory={onOpenBedroomHistory} />
@@ -18999,18 +19140,25 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                   ? renderDoneBuckets(itemsForBuilding)
                   : showFloorHeaders ? (
                       <div className="space-y-3">
-                        {floorKeys.map(fk => (
-                          <div key={fk}>
-                            <div className="flex items-center gap-2 mb-1.5 px-1">
-                              <span className="text-sm font-bold text-stone-800 tracking-wide">
-                                {fk === '—' ? 'Other' : `Floor ${fk}`}
-                              </span>
-                              <span className="text-xs font-mono text-stone-500">({byFloor[fk].length})</span>
-                              <div className="flex-1 h-px bg-stone-300" />
+                        {floorKeys.map(fk => {
+                          const floorKey = `${b}::${fk}`;
+                          const floorOpen = !collapsedFloors[floorKey];
+                          return (
+                            <div key={fk}>
+                              <button
+                                onClick={() => setCollapsedFloors(prev => ({ ...prev, [floorKey]: !prev[floorKey] }))}
+                                className="w-full flex items-center gap-2 mb-1.5 px-1 hover:bg-stone-50 rounded transition-colors text-left">
+                                <ChevronRight size={12} className={`text-stone-500 flex-shrink-0 transition-transform ${floorOpen ? 'rotate-90' : ''}`} />
+                                <span className="text-sm font-bold text-stone-800 tracking-wide">
+                                  {fk === '—' ? 'Other' : `Floor ${fk}`}
+                                </span>
+                                <span className="text-xs font-mono text-stone-500">({byFloor[fk].length})</span>
+                                <div className="flex-1 h-px bg-stone-300" />
+                              </button>
+                              {floorOpen && renderAssignmentList(byFloor[fk])}
                             </div>
-                            {renderAssignmentList(byFloor[fk])}
-                          </div>
-                        ))}
+                          );
+                        })}
                       </div>
                     ) : (
                       renderAssignmentList(itemsForBuilding)

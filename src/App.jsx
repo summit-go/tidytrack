@@ -17204,6 +17204,44 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
     }
   };
 
+  // Bulk wrappers — used by the bedroom-level summary card so
+  // Mark complete / Mark priority / Blocked work across every item
+  // in a single tap. Optimistic + single DB write per action.
+  const bulkUpdateStatus = async (rows, newStatus, statusNotes) => {
+    if (!rows || rows.length === 0) return;
+    const ids = rows.map(r => r.id);
+    setTargets(prev => prev.map(t => ids.includes(t.id) ? { ...t, status: newStatus } : t));
+    setBusy(true);
+    const patch = { status: newStatus };
+    if (newStatus === 'in_progress') {
+      patch.started_at = new Date().toISOString();
+      patch.started_by = employee?.id || null;
+    }
+    if (newStatus === 'done') {
+      patch.completed_at = new Date().toISOString();
+      patch.completed_by = employee?.id || null;
+    } else {
+      patch.completed_at = null; patch.completed_by = null;
+    }
+    if (newStatus === 'pending') { patch.started_at = null; patch.started_by = null; }
+    if (statusNotes !== undefined) patch.status_notes = statusNotes || null;
+    const { error } = await supabase.from('assignment_targets').update(patch).in('id', ids);
+    setBusy(false);
+    if (error) { load(); alert('Could not update: ' + error.message); return; }
+    if (onUpdate) onUpdate();
+    load();
+  };
+  const bulkTogglePriority = async (rows) => {
+    if (!rows || rows.length === 0) return;
+    const anyOn = rows.some(r => r.priority);
+    const next = !anyOn;
+    const ids = rows.map(r => r.id);
+    setTargets(prev => prev.map(t => ids.includes(t.id) ? { ...t, priority: next } : t));
+    const { error } = await supabase.from('assignment_targets').update({ priority: next }).in('id', ids);
+    if (error) { alert('Could not update priority: ' + error.message); load(); }
+    else if (onUpdate) onUpdate();
+  };
+
   if (!loaded || targets.length === 0) return null;
 
   // Group checklist-style targets (template_set_id is set) under their
@@ -17286,6 +17324,7 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
         const renderChecklistGroupCard = (g) => {
           const a = g.assignment;
           const items = g.items;
+          const rep = g.representative;
           const counts = {
             pending:     items.filter(i => i.status === 'pending').length,
             in_progress: items.filter(i => i.status === 'in_progress').length,
@@ -17295,32 +17334,102 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
           };
           const total = items.length;
           const isAllDone = counts.done === total;
-          const anyInProgress = counts.in_progress > 0;
-          const anyPaused = counts.paused > 0;
-          const startAll = async () => {
-            const eligible = items.filter(i => i.status === 'pending' || i.status === 'paused');
-            for (const t of eligible) await updateStatus(t, 'in_progress');
+          // Section breakdown — "57 items · Bedroom (16) · Vanity (12) · …"
+          const sectionCounts = {
+            bedroom:  items.filter(i => (i.template_section || '').toLowerCase() === 'bedroom').length,
+            vanity:   items.filter(i => (i.template_section || '').toLowerCase() === 'vanity').length,
+            bathroom: items.filter(i => (i.template_section || '').toLowerCase() === 'bathroom').length,
+            general:  items.filter(i => (i.template_section || '').toLowerCase() === 'general').length,
           };
-          const pauseAll = async () => {
-            const eligible = items.filter(i => i.status === 'in_progress');
-            for (const t of eligible) await updateStatus(t, 'paused');
-          };
-          const sheetTypeLabel = a?.sheet_type === 'cleaning_check' ? 'Cleaning check'
-            : a?.sheet_type === 'move_out_clean' ? 'Move-out clean' : 'Checklist';
+          const knownSectioned = sectionCounts.bedroom + sectionCounts.vanity + sectionCounts.bathroom + sectionCounts.general;
+          const otherCount = total - knownSectioned;
+          const sectionBits = [];
+          if (sectionCounts.bedroom)  sectionBits.push(`Bedroom (${sectionCounts.bedroom})`);
+          if (sectionCounts.vanity)   sectionBits.push(`Vanity (${sectionCounts.vanity})`);
+          if (sectionCounts.bathroom) sectionBits.push(`Bathroom (${sectionCounts.bathroom})`);
+          if (sectionCounts.general)  sectionBits.push(`General (${sectionCounts.general})`);
+          if (otherCount > 0)         sectionBits.push(`Other (${otherCount})`);
+          // Aggregated priority + status for the chips on the right
+          const anyPriority = items.some(i => i.priority);
+          const statusOrder = ['pending', 'in_progress', 'paused', 'blocked', 'done'];
+          const dominantStatus = statusOrder.find(s => items.some(i => i.status === s)) || 'pending';
+          const statusPill = ASSIGNMENT_STATUSES[dominantStatus] || ASSIGNMENT_STATUSES.pending;
+          // Item-level rows the cleaner can act on in BULK
+          const openItems = items.filter(i => i.status !== 'done');
           return (
-            <div key={g.key} className="p-3 sm:p-4 rounded-xl bg-white border-2 border-blue-300">
-              <div className="flex items-start gap-2 mb-2 flex-wrap">
+            <div key={g.key} className="p-3 sm:p-4 rounded-xl bg-white border border-stone-200">
+              {/* === HEADER: bedroom title + chips on right ===
+                 Layout mirrors the AssignmentList card exactly so
+                 the cleaner sees the same chrome everywhere. */}
+              <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-1.5 sm:gap-2 mb-2">
                 <div className="flex-1 min-w-0">
-                  <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-0.5">{sheetTypeLabel}</div>
-                  <div className="font-serif text-base text-stone-900 leading-tight break-words">{a?.title || 'Checklist assignment'}</div>
+                  {(rep?.unit?.label || rep?.party?.label) ? (
+                    <div className="font-serif text-lg text-stone-900 leading-tight break-words">
+                      <span className="font-bold">{rep?.unit?.label || 'No unit'}</span>
+                      {rep?.party?.label && (
+                        <>
+                          <span className="text-stone-400 mx-1.5">·</span>
+                          <span className="italic">{rep.party.label}</span>
+                        </>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="font-serif text-lg text-stone-900 font-bold">Checklist assignment</div>
+                  )}
                 </div>
-                {isAllDone && (
-                  <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 border border-emerald-300 flex items-center gap-1">
-                    <Check size={10} /> Done
-                  </span>
-                )}
+                <div className="flex flex-col sm:flex-row sm:items-center gap-1.5 flex-shrink-0 sm:max-w-[60%]">
+                  {/* Mini-row 1: Priority + status — Mark Priority is
+                     a bulk toggle here since the card represents N items. */}
+                  <div className="flex items-center gap-1.5 flex-wrap justify-end">
+                    {!isAllDone ? (
+                      <button onClick={(e) => { e.stopPropagation(); bulkTogglePriority(items); }} disabled={busy}
+                        className={`text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full border inline-flex items-center gap-1 transition-colors disabled:opacity-50 ${anyPriority
+                            ? 'bg-red-100 text-red-800 border-red-300 font-bold hover:bg-red-200'
+                            : 'bg-stone-100 text-stone-500 border-stone-200 hover:bg-stone-200'}`}>
+                        <AlertCircle size={10} /> {anyPriority ? 'Priority' : 'Mark priority'}
+                      </button>
+                    ) : (
+                      <PriorityChip on={anyPriority && !isAllDone} />
+                    )}
+                    <span className={`text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full border ${statusPill.color}`}>
+                      {statusPill.label}
+                    </span>
+                  </div>
+                  {/* Mini-row 2: View doc + History */}
+                  <div className="flex items-center gap-1.5 flex-wrap justify-end">
+                    <button onClick={() => setOpened(rep)}
+                      className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-100 hover:bg-stone-200 text-stone-700 flex items-center gap-1">
+                      <Eye size={10} /> View doc
+                    </button>
+                    {onOpenBedroomHistory && rep?.unit_id && rep?.party_id && (
+                      <button onClick={() => onOpenBedroomHistory({
+                          unitId: rep.unit_id, unitLabel: rep.unit?.label,
+                          partyId: rep.party_id, partyLabel: rep.party?.label
+                        })} disabled={busy}
+                        className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-100 hover:bg-stone-200 text-stone-700 flex items-center gap-1 disabled:opacity-50">
+                        <Clock size={10} /> History
+                      </button>
+                    )}
+                  </div>
+                </div>
               </div>
-              {/* Item-status summary chips */}
+
+              {/* === TITLE + TYPE + SECTION BREAKDOWN === */}
+              <div className="mb-2">
+                <div className="font-serif text-sm text-stone-700">{a?.title || 'Checklist assignment'}</div>
+                {a?.assignment_type && (
+                  <div className="mt-1">
+                    <AssignmentTypeChip type={a.assignment_type} />
+                  </div>
+                )}
+                <div className="text-[11px] font-mono text-stone-500 mt-1">
+                  {total} {total === 1 ? 'item' : 'items'}
+                  {sectionBits.length > 0 && <> · {sectionBits.join(' · ')}</>}
+                </div>
+              </div>
+
+              {/* === DONE / IN PROGRESS / PENDING chips ===
+                 Kept per request — useful glance for "how far am I?". */}
               <div className="flex flex-wrap gap-1.5 mb-3">
                 <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-stone-100 text-stone-700">
                   {counts.done}/{total} done
@@ -17346,28 +17455,44 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
                   </span>
                 )}
               </div>
-              {/* Action row — same buttons family as legacy AssignmentCard */}
-              <div className="flex flex-wrap items-center gap-1.5">
-                <button onClick={() => setOpened(g.representative)}
-                  className="h-9 px-3 rounded-lg bg-stone-900 hover:bg-stone-700 text-white text-xs font-medium flex items-center gap-1">
-                  <Eye size={12} /> View items
-                </button>
-                {!isAllDone && (counts.pending > 0 || counts.paused > 0) && (
-                  <button onClick={startAll} disabled={busy}
+
+              {/* === ACTION BUTTON ROW ===
+                 Start / Mark complete / Blocked / Reassign — same set
+                 the AssignmentList card shows. Bulk semantics:
+                 Mark complete + Blocked apply to every open item.
+                 Reassign opens the modal on the representative target
+                 (template-based assignments are 1 per bedroom so this
+                 is the right one to act on). */}
+              <div className="flex gap-2 flex-wrap">
+                {!isAllDone && counts.pending + counts.paused > 0 && (
+                  <button onClick={() => {
+                    const eligible = items.filter(i => i.status === 'pending' || i.status === 'paused');
+                    bulkUpdateStatus(eligible, 'in_progress');
+                  }} disabled={busy}
                     className="h-9 px-3 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-medium flex items-center gap-1 disabled:opacity-50">
-                    <Play size={12} /> {anyPaused && !counts.pending ? 'Resume all' : 'Start all'}
+                    <Play size={12} /> {counts.paused > 0 && counts.pending === 0 ? 'Resume' : 'Start'}
                   </button>
                 )}
-                {anyInProgress && (
-                  <button onClick={pauseAll} disabled={busy}
-                    className="h-9 px-3 rounded-lg border border-blue-300 hover:bg-blue-50 text-blue-700 text-xs font-medium flex items-center gap-1 disabled:opacity-50">
-                    <Pause size={12} /> Pause all
+                {!isAllDone && (can(employee, 'mark_assignments_done')) && (
+                  <button onClick={() => {
+                    if (confirm(`Mark all ${openItems.length} item${openItems.length === 1 ? '' : 's'} at this bedroom complete?`)) {
+                      bulkUpdateStatus(openItems, 'done');
+                    }
+                  }} disabled={busy}
+                    className="h-9 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-medium flex items-center gap-1 disabled:opacity-50">
+                    <Check size={12} /> Mark complete
                   </button>
                 )}
-                {a?.file_url && (
-                  <button onClick={() => setOpened(g.representative)}
-                    className="h-9 px-3 rounded-lg border border-stone-300 hover:bg-stone-50 text-stone-700 text-xs font-medium flex items-center gap-1">
-                    <FileText size={12} /> View doc
+                {!isAllDone && (
+                  <button onClick={() => setStatusModal({ target: rep, bulkRows: openItems })} disabled={busy}
+                    className="h-9 px-3 rounded-lg border border-red-200 hover:bg-red-50 text-red-700 text-xs font-medium flex items-center gap-1 disabled:opacity-50">
+                    <AlertCircle size={12} /> Blocked
+                  </button>
+                )}
+                {!isAllDone && (
+                  <button onClick={() => setReassignTarget(rep)} disabled={busy}
+                    className="h-9 px-3 rounded-lg border border-stone-300 hover:bg-stone-50 text-stone-700 text-xs font-medium flex items-center gap-1 disabled:opacity-50">
+                    <User size={12} /> Reassign
                   </button>
                 )}
               </div>
@@ -17412,7 +17537,14 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
       )}
       {statusModal && (
         <BlockedNoteModal target={statusModal.target}
-          onSave={(notes) => updateStatus(statusModal.target, 'blocked', notes)}
+          onSave={(notes) => {
+            if (statusModal.bulkRows && statusModal.bulkRows.length > 0) {
+              bulkUpdateStatus(statusModal.bulkRows, 'blocked', notes);
+              setStatusModal(null);
+            } else {
+              updateStatus(statusModal.target, 'blocked', notes);
+            }
+          }}
           onClose={() => setStatusModal(null)}
           busy={busy} />
       )}
@@ -19613,7 +19745,11 @@ function ChecklistAssignmentView({ assignment, employee, onClose, onOpenSheet })
                   <div className="text-sm font-bold text-stone-800 tracking-wide mb-1.5 px-1">
                     {sectionLabel[s]} <span className="text-xs font-mono text-stone-500">({grouped[s].length})</span>
                   </div>
-                  <div className="space-y-1.5">
+                  {/* Two-column grid keeps the quick-view short
+                     so the cleaner doesn't have to scroll a whole
+                     bedroom's worth of items. The rows are
+                     read-only anyway so density is fine. */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
                     {grouped[s].map(renderItemRow)}
                   </div>
                 </div>

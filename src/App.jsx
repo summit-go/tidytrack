@@ -151,6 +151,165 @@ async function translateText(strings, targetLang) {
   }));
 }
 
+// =================================================================
+// LIVE PAGE TRANSLATION — Spanish toggle for cleaners.
+// Walks the DOM, batch-translates text nodes via Google Translate
+// API, caches in localStorage to avoid re-translating known strings.
+// A MutationObserver re-runs on new content (route changes, modals).
+// Locale persists in localStorage and is per-device, not per-user
+// (matches the cleaner's preference, doesn't broadcast to PMs).
+// =================================================================
+const LocaleContext = React.createContext({ locale: 'en', setLocale: () => {} });
+
+function useLocale() {
+  return React.useContext(LocaleContext);
+}
+
+// In-memory cache so we don't hit localStorage on every node check.
+let _ttTranslationCache = null;
+function loadTranslationCache() {
+  if (_ttTranslationCache) return _ttTranslationCache;
+  try {
+    _ttTranslationCache = JSON.parse(localStorage.getItem('tidytrack_translations_es') || '{}');
+  } catch { _ttTranslationCache = {}; }
+  return _ttTranslationCache;
+}
+function saveTranslationCache(cache) {
+  _ttTranslationCache = cache;
+  try { localStorage.setItem('tidytrack_translations_es', JSON.stringify(cache)); } catch {}
+}
+
+function TranslationProvider({ children }) {
+  const [locale, setLocaleState] = useState(() => {
+    try { return localStorage.getItem('tidytrack_locale') || 'en'; } catch { return 'en'; }
+  });
+
+  const setLocale = (newLocale) => {
+    try { localStorage.setItem('tidytrack_locale', newLocale); } catch {}
+    // Switching back to English: easiest reset is a reload, since we
+    // mutated text nodes in place and can't reliably restore originals
+    // after React re-renders.
+    if (newLocale === 'en' && locale !== 'en') {
+      window.location.reload();
+      return;
+    }
+    setLocaleState(newLocale);
+  };
+
+  useEffect(() => {
+    if (locale !== 'es') return;
+    if (!isTextTranslateConfigured()) {
+      console.warn('[translate] Spanish requested but Google Translate API key not configured');
+      return;
+    }
+
+    // Don't translate text inside these elements — they're either
+    // user-generated content that should stay raw (apartment labels,
+    // proper names, IDs) or interactive form values.
+    const SKIP_TAGS = new Set(['SCRIPT','STYLE','NOSCRIPT','TEXTAREA','INPUT','CODE','PRE']);
+    // Common UI strings that are SHORT and ambiguous — skip to avoid
+    // weird machine translations. Apartment labels like "B1-101" or
+    // "Bedroom 2" are best left as-is.
+    const SKIP_PATTERN = /^([A-Z]\d+-?\d*|[a-f0-9-]{8,}|\d+|\d+[:.]?\d*[ap]m?|[\s·•—|/]+)$/i;
+
+    let pending = false;
+    const translateVisibleNodes = async () => {
+      if (pending) return;
+      pending = true;
+      try {
+        const cache = loadTranslationCache();
+        const nodes = [];
+        const walker = document.createTreeWalker(
+          document.body,
+          NodeFilter.SHOW_TEXT,
+          {
+            acceptNode: (node) => {
+              const text = node.nodeValue;
+              if (!text || !text.trim()) return NodeFilter.FILTER_REJECT;
+              if (node._ttDone) return NodeFilter.FILTER_REJECT;
+              const parent = node.parentElement;
+              if (!parent) return NodeFilter.FILTER_REJECT;
+              if (SKIP_TAGS.has(parent.tagName)) return NodeFilter.FILTER_REJECT;
+              if (parent.closest('[data-no-translate]')) return NodeFilter.FILTER_REJECT;
+              const trimmed = text.trim();
+              if (SKIP_PATTERN.test(trimmed)) return NodeFilter.FILTER_REJECT;
+              // Skip strings shorter than 2 chars
+              if (trimmed.length < 2) return NodeFilter.FILTER_REJECT;
+              return NodeFilter.FILTER_ACCEPT;
+            }
+          }
+        );
+        while (walker.nextNode()) nodes.push(walker.currentNode);
+        if (nodes.length === 0) return;
+
+        const uniqueTexts = [];
+        const seen = new Set();
+        nodes.forEach(n => {
+          const key = n.nodeValue.trim();
+          if (!cache[key] && !seen.has(key)) {
+            seen.add(key);
+            uniqueTexts.push(key);
+          }
+        });
+
+        if (uniqueTexts.length > 0) {
+          // Batch up to ~100 strings per request (Google limit is 128)
+          const BATCH = 100;
+          for (let i = 0; i < uniqueTexts.length; i += BATCH) {
+            const slice = uniqueTexts.slice(i, i + BATCH);
+            try {
+              const results = await translateText(slice, 'es');
+              results.forEach((r, j) => {
+                cache[slice[j]] = r.translatedText;
+              });
+            } catch (e) {
+              console.warn('[translate] batch failed', e);
+            }
+          }
+          saveTranslationCache(cache);
+        }
+
+        // Apply translations to all gathered nodes
+        nodes.forEach(node => {
+          const original = node.nodeValue.trim();
+          const translated = cache[original];
+          if (translated && translated !== original) {
+            // Preserve leading/trailing whitespace from the original
+            const leading = node.nodeValue.match(/^\s*/)[0];
+            const trailing = node.nodeValue.match(/\s*$/)[0];
+            node.nodeValue = leading + translated + trailing;
+          }
+          node._ttDone = true;
+        });
+      } finally {
+        pending = false;
+      }
+    };
+
+    // Initial translate
+    translateVisibleNodes();
+
+    // Re-run when DOM changes (route changes, modals, new content)
+    let raf = null;
+    const observer = new MutationObserver(() => {
+      if (raf) cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(translateVisibleNodes);
+    });
+    observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+
+    return () => {
+      observer.disconnect();
+      if (raf) cancelAnimationFrame(raf);
+    };
+  }, [locale]);
+
+  return (
+    <LocaleContext.Provider value={{ locale, setLocale }}>
+      {children}
+    </LocaleContext.Provider>
+  );
+}
+
 // Convert a fetched Blob to base64 (strips the data: prefix).
 async function blobToBase64(blob) {
   return new Promise((resolve, reject) => {
@@ -604,19 +763,17 @@ export default function App() {
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
 
-  // Portal route — explicit URL, preserves any existing PM bookmarks
+  // Decide which screen to mount, then wrap in TranslationProvider so
+  // the Spanish toggle works across every surface (cleaner, PM, owner).
+  let inner;
   if (route.startsWith('#/portal') || route.startsWith('#portal')) {
-    return <PortalApp />;
+    inner = <PortalApp />;
+  } else if (route.startsWith('#/staff') || route.startsWith('#staff')) {
+    inner = <StaffApp />;
+  } else {
+    inner = <RootRouter />;
   }
-
-  // Staff route — explicit URL, skips landing
-  if (route.startsWith('#/staff') || route.startsWith('#staff')) {
-    return <StaffApp />;
-  }
-
-  // Root URL — show landing UNLESS the device remembers a previous staff sign-in,
-  // in which case skip straight to staff sign-in (staff use this app constantly).
-  return <RootRouter />;
+  return <TranslationProvider>{inner}</TranslationProvider>;
 }
 
 // Decides between LandingPage and StaffApp at the root URL based on remembered choice.
@@ -695,6 +852,105 @@ function StaffApp() {
 
 function Splash({ text }) {
   return <div className="min-h-screen bg-stone-50 flex items-center justify-center text-stone-400 text-sm">{text}</div>;
+}
+
+// =================================================================
+// PROGRESS BAR — reusable step indicator. Used by both the upload
+// wizard and the cleaner workflow so people see where they are.
+//
+// - `steps` is an array of labels in order, e.g. ['Property', 'Bedrooms', 'Sheet', 'Configure']
+// - `currentStep` is the 0-based index of the step they're ON now
+//   (segments to the left of this are filled, this one is in-progress)
+// - `complete` (boolean) flips the whole bar to emerald green to signal
+//   the workflow finished
+//
+// Visual model:
+//   complete=false → segments [0..currentStep-1] are tan-filled,
+//                    segment currentStep is half-filled with stripe,
+//                    later segments are gray
+//   complete=true  → all segments emerald
+// =================================================================
+function ProgressBar({ steps, currentStep, complete = false }) {
+  if (!steps || steps.length === 0) return null;
+  return (
+    <div className="w-full">
+      <div className="flex gap-1">
+        {steps.map((label, i) => {
+          const isPast = i < currentStep;
+          const isCurrent = i === currentStep;
+          const fillClass = complete
+            ? 'bg-emerald-500'
+            : isPast
+              ? 'bg-amber-500'
+              : isCurrent
+                ? 'bg-amber-300'
+                : 'bg-stone-200';
+          return (
+            <div key={i} className="flex-1">
+              <div className={`h-1.5 rounded-full transition-colors ${fillClass}`} />
+            </div>
+          );
+        })}
+      </div>
+      <div className="flex gap-1 mt-1">
+        {steps.map((label, i) => {
+          const isPast = i < currentStep;
+          const isCurrent = i === currentStep;
+          const textClass = complete
+            ? 'text-emerald-700 font-bold'
+            : isPast
+              ? 'text-stone-700 font-medium'
+              : isCurrent
+                ? 'text-stone-900 font-bold'
+                : 'text-stone-400';
+          return (
+            <div key={i} className="flex-1 text-center">
+              <span className={`text-[9px] uppercase tracking-wider font-mono ${textClass}`}>
+                {label}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// =================================================================
+// PAGE PERSISTENCE — remember the cleaner's current page so refreshing
+// or reopening the app drops them back where they were. Stored per-
+// device in localStorage under a key the caller picks.
+// =================================================================
+function usePagePersistence(key, defaultValue) {
+  const [state, setState] = useState(() => {
+    try {
+      const raw = localStorage.getItem(`tidytrack_page_${key}`);
+      return raw ? JSON.parse(raw) : defaultValue;
+    } catch {
+      return defaultValue;
+    }
+  });
+  const set = (next) => {
+    setState(next);
+    try {
+      localStorage.setItem(`tidytrack_page_${key}`, JSON.stringify(next));
+    } catch {}
+  };
+  return [state, set];
+}
+
+// Map a bedroom party label to the bathroom number it shares.
+// Bedrooms 1 & 2 → Bathroom 1 (tub). Bedrooms 3 & 4 → Bathroom 2 (toilet).
+// Used in the upload wizard + cleaner views to label which physical
+// bathroom is meant. Returns null if we can't tell.
+function bathroomNumberForBedroom(partyLabel) {
+  if (!partyLabel) return null;
+  const m = String(partyLabel).match(/(\d+)/);
+  if (!m) return null;
+  const n = parseInt(m[1], 10);
+  if (n === 1 || n === 2) return 1;
+  if (n === 3 || n === 4) return 2;
+  return null;
 }
 
 // Landing page shown when someone hits the root URL and hasn't logged in before.
@@ -4226,6 +4482,8 @@ function Header({ name, onSignOut, role, employee, onOpenMessages, onLogoClick, 
   // Messages icon in header for all signed-in roles (cleaner/manager/owner)
   const showMessagesIcon = !!(onOpenMessages && employee);
   const unread = useUnreadCount({ employee: showMessagesIcon ? employee : null });
+  const { locale, setLocale } = useLocale();
+  const translateConfigured = isTextTranslateConfigured();
 
   const logoBlock = (
     <div className="flex items-center gap-3">
@@ -4269,7 +4527,21 @@ function Header({ name, onSignOut, role, employee, onOpenMessages, onLogoClick, 
           </button>
         ) : logoBlock}
       </div>
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2" data-no-translate>
+        {/* Locale toggle: cleaner can flip the entire UI to Spanish.
+           Persists per-device. Hidden if Google Translate isn't
+           configured. */}
+        {translateConfigured && (
+          <button
+            onClick={() => setLocale(locale === 'es' ? 'en' : 'es')}
+            className="relative p-2 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-50 flex items-center gap-1"
+            title={locale === 'es' ? 'Switch to English' : 'Cambiar a Español'}>
+            <Languages size={16} />
+            <span className="text-[10px] font-mono uppercase font-bold">
+              {locale === 'es' ? 'ES' : 'EN'}
+            </span>
+          </button>
+        )}
         {showMessagesIcon && (
           <button onClick={onOpenMessages}
             className="relative p-2 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-50">
@@ -6783,10 +7055,16 @@ function PropertyAdmin({ employee, onSignOut, onOpenMessages, onLogoClick }) {
         else setView({ kind: 'list' });
       }}
       onNew={() => setView({ kind: 'assignment-new', property: view.property })}
+      onNewChecklist={() => setView({ kind: 'assignment-new-checklist', property: view.property })}
       onOpen={(a) => setView({ kind: 'assignment-detail', property: view.property, assignment: a })} />;
   }
   if (view.kind === 'assignment-new') {
     return <AssignmentForm property={view.property} employee={employee}
+      onCancel={() => setView({ kind: 'assignment-list', property: view.property })}
+      onSaved={() => setView({ kind: 'assignment-list', property: view.property })} />;
+  }
+  if (view.kind === 'assignment-new-checklist') {
+    return <ChecklistAssignmentWizard property={view.property} employee={employee}
       onCancel={() => setView({ kind: 'assignment-list', property: view.property })}
       onSaved={() => setView({ kind: 'assignment-list', property: view.property })} />;
   }
@@ -12670,7 +12948,7 @@ function DailyUnitDayDetail({ date, propertyId, unitId, unitLabel, propertyName,
 // =================================================================
 // ASSIGNMENT LIST — owner/manager view of all assignments for a property
 // =================================================================
-function AssignmentList({ property, employee, onBack, onNew, onOpen }) {
+function AssignmentList({ property, employee, onBack, onNew, onNewChecklist, onOpen }) {
   const [assignments, setAssignments] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [filter, setFilter] = useState('open'); // open | all
@@ -12861,10 +13139,18 @@ function AssignmentList({ property, employee, onBack, onNew, onOpen }) {
       </div>
       <div className="px-5 pt-6">
         {can(employee, 'upload_assignments') && (
-          <button onClick={onNew}
-            className="w-full mb-4 p-4 rounded-2xl bg-stone-900 text-stone-50 font-medium flex items-center justify-center gap-2 active:scale-98">
-            <Plus size={18} /> Upload new assignment
-          </button>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-4">
+            {onNewChecklist && (
+              <button onClick={onNewChecklist}
+                className="p-4 rounded-2xl bg-stone-900 text-stone-50 font-medium flex items-center justify-center gap-2 active:scale-98">
+                <FileText size={18} /> New checklist assignment
+              </button>
+            )}
+            <button onClick={onNew}
+              className="p-4 rounded-2xl border-2 border-stone-300 bg-white text-stone-700 font-medium flex items-center justify-center gap-2 active:scale-98">
+              <Plus size={18} /> Upload sheet (legacy)
+            </button>
+          </div>
         )}
 
         {/* Search bar — always on for assignments. Filters across
@@ -13663,6 +13949,719 @@ function AssignmentForm({ property, employee, onCancel, onSaved }) {
 }
 
 // =================================================================
+// CHECKLIST ASSIGNMENT WIZARD — the new template-driven upload flow.
+//
+// Drives an apartment from "I need work done here" to a set of
+// per-bedroom assignments, each holding the specific failed items.
+// Five steps:
+//   0. Pick the apartment (unit)
+//   1. Pick which bedrooms need work (1-4 multi-select)
+//   2. Pick sheet type (cleaning_check or move_out_clean) — label only
+//   3. Configure each bedroom: bathroom variant, general variant,
+//      checkmark items per section, with Pass / Fail Entire shortcuts
+//   4. Review + submit → creates one assignment per non-passed bedroom,
+//      each with assignment_targets per checked item.
+//
+// Shared bathroom autofill: bedrooms 1 & 2 share bathroom 1 (tub);
+// bedrooms 3 & 4 share bathroom 2 (toilet). When the uploader picks
+// a bathroom variant for one bedroom, the partner bedroom auto-suggests
+// the opposite variant.
+//
+// Optional sheet image upload (single file) gets attached to ALL
+// assignments created so cleaners can still view the original paper
+// sheet if they want.
+// =================================================================
+function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
+  // Step 0..4. We persist nothing across reloads here — the wizard is
+  // short enough that an accidental refresh just starts over.
+  const [step, setStep] = useState(0);
+
+  // === Step 0: pick the apartment (unit) ===
+  const [units, setUnits] = useState([]);
+  const [selectedUnit, setSelectedUnit] = useState(null);
+  const [unitSearch, setUnitSearch] = useState('');
+
+  // === Step 1: pick the bedrooms (parties) ===
+  const [parties, setParties] = useState([]);
+  // Map of partyId → true if selected for this upload
+  const [selectedParties, setSelectedParties] = useState({});
+
+  // === Step 2: sheet type ===
+  const [sheetType, setSheetType] = useState(null); // 'cleaning_check' | 'move_out_clean'
+
+  // === Step 3: per-bedroom configuration ===
+  // { [partyId]: { mode: 'configure' | 'pass' | 'fail_entire',
+  //                bathroomVariant: 'a' | 'b',
+  //                generalVariant: 'a' | 'b' | 'c' | 'd',
+  //                checked: { '<section>:<itemKey>': true } } }
+  const [config, setConfig] = useState({});
+  // Which party we're currently editing inside step 3
+  const [activePartyId, setActivePartyId] = useState(null);
+
+  // Optional sheet image attachment
+  const [sheetFile, setSheetFile] = useState(null);
+  const [sheetPreviewUrl, setSheetPreviewUrl] = useState(null);
+
+  // Template data
+  const [templateSet, setTemplateSet] = useState(null);
+  const [variants, setVariants] = useState([]); // all variants under the set
+  const [items, setItems] = useState([]);       // all items under those variants
+  const [templateLoading, setTemplateLoading] = useState(true);
+  const [templateError, setTemplateError] = useState(null);
+
+  // Submission
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [submitted, setSubmitted] = useState(false);
+
+  // -----------------------------------------------------------------
+  // Load units (apartments) for this property
+  // -----------------------------------------------------------------
+  useEffect(() => {
+    (async () => {
+      const { data } = await supabase.from('units')
+        .select('*')
+        .eq('customer_id', property.id)
+        .eq('active', true)
+        .order('sort_order').order('label');
+      setUnits(data || []);
+    })();
+  }, [property.id]);
+
+  // -----------------------------------------------------------------
+  // Load template set (sets with customer_id matching, else default)
+  // -----------------------------------------------------------------
+  useEffect(() => {
+    (async () => {
+      setTemplateLoading(true); setTemplateError(null);
+      try {
+        // Prefer property-specific, fall back to global default
+        let { data: ownSet } = await supabase.from('section_template_sets')
+          .select('*').eq('customer_id', property.id).limit(1);
+        let chosen = (ownSet && ownSet[0]) || null;
+        if (!chosen) {
+          const { data: defaultSet } = await supabase.from('section_template_sets')
+            .select('*').eq('is_default', true).is('customer_id', null).limit(1);
+          chosen = (defaultSet && defaultSet[0]) || null;
+        }
+        if (!chosen) {
+          setTemplateError('No checklist template found for this property. Run the v27 migration first.');
+          setTemplateLoading(false);
+          return;
+        }
+        setTemplateSet(chosen);
+        // Load variants + items in one go
+        const { data: vData } = await supabase.from('section_template_variants')
+          .select('*').eq('set_id', chosen.id).order('sort_order');
+        setVariants(vData || []);
+        const variantIds = (vData || []).map(v => v.id);
+        if (variantIds.length > 0) {
+          const { data: iData } = await supabase.from('section_template_items')
+            .select('*').in('variant_id', variantIds).order('sort_order');
+          setItems(iData || []);
+        }
+      } catch (e) {
+        setTemplateError(e.message || 'Could not load checklist templates.');
+      }
+      setTemplateLoading(false);
+    })();
+  }, [property.id]);
+
+  // -----------------------------------------------------------------
+  // Load parties when unit chosen
+  // -----------------------------------------------------------------
+  useEffect(() => {
+    if (!selectedUnit) { setParties([]); return; }
+    (async () => {
+      const { data } = await supabase.from('parties').select('*')
+        .eq('unit_id', selectedUnit.id).eq('active', true)
+        .order('sort_order').order('label');
+      setParties(data || []);
+    })();
+  }, [selectedUnit?.id]);
+
+  // -----------------------------------------------------------------
+  // Sheet image preview
+  // -----------------------------------------------------------------
+  useEffect(() => {
+    if (!sheetFile) { setSheetPreviewUrl(null); return; }
+    const url = URL.createObjectURL(sheetFile);
+    setSheetPreviewUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [sheetFile]);
+
+  // Helper lookups against template data
+  const variantsBySection = (sectionKey) =>
+    variants.filter(v => v.section_key === sectionKey);
+  const variantById = (id) => variants.find(v => v.id === id);
+  const itemsForVariant = (variantId) =>
+    items.filter(i => i.variant_id === variantId);
+  const variantBySectionKey = (sectionKey, variantKey) =>
+    variants.find(v => v.section_key === sectionKey && v.variant_key === variantKey);
+
+  // For configure step: pick the active party, default to first selected
+  useEffect(() => {
+    if (step !== 3) return;
+    const ids = Object.keys(selectedParties).filter(k => selectedParties[k]);
+    if (ids.length === 0) return;
+    if (!activePartyId || !selectedParties[activePartyId]) {
+      setActivePartyId(ids[0]);
+    }
+  }, [step, selectedParties, activePartyId]);
+
+  // -----------------------------------------------------------------
+  // Toggle a bedroom on/off in the multi-select. Auto-creates a default
+  // configuration shell when toggled on so step 3 has something to edit.
+  // -----------------------------------------------------------------
+  const togglePartySelection = (partyId) => {
+    setSelectedParties(prev => {
+      const next = { ...prev };
+      if (next[partyId]) { delete next[partyId]; }
+      else { next[partyId] = true; }
+      return next;
+    });
+    // Default config: bathroom variant inferred from bedroom number,
+    // general variant left null until uploader picks one.
+    setConfig(prev => {
+      if (prev[partyId]) return prev;
+      const party = parties.find(p => p.id === partyId);
+      const partner = bathroomNumberForBedroom(party?.label);
+      // Bathroom 1 = tub variant (a), Bathroom 2 = toilet variant (b)
+      const bathroomVariant = partner === 1 ? 'a' : partner === 2 ? 'b' : null;
+      return {
+        ...prev,
+        [partyId]: {
+          mode: 'configure',
+          bathroomVariant,
+          generalVariant: null,
+          checked: {},
+        },
+      };
+    });
+  };
+
+  // -----------------------------------------------------------------
+  // Shared-bathroom autofill: if uploader changes bathroom variant for
+  // one bedroom, suggest the OPPOSITE for the other bedroom in the
+  // same bathroom group. Only suggests — uploader can override.
+  // -----------------------------------------------------------------
+  const setBathroomVariantWithAutofill = (partyId, variant) => {
+    setConfig(prev => {
+      const next = { ...prev };
+      const current = next[partyId] || { mode: 'configure', checked: {} };
+      next[partyId] = { ...current, bathroomVariant: variant };
+      // Find the partner bedroom (same bathroom group, different bedroom number)
+      const party = parties.find(p => p.id === partyId);
+      const myNum = parseInt((party?.label || '').match(/(\d+)/)?.[1] || '0', 10);
+      const myBathroom = bathroomNumberForBedroom(party?.label);
+      if (myBathroom) {
+        const partnerNum = myBathroom === 1
+          ? (myNum === 1 ? 2 : 1)
+          : (myNum === 3 ? 4 : 3);
+        const partnerParty = parties.find(p => {
+          const n = parseInt((p.label || '').match(/(\d+)/)?.[1] || '0', 10);
+          return n === partnerNum;
+        });
+        if (partnerParty && selectedParties[partnerParty.id] && next[partnerParty.id]) {
+          // Only autofill if partner doesn't have a variant set yet
+          if (!next[partnerParty.id].bathroomVariant) {
+            next[partnerParty.id] = {
+              ...next[partnerParty.id],
+              // Both bedrooms in a bathroom group clean the SAME variant.
+              // (Bedrooms 1+2 share bathroom 1 → both get variant 'a' = tub side)
+              bathroomVariant: variant,
+            };
+          }
+        }
+      }
+      return next;
+    });
+  };
+
+  const setGeneralVariant = (partyId, variant) => {
+    setConfig(prev => ({
+      ...prev,
+      [partyId]: { ...(prev[partyId] || { mode: 'configure', checked: {} }), generalVariant: variant },
+    }));
+  };
+
+  const toggleItem = (partyId, sectionKey, itemKey) => {
+    const key = `${sectionKey}:${itemKey}`;
+    setConfig(prev => {
+      const current = prev[partyId] || { mode: 'configure', checked: {} };
+      const checked = { ...current.checked };
+      if (checked[key]) delete checked[key]; else checked[key] = true;
+      return { ...prev, [partyId]: { ...current, checked, mode: 'configure' } };
+    });
+  };
+
+  const setMode = (partyId, mode) => {
+    setConfig(prev => {
+      const current = prev[partyId] || { bathroomVariant: null, generalVariant: null, checked: {} };
+      if (mode === 'fail_entire') {
+        // Pre-check every item in the bedroom's configured sections
+        const checked = {};
+        // Bedroom (universal, single variant)
+        const bedroomVariant = variantBySectionKey('bedroom', 'default');
+        if (bedroomVariant) itemsForVariant(bedroomVariant.id).forEach(i => { checked[`bedroom:${i.item_key}`] = true; });
+        const vanityVariant = variantBySectionKey('vanity', 'default');
+        if (vanityVariant) itemsForVariant(vanityVariant.id).forEach(i => { checked[`vanity:${i.item_key}`] = true; });
+        if (current.bathroomVariant) {
+          const bv = variantBySectionKey('bathroom', current.bathroomVariant);
+          if (bv) itemsForVariant(bv.id).forEach(i => { checked[`bathroom:${i.item_key}`] = true; });
+        }
+        if (current.generalVariant) {
+          const gv = variantBySectionKey('general', current.generalVariant);
+          if (gv) itemsForVariant(gv.id).forEach(i => { checked[`general:${i.item_key}`] = true; });
+        }
+        return { ...prev, [partyId]: { ...current, mode, checked } };
+      }
+      if (mode === 'pass') {
+        return { ...prev, [partyId]: { ...current, mode, checked: {} } };
+      }
+      return { ...prev, [partyId]: { ...current, mode } };
+    });
+  };
+
+  // -----------------------------------------------------------------
+  // Validation per step
+  // -----------------------------------------------------------------
+  const canAdvanceFromStep = () => {
+    if (step === 0) return !!selectedUnit;
+    if (step === 1) return Object.keys(selectedParties).some(k => selectedParties[k]);
+    if (step === 2) return !!sheetType;
+    if (step === 3) {
+      // Every selected bedroom needs to be either passed or have a
+      // non-pass configuration with at least one item checked.
+      const ids = Object.keys(selectedParties).filter(k => selectedParties[k]);
+      return ids.every(id => {
+        const c = config[id];
+        if (!c) return false;
+        if (c.mode === 'pass') return true;
+        if (!c.bathroomVariant || !c.generalVariant) return false;
+        return Object.keys(c.checked || {}).length > 0;
+      });
+    }
+    return true;
+  };
+
+  // -----------------------------------------------------------------
+  // Submit: create one assignment per non-pass bedroom with its targets
+  // -----------------------------------------------------------------
+  const submit = async () => {
+    if (busy) return;
+    setBusy(true); setError('');
+    try {
+      // Upload sheet file once (if attached) so all assignments reference it
+      let fileUrl = null, fileKind = null;
+      if (sheetFile) {
+        const safe = sheetFile.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+        const path = `assignments/${property.id}/${Date.now()}-${safe}`;
+        const { error: upErr } = await supabase.storage.from('assignments').upload(path, sheetFile);
+        if (upErr) throw new Error('Sheet upload failed: ' + upErr.message);
+        const { data: urlData } = supabase.storage.from('assignments').getPublicUrl(path);
+        fileUrl = urlData?.publicUrl || null;
+        fileKind = sheetFile.type === 'application/pdf' ? 'pdf' : 'image';
+      }
+
+      // Determine the friendly assignment title from sheet type
+      const titleBase = sheetType === 'cleaning_check'
+        ? 'Cleaning check'
+        : 'Move-out clean';
+
+      const selectedPartyIds = Object.keys(selectedParties).filter(k => selectedParties[k]);
+      const created = [];
+      for (const partyId of selectedPartyIds) {
+        const c = config[partyId];
+        if (!c || c.mode === 'pass') continue;
+        const party = parties.find(p => p.id === partyId);
+        const assignmentInsert = {
+          customer_id: property.id,
+          unit_id: selectedUnit.id,
+          title: `${titleBase} · ${selectedUnit.label}${party?.label ? ' · ' + party.label : ''}`,
+          notes: null,
+          file_url: fileUrl,
+          file_kind: fileKind,
+          assignment_type: sheetType === 'cleaning_check' ? 'cleaning_check' : 'move_out',
+          active: true,
+          source: 'staff',
+          uploader_employee_id: employee?.id || null,
+          sheet_type: sheetType,
+          template_set_id: templateSet?.id || null,
+          bathroom_variant: c.bathroomVariant || null,
+          general_variant: c.generalVariant || null,
+        };
+        const { data: created_assignment, error: aErr } = await supabase.from('assignments')
+          .insert(assignmentInsert).select().single();
+        if (aErr) throw new Error('Assignment insert failed: ' + aErr.message);
+
+        // Build the target rows — one per checked item
+        const targetRows = [];
+        Object.keys(c.checked).forEach(k => {
+          const [sectionKey, itemKey] = k.split(':', 2);
+          targetRows.push({
+            assignment_id: created_assignment.id,
+            unit_id: selectedUnit.id,
+            party_id: partyId,
+            status: 'pending',
+            template_section: sectionKey,
+            template_item_key: itemKey,
+          });
+        });
+        if (targetRows.length > 0) {
+          const { error: tErr } = await supabase.from('assignment_targets').insert(targetRows);
+          if (tErr) throw new Error('Target insert failed: ' + tErr.message);
+        }
+        created.push(created_assignment);
+      }
+
+      setSubmitted(true);
+      // Brief pause so the cleaner sees the green progress bar before redirect
+      setTimeout(() => onSaved(created), 800);
+    } catch (e) {
+      setError(e.message || 'Something went wrong.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Steps for the progress bar
+  const stepLabels = ['Apartment', 'Bedrooms', 'Sheet', 'Configure', 'Done'];
+
+  // === Render ======================================================
+  if (templateLoading) return <Splash text="Loading templates…" />;
+  if (templateError) {
+    return (
+      <div className="min-h-screen bg-stone-50 px-5 py-6">
+        <button onClick={onCancel} className="text-sm text-stone-600 mb-3">← Back</button>
+        <div className="p-4 rounded-2xl bg-red-50 border border-red-200 text-red-700 text-sm">
+          <div className="flex items-start gap-2"><AlertCircle size={16} className="flex-shrink-0 mt-0.5" />
+            <div><div className="font-medium">Couldn't load templates</div><div className="text-xs mt-1">{templateError}</div></div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const renderUnitPicker = () => {
+    const q = unitSearch.trim().toLowerCase();
+    const visible = units.filter(u => !q || (u.label || '').toLowerCase().includes(q));
+    return (
+      <div>
+        <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-2">Step 1 · Pick the apartment</div>
+        <input value={unitSearch} onChange={e => setUnitSearch(e.target.value)}
+          placeholder={`Search ${units.length} apartments…`}
+          className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white text-sm mb-3" />
+        <div className="space-y-2 max-h-[60vh] overflow-y-auto">
+          {visible.map(u => (
+            <button key={u.id} onClick={() => setSelectedUnit(u)}
+              className={`w-full text-left px-4 py-3 rounded-xl border transition-colors ${selectedUnit?.id === u.id ? 'bg-amber-50 border-amber-400' : 'bg-white border-stone-200 hover:border-stone-400'}`}>
+              <div className="font-mono text-base text-stone-900 font-bold">{u.label}</div>
+            </button>
+          ))}
+          {visible.length === 0 && (
+            <div className="text-center py-8 text-stone-400 text-sm">No apartments match.</div>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  const renderPartyPicker = () => {
+    return (
+      <div>
+        <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-1">Step 2 · Which bedrooms?</div>
+        <div className="text-sm text-stone-600 mb-3">Tap each bedroom that needs work. You can pick more than one — one assignment will be created per bedroom.</div>
+        <div className="space-y-2">
+          {parties.map(p => {
+            const selected = !!selectedParties[p.id];
+            const bathroomNum = bathroomNumberForBedroom(p.label);
+            return (
+              <button key={p.id} onClick={() => togglePartySelection(p.id)}
+                className={`w-full text-left px-4 py-3 rounded-xl border-2 transition-colors ${selected ? 'bg-amber-50 border-amber-500' : 'bg-white border-stone-200 hover:border-stone-400'}`}>
+                <div className="flex items-center gap-3">
+                  <div className={`w-5 h-5 rounded border-2 flex items-center justify-center ${selected ? 'bg-amber-600 border-amber-600 text-white' : 'border-stone-300'}`}>
+                    {selected && <Check size={12} />}
+                  </div>
+                  <div className="flex-1">
+                    <div className="font-serif text-base text-stone-900">{p.label}</div>
+                    {bathroomNum && (
+                      <div className="text-xs text-stone-500 font-mono mt-0.5">
+                        Shares Bathroom {bathroomNum}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </button>
+            );
+          })}
+          {parties.length === 0 && (
+            <div className="text-center py-8 text-stone-400 text-sm">No bedrooms in this apartment yet.</div>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  const renderSheetTypePicker = () => {
+    return (
+      <div>
+        <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-3">Step 3 · Which sheet?</div>
+        <div className="space-y-3">
+          <button onClick={() => setSheetType('cleaning_check')}
+            className={`w-full text-left p-4 rounded-2xl border-2 transition-colors ${sheetType === 'cleaning_check' ? 'bg-amber-50 border-amber-500' : 'bg-white border-stone-200 hover:border-stone-400'}`}>
+            <div className="font-serif text-lg text-stone-900 font-bold mb-1">Cleaning check</div>
+            <div className="text-sm text-stone-600">Mid-tenancy inspection. Tenants get charged from their deposit for unclean items.</div>
+          </button>
+          <button onClick={() => setSheetType('move_out_clean')}
+            className={`w-full text-left p-4 rounded-2xl border-2 transition-colors ${sheetType === 'move_out_clean' ? 'bg-amber-50 border-amber-500' : 'bg-white border-stone-200 hover:border-stone-400'}`}>
+            <div className="font-serif text-lg text-stone-900 font-bold mb-1">Move-out clean</div>
+            <div className="text-sm text-stone-600">Final white-glove inspection at move-out. Failed items get cleaned by Summit Clean.</div>
+          </button>
+        </div>
+        <div className="mt-6 pt-4 border-t border-stone-200">
+          <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-2">Optional sheet photo</div>
+          <div className="text-xs text-stone-500 mb-2">Attach the original paper sheet so cleaners can view it if they want.</div>
+          <label className="block">
+            <input type="file" accept="image/*,application/pdf" className="hidden"
+              onChange={e => setSheetFile(e.target.files?.[0] || null)} />
+            <div className="px-3 py-2 rounded-xl border-2 border-dashed border-stone-300 text-center text-stone-600 text-sm hover:border-stone-500 cursor-pointer">
+              {sheetFile ? `📄 ${sheetFile.name} (tap to replace)` : 'Tap to attach sheet photo or PDF'}
+            </div>
+          </label>
+          {sheetPreviewUrl && sheetFile?.type?.startsWith('image/') && (
+            <img src={sheetPreviewUrl} alt="" className="mt-2 max-h-48 rounded-lg" />
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  // -- Step 4: Configure ------------------------------------------------
+  const renderConfigure = () => {
+    const selectedIds = Object.keys(selectedParties).filter(k => selectedParties[k]);
+    return (
+      <div>
+        <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-1">Step 4 · Configure each bedroom</div>
+        <div className="text-sm text-stone-600 mb-3">Pick the bathroom and general area for each bedroom, then check the items that need cleaning.</div>
+        {/* Bedroom tabs */}
+        <div className="flex gap-2 mb-3 overflow-x-auto pb-1">
+          {selectedIds.map(id => {
+            const p = parties.find(x => x.id === id);
+            const c = config[id];
+            const isActive = activePartyId === id;
+            const isPass = c?.mode === 'pass';
+            const checkCount = c?.checked ? Object.keys(c.checked).length : 0;
+            const labelExtra = isPass ? '· Pass' : checkCount > 0 ? `· ${checkCount}` : '';
+            return (
+              <button key={id} onClick={() => setActivePartyId(id)}
+                className={`px-3 py-2 rounded-xl border-2 text-sm whitespace-nowrap flex-shrink-0 ${isActive ? 'bg-amber-50 border-amber-500' : isPass ? 'bg-emerald-50 border-emerald-300' : 'bg-white border-stone-200'}`}>
+                <div className="font-mono font-bold text-stone-900">{p?.label}</div>
+                <div className="text-[10px] font-mono text-stone-500">{labelExtra}</div>
+              </button>
+            );
+          })}
+        </div>
+        {activePartyId && renderBedroomConfig(activePartyId)}
+      </div>
+    );
+  };
+
+  const renderBedroomConfig = (partyId) => {
+    const c = config[partyId] || { mode: 'configure', checked: {} };
+    const party = parties.find(x => x.id === partyId);
+    const bathroomNum = bathroomNumberForBedroom(party?.label);
+
+    if (c.mode === 'pass') {
+      return (
+        <div className="p-4 rounded-2xl bg-emerald-50 border-2 border-emerald-300">
+          <div className="font-serif text-lg text-emerald-900 mb-2">Passed — no assignment will be created</div>
+          <div className="text-sm text-emerald-800 mb-3">This bedroom doesn't need cleaning. Tap Configure to change.</div>
+          <button onClick={() => setMode(partyId, 'configure')}
+            className="px-3 py-2 rounded-lg bg-white border border-emerald-300 text-emerald-800 text-sm font-medium">
+            Configure instead
+          </button>
+        </div>
+      );
+    }
+
+    return (
+      <div className="space-y-4">
+        {/* Pass / Fail-Entire shortcuts */}
+        <div className="flex gap-2">
+          <button onClick={() => setMode(partyId, 'pass')}
+            className="flex-1 py-2 rounded-xl border-2 border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 text-sm font-medium flex items-center justify-center gap-1.5">
+            <Check size={14} /> Pass — no work needed
+          </button>
+          <button onClick={() => setMode(partyId, 'fail_entire')}
+            className="flex-1 py-2 rounded-xl border-2 border-red-300 bg-red-50 hover:bg-red-100 text-red-800 text-sm font-medium flex items-center justify-center gap-1.5">
+            <AlertCircle size={14} /> Fail entire
+          </button>
+        </div>
+
+        {/* Bathroom variant picker */}
+        <div className="p-3 rounded-xl bg-stone-50 border border-stone-200">
+          <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-2">
+            Bathroom {bathroomNum ? `(this is Bathroom ${bathroomNum})` : ''}
+          </div>
+          <div className="flex gap-2">
+            {variantsBySection('bathroom').map(v => (
+              <button key={v.id} onClick={() => setBathroomVariantWithAutofill(partyId, v.variant_key)}
+                className={`flex-1 px-3 py-2 rounded-lg border-2 text-sm font-medium ${c.bathroomVariant === v.variant_key ? 'bg-amber-50 border-amber-500 text-amber-900' : 'bg-white border-stone-200 text-stone-700'}`}>
+                {v.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* General variant picker */}
+        <div className="p-3 rounded-xl bg-stone-50 border border-stone-200">
+          <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-2">General area</div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            {variantsBySection('general').map(v => (
+              <button key={v.id} onClick={() => setGeneralVariant(partyId, v.variant_key)}
+                className={`text-left px-3 py-2 rounded-lg border-2 text-sm font-medium ${c.generalVariant === v.variant_key ? 'bg-amber-50 border-amber-500 text-amber-900' : 'bg-white border-stone-200 text-stone-700'}`}>
+                {v.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Section checklists */}
+        {renderSectionChecklist(partyId, 'bedroom', 'default', 'Bedroom items')}
+        {renderSectionChecklist(partyId, 'vanity', 'default', 'Vanity items')}
+        {c.bathroomVariant
+          ? renderSectionChecklist(partyId, 'bathroom', c.bathroomVariant, 'Bathroom items')
+          : <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-sm text-amber-800">Pick a bathroom variant above to see its items.</div>
+        }
+        {c.generalVariant
+          ? renderSectionChecklist(partyId, 'general', c.generalVariant, 'General items')
+          : <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-sm text-amber-800">Pick a general variant above to see its items.</div>
+        }
+      </div>
+    );
+  };
+
+  const renderSectionChecklist = (partyId, sectionKey, variantKey, title) => {
+    const variant = variantBySectionKey(sectionKey, variantKey);
+    if (!variant) return null;
+    const sectionItems = itemsForVariant(variant.id);
+    const c = config[partyId] || { checked: {} };
+    return (
+      <div className="rounded-xl bg-white border-2 border-stone-200">
+        <div className="px-3 py-2 border-b border-stone-200 bg-stone-50 flex items-center justify-between">
+          <div className="font-serif text-sm text-stone-900 font-bold">{title}</div>
+          <div className="text-[10px] font-mono text-stone-500">
+            {sectionItems.filter(i => c.checked[`${sectionKey}:${i.item_key}`]).length}/{sectionItems.length}
+          </div>
+        </div>
+        <div className="p-2 space-y-1 max-h-72 overflow-y-auto">
+          {sectionItems.map(item => {
+            const key = `${sectionKey}:${item.item_key}`;
+            const isChecked = !!c.checked[key];
+            return (
+              <button key={item.id} onClick={() => toggleItem(partyId, sectionKey, item.item_key)}
+                className={`w-full text-left px-2 py-1.5 rounded-lg flex items-center gap-2 transition-colors ${isChecked ? 'bg-amber-50' : 'hover:bg-stone-50'}`}>
+                <div className={`w-4 h-4 rounded border-2 flex items-center justify-center flex-shrink-0 ${isChecked ? 'bg-amber-600 border-amber-600 text-white' : 'border-stone-300'}`}>
+                  {isChecked && <Check size={10} />}
+                </div>
+                <div className="text-xs text-stone-800">{item.label}</div>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    );
+  };
+
+  // -- Main render ------------------------------------------------------
+  return (
+    <div className="min-h-screen bg-stone-50 pb-32">
+      <div className="px-5 py-4 border-b border-stone-200 bg-white sticky top-0 z-10">
+        <div className="flex items-center gap-3 mb-3">
+          <button onClick={() => { if (step > 0) setStep(step - 1); else onCancel(); }}
+            className="p-2 -ml-2 rounded-full hover:bg-stone-100">
+            <ArrowLeft size={20} />
+          </button>
+          <div className="flex-1 min-w-0">
+            <div className="text-xs uppercase tracking-wider font-mono text-stone-500">{property.name}</div>
+            <div className="font-serif text-lg text-stone-900 font-bold">New checklist assignment</div>
+          </div>
+        </div>
+        <ProgressBar steps={stepLabels} currentStep={step} complete={submitted} />
+      </div>
+
+      <div className="px-5 py-5">
+        {step === 0 && renderUnitPicker()}
+        {step === 1 && renderPartyPicker()}
+        {step === 2 && renderSheetTypePicker()}
+        {step === 3 && renderConfigure()}
+        {step === 4 && (
+          <div>
+            <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-2">Step 5 · Review</div>
+            <div className="space-y-2 mb-4">
+              <ReviewLine label="Apartment" value={selectedUnit?.label || '—'} />
+              <ReviewLine label="Sheet type" value={sheetType === 'cleaning_check' ? 'Cleaning check' : 'Move-out clean'} />
+              <ReviewLine label="Bedrooms" value={
+                Object.keys(selectedParties).filter(k => selectedParties[k]).map(k => {
+                  const p = parties.find(x => x.id === k);
+                  const c = config[k];
+                  if (c?.mode === 'pass') return `${p?.label} (Pass)`;
+                  const n = c?.checked ? Object.keys(c.checked).length : 0;
+                  return `${p?.label} (${n} items)`;
+                }).join(', ')
+              } />
+              {sheetFile && <ReviewLine label="Sheet attached" value={sheetFile.name} />}
+            </div>
+            {error && (
+              <div className="mb-3 p-3 rounded-xl bg-red-50 border border-red-200 text-red-700 text-sm flex items-start gap-2">
+                <AlertCircle size={16} className="flex-shrink-0 mt-0.5" /><span>{error}</span>
+              </div>
+            )}
+            {submitted && (
+              <div className="mb-3 p-3 rounded-xl bg-emerald-50 border-2 border-emerald-300 text-emerald-800 text-sm font-medium flex items-center gap-2">
+                <Check size={16} /> Assignments created. Returning to your list…
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Sticky action bar */}
+      <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-stone-200 px-5 py-3 flex gap-2">
+        {step > 0 && !submitted && (
+          <button onClick={() => setStep(step - 1)} disabled={busy}
+            className="px-4 py-3 rounded-xl border-2 border-stone-300 text-stone-700 text-sm font-medium disabled:opacity-50">
+            Back
+          </button>
+        )}
+        {step < 4 && (
+          <button onClick={() => setStep(step + 1)} disabled={!canAdvanceFromStep()}
+            className="flex-1 py-3 rounded-xl bg-stone-900 text-stone-50 text-sm font-medium disabled:opacity-50">
+            Next
+          </button>
+        )}
+        {step === 4 && !submitted && (
+          <button onClick={submit} disabled={busy}
+            className="flex-1 py-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-medium disabled:opacity-50">
+            {busy ? 'Creating…' : 'Create assignments'}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ReviewLine({ label, value }) {
+  return (
+    <div className="flex items-baseline gap-2 px-3 py-2 rounded-xl bg-white border border-stone-200">
+      <span className="text-[10px] uppercase tracking-wider font-mono text-stone-500 w-24 flex-shrink-0">{label}</span>
+      <span className="text-sm text-stone-900 break-words">{value}</span>
+    </div>
+  );
+}
+
+// =================================================================
 // ASSIGNMENT DETAIL — full view for owner/manager
 // =================================================================
 function AssignmentDetail({ property, assignment: assignmentInit, employee, onBack }) {
@@ -14110,7 +15109,16 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
         );
       })()}
 
-      {opened && <AssignmentViewer target={opened} onClose={() => setOpened(null)} />}
+      {opened && (
+        opened.assignment?.template_set_id
+          ? <ChecklistAssignmentView assignment={opened.assignment}
+              employee={employee}
+              onClose={() => setOpened(null)}
+              onOpenSheet={opened.assignment?.file_url
+                ? () => window.open(opened.assignment.file_url, '_blank', 'noopener')
+                : null} />
+          : <AssignmentViewer target={opened} onClose={() => setOpened(null)} />
+      )}
       {statusModal && (
         <BlockedNoteModal target={statusModal.target}
           onSave={(notes) => updateStatus(statusModal.target, 'blocked', notes)}
@@ -14376,15 +15384,23 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
 // Tabs: Pending | Paused | In Progress | Done
 function AssignmentsPanel({ propertyId, employee, refreshKey, onGoToBedroom, onOpenBedroomHistory }) {
   const [tab, setTab] = useState('pending');
-  const [counts, setCounts] = useState({ pending: 0, paused: 0, in_progress: 0, done: 0, blocked: 0 });
+  const [counts, setCounts] = useState({ pending: 0, paused: 0, in_progress: 0, done: 0, blocked: 0, mine: 0 });
 
   const loadCounts = async () => {
     const { data } = await supabase
       .from('assignment_targets')
-      .select('status, assignment:assignments!inner(customer_id, active)');
+      .select('status, completed_by, completed_at, assignment:assignments!inner(customer_id, active)');
     const filtered = (data || []).filter(t => t.assignment?.customer_id === propertyId && t.assignment?.active);
-    const c = { pending: 0, paused: 0, in_progress: 0, done: 0, blocked: 0 };
-    filtered.forEach(t => { c[t.status] = (c[t.status] || 0) + 1; });
+    const c = { pending: 0, paused: 0, in_progress: 0, done: 0, blocked: 0, mine: 0 };
+    // "Mine" = items I completed today at this property
+    const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
+    filtered.forEach(t => {
+      c[t.status] = (c[t.status] || 0) + 1;
+      if (t.completed_by && employee?.id && t.completed_by === employee.id && t.completed_at) {
+        const ca = new Date(t.completed_at);
+        if (ca >= todayStart) c.mine = (c.mine || 0) + 1;
+      }
+    });
     setCounts(c);
   };
   useEffect(() => { loadCounts(); }, [propertyId, refreshKey]);
@@ -14412,6 +15428,15 @@ function AssignmentsPanel({ propertyId, employee, refreshKey, onGoToBedroom, onO
           className={`flex-1 min-w-fit py-2 px-2 rounded-lg text-xs font-medium transition-colors whitespace-nowrap ${tab === 'done' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
           Done{counts.done > 0 && ` (${counts.done})`}
         </button>
+        {/* Mine tab — items the current cleaner personally completed today.
+           Hidden if the cleaner has no completions yet so the row stays
+           compact for owners/managers viewing the same panel. */}
+        {counts.mine > 0 && (
+          <button onClick={() => setTab('mine')}
+            className={`flex-1 min-w-fit py-2 px-2 rounded-lg text-xs font-medium transition-colors whitespace-nowrap ${tab === 'mine' ? 'bg-amber-50 shadow-sm text-amber-900 font-bold' : 'text-stone-500'}`}>
+            Mine ({counts.mine})
+          </button>
+        )}
       </div>
       <AssignmentTabContent propertyId={propertyId} employee={employee} statusFilter={tab}
         onUpdate={loadCounts} onGoToBedroom={onGoToBedroom} onOpenBedroomHistory={onOpenBedroomHistory} />
@@ -14446,10 +15471,14 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
 
   const load = async () => {
     setLoadError(null);
+    // Mine = items I personally completed today at this property.
+    // We query for status='done' from the DB and filter further in
+    // memory below so the schema doesn't need a special path.
+    const effectiveStatus = statusFilter === 'mine' ? 'done' : statusFilter;
     const { data, error } = await supabase
       .from('assignment_targets')
-      .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, extracted_text, spanish_translation, translation_status, assignment_type, scheduled_date), unit:units(id, label), party:parties(id, label), starter:employees!started_by(id, name), completer:employees!completed_by(id, name), assignedTo:employees!assigned_to(id, name)')
-      .eq('status', statusFilter);
+      .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, extracted_text, spanish_translation, translation_status, assignment_type, scheduled_date, sheet_type, template_set_id, bathroom_variant, general_variant), unit:units(id, label), party:parties(id, label), starter:employees!started_by(id, name), completer:employees!completed_by(id, name), assignedTo:employees!assigned_to(id, name)')
+      .eq('status', effectiveStatus);
     if (error) {
       console.error('[Assignments] load error:', error);
       setLoadError(error.message);
@@ -14457,11 +15486,19 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
       return;
     }
     // Hide non-approved PM assignments from cleaners
-    const filtered = (data || []).filter(t =>
+    let filtered = (data || []).filter(t =>
       t.assignment?.customer_id === propertyId &&
       t.assignment?.active &&
       (t.assignment?.source !== 'pm' || t.assignment?.pm_status === 'approved')
     );
+    // "Mine" view: only items I personally completed today
+    if (statusFilter === 'mine') {
+      const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
+      filtered = filtered.filter(t =>
+        t.completed_by && employee?.id && t.completed_by === employee.id
+        && t.completed_at && new Date(t.completed_at) >= todayStart
+      );
+    }
     if (statusFilter === 'done') {
       // Sort Done by building → unit → bedroom (natural compare on the
       // unit label so "B1-101" comes before "B1-102" before "B2-101").
@@ -15215,7 +16252,16 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
         })}
       </div>
 
-      {opened && <AssignmentViewer target={opened} onClose={() => setOpened(null)} />}
+      {opened && (
+        opened.assignment?.template_set_id
+          ? <ChecklistAssignmentView assignment={opened.assignment}
+              employee={employee}
+              onClose={() => setOpened(null)}
+              onOpenSheet={opened.assignment?.file_url
+                ? () => window.open(opened.assignment.file_url, '_blank', 'noopener')
+                : null} />
+          : <AssignmentViewer target={opened} onClose={() => setOpened(null)} />
+      )}
       {statusModal && (
         <BlockedNoteModal target={statusModal.target}
           onSave={(notes) => updateStatus(statusModal.target, 'blocked', notes)}
@@ -15480,6 +16526,339 @@ function AssignmentViewer({ target, onClose }) {
           className="w-full inline-flex items-center justify-center gap-2 py-3 rounded-xl bg-stone-50 text-stone-900 text-sm font-medium">
           <Download size={14} /> Open / download
         </a>
+      </div>
+    </div>
+  );
+}
+
+// =================================================================
+// CHECKLIST ASSIGNMENT VIEW — cleaner-side view of a template-driven
+// assignment. Shows the 4 main sections (Bedroom / Vanity / Bathroom
+// / General) with their items as a checklist. Tapping an item flips
+// its status:
+//   pending     → in_progress (claim it)
+//   in_progress → done        (mark complete)
+//   done        → re-open prompt
+//
+// A 3-state toggle filters which items show:
+//   - Not started (pending) — shown by default, also lists other
+//     assignments at this bedroom in case the cleaner wants to bounce
+//   - Working on now (in_progress) — what the cleaner is actively doing
+//   - Done — completed items, with a re-open option
+//
+// Status changes write directly to assignment_targets and rely on the
+// existing realtime sync to push updates to other viewers.
+// =================================================================
+function ChecklistAssignmentView({ assignment, employee, onClose, onOpenSheet }) {
+  const [targets, setTargets] = useState([]);
+  const [templateInfo, setTemplateInfo] = useState({ variants: [], items: [] });
+  const [otherAssignments, setOtherAssignments] = useState([]);
+  const [loaded, setLoaded] = useState(false);
+  const [tab, setTab] = useState('not_started'); // 'not_started' | 'in_progress' | 'done'
+  const [busyId, setBusyId] = useState(null);
+
+  // -----------------------------------------------------------------
+  // Load targets (the actual checklist items) + template metadata so
+  // we can display human-friendly item labels.
+  // -----------------------------------------------------------------
+  const load = async () => {
+    const { data: tData } = await supabase
+      .from('assignment_targets')
+      .select('*, unit:units(label), party:parties(label)')
+      .eq('assignment_id', assignment.id);
+    setTargets(tData || []);
+
+    // Template metadata — only fetch if the assignment uses a template
+    if (assignment.template_set_id) {
+      const { data: vData } = await supabase
+        .from('section_template_variants')
+        .select('*').eq('set_id', assignment.template_set_id);
+      const variantIds = (vData || []).map(v => v.id);
+      let iData = [];
+      if (variantIds.length > 0) {
+        const { data } = await supabase
+          .from('section_template_items')
+          .select('*').in('variant_id', variantIds);
+        iData = data || [];
+      }
+      setTemplateInfo({ variants: vData || [], items: iData });
+    }
+
+    // Other open assignments at the same bedroom — for the "Not started"
+    // tab footer so the cleaner can hop to a sibling without going home.
+    const firstTarget = (tData || [])[0];
+    if (firstTarget?.unit_id && firstTarget?.party_id) {
+      const { data: others } = await supabase
+        .from('assignments')
+        .select('id, title, assignment_type, sheet_type, template_set_id, source, pm_status, active, customer_id, targets:assignment_targets!inner(id, status, unit_id, party_id)')
+        .neq('id', assignment.id)
+        .eq('targets.unit_id', firstTarget.unit_id)
+        .eq('targets.party_id', firstTarget.party_id)
+        .eq('active', true);
+      // Filter to assignments with non-done targets at this bedroom
+      const filtered = (others || []).filter(a => {
+        if (a.source === 'pm' && a.pm_status !== 'approved') return false;
+        return (a.targets || []).some(t => t.status !== 'done');
+      });
+      setOtherAssignments(filtered);
+    }
+
+    setLoaded(true);
+  };
+
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, [assignment.id]);
+  useAssignmentSync(load, 'checklist-view');
+
+  // -----------------------------------------------------------------
+  // Helper: friendly item label from template + section/key on a target
+  // -----------------------------------------------------------------
+  const labelForTarget = (target) => {
+    if (!target.template_section || !target.template_item_key) return null;
+    // For Bedroom/Vanity, variant key is 'default'. For Bathroom and
+    // General, variant key is on the assignment.
+    let variantKey = 'default';
+    if (target.template_section === 'bathroom') variantKey = assignment.bathroom_variant;
+    if (target.template_section === 'general') variantKey = assignment.general_variant;
+    const variant = templateInfo.variants.find(v =>
+      v.section_key === target.template_section && v.variant_key === variantKey
+    );
+    if (!variant) return null;
+    const item = templateInfo.items.find(i =>
+      i.variant_id === variant.id && i.item_key === target.template_item_key
+    );
+    return item?.label || null;
+  };
+
+  // -----------------------------------------------------------------
+  // Advance / toggle a target's status. Optimistic UI for snappiness.
+  // -----------------------------------------------------------------
+  const setStatus = async (target, newStatus) => {
+    if (busyId) return;
+    setBusyId(target.id);
+    const patch = { status: newStatus };
+    if (newStatus === 'in_progress') {
+      if (!target.started_at) patch.started_at = new Date().toISOString();
+      patch.started_by = employee?.id || null;
+    }
+    if (newStatus === 'done') {
+      patch.completed_at = new Date().toISOString();
+      patch.completed_by = employee?.id || null;
+    } else if (target.status === 'done') {
+      patch.completed_at = null;
+      patch.completed_by = null;
+    }
+    if (newStatus === 'pending') {
+      patch.started_at = null;
+      patch.started_by = null;
+    }
+    // Optimistic update
+    setTargets(prev => prev.map(t => t.id === target.id ? { ...t, ...patch } : t));
+    const { error } = await supabase.from('assignment_targets').update(patch).eq('id', target.id);
+    setBusyId(null);
+    if (error) {
+      alert('Could not update: ' + error.message);
+      load(); // re-fetch authoritative
+    }
+  };
+
+  // -----------------------------------------------------------------
+  // Group filtered targets by template_section so the cleaner sees
+  // logical chunks (Bedroom items together, Bathroom items together).
+  // -----------------------------------------------------------------
+  const sectionOrder = ['bedroom', 'vanity', 'bathroom', 'general'];
+  const sectionLabel = {
+    bedroom: 'Bedroom', vanity: 'Vanity', bathroom: 'Bathroom', general: 'General',
+  };
+
+  const counts = {
+    not_started: targets.filter(t => t.status === 'pending').length,
+    in_progress: targets.filter(t => t.status === 'in_progress').length,
+    done: targets.filter(t => t.status === 'done').length,
+    blocked: targets.filter(t => t.status === 'blocked').length,
+  };
+  const filterStatus = tab === 'not_started' ? 'pending' : tab;
+  const visibleTargets = targets.filter(t => t.status === filterStatus);
+
+  const grouped = {};
+  sectionOrder.forEach(s => { grouped[s] = []; });
+  visibleTargets.forEach(t => {
+    const s = t.template_section || 'bedroom';
+    if (!grouped[s]) grouped[s] = [];
+    grouped[s].push(t);
+  });
+
+  // Progress: % of items done over total
+  const total = targets.length;
+  const doneCount = counts.done;
+  const isAllDone = total > 0 && doneCount === total;
+
+  // Bedroom label for header
+  const bedroomLabel = targets[0]?.party?.label;
+  const unitLabel = targets[0]?.unit?.label;
+  // Bathroom helper for clarity
+  const bathroomNum = bathroomNumberForBedroom(bedroomLabel);
+
+  // -----------------------------------------------------------------
+  // Render an item row — tap to advance status
+  // -----------------------------------------------------------------
+  const renderItemRow = (t) => {
+    const label = labelForTarget(t) || `Item ${t.template_item_key || t.id.slice(0, 6)}`;
+    const isDone = t.status === 'done';
+    const isInProgress = t.status === 'in_progress';
+    const nextStatus = t.status === 'pending' ? 'in_progress'
+      : t.status === 'in_progress' ? 'done'
+      : 'in_progress'; // re-open from done
+    const actionLabel = t.status === 'pending' ? 'Claim'
+      : t.status === 'in_progress' ? 'Mark done'
+      : 'Re-open';
+    const colorClass = isDone
+      ? 'bg-emerald-50 border-emerald-200 hover:border-emerald-400'
+      : isInProgress
+        ? 'bg-amber-50 border-amber-300 hover:border-amber-500'
+        : 'bg-white border-stone-200 hover:border-stone-400';
+    return (
+      <button key={t.id}
+        onClick={() => setStatus(t, nextStatus)}
+        disabled={busyId === t.id}
+        className={`w-full text-left p-3 rounded-xl border-2 transition-colors disabled:opacity-50 ${colorClass}`}>
+        <div className="flex items-center gap-3">
+          <div className={`w-5 h-5 rounded-full border-2 flex items-center justify-center flex-shrink-0 ${isDone ? 'bg-emerald-600 border-emerald-600 text-white' : isInProgress ? 'bg-amber-500 border-amber-500 text-white' : 'border-stone-300'}`}>
+            {isDone ? <Check size={12} /> : isInProgress ? <Play size={10} /> : null}
+          </div>
+          <div className="flex-1 min-w-0">
+            <div className={`text-sm ${isDone ? 'text-emerald-900 line-through' : 'text-stone-900'}`}>{label}</div>
+            {t.status_notes && (
+              <div className="text-xs text-red-700 italic mt-0.5">"{t.status_notes}"</div>
+            )}
+          </div>
+          <span className={`text-[10px] uppercase tracking-wider font-mono px-2 py-1 rounded-full ${isDone ? 'bg-emerald-100 text-emerald-700' : isInProgress ? 'bg-amber-100 text-amber-800' : 'bg-stone-100 text-stone-600'}`}>
+            {actionLabel}
+          </span>
+        </div>
+      </button>
+    );
+  };
+
+  if (!loaded) {
+    return (
+      <div className="fixed inset-0 bg-stone-50 z-50 flex items-center justify-center text-stone-400 text-sm">
+        Loading checklist…
+      </div>
+    );
+  }
+
+  return (
+    <div className="fixed inset-0 bg-stone-50 z-50 flex flex-col">
+      {/* Header */}
+      <div className="bg-stone-900 text-stone-50 px-5 py-4 sticky top-0 z-10">
+        <div className="flex items-center justify-between mb-2">
+          <button onClick={onClose}
+            className="p-2 -ml-2 rounded-full bg-stone-800 hover:bg-stone-700">
+            <ArrowLeft size={20} />
+          </button>
+          {onOpenSheet && assignment.file_url && (
+            <button onClick={onOpenSheet}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-50 text-xs font-medium">
+              <Eye size={12} /> View sheet
+            </button>
+          )}
+        </div>
+        <div className="text-xs uppercase tracking-wider font-mono text-stone-400">
+          {assignment.sheet_type === 'cleaning_check' ? 'Cleaning check' : 'Move-out clean'}
+        </div>
+        <div className="font-serif text-xl font-bold leading-tight break-words">
+          {unitLabel}{bedroomLabel && (<>
+            <span className="text-stone-400 mx-1.5">·</span>
+            <span className="italic">{bedroomLabel}</span>
+          </>)}
+        </div>
+        {bathroomNum && (
+          <div className="text-[11px] text-amber-300 font-mono mt-1">
+            Bathroom {bathroomNum} (shared between bedrooms {bathroomNum === 1 ? '1 & 2' : '3 & 4'})
+          </div>
+        )}
+        {/* Progress bar — green when fully done */}
+        <div className="mt-3">
+          <ProgressBar
+            steps={['Started', 'Items claimed', 'All done']}
+            currentStep={doneCount === 0 ? 0 : isAllDone ? 2 : 1}
+            complete={isAllDone}
+          />
+          <div className="text-[10px] font-mono text-stone-400 mt-1.5">
+            {doneCount} of {total} items done
+            {counts.in_progress > 0 && ` · ${counts.in_progress} in progress`}
+          </div>
+        </div>
+      </div>
+
+      {/* Tab toggle */}
+      <div className="flex gap-1 px-3 py-3 bg-stone-100">
+        <button onClick={() => setTab('not_started')}
+          className={`flex-1 py-2 px-3 rounded-lg text-xs font-medium ${tab === 'not_started' ? 'bg-white shadow-sm text-stone-900 font-bold' : 'text-stone-600'}`}>
+          Not started {counts.not_started > 0 && `(${counts.not_started})`}
+        </button>
+        <button onClick={() => setTab('in_progress')}
+          className={`flex-1 py-2 px-3 rounded-lg text-xs font-medium ${tab === 'in_progress' ? 'bg-amber-50 shadow-sm text-amber-900 font-bold' : 'text-stone-600'}`}>
+          Working on now {counts.in_progress > 0 && `(${counts.in_progress})`}
+        </button>
+        <button onClick={() => setTab('done')}
+          className={`flex-1 py-2 px-3 rounded-lg text-xs font-medium ${tab === 'done' ? 'bg-emerald-50 shadow-sm text-emerald-900 font-bold' : 'text-stone-600'}`}>
+          Done {counts.done > 0 && `(${counts.done})`}
+        </button>
+      </div>
+
+      {/* Body */}
+      <div className="flex-1 overflow-y-auto px-3 py-3 pb-24">
+        {visibleTargets.length === 0 ? (
+          <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
+            {tab === 'not_started' && 'No items to start. Either everything is in progress or already done.'}
+            {tab === 'in_progress' && 'Nothing in progress yet. Tap an item in Not started to claim it.'}
+            {tab === 'done' && 'Nothing done yet.'}
+          </div>
+        ) : (
+          <div className="space-y-4">
+            {sectionOrder.filter(s => grouped[s].length > 0).map(s => (
+              <div key={s}>
+                <div className="text-sm font-bold text-stone-800 tracking-wide mb-1.5 px-1">
+                  {sectionLabel[s]} <span className="text-xs font-mono text-stone-500">({grouped[s].length})</span>
+                </div>
+                <div className="space-y-1.5">
+                  {grouped[s].map(renderItemRow)}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Other assignments at this bedroom — only show on Not Started
+           tab so the cleaner can hop between sibling assignments
+           without going back to the property home. */}
+        {tab === 'not_started' && otherAssignments.length > 0 && (
+          <div className="mt-6 pt-4 border-t border-stone-200">
+            <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-2 px-1">
+              Other assignments at this bedroom
+            </div>
+            <div className="space-y-1.5">
+              {otherAssignments.map(oa => (
+                <div key={oa.id} className="p-3 rounded-xl bg-white border border-stone-200">
+                  <div className="font-serif text-sm text-stone-900 mb-1">{oa.title}</div>
+                  <div className="text-[10px] font-mono text-stone-500">
+                    {oa.sheet_type === 'cleaning_check' ? 'Cleaning check'
+                      : oa.sheet_type === 'move_out_clean' ? 'Move-out clean'
+                      : 'Legacy upload'}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Footer hint */}
+      <div className="bg-stone-900 px-5 py-3">
+        <div className="text-[10px] uppercase tracking-wider font-mono text-stone-400 text-center">
+          Tap any item to advance · {tab === 'not_started' ? 'Pending → In progress' : tab === 'in_progress' ? 'In progress → Done' : 'Done → Re-open'}
+        </div>
       </div>
     </div>
   );

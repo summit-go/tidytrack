@@ -17055,7 +17055,7 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
   const load = async () => {
     let q = supabase
       .from('assignment_targets')
-      .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, extracted_text, spanish_translation, translation_status), unit:units(id, label), party:parties(id, label), starter:employees!started_by(name), completer:employees!completed_by(name), assignedTo:employees!assigned_to(id, name)');
+      .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, extracted_text, spanish_translation, translation_status, template_set_id, sheet_type, bathroom_variant, general_variant, assignment_type, created_at), unit:units(id, label), party:parties(id, label), starter:employees!started_by(name), completer:employees!completed_by(name), assignedTo:employees!assigned_to(id, name)');
 
     if (!showDone) q = q.neq('status', 'done');
 
@@ -19160,6 +19160,10 @@ function ChecklistAssignmentView({ assignment, employee, onClose, onOpenSheet })
   const [targets, setTargets] = useState([]);
   const [templateInfo, setTemplateInfo] = useState({ variants: [], items: [] });
   const [otherAssignments, setOtherAssignments] = useState([]);
+  // Work blocks at this exact bedroom — used by the Working on now
+  // and Done tabs which now show block-level history instead of
+  // per-item status.
+  const [workBlocks, setWorkBlocks] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [tab, setTab] = useState('not_started'); // 'not_started' | 'in_progress' | 'done'
   // Sub-tab inside "Not started" — lets the cleaner view items
@@ -19218,6 +19222,25 @@ function ChecklistAssignmentView({ assignment, employee, onClose, onOpenSheet })
         return (a.targets || []).some(t => t.status !== 'done');
       });
       setOtherAssignments(filtered);
+    }
+
+    // Load work_blocks at this bedroom for the Working on now / Done
+    // tabs. The user wants those tabs to show work_blocks scoped to
+    // THIS bedroom (open ones in Working on now, closed ones in
+    // Done), not assignment_target rows. Items inside a block can
+    // be tapped to navigate into the block for detail.
+    if (firstTarget?.unit_id && firstTarget?.party_id) {
+      const { data: blocks } = await supabase
+        .from('work_blocks')
+        .select('id, start_time, end_time, work_notes, shift:shifts(employee:employees(id, name), customer_id), tasks(id, name, category, end_time)')
+        .eq('unit_id', firstTarget.unit_id)
+        .eq('party_id', firstTarget.party_id)
+        .eq('is_preview', false)
+        .order('start_time', { ascending: false });
+      // Same-customer only (defensive — work_blocks have a shift FK
+      // and shifts carry the customer_id).
+      const scoped = (blocks || []).filter(b => b.shift?.customer_id === assignment.customer_id);
+      setWorkBlocks(scoped);
     }
 
     setLoaded(true);
@@ -19292,6 +19315,9 @@ function ChecklistAssignmentView({ assignment, employee, onClose, onOpenSheet })
     in_progress: targets.filter(t => t.status === 'in_progress').length,
     done: targets.filter(t => t.status === 'done').length,
     blocked: targets.filter(t => t.status === 'blocked').length,
+    // Block-level counts for the new Working on now / Done tab semantics.
+    open_blocks: workBlocks.filter(b => !b.end_time).length,
+    closed_blocks: workBlocks.filter(b => !!b.end_time).length,
   };
   const filterStatus = tab === 'not_started' ? 'pending' : tab;
   const visibleTargets = targets.filter(t => t.status === filterStatus);
@@ -19316,28 +19342,24 @@ function ChecklistAssignmentView({ assignment, employee, onClose, onOpenSheet })
   const bathroomNum = bathroomNumberForBedroom(bedroomLabel);
 
   // -----------------------------------------------------------------
-  // Render an item row — tap to advance status
+  // Render an item row — READ-ONLY in this view. The View-doc destination
+  // is now a quick reference: cleaner sees what needs cleaning by
+  // section but cannot advance status. Status changes happen via the
+  // bedroom-level bulk card or the work-block picker — that's the
+  // single source of truth for who started what.
   // -----------------------------------------------------------------
   const renderItemRow = (t) => {
     const label = labelForTarget(t) || `Item ${t.template_item_key || t.id.slice(0, 6)}`;
     const isDone = t.status === 'done';
     const isInProgress = t.status === 'in_progress';
-    const nextStatus = t.status === 'pending' ? 'in_progress'
-      : t.status === 'in_progress' ? 'done'
-      : 'in_progress'; // re-open from done
-    const actionLabel = t.status === 'pending' ? 'Claim'
-      : t.status === 'in_progress' ? 'Mark done'
-      : 'Re-open';
     const colorClass = isDone
-      ? 'bg-emerald-50 border-emerald-200 hover:border-emerald-400'
+      ? 'bg-emerald-50 border-emerald-200'
       : isInProgress
-        ? 'bg-amber-50 border-amber-300 hover:border-amber-500'
-        : 'bg-white border-stone-200 hover:border-stone-400';
+        ? 'bg-amber-50 border-amber-300'
+        : 'bg-white border-stone-200';
     return (
-      <button key={t.id}
-        onClick={() => setStatus(t, nextStatus)}
-        disabled={busyId === t.id}
-        className={`w-full text-left p-3 rounded-xl border-2 transition-colors disabled:opacity-50 ${colorClass}`}>
+      <div key={t.id}
+        className={`w-full text-left p-3 rounded-xl border-2 ${colorClass}`}>
         <div className="flex items-center gap-3">
           <div className={`w-5 h-5 rounded-full border-2 flex items-center justify-center flex-shrink-0 ${isDone ? 'bg-emerald-600 border-emerald-600 text-white' : isInProgress ? 'bg-amber-500 border-amber-500 text-white' : 'border-stone-300'}`}>
             {isDone ? <Check size={12} /> : isInProgress ? <Play size={10} /> : null}
@@ -19348,11 +19370,13 @@ function ChecklistAssignmentView({ assignment, employee, onClose, onOpenSheet })
               <div className="text-xs text-red-700 italic mt-0.5">"{t.status_notes}"</div>
             )}
           </div>
-          <span className={`text-[10px] uppercase tracking-wider font-mono px-2 py-1 rounded-full ${isDone ? 'bg-emerald-100 text-emerald-700' : isInProgress ? 'bg-amber-100 text-amber-800' : 'bg-stone-100 text-stone-600'}`}>
-            {actionLabel}
-          </span>
+          {t.priority && !isDone && (
+            <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-1 rounded-full bg-red-50 border border-red-200 text-red-700 font-bold flex items-center gap-1">
+              <AlertCircle size={10} /> Priority
+            </span>
+          )}
         </div>
-      </button>
+      </div>
     );
   };
 
@@ -19468,11 +19492,11 @@ function ChecklistAssignmentView({ assignment, employee, onClose, onOpenSheet })
         </button>
         <button onClick={() => setTab('in_progress')}
           className={`flex-1 py-2 px-3 rounded-lg text-xs font-medium ${tab === 'in_progress' ? 'bg-amber-50 shadow-sm text-amber-900 font-bold' : 'text-stone-600'}`}>
-          Working on now {counts.in_progress > 0 && `(${counts.in_progress})`}
+          Working on now {counts.open_blocks > 0 && `(${counts.open_blocks})`}
         </button>
         <button onClick={() => setTab('done')}
           className={`flex-1 py-2 px-3 rounded-lg text-xs font-medium ${tab === 'done' ? 'bg-emerald-50 shadow-sm text-emerald-900 font-bold' : 'text-stone-600'}`}>
-          Done {counts.done > 0 && `(${counts.done})`}
+          Done {counts.closed_blocks > 0 && `(${counts.closed_blocks})`}
         </button>
       </div>
 
@@ -19504,32 +19528,99 @@ function ChecklistAssignmentView({ assignment, employee, onClose, onOpenSheet })
 
       {/* Body */}
       <div className="flex-1 overflow-y-auto px-3 py-3 pb-24">
-        {visibleTargets.length === 0 ? (
-          <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
-            {tab === 'not_started' && 'No items to start. Either everything is in progress or already done.'}
-            {tab === 'in_progress' && 'Nothing in progress yet. Tap an item in Not started to claim it.'}
-            {tab === 'done' && 'Nothing done yet.'}
-          </div>
-        ) : (
-          <div className="space-y-4">
-            {sectionOrder
-              .filter(s => grouped[s].length > 0)
-              // When a section sub-tab is picked on Not Started,
-              // show ONLY that section. Other tabs / "all" keep
-              // grouping everything as before.
-              .filter(s => tab !== 'not_started' || sectionFilter === 'all' || sectionFilter === s)
-              .map(s => (
-              <div key={s}>
-                <div className="text-sm font-bold text-stone-800 tracking-wide mb-1.5 px-1">
-                  {sectionLabel[s]} <span className="text-xs font-mono text-stone-500">({grouped[s].length})</span>
+        {(() => {
+          // Working on now / Done tabs now render WORK BLOCKS scoped
+          // to THIS bedroom, not item-status rows. Open blocks live
+          // under Working on now; closed blocks under Done. Tapping
+          // a block card surfaces its tasks (the work the cleaner
+          // logged inside that block). Items remain non-interactive
+          // here — this view is a quick reference, not a control panel.
+          if (tab === 'in_progress' || tab === 'done') {
+            const wantsOpen = tab === 'in_progress';
+            const blocks = workBlocks.filter(b => wantsOpen ? !b.end_time : !!b.end_time);
+            if (blocks.length === 0) {
+              return (
+                <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
+                  {wantsOpen
+                    ? 'No work blocks open at this bedroom right now.'
+                    : 'No completed work blocks for this bedroom yet.'}
                 </div>
-                <div className="space-y-1.5">
-                  {grouped[s].map(renderItemRow)}
-                </div>
+              );
+            }
+            return (
+              <div className="space-y-2">
+                {blocks.map(b => {
+                  const start = b.start_time ? new Date(b.start_time) : null;
+                  const end = b.end_time ? new Date(b.end_time) : null;
+                  const durMs = end ? end - start : (start ? Date.now() - start.getTime() : 0);
+                  const hrs = Math.floor(durMs / 3600000);
+                  const mins = Math.floor((durMs % 3600000) / 60000);
+                  const durLabel = `${hrs > 0 ? hrs + 'h ' : ''}${mins}m`;
+                  const taskCount = (b.tasks || []).length;
+                  const cleaner = b.shift?.employee?.name || 'Unknown';
+                  return (
+                    <div key={b.id}
+                      className={`p-3 rounded-xl border-2 ${wantsOpen ? 'bg-amber-50 border-amber-300' : 'bg-white border-stone-200'}`}>
+                      <div className="flex items-center justify-between gap-2 mb-1">
+                        <div className="font-serif text-sm text-stone-900 font-bold">
+                          {cleaner}
+                        </div>
+                        <span className={`text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full ${wantsOpen ? 'bg-amber-100 text-amber-800 border border-amber-300' : 'bg-emerald-100 text-emerald-800 border border-emerald-300'}`}>
+                          {wantsOpen ? 'In progress' : 'Done'}
+                        </span>
+                      </div>
+                      <div className="text-[11px] font-mono text-stone-500">
+                        {start && start.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}
+                        {' · '}{durLabel}
+                        {taskCount > 0 && <> · {taskCount} task{taskCount === 1 ? '' : 's'}</>}
+                      </div>
+                      {b.work_notes && (
+                        <div className="text-xs text-stone-700 mt-1 italic">"{b.work_notes}"</div>
+                      )}
+                      {taskCount > 0 && (
+                        <ul className="mt-2 text-xs text-stone-700 space-y-0.5 pl-3 border-l-2 border-stone-200">
+                          {b.tasks.map(t => (
+                            <li key={t.id} className="flex items-center gap-1.5">
+                              <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${t.end_time ? 'bg-emerald-500' : 'bg-amber-500'}`} />
+                              <span className={t.end_time ? 'line-through text-stone-500' : ''}>{t.name || t.category || '(unnamed)'}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
-            ))}
-          </div>
-        )}
+            );
+          }
+          // Not started tab — keep the existing grouped, read-only,
+          // section-filterable layout. visibleTargets / grouped were
+          // computed against status='pending' above.
+          if (visibleTargets.length === 0) {
+            return (
+              <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
+                No items to start. Either everything is in progress or already done.
+              </div>
+            );
+          }
+          return (
+            <div className="space-y-4">
+              {sectionOrder
+                .filter(s => grouped[s].length > 0)
+                .filter(s => sectionFilter === 'all' || sectionFilter === s)
+                .map(s => (
+                <div key={s}>
+                  <div className="text-sm font-bold text-stone-800 tracking-wide mb-1.5 px-1">
+                    {sectionLabel[s]} <span className="text-xs font-mono text-stone-500">({grouped[s].length})</span>
+                  </div>
+                  <div className="space-y-1.5">
+                    {grouped[s].map(renderItemRow)}
+                  </div>
+                </div>
+              ))}
+            </div>
+          );
+        })()}
 
         {/* Other assignments at this bedroom — only show on Not Started
            tab so the cleaner can hop between sibling assignments

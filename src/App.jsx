@@ -17773,7 +17773,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
     const effectiveStatus = statusFilter === 'mine' ? 'done' : statusFilter;
     const { data, error } = await supabase
       .from('assignment_targets')
-      .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, extracted_text, spanish_translation, translation_status, assignment_type, scheduled_date, sheet_type, template_set_id, bathroom_variant, general_variant), unit:units(id, label), party:parties(id, label), starter:employees!started_by(id, name), completer:employees!completed_by(id, name), assignedTo:employees!assigned_to(id, name)')
+      .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, extracted_text, spanish_translation, translation_status, assignment_type, scheduled_date, sheet_type, template_set_id, bathroom_variant, general_variant, created_at), unit:units(id, label), party:parties(id, label), starter:employees!started_by(id, name), completer:employees!completed_by(id, name), assignedTo:employees!assigned_to(id, name)')
       .eq('status', effectiveStatus);
     if (error) {
       console.error('[Assignments] load error:', error);
@@ -17862,6 +17862,62 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
       setTasksByBedroom(map);
     })();
   }, [propertyId, targets.length]);
+
+  // Cutoff timestamp: any assignment whose parent `created_at` is at
+  // or after this moment uses the new bedroom-level UI (bulk action
+  // card with section breakdown). Assignments created BEFORE this
+  // timestamp keep the original per-item AssignmentCard rendering so
+  // the cleaners' Mon-Wed work is not disturbed.
+  // 10:30 AM MDT June 12, 2026 → 16:30 UTC (MDT is UTC-6 in June).
+  const ASSIGNMENT_CUTOFF = '2026-06-12T16:30:00Z';
+  const isPostCutoff = (t) => (t?.assignment?.created_at || '') >= ASSIGNMENT_CUTOFF;
+
+  // Bulk wrappers that act on every target at a bedroom. Optimistic
+  // update + single .in() call, then re-load. Used by the new
+  // bedroom-level card so the cleaner can mark-complete / block /
+  // re-prioritize a whole bedroom in one tap.
+  const bulkUpdateStatus = async (rows, newStatus, statusNotes) => {
+    if (!rows || rows.length === 0) return;
+    const ids = rows.map(r => r.id);
+    const movedOffTab = newStatus !== statusFilter;
+    if (movedOffTab) {
+      setTargets(prev => prev.filter(t => !ids.includes(t.id)));
+    } else {
+      setTargets(prev => prev.map(t => ids.includes(t.id) ? { ...t, status: newStatus } : t));
+    }
+    setBusy(true);
+    const patch = { status: newStatus };
+    if (newStatus === 'in_progress') {
+      patch.started_at = new Date().toISOString();
+      patch.started_by = employee?.id || null;
+    }
+    if (newStatus === 'done') {
+      patch.completed_at = new Date().toISOString();
+      patch.completed_by = employee?.id || null;
+    } else {
+      patch.completed_at = null; patch.completed_by = null;
+    }
+    if (newStatus === 'pending') {
+      patch.started_at = null;
+      patch.started_by = null;
+    }
+    if (statusNotes !== undefined) patch.status_notes = statusNotes || null;
+    const { error } = await supabase.from('assignment_targets').update(patch).in('id', ids);
+    setBusy(false);
+    if (error) { load(); alert('Could not update: ' + error.message); return; }
+    load();
+    if (onUpdate) onUpdate();
+  };
+
+  const bulkTogglePriority = async (rows) => {
+    if (!rows || rows.length === 0) return;
+    const anyOn = rows.some(r => r.priority);
+    const next = !anyOn;
+    const ids = rows.map(r => r.id);
+    setTargets(prev => prev.map(t => ids.includes(t.id) ? { ...t, priority: next } : t));
+    const { error } = await supabase.from('assignment_targets').update({ priority: next }).in('id', ids);
+    if (error) { alert('Could not update priority: ' + error.message); load(); }
+  };
 
   const updateStatus = async (target, newStatus, statusNotes) => {
     // OPTIMISTIC: since this tab filters by statusFilter, an item that
@@ -18211,11 +18267,8 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                       bathroom: bed.sectionItems.bathroom.length,
                       general: bed.sectionItems.general.length,
                     };
-                    // Items NOT in any of the 4 known sections (legacy
-                    // assignments that have no template_section set,
-                    // or one-off custom rows). Count them so the row's
-                    // "N items" total stays accurate without losing
-                    // the items entirely.
+                    // Items not in any of the 4 known sections (legacy
+                    // targets with no template_section, or one-offs).
                     const knownSectioned =
                       sectionCounts.bedroom + sectionCounts.vanity +
                       sectionCounts.bathroom + sectionCounts.general;
@@ -18225,37 +18278,182 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                     if (sectionCounts.vanity)   sectionBits.push(`Vanity (${sectionCounts.vanity})`);
                     if (sectionCounts.bathroom) sectionBits.push(`Bathroom (${sectionCounts.bathroom})`);
                     if (sectionCounts.general)  sectionBits.push(`General (${sectionCounts.general})`);
-                    if (otherCount > 0)        sectionBits.push(`Other (${otherCount})`);
-                    // Clicking the bedroom row NAVIGATES to that bedroom
-                    // (PreparingBlockView with the "Start cleaning"
-                    // button). It does not expand further or auto-start
-                    // anything. From the bedroom landing the cleaner
-                    // explicitly chooses to begin work.
+                    if (otherCount > 0)         sectionBits.push(`Other (${otherCount})`);
+
+                    // Split this bedroom's items by cutoff. LEGACY
+                    // (pre-cutoff) items render as the original per-item
+                    // AssignmentCards — that's the contract the user
+                    // asked for, so the Mon-Wed assignments behave
+                    // exactly the way the cleaners are already used
+                    // to. NEW (post-cutoff) items collapse into ONE
+                    // bedroom-level card with the section breakdown +
+                    // bulk action buttons.
+                    const legacyItems = bed.items.filter(t => !isPostCutoff(t));
+                    const newItems = bed.items.filter(t => isPostCutoff(t));
+
                     const firstTarget = bed.items[0];
                     const canGoToBedroom = !!(onGoToBedroom && firstTarget?.unit_id && firstTarget?.party_id);
-                    return (
-                      <button key={pid}
-                        onClick={() => { if (canGoToBedroom) startAndGo(firstTarget); }}
-                        disabled={!canGoToBedroom}
-                        className={`w-full text-left rounded-xl border border-stone-200 bg-white p-3 ${canGoToBedroom ? 'hover:border-stone-900 active:scale-98 transition-all' : 'opacity-70'}`}>
-                        <div className="flex items-center justify-between gap-2">
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-2 flex-wrap">
-                              <span className="font-serif text-sm text-stone-900">{bedLabel}</span>
-                              <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-stone-200 text-stone-700">
-                                {bed.items.length} {bed.items.length === 1 ? 'item' : 'items'}
-                              </span>
-                              {bed.hasPriority && <PriorityChip on={true} size="xs" />}
+
+                    // Build the bedroom-level bulk card (only when there
+                    // are NEW items at this bedroom). We compute a few
+                    // derived flags from the new-items subset:
+                    //  - hasPriority: any new item has priority on
+                    //  - statusBucket: the dominant status to display
+                    //    in the read-only pill (pending wins, then
+                    //    in_progress, then paused, then blocked, then done)
+                    //  - allDone: every new item is already done
+                    //  - canBulkComplete: at least one item can move to
+                    //    done (i.e. not already done)
+                    let bulkCard = null;
+                    if (newItems.length > 0) {
+                      const anyPriority = newItems.some(t => t.priority);
+                      const statusOrder = ['pending', 'in_progress', 'paused', 'blocked', 'done'];
+                      const dominantStatus =
+                        statusOrder.find(s => newItems.some(t => t.status === s)) || 'pending';
+                      const statusPill = ASSIGNMENT_STATUSES[dominantStatus] || ASSIGNMENT_STATUSES.pending;
+                      const allDone = newItems.every(t => t.status === 'done');
+                      const canBulkComplete = !allDone && can(employee, 'mark_assignments_done');
+                      // For View Doc and Reassign we pick the first
+                      // target's assignment as the representative.
+                      // Bedroom-level uploads are 1 assignment per
+                      // bedroom in the new model so this is correct
+                      // 99% of the time; the rare exception (multiple
+                      // assignments at one bedroom) still gets a
+                      // useful "open one of them" affordance.
+                      bulkCard = (
+                        <div key={`bulk-${pid}`} className="rounded-xl border border-stone-200 bg-white p-3">
+                          {/* === HEADER: title + chips === */}
+                          <div className="flex items-start justify-between gap-2 mb-2">
+                            <div className="flex-1 min-w-0">
+                              <div className="font-serif text-base text-stone-900 leading-tight break-words">
+                                <span className="font-bold">{group.unit?.label || unitLabel}</span>
+                                <span className="text-stone-400 mx-1.5">·</span>
+                                <span className="italic">{bedLabel}</span>
+                              </div>
                             </div>
-                            {sectionBits.length > 0 && (
-                              <div className="text-[11px] font-mono text-stone-500 mt-0.5">
-                                {sectionBits.join(' · ')}
+                            <div className="flex flex-col items-end gap-1 flex-shrink-0">
+                              <div className="flex items-center gap-1.5 flex-wrap justify-end">
+                                <button onClick={(e) => { e.stopPropagation(); bulkTogglePriority(newItems); }} disabled={busy}
+                                  className={`text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full border inline-flex items-center gap-1 transition-colors disabled:opacity-50 ${anyPriority
+                                      ? 'bg-red-100 text-red-800 border-red-300 font-bold hover:bg-red-200'
+                                      : 'bg-stone-100 text-stone-500 border-stone-200 hover:bg-stone-200'}`}>
+                                  <AlertCircle size={10} /> {anyPriority ? 'Priority' : 'Mark priority'}
+                                </button>
+                                <span className={`text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full border ${statusPill.color}`}>
+                                  {statusPill.label}
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-1.5 flex-wrap justify-end">
+                                <button onClick={(e) => { e.stopPropagation(); setOpened(firstTarget); }}
+                                  className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-100 hover:bg-stone-200 text-stone-700 flex items-center gap-1">
+                                  <Eye size={10} /> View doc
+                                </button>
+                                {onOpenBedroomHistory && firstTarget?.unit_id && firstTarget?.party_id && (
+                                  <button onClick={(e) => { e.stopPropagation(); onOpenBedroomHistory({
+                                      unitId: firstTarget.unit_id, unitLabel: group.unit?.label,
+                                      partyId: firstTarget.party_id, partyLabel: bedLabel,
+                                    }); }} disabled={busy}
+                                    className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-100 hover:bg-stone-200 text-stone-700 flex items-center gap-1 disabled:opacity-50">
+                                    <Clock size={10} /> History
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                          {/* === ASSIGNMENT TITLE + TYPE + SECTION BREAKDOWN === */}
+                          <div className="mb-2">
+                            <div className="font-serif text-sm text-stone-700">
+                              {firstTarget?.assignment?.title || 'Cleaning assignment'}
+                            </div>
+                            {firstTarget?.assignment?.assignment_type && (
+                              <div className="mt-1">
+                                <AssignmentTypeChip type={firstTarget.assignment.assignment_type} />
                               </div>
                             )}
+                            <div className="text-[11px] font-mono text-stone-500 mt-1">
+                              {newItems.length} {newItems.length === 1 ? 'item' : 'items'}
+                              {sectionBits.length > 0 && (
+                                <> · {sectionBits.join(' · ')}</>
+                              )}
+                            </div>
                           </div>
-                          {canGoToBedroom && <ChevronRight size={14} className="text-stone-400 flex-shrink-0" />}
+                          {/* === BULK ACTION BUTTONS ===
+                             Start = navigate to bedroom (no status flip).
+                             Mark complete = bulk mark all to done (with confirm).
+                             Blocked = bulk mark all blocked (note via modal on first
+                                       target as proxy; we apply the same note to all).
+                             Reassign = opens reassign modal on the first target.
+                                        It's a per-target modal so handling N targets
+                                        sequentially would be ugly; keeping it on
+                                        one. Most apt cases have 1 assignment per
+                                        bedroom in the new model anyway. */}
+                          <div className="flex gap-2 flex-wrap">
+                            {!allDone && canGoToBedroom && (
+                              <button onClick={() => startAndGo(firstTarget)} disabled={busy}
+                                className="h-9 px-3 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-medium flex items-center gap-1 disabled:opacity-50">
+                                <Play size={12} /> Start
+                              </button>
+                            )}
+                            {canBulkComplete && (
+                              <button onClick={() => {
+                                if (confirm(`Mark all ${newItems.length} items at ${bedLabel} complete?`)) {
+                                  bulkUpdateStatus(newItems, 'done');
+                                }
+                              }} disabled={busy}
+                                className="h-9 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-medium flex items-center gap-1 disabled:opacity-50">
+                                <Check size={12} /> Mark complete
+                              </button>
+                            )}
+                            {!allDone && (
+                              <button onClick={() => setStatusModal({ target: firstTarget, bulkRows: newItems })} disabled={busy}
+                                className="h-9 px-3 rounded-lg border border-red-200 hover:bg-red-50 text-red-700 text-xs font-medium flex items-center gap-1 disabled:opacity-50">
+                                <AlertCircle size={12} /> Blocked
+                              </button>
+                            )}
+                            {!allDone && (
+                              <button onClick={() => setReassignTarget(firstTarget)} disabled={busy}
+                                className="h-9 px-3 rounded-lg border border-stone-300 hover:bg-stone-50 text-stone-700 text-xs font-medium flex items-center gap-1 disabled:opacity-50">
+                                <User size={12} /> Reassign
+                              </button>
+                            )}
+                          </div>
+                          {/* === Go to this bedroom (full-width bottom) === */}
+                          {canGoToBedroom && (
+                            <button onClick={() => startAndGo(firstTarget)}
+                              className="w-full mt-3 py-2.5 rounded-lg bg-stone-900 text-stone-50 text-sm font-medium flex items-center justify-center gap-1.5 active:scale-98 transition-transform">
+                              Go to this bedroom <ChevronRight size={14} />
+                            </button>
+                          )}
                         </div>
-                      </button>
+                      );
+                    }
+                    return (
+                      <React.Fragment key={pid}>
+                        {/* Legacy items at this bedroom — keep the
+                           original per-item rendering so Mon-Wed
+                           assignments stay exactly as the cleaners
+                           are used to. */}
+                        {legacyItems.map(t => (
+                          <AssignmentCard key={t.id} target={t} busy={busy} propertyId={propertyId}
+                            onView={() => setOpened(t)}
+                            onStart={() => startAndGo(t)}
+                            onPause={() => updateStatus(t, 'paused')}
+                            onMoveToPending={() => updateStatus(t, 'pending')}
+                            onDone={() => updateStatus(t, 'done')}
+                            onReopen={() => updateStatus(t, 'pending')}
+                            onBlocked={() => setStatusModal({ target: t })}
+                            onReassign={() => setReassignTarget(t)}
+                            onTogglePriority={togglePriority}
+                            canMarkDone={can(employee, 'mark_assignments_done') || t.started_by === employee?.id}
+                            currentEmployeeId={employee?.id}
+                            onGoToBedroom={onGoToBedroom ? () => startAndGo(t) : null}
+                            onOpenBedroomHistory={onOpenBedroomHistory} />
+                        ))}
+                        {/* NEW items at this bedroom: ONE bedroom-level
+                           bulk card with section breakdown + all the
+                           same action buttons as legacy. */}
+                        {bulkCard}
+                      </React.Fragment>
                     );
                   })}
                 </div>
@@ -18631,7 +18829,19 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
       )}
       {statusModal && (
         <BlockedNoteModal target={statusModal.target}
-          onSave={(notes) => updateStatus(statusModal.target, 'blocked', notes)}
+          onSave={(notes) => {
+            // When the bedroom-level "Blocked" button opens this modal
+            // it sets bulkRows = every new item at the bedroom. We
+            // apply the same blocked + note to all of them in one call.
+            // Per-item Blocked (legacy AssignmentCard) doesn't set
+            // bulkRows, so it falls back to single-target update.
+            if (statusModal.bulkRows && statusModal.bulkRows.length > 0) {
+              bulkUpdateStatus(statusModal.bulkRows, 'blocked', notes);
+              setStatusModal(null);
+            } else {
+              updateStatus(statusModal.target, 'blocked', notes);
+            }
+          }}
           onClose={() => setStatusModal(null)}
           busy={busy} />
       )}

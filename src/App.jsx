@@ -14052,7 +14052,7 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
   if (!loaded || targets.length === 0) return null;
 
   return (
-    <div className="mx-4 mt-4 p-4 rounded-2xl bg-blue-50 border-2 border-blue-200">
+    <div className="mx-2 sm:mx-4 mt-4 p-3 sm:p-4 rounded-2xl bg-blue-50 border-2 border-blue-200">
       <button onClick={() => setCollapsed(c => !c)}
         className={`w-full flex items-center gap-2 active:opacity-80 ${collapsed ? '' : 'mb-3'}`}>
         <FileText size={16} className="text-blue-700 flex-shrink-0" />
@@ -14183,41 +14183,46 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
             <div className="font-serif text-lg text-stone-900 font-bold">Whole property</div>
           )}
         </div>
-        <div className="flex items-center gap-1.5 flex-shrink-0 flex-wrap justify-end sm:max-w-[60%]">
-          {/* Priority toggle (gray ↔ red) when parent passes it; else
-             read-only chip. */}
-          {!isDone && onTogglePriority ? (
-            <button
-              onClick={(e) => { e.stopPropagation(); onTogglePriority(t); }}
-              disabled={busy}
-              className={`text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full border inline-flex items-center gap-1 transition-colors disabled:opacity-50 ${t.priority
-                  ? 'bg-red-100 text-red-800 border-red-300 font-bold hover:bg-red-200'
-                  : 'bg-stone-100 text-stone-500 border-stone-200 hover:bg-stone-200'}`}>
-              <AlertCircle size={10} /> {t.priority ? 'Priority' : 'Mark priority'}
+        <div className="flex flex-col sm:flex-row sm:items-center gap-1.5 flex-shrink-0 sm:max-w-[60%]">
+          {/* Mini-row 1: Priority + Status — right-aligned. */}
+          <div className="flex items-center gap-1.5 flex-wrap justify-end">
+            {/* Priority toggle (gray ↔ red) when parent passes it; else
+               read-only chip. */}
+            {!isDone && onTogglePriority ? (
+              <button
+                onClick={(e) => { e.stopPropagation(); onTogglePriority(t); }}
+                disabled={busy}
+                className={`text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full border inline-flex items-center gap-1 transition-colors disabled:opacity-50 ${t.priority
+                    ? 'bg-red-100 text-red-800 border-red-300 font-bold hover:bg-red-200'
+                    : 'bg-stone-100 text-stone-500 border-stone-200 hover:bg-stone-200'}`}>
+                <AlertCircle size={10} /> {t.priority ? 'Priority' : 'Mark priority'}
+              </button>
+            ) : (
+              <PriorityChip on={t.priority && !isDone} />
+            )}
+            {/* Status pill — read-only, just a visual cue. */}
+            <span className={`text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full border ${s.color}`}>
+              {s.label}
+            </span>
+          </div>
+          {/* Mini-row 2: View doc + History — right-aligned. Stays a
+             separate mini-row so the chip pairs never split awkwardly:
+             priority sits next to status, view doc next to history. */}
+          <div className="flex items-center gap-1.5 flex-wrap justify-end">
+            <button onClick={onView}
+              className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-100 hover:bg-stone-200 text-stone-700 flex items-center gap-1">
+              <Eye size={10} /> View doc
             </button>
-          ) : (
-            <PriorityChip on={t.priority && !isDone} />
-          )}
-          {/* Status pill — read-only, just a visual cue. */}
-          <span className={`text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full border ${s.color}`}>
-            {s.label}
-          </span>
-          {/* View doc + History live here too so the title row below
-             gets the full width — fixes the mobile cut-off. They share
-             the same chip language as priority/status. */}
-          <button onClick={onView}
-            className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-100 hover:bg-stone-200 text-stone-700 flex items-center gap-1">
-            <Eye size={10} /> View doc
-          </button>
-          {onOpenBedroomHistory && t.unit_id && t.party_id && (
-            <button onClick={() => onOpenBedroomHistory({
-                unitId: t.unit_id, unitLabel: t.unit?.label,
-                partyId: t.party_id, partyLabel: t.party?.label
-              })} disabled={busy}
-              className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-100 hover:bg-stone-200 text-stone-700 flex items-center gap-1 disabled:opacity-50">
-              <Clock size={10} /> History
-            </button>
-          )}
+            {onOpenBedroomHistory && t.unit_id && t.party_id && (
+              <button onClick={() => onOpenBedroomHistory({
+                  unitId: t.unit_id, unitLabel: t.unit?.label,
+                  partyId: t.party_id, partyLabel: t.party?.label
+                })} disabled={busy}
+                className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-100 hover:bg-stone-200 text-stone-700 flex items-center gap-1 disabled:opacity-50">
+                <Clock size={10} /> History
+              </button>
+            )}
+          </div>
         </div>
       </div>
 
@@ -14385,7 +14390,7 @@ function AssignmentsPanel({ propertyId, employee, refreshKey, onGoToBedroom, onO
   useEffect(() => { loadCounts(); }, [propertyId, refreshKey]);
 
   return (
-    <div className="px-4 mt-4">
+    <div className="px-2 sm:px-4 mt-4">
       <div className="flex items-center gap-2 mb-3">
         <FileText size={14} className="text-stone-500" />
         <span className="text-xs uppercase tracking-wider text-stone-500 font-mono">Assignments</span>

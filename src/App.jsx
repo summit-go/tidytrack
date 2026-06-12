@@ -14161,11 +14161,13 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
   return (
     <div className={`p-2.5 sm:p-3 rounded-xl border ${isDone ? 'bg-stone-50 border-stone-200 opacity-90' : 'bg-white border-stone-200'}`}>
       {/* === HEADER ROW =================================================
-         Apartment info BOLD up top. Never truncated — long bedroom
-         labels wrap to a second line rather than being cut. Right side
-         holds the priority toggle + status pill so the cleaner sees
-         urgency and state at a glance. */}
-      <div className="flex items-start justify-between gap-2 mb-2">
+         On mobile the title takes a full-width row of its own and the
+         chip group (priority / status / view doc / history) drops to
+         the line below — that's the only way to guarantee long
+         apartment labels never get cut off on a phone. From `sm:`
+         and up there's enough horizontal room to put the title on
+         the left and chips on the right. */}
+      <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-1.5 sm:gap-2 mb-2">
         <div className="flex-1 min-w-0">
           {(t.unit?.label || t.party?.label) ? (
             <div className="font-serif text-lg text-stone-900 leading-tight break-words">
@@ -14181,7 +14183,7 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
             <div className="font-serif text-lg text-stone-900 font-bold">Whole property</div>
           )}
         </div>
-        <div className="flex items-center gap-1.5 flex-shrink-0 flex-wrap justify-end max-w-[60%]">
+        <div className="flex items-center gap-1.5 flex-shrink-0 flex-wrap justify-start sm:justify-end sm:max-w-[60%]">
           {/* Priority toggle (gray ↔ red) when parent passes it; else
              read-only chip. */}
           {!isDone && onTogglePriority ? (

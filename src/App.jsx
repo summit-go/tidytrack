@@ -15395,10 +15395,26 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
   };
 
   const setGeneralVariant = (partyId, variant) => {
-    setConfig(prev => ({
-      ...prev,
-      [partyId]: { ...(prev[partyId] || { mode: 'configure', checked: {} }), generalVariant: variant },
-    }));
+    setConfig(prev => {
+      const current = prev[partyId] || { mode: 'configure', checked: {} };
+      // If the bedroom is in Fail-Entire mode and didn't have a
+      // variant before (or had a different one), we need to:
+      //  1) Drop any general:* checks tied to the OLD variant
+      //  2) Add general:* checks for every item in the NEW variant
+      // This keeps Fail-Entire semantically honest: "fail everything
+      // in the assigned General area" — once the variant is known.
+      if (current.mode === 'fail_entire') {
+        const newChecked = { ...(current.checked || {}) };
+        // Strip every existing general:* check so the variant swap is clean.
+        Object.keys(newChecked).forEach(k => {
+          if (k.startsWith('general:')) delete newChecked[k];
+        });
+        const gv = variantBySectionKey('general', variant);
+        if (gv) itemsForVariant(gv.id).forEach(i => { newChecked[`general:${i.item_key}`] = true; });
+        return { ...prev, [partyId]: { ...current, generalVariant: variant, checked: newChecked } };
+      }
+      return { ...prev, [partyId]: { ...current, generalVariant: variant } };
+    });
   };
 
   // Per-bedroom cleaning type. Lives on the assignment row as the
@@ -15445,9 +15461,15 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
         return { ...prev, [partyId]: { ...current, mode: 'configure' } };
       }
       if (mode === 'fail_entire') {
-        // Auto-default variants if not set so we can pre-check every item
+        // Bathroom variant follows the bedroom-parity rule (odd→tub,
+        // even→toilet) so we can auto-default safely — bedrooms in the
+        // same apartment naturally get different bathroom variants
+        // because of the parity split. General has NO such natural
+        // mapping, so we leave it UNSET and force the uploader to
+        // pick one per bedroom. This prevents the bug where two
+        // bedrooms in the same apartment both end up with the same
+        // General assignment (e.g. both getting "Living Room").
         const bathroomVariant = current.bathroomVariant || 'a';
-        const generalVariant = current.generalVariant || 'a';
         const checked = {};
         const bedroomV = variantBySectionKey('bedroom', 'default');
         if (bedroomV) itemsForVariant(bedroomV.id).forEach(i => { checked[`bedroom:${i.item_key}`] = true; });
@@ -15455,10 +15477,18 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
         if (vanityV) itemsForVariant(vanityV.id).forEach(i => { checked[`vanity:${i.item_key}`] = true; });
         const bv = variantBySectionKey('bathroom', bathroomVariant);
         if (bv) itemsForVariant(bv.id).forEach(i => { checked[`bathroom:${i.item_key}`] = true; });
-        const gv = variantBySectionKey('general', generalVariant);
-        if (gv) itemsForVariant(gv.id).forEach(i => { checked[`general:${i.item_key}`] = true; });
+        // Only check General items if a variant has actually been
+        // picked. Otherwise leave General empty so the uploader sees
+        // a clear "pick a variant" prompt before they can submit.
+        if (current.generalVariant) {
+          const gv = variantBySectionKey('general', current.generalVariant);
+          if (gv) itemsForVariant(gv.id).forEach(i => { checked[`general:${i.item_key}`] = true; });
+        }
         return { ...prev, [partyId]: {
-          ...current, mode, bathroomVariant, generalVariant, checked,
+          ...current, mode, bathroomVariant,
+          // Explicitly preserve (or leave null) generalVariant — no auto-default.
+          generalVariant: current.generalVariant || null,
+          checked,
           passedSections: {}, // un-pass any sections that were marked
         } };
       }
@@ -15579,6 +15609,66 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
     }, { assignments: 0, items: 0 });
     if (previewCounts.assignments === 0) {
       setError('Nothing to create — every bedroom is set to Pass.');
+      return;
+    }
+    // Unique-variant validation across an apartment. Each bedroom in
+    // a 4-bedroom unit should get a DIFFERENT General variant — only
+    // one bedroom is "the kitchen bedroom", only one is "the LR
+    // bedroom", etc. If two bedrooms in the same unit ended up with
+    // the same variant, that's a data-entry mistake we want to catch
+    // before writing to the DB. Same rule applies whether the bedroom
+    // is in configure or fail_entire mode (both produce General items).
+    const variantConflicts = []; // [{ unitLabel, variant, bedroomLabels }]
+    const missingVariants = []; // [{ bedroomLabel }]
+    {
+      const byUnit = {}; // unitId -> { variant -> [bedroomLabel] }
+      selectedPartyIds.forEach(pid => {
+        const cc = config[pid];
+        if (!cc || cc.mode === 'pass') return;
+        const party = parties.find(p => p.id === pid);
+        if (!party) return;
+        // Only require a variant when there's at least one general
+        // item checked. If the cleaner explicitly un-checked all
+        // General items, the variant doesn't matter (no general row
+        // gets created).
+        const hasGeneralChecks = Object.keys(cc.checked || {}).some(k => k.startsWith('general:'));
+        if (hasGeneralChecks && !cc.generalVariant) {
+          missingVariants.push({ bedroomLabel: party.label || pid });
+          return;
+        }
+        if (!cc.generalVariant) return;
+        const uid = party.unit_id;
+        if (!byUnit[uid]) byUnit[uid] = {};
+        if (!byUnit[uid][cc.generalVariant]) byUnit[uid][cc.generalVariant] = [];
+        byUnit[uid][cc.generalVariant].push(party.label || pid);
+      });
+      Object.entries(byUnit).forEach(([uid, variants]) => {
+        const unit = units.find(u => u.id === uid);
+        const unitLabel = unit?.label || uid;
+        Object.entries(variants).forEach(([variant, labels]) => {
+          if (labels.length > 1) {
+            variantConflicts.push({ unitLabel, variant: variant.toUpperCase(), bedroomLabels: labels });
+          }
+        });
+      });
+    }
+    if (missingVariants.length > 0) {
+      setError(
+        `Pick a General variant (LR / Fridge / Vents / Kitchen) for: ` +
+        missingVariants.map(m => m.bedroomLabel).join(', ') +
+        `. Each bedroom in an apartment gets its own General area.`
+      );
+      return;
+    }
+    if (variantConflicts.length > 0) {
+      const msgs = variantConflicts.map(c =>
+        `${c.unitLabel}: variant ${c.variant} is assigned to ${c.bedroomLabels.join(' AND ')}`
+      );
+      setError(
+        `Each bedroom in the same apartment needs a UNIQUE General variant — ` +
+        `there's a 1:1 mapping (LR=A, Fridge=B, Vents=C, Kitchen=D).\n\n` +
+        msgs.join('\n')
+      );
       return;
     }
     // Confirmation only fires above a reasonable threshold to avoid
@@ -16466,19 +16556,69 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
             </div>
           </div>
         )}
-        {sectionKey === 'general' && !passed && (
-          <div className="p-3 rounded-xl bg-stone-50 border border-stone-200">
-            <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-2">General area</div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-              {variantsBySection('general').map(v => (
-                <button key={v.id} onClick={() => setGeneralVariant(partyId, v.variant_key)}
-                  className={`text-left px-3 py-2 rounded-lg border-2 text-sm font-medium transition-colors ${c.generalVariant === v.variant_key ? 'bg-amber-50 border-amber-500 text-amber-900' : 'bg-white border-stone-200 text-stone-700'}`}>
-                  {v.label}
-                </button>
-              ))}
+        {sectionKey === 'general' && !passed && (() => {
+          // Variants already taken by OTHER bedrooms in the same
+          // apartment. Each bedroom gets a UNIQUE General variant
+          // (LR=A, Fridge=B, Vents=C, Kitchen=D) so we surface the
+          // conflicts directly on the picker. Picking a taken
+          // variant is allowed (UX is not blocking — submit
+          // validation will catch it) but the button shows red so
+          // the uploader can fix it before submitting.
+          const thisParty = parties.find(p => p.id === partyId);
+          const thisUnitId = thisParty?.unit_id;
+          const takenByOthers = new Map(); // variantKey -> bedroomLabel
+          if (thisUnitId) {
+            Object.entries(config).forEach(([otherPid, oc]) => {
+              if (otherPid === partyId) return;
+              if (!oc?.generalVariant) return;
+              if (oc?.mode === 'pass') return;
+              const otherParty = parties.find(p => p.id === otherPid);
+              if (!otherParty || otherParty.unit_id !== thisUnitId) return;
+              if (!selectedParties[otherPid]) return;
+              takenByOthers.set(oc.generalVariant, otherParty.label || otherPid);
+            });
+          }
+          return (
+            <div className="p-3 rounded-xl bg-stone-50 border border-stone-200">
+              <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-2">
+                General area
+                {!c.generalVariant && (
+                  <span className="ml-2 normal-case text-red-700 font-bold">· pick one</span>
+                )}
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                {variantsBySection('general').map(v => {
+                  const taken = takenByOthers.get(v.variant_key);
+                  const isThis = c.generalVariant === v.variant_key;
+                  const isConflict = taken && isThis;
+                  return (
+                    <button key={v.id} onClick={() => setGeneralVariant(partyId, v.variant_key)}
+                      className={`text-left px-3 py-2 rounded-lg border-2 text-sm font-medium transition-colors ${
+                        isConflict ? 'bg-red-50 border-red-400 text-red-900' :
+                        isThis ? 'bg-amber-50 border-amber-500 text-amber-900' :
+                        taken ? 'bg-stone-100 border-stone-300 text-stone-500' :
+                        'bg-white border-stone-200 text-stone-700'
+                      }`}>
+                      <div className="flex items-center justify-between gap-2">
+                        <span>{v.label}</span>
+                        {taken && (
+                          <span className="text-[9px] uppercase tracking-wider font-mono px-1.5 py-0.5 rounded-full bg-stone-200 text-stone-600 whitespace-nowrap">
+                            {isThis ? 'CONFLICT' : taken}
+                          </span>
+                        )}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+              {!c.generalVariant && (
+                <div className="mt-2 text-[11px] font-mono text-red-700">
+                  Each bedroom in this apartment gets a unique General area.
+                </div>
+              )}
             </div>
-          </div>
-        )}
+          );
+        })()}
 
         {/* Items checklist — only shown when section isn't passed AND
            variant is picked (for bathroom/general). */}
@@ -17982,7 +18122,17 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
     return (
       <div className="space-y-2">
         {entries.map(([key, group]) => {
-          // Single-assignment "groups" render as a plain card (no bundling overhead)
+          // Distinct bedrooms (party_ids) in this apartment with
+          // open work. This is what the owner asked for: the count
+          // chip on the apartment pill should be "how many bedrooms
+          // need cleaning", not "how many item rows" (which can hit
+          // the hundreds in a Fail-Entire scenario).
+          const bedroomIds = new Set();
+          group.items.forEach(t => bedroomIds.add(t.party_id || 'no-party'));
+          const bedroomCount = bedroomIds.size;
+
+          // Single-bedroom + single-item apartments render as a plain
+          // card with no extra nesting. Saves a click.
           if (group.items.length === 1) {
             const t = group.items[0];
             return (
@@ -18002,13 +18152,35 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                 onOpenBedroomHistory={onOpenBedroomHistory} />
             );
           }
-          // Bundle: collapsible header showing count, expanded shows all cards
+          // Apartment-level expandable card. When expanded, we don't
+          // dump every item — we group by BEDROOM (party_id) and
+          // then by main SECTION inside each bedroom. Three taps
+          // total to reach the item: apartment → bedroom → section.
           const isOpen = !!bundleOpen[key];
           const unitLabel = group.unit?.label || (key === 'no-unit' ? 'No unit' : key);
-          // Show a red priority dot on the bundle header if any of its
-          // items is priority — useful so a collapsed bundle still
-          // signals urgency.
           const bundleHasPriority = group.items.some(t => t.priority);
+          // Build the bedroom → section breakdown for the expanded view.
+          const byBedroom = new Map(); // partyId -> { party, sections: { bedroom, vanity, bathroom, general } }
+          group.items.forEach(t => {
+            const pid = t.party_id || 'no-party';
+            if (!byBedroom.has(pid)) {
+              byBedroom.set(pid, {
+                party: t.party,
+                partyId: t.party_id,
+                items: [],
+                sectionItems: { bedroom: [], vanity: [], bathroom: [], general: [] },
+                hasPriority: false,
+              });
+            }
+            const b = byBedroom.get(pid);
+            b.items.push(t);
+            const sec = (t.template_section || '').toLowerCase();
+            if (b.sectionItems[sec]) b.sectionItems[sec].push(t);
+            if (t.priority) b.hasPriority = true;
+          });
+          const bedroomEntries = Array.from(byBedroom.entries()).sort((a, b) =>
+            naturalCompare(a[1].party?.label || '', b[1].party?.label || '')
+          );
           return (
             <div key={key} className="rounded-xl border-2 border-amber-200 bg-amber-50/40 overflow-hidden">
               <button onClick={() => toggleBundle(key)}
@@ -18017,7 +18189,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                   <Building2 size={16} className="text-amber-700 flex-shrink-0" />
                   <span className="font-serif text-base text-stone-900 truncate">{unitLabel}</span>
                   <span className="text-xs font-mono px-2 py-0.5 rounded-full bg-amber-600 text-white font-bold flex-shrink-0">
-                    {group.items.length}
+                    {bedroomCount} bedroom{bedroomCount === 1 ? '' : 's'}
                   </span>
                   {bundleHasPriority && <PriorityChip on={true} size="xs" />}
                 </div>
@@ -18025,22 +18197,78 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
               </button>
               {isOpen && (
                 <div className="px-3 pb-3 space-y-2 border-t border-amber-100 pt-3">
-                  {group.items.map(t => (
-                    <AssignmentCard key={t.id} target={t} busy={busy} propertyId={propertyId}
-                      onView={() => setOpened(t)}
-                      onStart={() => startAndGo(t)}
-                      onPause={() => updateStatus(t, 'paused')}
-              onMoveToPending={() => updateStatus(t, 'pending')}
-                      onDone={() => updateStatus(t, 'done')}
-                      onReopen={() => updateStatus(t, 'pending')}
-                      onBlocked={() => setStatusModal({ target: t })}
-                      onReassign={() => setReassignTarget(t)}
-                      onTogglePriority={togglePriority}
-              canMarkDone={can(employee, 'mark_assignments_done') || t.started_by === employee?.id}
-              currentEmployeeId={employee?.id}
-                onGoToBedroom={onGoToBedroom ? () => startAndGo(t) : null}
-                      onOpenBedroomHistory={onOpenBedroomHistory} />
-                  ))}
+                  {bedroomEntries.map(([pid, bed]) => {
+                    const bedroomKey = `${key}::${pid}`;
+                    const isBedOpen = !!bundleOpen[bedroomKey];
+                    const bedLabel = bed.party?.label || (pid === 'no-party' ? 'Unassigned' : pid);
+                    const sectionCounts = {
+                      bedroom: bed.sectionItems.bedroom.length,
+                      vanity: bed.sectionItems.vanity.length,
+                      bathroom: bed.sectionItems.bathroom.length,
+                      general: bed.sectionItems.general.length,
+                    };
+                    const sectionBits = [];
+                    if (sectionCounts.bedroom)  sectionBits.push(`Bedroom (${sectionCounts.bedroom})`);
+                    if (sectionCounts.vanity)   sectionBits.push(`Vanity (${sectionCounts.vanity})`);
+                    if (sectionCounts.bathroom) sectionBits.push(`Bathroom (${sectionCounts.bathroom})`);
+                    if (sectionCounts.general)  sectionBits.push(`General (${sectionCounts.general})`);
+                    return (
+                      <div key={pid} className="rounded-xl border border-stone-200 bg-white overflow-hidden">
+                        <button onClick={() => toggleBundle(bedroomKey)}
+                          className="w-full px-3 py-2.5 flex items-center justify-between hover:bg-stone-50 text-left">
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="font-serif text-sm text-stone-900">{bedLabel}</span>
+                              <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-stone-200 text-stone-700">
+                                {bed.items.length} {bed.items.length === 1 ? 'item' : 'items'}
+                              </span>
+                              {bed.hasPriority && <PriorityChip on={true} size="xs" />}
+                            </div>
+                            {sectionBits.length > 0 && (
+                              <div className="text-[11px] font-mono text-stone-500 mt-0.5">
+                                {sectionBits.join(' · ')}
+                              </div>
+                            )}
+                          </div>
+                          <ChevronRight size={14} className={`text-stone-500 flex-shrink-0 transition-transform ml-2 ${isBedOpen ? 'rotate-90' : ''}`} />
+                        </button>
+                        {isBedOpen && (
+                          <div className="px-2 pb-2 pt-1 space-y-2 border-t border-stone-100">
+                            {/* Within a bedroom, group items by section.
+                               Each section header is sticky-ish so the
+                               owner can quickly scan what's pending in
+                               Bedroom vs Bathroom vs General. */}
+                            {['bedroom','vanity','bathroom','general'].filter(sec => bed.sectionItems[sec].length > 0).map(sec => (
+                              <div key={sec}>
+                                <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1 px-1">
+                                  {sec === 'bedroom' ? 'Bedroom' : sec === 'vanity' ? 'Vanity' : sec === 'bathroom' ? 'Bathroom' : 'General'}
+                                  <span className="text-stone-400"> · {bed.sectionItems[sec].length}</span>
+                                </div>
+                                <div className="space-y-1.5">
+                                  {bed.sectionItems[sec].map(t => (
+                                    <AssignmentCard key={t.id} target={t} busy={busy} propertyId={propertyId}
+                                      onView={() => setOpened(t)}
+                                      onStart={() => startAndGo(t)}
+                                      onPause={() => updateStatus(t, 'paused')}
+                                      onMoveToPending={() => updateStatus(t, 'pending')}
+                                      onDone={() => updateStatus(t, 'done')}
+                                      onReopen={() => updateStatus(t, 'pending')}
+                                      onBlocked={() => setStatusModal({ target: t })}
+                                      onReassign={() => setReassignTarget(t)}
+                                      onTogglePriority={togglePriority}
+                                      canMarkDone={can(employee, 'mark_assignments_done') || t.started_by === employee?.id}
+                                      currentEmployeeId={employee?.id}
+                                      onGoToBedroom={onGoToBedroom ? () => startAndGo(t) : null}
+                                      onOpenBedroomHistory={onOpenBedroomHistory} />
+                                  ))}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </div>

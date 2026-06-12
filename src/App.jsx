@@ -14325,11 +14325,17 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
   }, [sheetFiles]);
 
   // Append new sheet files to the list. Filters out files already
-  // present by name+size so re-tapping the input doesn't duplicate.
-  const addSheetFiles = (newFiles) => {
+  // present by name+size so re-picking the input doesn't duplicate.
+  // Accepts a plain array — callers must snapshot the FileList from
+  // the input element BEFORE this runs because clearing input.value
+  // (which we do to allow re-picking the same file) also wipes
+  // input.files, and React state updates are async so the FileList
+  // would be empty by the time the setter reads from it.
+  const addSheetFiles = (files) => {
+    if (!files || files.length === 0) return;
     setSheetFiles(prev => {
       const existing = new Set(prev.map(f => `${f.name}-${f.size}`));
-      const additions = Array.from(newFiles).filter(f => !existing.has(`${f.name}-${f.size}`));
+      const additions = files.filter(f => !existing.has(`${f.name}-${f.size}`));
       return [...prev, ...additions];
     });
   };
@@ -14739,7 +14745,14 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
         {/* Dropzone — always shown, lets uploader add more */}
         <label className="block">
           <input type="file" accept="image/*,application/pdf" className="hidden" multiple
-            onChange={e => { addSheetFiles(e.target.files); e.target.value = ''; }} />
+            onChange={e => {
+              // Snapshot files into a plain array FIRST. Setting
+              // e.target.value below wipes e.target.files, so any
+              // async (React state) read of it would get nothing.
+              const snapshot = Array.from(e.target.files || []);
+              e.target.value = ''; // allow re-picking the same file later
+              addSheetFiles(snapshot);
+            }} />
           <div className="px-4 py-6 rounded-2xl border-2 border-dashed border-stone-300 text-center text-stone-600 hover:border-stone-500 cursor-pointer">
             <Camera size={24} className="mx-auto mb-2 text-stone-400" />
             <div className="font-medium text-sm">

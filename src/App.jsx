@@ -14922,7 +14922,6 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
           file_kind: bedroomSheet?.kind || null,
           assignment_type: cleaningType,
           active: true,
-          source: 'staff',
           uploaded_by: employee?.id || null,
           sheet_type: sheetType,
           template_set_id: templateSet?.id || null,
@@ -14933,9 +14932,12 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
         // set before sending. If a column is missing in the schema,
         // dropping it here prevents the "Could not find column" error.
         // Drop unit_id/party_id explicitly — those belong on
-        // assignment_targets, never on assignments itself.
+        // assignment_targets, never on assignments itself. Drop source
+        // because the CHECK constraint only accepts 'pm' (or NULL);
+        // staff-created assignments leave it unset (matches legacy).
         delete assignmentInsert.unit_id;
         delete assignmentInsert.party_id;
+        delete assignmentInsert.source;
         if (typeof console !== 'undefined') {
           console.log('[wizard] assignments insert payload keys:', Object.keys(assignmentInsert));
         }

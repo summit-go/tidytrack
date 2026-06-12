@@ -1676,6 +1676,11 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
   // checklist items. They tap items + Start to flip them to
   // in_progress. Reset when category changes.
   const [selectedTargetIds, setSelectedTargetIds] = useState(new Set());
+  // Top-level tab inside the picker. 'not_started' is the default —
+  // it's the "I want to start cleaning X" flow. 'active' shows
+  // what's already in progress at this bedroom so the cleaner can
+  // see the work-in-flight without leaving the picker.
+  const [pickerTab, setPickerTab] = useState('not_started'); // 'active' | 'not_started'
   // Active variant from the assigned checklist assignments at this
   // bedroom. Used to filter the General groups. Bathroom variant
   // follows the same rule but the legacy picker doesn't split
@@ -1758,11 +1763,12 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
   // For general with no subs, just "General"
   // Cleaner can override with customName for any of those.
 
-  const canSubmit = !!category && !busy && (
-    // Standard category submit is allowed any time a category is
-    // picked. Checklist mode also allows submit when targets are
-    // picked even without selectedSubs.
-    true
+  const canSubmit = !busy && (
+    // Either: a category is picked (Not-started flow with custom-name
+    // or section pick), OR target picks exist (Active-tab resume
+    // flow). The submit handler picks the right path based on which
+    // is set.
+    !!category || hasTargetPicks
   );
 
   const submit = async () => {
@@ -1818,21 +1824,147 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
 
   return (
     <div className="space-y-3">
+      {/* TABS — only show when checklist mode is on AND there's at
+         least one assigned item at this bedroom. Otherwise it's just
+         the legacy picker behavior with no tabs. Active tab counts
+         in_progress + paused + blocked (anything underway or
+         interrupted). Not-started counts pending only. */}
+      {checklistMode && checklistTargets.length > 0 && (() => {
+        const activeCount = checklistTargets.filter(t =>
+          t.status === 'in_progress' || t.status === 'paused' || t.status === 'blocked'
+        ).length;
+        const pendingCount = checklistTargets.filter(t => t.status === 'pending').length;
+        return (
+          <div className="flex gap-1 p-1 bg-stone-100 rounded-full">
+            <button type="button" onClick={() => setPickerTab('active')}
+              className={`flex-1 py-2 px-3 rounded-full text-xs font-medium transition-colors ${pickerTab === 'active' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-600'}`}>
+              Active {activeCount > 0 && <span className="ml-0.5 text-amber-700">({activeCount})</span>}
+            </button>
+            <button type="button" onClick={() => setPickerTab('not_started')}
+              className={`flex-1 py-2 px-3 rounded-full text-xs font-medium transition-colors ${pickerTab === 'not_started' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-600'}`}>
+              Not started {pendingCount > 0 && <span className="ml-0.5 text-amber-700">({pendingCount})</span>}
+            </button>
+          </div>
+        );
+      })()}
+
+      {/* ACTIVE TAB — flat list of in-progress / paused / blocked
+         items, grouped by section, with in_progress at the top and
+         paused / blocked below. Tapping an item opens the bulk
+         actions; multi-pick + Start re-flips paused→in_progress. */}
+      {checklistMode && checklistTargets.length > 0 && pickerTab === 'active' && (() => {
+        const activeItems = checklistTargets.filter(t =>
+          t.status === 'in_progress' || t.status === 'paused' || t.status === 'blocked'
+        );
+        if (activeItems.length === 0) {
+          return (
+            <div className="rounded-2xl bg-stone-50 border-2 border-dashed border-stone-200 p-6 text-center">
+              <div className="text-sm text-stone-500">Nothing is in progress yet.</div>
+              <div className="text-[10px] text-stone-400 mt-1">Switch to <span className="font-medium">Not started</span> to begin a section.</div>
+            </div>
+          );
+        }
+        // Group by section so cleaners see a clean Bedroom / Vanity /
+        // Bathroom / General layout. Within each section: in_progress
+        // first, then paused, then blocked.
+        const sectionOrder = ['bedroom', 'vanity', 'bathroom', 'general'];
+        const sectionLabels = { bedroom: 'Bedroom', vanity: 'Vanity', bathroom: 'Bathroom', general: 'General' };
+        const statusRank = { in_progress: 0, paused: 1, blocked: 2 };
+        const bySection = {};
+        activeItems.forEach(t => {
+          const sec = (t.template_section || '').toLowerCase();
+          if (!bySection[sec]) bySection[sec] = [];
+          bySection[sec].push(t);
+        });
+        Object.keys(bySection).forEach(sec => {
+          bySection[sec].sort((a, b) => (statusRank[a.status] ?? 99) - (statusRank[b.status] ?? 99));
+        });
+        return (
+          <div className="space-y-3">
+            {sectionOrder.filter(sec => bySection[sec]?.length).map(sec => (
+              <div key={sec}>
+                <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1.5 px-1">
+                  {sectionLabels[sec]} <span className="text-stone-400">· {bySection[sec].length}</span>
+                </div>
+                <div className="grid grid-cols-2 gap-1.5">
+                  {bySection[sec].map(t => {
+                    const checked = selectedTargetIds.has(t.id);
+                    const inProg = t.status === 'in_progress';
+                    const paused = t.status === 'paused';
+                    const blocked = t.status === 'blocked';
+                    const statusChip = inProg ? { label: 'In progress', cls: 'bg-amber-100 text-amber-800 border-amber-300' }
+                      : paused ? { label: 'Paused', cls: 'bg-blue-100 text-blue-800 border-blue-300' }
+                      : blocked ? { label: 'Blocked', cls: 'bg-red-100 text-red-800 border-red-300' }
+                      : null;
+                    return (
+                      <button key={t.id} type="button" onClick={() => toggleTarget(t.id)}
+                        className={`flex items-start gap-2 px-3 py-2.5 rounded-xl border-2 text-left transition-all ${checked ? 'border-amber-600 bg-amber-50' : 'border-stone-200 bg-white hover:border-stone-400'}`}>
+                        <div className={`mt-0.5 w-4 h-4 rounded border-2 flex-shrink-0 flex items-center justify-center ${checked ? 'border-amber-600 bg-amber-600' : 'border-stone-300'}`}>
+                          {checked && <Check size={11} className="text-white" />}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="text-sm text-stone-900 mb-0.5">{labelForTarget(t)}</div>
+                          {statusChip && (
+                            <span className={`inline-block text-[9px] uppercase tracking-wider font-mono px-1.5 py-0.5 rounded-full border ${statusChip.cls}`}>
+                              {statusChip.label}
+                            </span>
+                          )}
+                          {t.priority && (
+                            <span className="ml-1 inline-block text-[9px] uppercase tracking-wider font-mono px-1.5 py-0.5 rounded-full bg-red-50 border border-red-200 text-red-700 font-bold">
+                              Priority
+                            </span>
+                          )}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+          </div>
+        );
+      })()}
+
+      {/* NOT-STARTED TAB — the existing category buttons + items panel.
+         Renders when (a) we're not in checklist mode (legacy free-form
+         picker), or (b) we ARE in checklist mode and the tab is
+         not_started. */}
+      {(!checklistMode || checklistTargets.length === 0 || pickerTab === 'not_started') && (
       <div>
         <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Pick a category</label>
         <div className="grid grid-cols-4 gap-2">
-          {TASK_CATEGORIES.map(c => (
-            <button key={c.id} type="button" onClick={() => {
-              setCategory(c.id);
-              setSelectedSubs(new Set());
-              setSelectedTargetIds(new Set());
-            }}
-              className={`py-3 px-2 rounded-xl border-2 font-medium text-sm transition-all ${category === c.id ? 'border-stone-900 bg-stone-900 text-stone-50' : 'border-stone-200 bg-white text-stone-700 hover:border-stone-400'}`}>
-              {c.label}
-            </button>
-          ))}
+          {(() => {
+            // Compute counts inline so the button row reads them
+            // directly. The loader excludes done items, so anything
+            // in checklistTargets is "needs work".
+            const counts = { bedroom: 0, vanity: 0, bathroom: 0, general: 0 };
+            checklistTargets.forEach(t => {
+              const sec = (t.template_section || '').toLowerCase();
+              if (sec in counts && t.status === 'pending') counts[sec] += 1;
+            });
+            return TASK_CATEGORIES.map(c => {
+              const n = counts[c.id] || 0;
+              const inChecklist = checklistMode && checklistTargets.length > 0;
+              return (
+                <button key={c.id} type="button" onClick={() => {
+                  setCategory(c.id);
+                  setSelectedSubs(new Set());
+                  setSelectedTargetIds(new Set());
+                }}
+                  className={`py-3 px-2 rounded-xl border-2 font-medium text-sm transition-all flex flex-col items-center gap-0.5 ${category === c.id ? 'border-stone-900 bg-stone-900 text-stone-50' : 'border-stone-200 bg-white text-stone-700 hover:border-stone-400'}`}>
+                  <span>{c.label}</span>
+                  {inChecklist && (
+                    <span className={`text-[10px] font-mono ${category === c.id ? 'text-stone-300' : n === 0 ? 'text-stone-400' : 'text-amber-700'}`}>
+                      ({n})
+                    </span>
+                  )}
+                </button>
+              );
+            });
+          })()}
         </div>
       </div>
+      )}
 
       {/* CHECKLIST-ITEM PANEL — when bedroom context is set AND we
          have active checklist targets in the picked category, show
@@ -1840,15 +1972,47 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
          items + Start to advance those targets and create a linked
          task. The legacy picker (custom-name + variant groups)
          remains below for ad-hoc tasks. */}
-      {checklistMode && category && (() => {
-        // Filter targets to this section. For General we ALSO filter
-        // by the assigned general_variant — this satisfies the
-        // "only show items assigned to this bedroom" requirement.
+      {checklistMode && category && (!checklistMode || checklistTargets.length === 0 || pickerTab === 'not_started') && (() => {
+        // In the Not-started tab we show ONLY pending items (the cleaner
+        // hasn't begun them yet). Active/paused/blocked items live in
+        // the Active tab. This keeps the two tabs cleanly separated.
         const sectionTargets = checklistTargets.filter(t => {
           if ((t.template_section || '').toLowerCase() !== category) return false;
+          if (t.status !== 'pending') return false;
           return true;
         });
-        if (sectionTargets.length === 0) return null;
+        // If there are no targets at all for this section but the
+        // bedroom IS in checklist mode, show a friendly notice instead
+        // of silently rendering nothing. Lets the cleaner know they
+        // can still create an ad-hoc task or move on to another
+        // section.
+        if (sectionTargets.length === 0) {
+          // Only show the "nothing to do" notice when there's at least
+          // ONE assignment at this bedroom — otherwise the picker is
+          // in pure ad-hoc mode and the legacy subgrid covers it.
+          if (checklistTargets.length === 0) return null;
+          return (
+            <div className="rounded-2xl bg-stone-50 border-2 border-dashed border-stone-200 p-3 text-center">
+              <div className="text-xs text-stone-500">
+                Nothing assigned in <span className="font-medium text-stone-700">{TASK_CATEGORIES.find(c => c.id === category)?.label || category}</span> for this bedroom.
+              </div>
+              <div className="text-[10px] text-stone-400 mt-1">
+                You can still add a custom task with the input below.
+              </div>
+            </div>
+          );
+        }
+        const allDone = sectionTargets.every(t => t.status === 'done');
+        if (allDone) {
+          return (
+            <div className="rounded-2xl bg-emerald-50 border-2 border-emerald-200 p-3 text-center">
+              <Check size={18} className="inline text-emerald-700 mb-1" />
+              <div className="text-xs text-emerald-800 font-medium">
+                All {TASK_CATEGORIES.find(c => c.id === category)?.label} items are done.
+              </div>
+            </div>
+          );
+        }
         // Group by parent assignment for context (sheet type / variant)
         const byAssignment = new Map();
         sectionTargets.forEach(t => {
@@ -1860,20 +2024,31 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
           <div className="rounded-2xl bg-emerald-50 border-2 border-emerald-200 p-3">
             <div className="flex items-center gap-2 mb-2">
               <FileText size={14} className="text-emerald-700 flex-shrink-0" />
-              <span className="text-[11px] uppercase tracking-wider font-mono text-emerald-800 font-bold">
-                Pick what you're cleaning right now
+              <span className="text-[11px] uppercase tracking-wider font-mono text-emerald-800 font-bold flex-1">
+                Check off what you're cleaning
+              </span>
+              <span className="text-[10px] font-mono text-emerald-700">
+                {sectionTargets.filter(t => t.status !== 'done').length} left
               </span>
             </div>
             <div className="space-y-2.5">
               {Array.from(byAssignment.values()).map(group => (
                 <div key={group.assignment.id}>
-                  <div className="text-[10px] uppercase tracking-wider font-mono text-emerald-700 mb-1 px-1">
-                    {group.assignment.sheet_type === 'cleaning_check' ? 'Cleaning check' : 'Move-out clean'}
-                    {category === 'general' && group.assignment.general_variant && (
-                      <span className="ml-1 normal-case text-stone-500">· variant {group.assignment.general_variant.toUpperCase()}</span>
-                    )}
-                  </div>
-                  <div className="grid grid-cols-1 gap-1.5">
+                  {/* Only show the parent-assignment subheader when
+                     there are MULTIPLE assignments contributing items
+                     to this section (e.g. cleaning_check + move_out
+                     both active). With a single parent it's just
+                     noise — the section button up top already says
+                     "Bedroom" or whatever. */}
+                  {byAssignment.size > 1 && (
+                    <div className="text-[10px] uppercase tracking-wider font-mono text-emerald-700 mb-1 px-1">
+                      {group.assignment.sheet_type === 'cleaning_check' ? 'Cleaning check' : 'Move-out clean'}
+                      {category === 'general' && group.assignment.general_variant && (
+                        <span className="ml-1 normal-case text-stone-500">· variant {group.assignment.general_variant.toUpperCase()}</span>
+                      )}
+                    </div>
+                  )}
+                  <div className="grid grid-cols-2 gap-1.5">
                     {group.items.map(t => {
                       const checked = selectedTargetIds.has(t.id);
                       const inProg = t.status === 'in_progress';
@@ -1911,19 +2086,21 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
                 </div>
               ))}
             </div>
-            <div className="mt-2 text-[10px] font-mono text-emerald-800">
-              Don't see what you're cleaning? Use the options below for a custom task.
-            </div>
           </div>
         );
       })()}
 
-      {isGeneral && cat.subcategories && (
+      {/* Legacy variant subgrid — appears ONLY when there's no
+         checklist context for General (either not in checklist mode,
+         or no general_variant assigned). Removed when checklist mode
+         is active for this section so the cleaner sees a single
+         clean list, not the emerald panel + a redundant variant
+         picker below it. Also hidden in the Active tab — that tab is
+         for status review, not starting new work. */}
+      {(!checklistMode || checklistTargets.length === 0 || pickerTab === 'not_started') && isGeneral && cat.subcategories && !(checklistMode && checklistTargets.some(t => (t.template_section || '').toLowerCase() === 'general')) && (
         <div>
           <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">
-            {checklistMode && checklistTargets.some(t => (t.template_section || '').toLowerCase() === 'general')
-              ? 'Or pick a custom area'
-              : <>Pick one or more areas {selectedSubs.size > 1 && <span className="normal-case text-amber-700">· creates 1 combined task</span>}</>}
+            Pick one or more areas {selectedSubs.size > 1 && <span className="normal-case text-amber-700">· creates 1 combined task</span>}
           </label>
           {/* Render items grouped by their A/B/C/D group — mirrors
              the upload wizard's General variant structure so cleaners
@@ -1972,7 +2149,7 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
         </div>
       )}
 
-      {category && (
+      {(!checklistMode || checklistTargets.length === 0 || pickerTab === 'not_started') && category && (
         <div>
           <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">
             Custom name <span className="normal-case text-stone-400">(optional)</span>
@@ -1993,12 +2170,19 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
           className="flex-1 py-3 rounded-xl bg-stone-900 text-stone-50 font-medium text-sm disabled:opacity-50 flex items-center justify-center gap-1.5">
           <Play size={14} />
           {hasTargetPicks
-            ? `Start work · ${selectedTargetIds.size} item${selectedTargetIds.size === 1 ? '' : 's'}`
+            ? (() => {
+                // If every picked target is currently paused, this is
+                // a Resume action. Mixed or pending → Start.
+                const pickedRows = checklistTargets.filter(t => selectedTargetIds.has(t.id));
+                const allPaused = pickedRows.length > 0 && pickedRows.every(t => t.status === 'paused');
+                const verb = allPaused ? 'Resume' : 'Start';
+                return `${verb} · ${selectedTargetIds.size} item${selectedTargetIds.size === 1 ? '' : 's'}`;
+              })()
             : isGeneral && selectedSubs.size > 1
               ? `Start 1 task (${selectedSubs.size} areas)`
               : 'Start task'}
         </button>
-        {category && (
+        {(category || hasTargetPicks) && (
           <button onClick={reset} disabled={busy} type="button"
             className="px-4 py-3 rounded-xl border border-stone-300 text-stone-700 font-medium text-sm disabled:opacity-50">
             Clear
@@ -4230,19 +4414,31 @@ function PropertyPicker({ onPick, onCancel, busy, title, subtitle, viewOnly = fa
 
   useEffect(() => { (async () => {
     // Load active properties AND open assignment counts in parallel.
-    // "Open" = status != 'done', so the cleaner still has something to do.
+    // The count is **unique bedrooms** with open work, not the raw
+    // assignment_target row count. One bedroom can have 20 items but
+    // it's still ONE bedroom that needs cleaning — that's the number
+    // the cleaner cares about ("which apartments have work?"), not
+    // the item-level total.
     const [propsRes, targetsRes] = await Promise.all([
       supabase.from('customers').select('*').eq('active', true).order('name'),
       supabase.from('assignment_targets')
-        .select('status, assignment:assignments!inner(customer_id, active)')
+        .select('unit_id, party_id, status, assignment:assignments!inner(customer_id, active)')
         .neq('status', 'done'),
     ]);
     const counts = {};
+    const seenBedrooms = new Set();
     (targetsRes.data || []).forEach(t => {
       const a = t.assignment;
       if (!a || a.active === false) return;
       const cid = a.customer_id;
       if (!cid) return;
+      // Bedroom identity = (unit_id, party_id). Property-wide
+      // assignments (both null) count as one "bedroom" per property
+      // since they represent work that isn't scoped to a specific
+      // bedroom but is still real work to do.
+      const key = `${cid}::${t.unit_id || ''}::${t.party_id || ''}`;
+      if (seenBedrooms.has(key)) return;
+      seenBedrooms.add(key);
       counts[cid] = (counts[cid] || 0) + 1;
     });
     setProperties(propsRes.data || []);
@@ -4277,7 +4473,7 @@ function PropertyPicker({ onPick, onCancel, busy, title, subtitle, viewOnly = fa
             )}
             {(assignmentCounts[p.id] || 0) > 0 && (
               <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-amber-600 text-white flex items-center gap-1 font-bold">
-                <FileText size={10} /> {assignmentCounts[p.id]} assignment{assignmentCounts[p.id] === 1 ? '' : 's'}
+                <FileText size={10} /> {assignmentCounts[p.id]} bedroom{assignmentCounts[p.id] === 1 ? '' : 's'} to clean
               </span>
             )}
           </div>
@@ -4556,19 +4752,53 @@ function UnitPicker({ property, onPick, onBack, busy, title = "Pick a unit" }) {
   const [units, setUnits] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [search, setSearch] = useState('');
+  // Per-unit bedroom counts: how many bedrooms (party_ids) within
+  // this apartment still have open assignment items. Lets the
+  // cleaner spot at a glance which apartments need work and how
+  // much, without drilling in.
+  const [bedroomCounts, setBedroomCounts] = useState({}); // { unit_id: number }
   useEffect(() => { (async () => {
-    const { data } = await supabase.from('units').select('*')
-      .eq('customer_id', property.id).eq('active', true)
-      .order('sort_order').order('label');
+    const [unitsRes, targetsRes] = await Promise.all([
+      supabase.from('units').select('*')
+        .eq('customer_id', property.id).eq('active', true)
+        .order('sort_order').order('label'),
+      supabase.from('assignment_targets')
+        .select('unit_id, party_id, status, assignment:assignments!inner(customer_id, active)')
+        .neq('status', 'done'),
+    ]);
     // Apply natural sort client-side so '10-101' comes after '9-101'
-    const sorted = (data || []).slice().sort((a, b) => naturalCompare(a.label, b.label));
-    setUnits(sorted); setLoaded(true);
+    const sorted = (unitsRes.data || []).slice().sort((a, b) => naturalCompare(a.label, b.label));
+    // Count unique (party_id) bedrooms per unit — scoped to THIS
+    // property and to active assignments. unit_id can be null when
+    // an assignment is property-wide; those don't apply to any one
+    // unit so we skip them here.
+    const counts = {};
+    const seen = new Set();
+    (targetsRes.data || []).forEach(t => {
+      const a = t.assignment;
+      if (!a || a.active === false) return;
+      if (a.customer_id !== property.id) return;
+      if (!t.unit_id) return;
+      const key = `${t.unit_id}::${t.party_id || ''}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      counts[t.unit_id] = (counts[t.unit_id] || 0) + 1;
+    });
+    setUnits(sorted); setBedroomCounts(counts); setLoaded(true);
   })(); }, [property.id]);
 
   const q = search.trim().toLowerCase();
-  const filtered = q
+  const filtered = (q
     ? units.filter(u => u.label.toLowerCase().includes(q) || (u.notes || '').toLowerCase().includes(q))
-    : units;
+    : units
+  ).slice().sort((a, b) => {
+    // Apartments with open work jump to the top so the cleaner sees
+    // them first. Within each bucket keep the natural sort by label.
+    const aHas = (bedroomCounts[a.id] || 0) > 0 ? 1 : 0;
+    const bHas = (bedroomCounts[b.id] || 0) > 0 ? 1 : 0;
+    if (aHas !== bHas) return bHas - aHas;
+    return naturalCompare(a.label, b.label);
+  });
 
   return (
     <div className="min-h-screen bg-stone-50 flex flex-col">
@@ -4607,18 +4837,28 @@ function UnitPicker({ property, onPick, onBack, busy, title = "Pick a unit" }) {
           </div>
         ) : (
           <div className="space-y-2">
-            {filtered.map(u => (
-              <button key={u.id} onClick={() => onPick(u)} disabled={busy}
-                className="w-full text-left p-4 rounded-2xl bg-white border-2 border-stone-200 hover:border-stone-900 active:scale-98 transition-all disabled:opacity-50">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <div className="font-serif text-lg text-stone-900">{u.label}</div>
-                    {u.notes && <div className="text-xs text-stone-500 mt-1">{u.notes}</div>}
+            {filtered.map(u => {
+              const n = bedroomCounts[u.id] || 0;
+              return (
+                <button key={u.id} onClick={() => onPick(u)} disabled={busy}
+                  className="w-full text-left p-4 rounded-2xl bg-white border-2 border-stone-200 hover:border-stone-900 active:scale-98 transition-all disabled:opacity-50">
+                  <div className="flex items-center justify-between">
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="font-serif text-lg text-stone-900">{u.label}</span>
+                        {n > 0 && (
+                          <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-amber-600 text-white font-bold flex items-center gap-1">
+                            <FileText size={10} /> {n} bedroom{n === 1 ? '' : 's'} to clean
+                          </span>
+                        )}
+                      </div>
+                      {u.notes && <div className="text-xs text-stone-500 mt-1">{u.notes}</div>}
+                    </div>
+                    <ChevronRight size={16} className="text-stone-400" />
                   </div>
-                  <ChevronRight size={16} className="text-stone-400" />
-                </div>
-              </button>
-            ))}
+                </button>
+              );
+            })}
           </div>
         )}
       </div>
@@ -9396,15 +9636,24 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
     const [propsRes, targetsRes] = await Promise.all([
       supabase.from('customers').select('*').eq('active', true).order('name'),
       supabase.from('assignment_targets')
-        .select('status, assignment:assignments!inner(customer_id, active)')
+        .select('unit_id, party_id, status, assignment:assignments!inner(customer_id, active)')
         .neq('status', 'done'),
     ]);
+    // Count unique (unit_id, party_id) bedrooms per customer rather
+    // than raw item rows. A 4-bedroom apartment with 80 items shows
+    // as 4, not 80 — the count answers "how many bedrooms still need
+    // cleaning", which is what the owner actually wants to know at a
+    // glance.
     const counts = {};
+    const seenBedrooms = new Set();
     (targetsRes.data || []).forEach(t => {
       const a = t.assignment;
       if (!a || a.active === false) return;
       const cid = a.customer_id;
       if (!cid) return;
+      const key = `${cid}::${t.unit_id || ''}::${t.party_id || ''}`;
+      if (seenBedrooms.has(key)) return;
+      seenBedrooms.add(key);
       counts[cid] = (counts[cid] || 0) + 1;
     });
     setProperties(propsRes.data || []);
@@ -9467,7 +9716,7 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
             )}
             {(assignmentCounts[p.id] || 0) > 0 && (
               <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-amber-600 text-white font-bold flex items-center gap-1">
-                <FileText size={10} /> {assignmentCounts[p.id]} open
+                <FileText size={10} /> {assignmentCounts[p.id]} bedroom{assignmentCounts[p.id] === 1 ? '' : 's'} to clean
               </span>
             )}
           </div>

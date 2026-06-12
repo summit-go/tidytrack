@@ -14916,7 +14916,6 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
           || (sheetType === 'cleaning_check' ? 'cleaning_check' : 'move_out_check');
         const assignmentInsert = {
           customer_id: property.id,
-          unit_id: partyUnit?.id || null,
           title: `${titleBase} · ${partyUnit?.label || ''}${party?.label ? ' · ' + party.label : ''}`.trim(),
           notes: null,
           file_url: bedroomSheet?.url || null,
@@ -14924,7 +14923,7 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
           assignment_type: cleaningType,
           active: true,
           source: 'staff',
-          uploader_employee_id: employee?.id || null,
+          uploaded_by: employee?.id || null,
           sheet_type: sheetType,
           template_set_id: templateSet?.id || null,
           bathroom_variant: c.bathroomVariant || null,

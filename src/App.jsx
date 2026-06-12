@@ -14850,8 +14850,8 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
 
   // -- Main render ------------------------------------------------------
   return (
-    <div className="min-h-screen bg-stone-50 pb-32">
-      <div className="px-5 py-4 border-b border-stone-200 bg-white sticky top-0 z-10">
+    <div className="fixed inset-0 bg-stone-50 z-50 flex flex-col">
+      <div className="px-5 py-4 border-b border-stone-200 bg-white flex-shrink-0">
         <div className="flex items-center gap-3 mb-3">
           <button onClick={() => { if (step > 0) setStep(step - 1); else onCancel(); }}
             className="p-2 -ml-2 rounded-full hover:bg-stone-100">
@@ -14865,7 +14865,11 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
         <ProgressBar steps={stepLabels} currentStep={step} complete={submitted} />
       </div>
 
-      <div className="px-5 py-5">
+      {/* Scrollable content area. flex-1 takes remaining height between
+         the header and the action bar — the page itself doesn't scroll,
+         only this region does, so the Next button stays parked at the
+         bottom regardless of how tall step content gets. */}
+      <div className="flex-1 overflow-y-auto px-5 py-5">
         {step === 0 && renderSheetUpload()}
         {step === 1 && renderUnitPicker()}
         {step === 2 && renderSheetTypePicker()}
@@ -14903,8 +14907,10 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
         )}
       </div>
 
-      {/* Sticky action bar */}
-      <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-stone-200 px-5 py-3 flex gap-2">
+      {/* Action bar — last child of the flex column, so it parks at
+         the bottom of the wizard overlay. No `fixed` positioning
+         needed since the wizard itself is fullscreen. */}
+      <div className="bg-white border-t border-stone-200 px-5 py-3 flex gap-2 flex-shrink-0">
         {step > 0 && !submitted && (
           <button onClick={() => setStep(step - 1)} disabled={busy}
             className="px-4 py-3 rounded-xl border-2 border-stone-300 text-stone-700 text-sm font-medium disabled:opacity-50">

@@ -14183,7 +14183,7 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
             <div className="font-serif text-lg text-stone-900 font-bold">Whole property</div>
           )}
         </div>
-        <div className="flex items-center gap-1.5 flex-shrink-0 flex-wrap justify-start sm:justify-end sm:max-w-[60%]">
+        <div className="flex items-center gap-1.5 flex-shrink-0 flex-wrap justify-end sm:max-w-[60%]">
           {/* Priority toggle (gray ↔ red) when parent passes it; else
              read-only chip. */}
           {!isDone && onTogglePriority ? (

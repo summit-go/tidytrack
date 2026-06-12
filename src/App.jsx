@@ -12,7 +12,7 @@ import {
 // =================================================================
 // 🔧 PASTE YOUR SUPABASE KEYS HERE
 // =================================================================
-const SUPABASE_URL = "https://bbaynvqnbkjyqhzhhypr.supabase.co/";
+const SUPABASE_URL = "PASTE_Yhttps://bbaynvqnbkjyqhzhhypr.supabase.co/";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJiYXludnFuYmtqeXFoemhoeXByIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc0NzQ2MTMsImV4cCI6MjA5MzA1MDYxM30.ZXUoHFj_IwMe6rX8RxK8Dj4kAB9AS7X9xZAhQ84wDEk";
 
 // =================================================================
@@ -21,7 +21,7 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 // and restrict to the Cloud Translation API only.
 // If empty, the Translate button is hidden.
 // =================================================================
-const GOOGLE_TRANSLATE_API_KEY = "AIzaSyD7ceHPryMzs45hWJOyFNBxtOzQOEmJcSA";
+const GOOGLE_TRANSLATE_API_KEY = "PASTE_YOUR_GOAIzaSyD7ceHPryMzs45hWJOyFNBxtOzQOEmJcSA";
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 const PHOTO_BUCKET = 'task-photos';
@@ -569,6 +569,18 @@ function buildingFromLabel(label) {
   return m ? m[1] : null;
 }
 
+// Pull the floor number out of an apartment label. The first digit of
+// the apartment portion is the floor (101 → 1, 204 → 2, 305 → 3).
+// Returns null if no apartment number is detected.
+function floorFromLabel(label) {
+  if (!label) return null;
+  // Match the apartment number portion — everything after the building
+  // prefix (e.g. "B1-101" → "101", or just "101" if no prefix).
+  const m = String(label).match(/(\d{3,})/);
+  if (!m) return null;
+  return parseInt(m[1].charAt(0), 10);
+}
+
 const sessionStore = {
   async get() {
     try { const v = localStorage.getItem('tidytrack_session'); return v ? JSON.parse(v) : null; }
@@ -954,6 +966,7 @@ const canSeeMoney = (e) => isOwner(e) || can(e, 'view_pay_info'); // managers se
 const CAPABILITIES = [
   { key: 'upload_assignments',       label: 'Upload assignments',         hint: 'Create assignments and upload PDFs or photos for cleaners.' },
   { key: 'approve_pm_assignments',   label: 'Approve PM assignments',     hint: 'Accept or reject assignments submitted by property managers.' },
+  { key: 'mark_assignments_done',    label: 'Mark any assignment done',   hint: 'Mark assignments complete even when they did not personally work on them. Without this, an employee can only mark Done on assignments they started.' },
   { key: 'edit_shift_times',         label: 'Edit shift times',           hint: 'Manually adjust clock-in/out and work block times.' },
   { key: 'view_pay_info',            label: 'View pay info',              hint: 'See bill rates, money amounts, and invoices.' },
   { key: 'manage_units',             label: 'Manage units & properties',  hint: 'Add or edit units, parties, properties, and bulk imports.' },
@@ -2846,7 +2859,7 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
           </button>
           <button onClick={onFinish} disabled={busy}
             className="px-4 py-2 rounded-full bg-amber-700 text-stone-50 text-sm font-medium flex items-center gap-2 active:scale-95 transition-transform disabled:opacity-50">
-            <Check size={14} /> Done with this party
+            <Check size={14} /> Finish this bedroom
           </button>
         </div>
         <div className="text-xs uppercase tracking-widest text-stone-400 font-mono">Working on</div>
@@ -3904,6 +3917,9 @@ function PhotoModal({ kind, taskName, existing, onUpload, onSaveNote, onClose })
   const [noteDraft, setNoteDraft] = useState('');
   const [savingNote, setSavingNote] = useState(false);
   const [noteSaved, setNoteSaved] = useState(false);
+  // When the cleaner taps an existing photo in the grid, open the
+  // full-screen zoom viewer so they can inspect detail + read notes.
+  const [zoomPhoto, setZoomPhoto] = useState(null);
   const inputRef = useRef(null);
   const existingPhotos = Array.isArray(existing) ? existing : [];
 
@@ -3966,8 +3982,12 @@ function PhotoModal({ kind, taskName, existing, onUpload, onSaveNote, onClose })
           {existingPhotos.length > 0 && (
             <div className="grid grid-cols-2 gap-2 mb-4">
               {existingPhotos.map(p => (
-                <img key={p.id} src={p.public_url} alt="" loading="lazy"
-                  className="w-full aspect-square object-cover rounded-xl" />
+                <button key={p.id} type="button"
+                  onClick={() => setZoomPhoto(p)}
+                  className="block aspect-square rounded-xl overflow-hidden active:opacity-80 transition-opacity">
+                  <img src={p.public_url} alt="" loading="lazy"
+                    className="w-full h-full object-cover" />
+                </button>
               ))}
             </div>
           )}
@@ -4032,6 +4052,12 @@ function PhotoModal({ kind, taskName, existing, onUpload, onSaveNote, onClose })
           </button>
         </div>
       </div>
+      {/* Tap any existing photo to zoom and inspect detail. The zoom
+         viewer also surfaces the photo's note (when present). */}
+      {zoomPhoto && (
+        <PhotoZoomViewer photos={existingPhotos} initialUrl={zoomPhoto.public_url}
+          onClose={() => setZoomPhoto(null)} />
+      )}
     </div>
   );
 }
@@ -12907,38 +12933,74 @@ function AssignmentList({ property, employee, onBack, onNew, onOpen }) {
                     <ChevronRight size={14} className={`text-stone-500 flex-shrink-0 transition-transform ${isCollapsed ? '' : 'rotate-90'}`} />
                   </button>
                   {!isCollapsed && (
-                    <div className="p-3 space-y-2">
-                      {unitKeys.map(unitKey => {
-                        const assignmentsInUnit = unitsInBuilding[unitKey];
-                        // Single assignment in this unit — render plain.
-                        if (assignmentsInUnit.length === 1) {
-                          return renderAssignmentRow(assignmentsInUnit[0]);
+                    <div className="p-3 space-y-3">
+                      {(() => {
+                        // Sub-group by floor (first digit of apt number)
+                        // so the owner sees Floor 1 → Floor 2 → Floor 3
+                        // sections within each building.
+                        const byFloor = {};
+                        unitKeys.forEach(uk => {
+                          const f = floorFromLabel(uk);
+                          const fk = f != null ? String(f) : '—';
+                          if (!byFloor[fk]) byFloor[fk] = [];
+                          byFloor[fk].push(uk);
+                        });
+                        const floorKeys = Object.keys(byFloor).sort((a, b) => {
+                          if (a === '—') return 1;
+                          if (b === '—') return -1;
+                          return parseInt(a, 10) - parseInt(b, 10);
+                        });
+                        const showFloorHeaders = floorKeys.length > 1;
+                        const renderUnitKey = (unitKey) => {
+                          const assignmentsInUnit = unitsInBuilding[unitKey];
+                          // Single assignment in this unit — render plain.
+                          if (assignmentsInUnit.length === 1) {
+                            return renderAssignmentRow(assignmentsInUnit[0]);
+                          }
+                          // Multiple — render as a dropdown labeled with apt + count.
+                          const apartmentKey = `${buildingKey}::${unitKey}`;
+                          const isOpen = !!openApartments[apartmentKey];
+                          const unitHasPriority = assignmentsInUnit.some(a => a.hasPriority && !a.allDone);
+                          return (
+                            <div key={unitKey} className="rounded-xl border border-amber-200 bg-amber-50/30 overflow-hidden">
+                              <button onClick={() => toggleApartment(apartmentKey)}
+                                className="w-full px-3 py-2 flex items-center justify-between hover:bg-amber-50">
+                                <div className="flex items-center gap-2 min-w-0">
+                                  <span className="font-mono text-sm text-stone-800 truncate">{unitKey}</span>
+                                  <span className="text-xs font-mono px-2 py-0.5 rounded-full bg-amber-600 text-white font-bold flex-shrink-0">
+                                    {assignmentsInUnit.length}
+                                  </span>
+                                  <PriorityChip on={unitHasPriority} size="xs" />
+                                </div>
+                                <ChevronRight size={14} className={`text-amber-700 flex-shrink-0 transition-transform ${isOpen ? 'rotate-90' : ''}`} />
+                              </button>
+                              {isOpen && (
+                                <div className="px-2 pb-2 pt-1 space-y-2 border-t border-amber-100">
+                                  {assignmentsInUnit.map(a => renderAssignmentRow(a))}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        };
+                        if (!showFloorHeaders) {
+                          // Single-floor building — no floor headers, just the apartments
+                          return unitKeys.map(renderUnitKey);
                         }
-                        // Multiple — render as a dropdown labeled with apt + count.
-                        const apartmentKey = `${buildingKey}::${unitKey}`;
-                        const isOpen = !!openApartments[apartmentKey];
-                        const unitHasPriority = assignmentsInUnit.some(a => a.hasPriority && !a.allDone);
-                        return (
-                          <div key={unitKey} className="rounded-xl border border-amber-200 bg-amber-50/30 overflow-hidden">
-                            <button onClick={() => toggleApartment(apartmentKey)}
-                              className="w-full px-3 py-2 flex items-center justify-between hover:bg-amber-50">
-                              <div className="flex items-center gap-2 min-w-0">
-                                <span className="font-mono text-sm text-stone-800 truncate">{unitKey}</span>
-                                <span className="text-xs font-mono px-2 py-0.5 rounded-full bg-amber-600 text-white font-bold flex-shrink-0">
-                                  {assignmentsInUnit.length}
-                                </span>
-                                <PriorityChip on={unitHasPriority} size="xs" />
-                              </div>
-                              <ChevronRight size={14} className={`text-amber-700 flex-shrink-0 transition-transform ${isOpen ? 'rotate-90' : ''}`} />
-                            </button>
-                            {isOpen && (
-                              <div className="px-2 pb-2 pt-1 space-y-2 border-t border-amber-100">
-                                {assignmentsInUnit.map(a => renderAssignmentRow(a))}
-                              </div>
-                            )}
+                        return floorKeys.map(fk => (
+                          <div key={fk}>
+                            <div className="flex items-center gap-2 mb-1.5 px-1">
+                              <span className="text-[10px] uppercase tracking-wider font-mono text-stone-500 font-bold">
+                                {fk === '—' ? 'Other' : `Floor ${fk}`}
+                              </span>
+                              <span className="text-[10px] font-mono text-stone-400">({byFloor[fk].length})</span>
+                              <div className="flex-1 h-px bg-stone-200" />
+                            </div>
+                            <div className="space-y-2">
+                              {byFloor[fk].map(renderUnitKey)}
+                            </div>
                           </div>
-                        );
-                      })}
+                        ));
+                      })()}
                     </div>
                   )}
                 </div>
@@ -13822,6 +13884,42 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
   useAssignmentSync(load, 'asgn-banner');
 
   const updateStatus = async (target, newStatus, statusNotes) => {
+    // Snapshot of values used for both the optimistic update AND the DB
+    // patch. By computing them up front we avoid a race where the user
+    // double-taps and the second click captures a stale target.
+    const completedNow = newStatus === 'done' ? new Date().toISOString() : null;
+    const startedNow = (newStatus === 'in_progress' && !target.started_at)
+      ? new Date().toISOString() : null;
+    const wasDone = target.status === 'done';
+
+    // OPTIMISTIC UPDATE — flip the local UI immediately so the cleaner
+    // never sees a "click did nothing" gap. The DB write below makes it
+    // durable; realtime sync corrects any divergence. Done is a hard
+    // commit: nothing in this code path can put it back to pending /
+    // paused / in_progress without an explicit user action.
+    setTargets(prev => prev.map(t => {
+      if (t.id !== target.id) return t;
+      const next = { ...t, status: newStatus };
+      if (newStatus === 'in_progress') {
+        if (!t.started_at) next.started_at = startedNow;
+        next.started_by = employee?.id || null;
+      }
+      if (newStatus === 'done') {
+        next.completed_at = completedNow;
+        next.completed_by = employee?.id || null;
+      } else if (wasDone) {
+        // Re-opening a done assignment wipes completion
+        next.completed_at = null;
+        next.completed_by = null;
+      }
+      if (newStatus === 'pending' && (t.status === 'paused' || t.status === 'in_progress' || t.status === 'blocked')) {
+        next.started_at = null;
+        next.started_by = null;
+      }
+      if (statusNotes !== undefined) next.status_notes = statusNotes || null;
+      return next;
+    }));
+
     setBusy(true);
     // Auto-handoff: if cleaner is starting a new assignment and they have an OTHER
     // in_progress assignment on a different bedroom, mark that one done first.
@@ -13849,13 +13947,13 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
     }
     const patch = { status: newStatus };
     if (newStatus === 'in_progress') {
-      if (!target.started_at) patch.started_at = new Date().toISOString();
+      if (!target.started_at) patch.started_at = startedNow;
       patch.started_by = employee?.id || null;
     }
     if (newStatus === 'done') {
-      patch.completed_at = new Date().toISOString();
+      patch.completed_at = completedNow;
       patch.completed_by = employee?.id || null;
-    } else if (target.status === 'done') {
+    } else if (wasDone) {
       patch.completed_at = null;
       patch.completed_by = null;
     }
@@ -13872,7 +13970,12 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
 
     const { error } = await supabase.from('assignment_targets').update(patch).eq('id', target.id);
     setBusy(false);
-    if (error) { alert('Could not update: ' + error.message); return; }
+    if (error) {
+      // Roll back optimistic on failure — keep the user truthful
+      setTargets(prev => prev.map(t => t.id === target.id ? target : t));
+      alert('Could not update: ' + error.message);
+      return;
+    }
     setStatusModal(null);
     load();
     if (onUpdate) onUpdate();
@@ -13925,6 +14028,7 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
             onBlocked={() => setStatusModal({ target: t })}
             onReassign={() => setReassignTarget(t)}
             onTogglePriority={togglePriority}
+              canMarkDone={can(employee, 'mark_assignments_done') || t.started_by === employee?.id}
             onOpenBedroomHistory={onOpenBedroomHistory} />
         );
         return (
@@ -13970,7 +14074,7 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
 }
 
 // Reusable card for one assignment target, used in banner + panel
-function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPending, onDone, onReopen, onBlocked, onReassign, onGoToBedroom, onOpenBedroomHistory, onTogglePriority, propertyId }) {
+function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPending, onDone, onReopen, onBlocked, onReassign, onGoToBedroom, onOpenBedroomHistory, onTogglePriority, canMarkDone = true, propertyId }) {
   const t = target;
   const s = ASSIGNMENT_STATUSES[t.status] || ASSIGNMENT_STATUSES.pending;
   const isDone = t.status === 'done';
@@ -14003,108 +14107,123 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
 
   return (
     <div className={`p-3 rounded-xl border ${isDone ? 'bg-stone-50 border-stone-200 opacity-90' : 'bg-white border-stone-200'}`}>
+      {/* === HEADER ROW =================================================
+         Apartment info BOLD up top. Never truncated — long bedroom
+         labels wrap to a second line rather than being cut. Right side
+         holds the priority toggle + status pill so the cleaner sees
+         urgency and state at a glance. */}
       <div className="flex items-start justify-between gap-2 mb-2">
         <div className="flex-1 min-w-0">
-          {/* Title is a tap target when we have a way to go to the
-             bedroom AND the target IS tied to a bedroom. Falls back to
-             plain text on the owner-side admin list where no
-             onGoToBedroom is wired. */}
-          {canGo ? (
-            <button onClick={onGoToBedroom} disabled={busy}
-              className="text-left w-full font-serif text-base text-stone-900 truncate hover:underline disabled:opacity-50">
-              {t.assignment?.title}
-            </button>
+          {(t.unit?.label || t.party?.label) ? (
+            <div className="font-serif text-lg text-stone-900 leading-tight break-words">
+              <span className="font-bold">{t.unit?.label || 'No unit'}</span>
+              {t.party?.label && (
+                <>
+                  <span className="text-stone-400 mx-1.5">·</span>
+                  <span className="italic">{t.party.label}</span>
+                </>
+              )}
+            </div>
           ) : (
-            <div className="font-serif text-base text-stone-900 truncate">{t.assignment?.title}</div>
-          )}
-          {/* Priority + cleaning-type + assignee chips — all use the
-             shared chip components so the visual language is consistent
-             everywhere a bedroom/assignment is shown. When the parent
-             passes onTogglePriority, the priority chip becomes a
-             clickable toggle (gray = not priority, red = priority).
-             Always render the priority slot for non-done targets so
-             owners can flag urgency directly from the capsule. */}
-          {(!isDone || t.priority || t.assignedTo || t.assignment?.assignment_type) && (
-            <div className="mt-1 flex items-center gap-1.5 flex-wrap">
-              {!isDone && onTogglePriority ? (
-                <button
-                  onClick={(e) => { e.stopPropagation(); onTogglePriority(t); }}
-                  disabled={busy}
-                  className={`text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full border inline-flex items-center gap-1 transition-colors disabled:opacity-50 ${t.priority
-                      ? 'bg-red-100 text-red-800 border-red-300 font-bold hover:bg-red-200'
-                      : 'bg-stone-100 text-stone-500 border-stone-200 hover:bg-stone-200'}`}>
-                  <AlertCircle size={10} /> {t.priority ? 'Priority' : 'Mark priority'}
-                </button>
-              ) : (
-                <PriorityChip on={t.priority && !isDone} />
-              )}
-              <AssignmentTypeChip type={t.assignment?.assignment_type} />
-              {t.assignedTo?.name && !isDone && (
-                <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-purple-100 text-purple-800 border border-purple-300 inline-flex items-center gap-1">
-                  <User size={10} /> {t.assignedTo.name}
-                </span>
-              )}
-            </div>
-          )}
-          {(t.unit?.label || t.party?.label) && (
-            <div className="text-xs font-mono text-stone-500 mt-0.5">
-              {t.unit?.label}{t.party?.label && ` · ${t.party.label}`}
-            </div>
-          )}
-          {t.assignment?.notes && (
-            <div className="text-xs text-stone-600 mt-1 line-clamp-2">{t.assignment.notes}</div>
-          )}
-          {t.status === 'in_progress' && t.starter?.name && (
-            <div className="text-xs text-amber-700 font-mono mt-1">
-              Started by {t.starter.name}{t.started_at && ` · ${fmtClock(t.started_at)}`}
-            </div>
-          )}
-          {t.status === 'paused' && t.starter?.name && (
-            <div className="text-xs text-blue-700 font-mono mt-1 flex items-center gap-1">
-              <Pause size={10} />
-              Paused by {t.starter.name}
-            </div>
-          )}
-          {activeCleaners.length > 0 && (
-            <div className="text-xs text-emerald-700 font-mono mt-1 flex items-center gap-1">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-              {activeCleaners.length === 1 ? `${activeCleaners[0]} is here` : `${activeCleaners.length} cleaners here: ${activeCleaners.join(', ')}`}
-            </div>
-          )}
-          {isDone && t.completed_at && (
-            <div className="text-xs text-emerald-700 font-mono mt-1">
-              {t.completer?.name ? `Done by ${t.completer.name} · ` : 'Done '}{fmtDateWithDay(t.completed_at)} {fmtClock(t.completed_at)}
-            </div>
-          )}
-          {t.status_notes && (
-            <div className="text-xs text-red-700 italic mt-1">"{t.status_notes}"</div>
+            <div className="font-serif text-lg text-stone-900 font-bold">Whole property</div>
           )}
         </div>
-        {/* Status + chips row: View doc + History live as small pills next
-           to the status. Keeps the action-button row uniform below. */}
         <div className="flex items-center gap-1.5 flex-shrink-0 flex-wrap justify-end">
+          {!isDone && onTogglePriority ? (
+            <button
+              onClick={(e) => { e.stopPropagation(); onTogglePriority(t); }}
+              disabled={busy}
+              className={`text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full border inline-flex items-center gap-1 transition-colors disabled:opacity-50 ${t.priority
+                  ? 'bg-red-100 text-red-800 border-red-300 font-bold hover:bg-red-200'
+                  : 'bg-stone-100 text-stone-500 border-stone-200 hover:bg-stone-200'}`}>
+              <AlertCircle size={10} /> {t.priority ? 'Priority' : 'Mark priority'}
+            </button>
+          ) : (
+            <PriorityChip on={t.priority && !isDone} />
+          )}
           <span className={`text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full border ${s.color}`}>
             {s.label}
           </span>
-          <button onClick={onView}
-            className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-100 hover:bg-stone-200 text-stone-700 flex items-center gap-1">
-            <Eye size={10} /> View doc
-          </button>
-          {onOpenBedroomHistory && t.unit_id && t.party_id && (
-            <button onClick={() => onOpenBedroomHistory({
-                unitId: t.unit_id, unitLabel: t.unit?.label,
-                partyId: t.party_id, partyLabel: t.party?.label
-              })} disabled={busy}
-              className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-100 hover:bg-stone-200 text-stone-700 flex items-center gap-1 disabled:opacity-50">
-              <Clock size={10} /> History
-            </button>
-          )}
         </div>
       </div>
-      {/* Action buttons row — uniform h-9 / px-3 / text-xs across all
-         so they line up. Start / Pause / Done / Blocked / Reassign.
-         The "Go to this bedroom" button below is intentionally larger
-         as the primary workflow CTA. */}
+
+      {/* === TITLE + TYPE ===============================================
+         Assignment title (move-out check / standard / etc), cleaning
+         type chip, assignee. Tappable when canGo so cleaner can jump
+         from the title alone. */}
+      <div className="mb-2">
+        {canGo ? (
+          <button onClick={onGoToBedroom} disabled={busy}
+            className="text-left w-full font-serif text-sm text-stone-700 hover:underline disabled:opacity-50">
+            {t.assignment?.title}
+          </button>
+        ) : (
+          <div className="font-serif text-sm text-stone-700">{t.assignment?.title}</div>
+        )}
+        {(t.assignment?.assignment_type || (t.assignedTo?.name && !isDone)) && (
+          <div className="mt-1 flex items-center gap-1.5 flex-wrap">
+            <AssignmentTypeChip type={t.assignment?.assignment_type} />
+            {t.assignedTo?.name && !isDone && (
+              <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-purple-100 text-purple-800 border border-purple-300 inline-flex items-center gap-1">
+                <User size={10} /> {t.assignedTo.name}
+              </span>
+            )}
+          </div>
+        )}
+        {t.assignment?.notes && (
+          <div className="text-xs text-stone-600 mt-1 line-clamp-2">{t.assignment.notes}</div>
+        )}
+        {t.status === 'in_progress' && t.starter?.name && (
+          <div className="text-xs text-amber-700 font-mono mt-1">
+            Started by {t.starter.name}{t.started_at && ` · ${fmtClock(t.started_at)}`}
+          </div>
+        )}
+        {t.status === 'paused' && t.starter?.name && (
+          <div className="text-xs text-blue-700 font-mono mt-1 flex items-center gap-1">
+            <Pause size={10} />
+            Paused by {t.starter.name}
+          </div>
+        )}
+        {activeCleaners.length > 0 && (
+          <div className="text-xs text-emerald-700 font-mono mt-1 flex items-center gap-1">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+            {activeCleaners.length === 1 ? `${activeCleaners[0]} is here` : `${activeCleaners.length} cleaners here: ${activeCleaners.join(', ')}`}
+          </div>
+        )}
+        {isDone && t.completed_at && (
+          <div className="text-xs text-emerald-700 font-mono mt-1">
+            {t.completer?.name ? `Done by ${t.completer.name} · ` : 'Done '}{fmtDateWithDay(t.completed_at)} {fmtClock(t.completed_at)}
+          </div>
+        )}
+        {t.status_notes && (
+          <div className="text-xs text-red-700 italic mt-1">"{t.status_notes}"</div>
+        )}
+      </div>
+
+      {/* === ANCILLARY PILLS — View doc + History. Their own row so
+         they don't compete visually with the main action buttons. */}
+      <div className="flex items-center gap-1.5 flex-wrap mb-2">
+        <button onClick={onView}
+          className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-100 hover:bg-stone-200 text-stone-700 flex items-center gap-1">
+          <Eye size={10} /> View doc
+        </button>
+        {onOpenBedroomHistory && t.unit_id && t.party_id && (
+          <button onClick={() => onOpenBedroomHistory({
+              unitId: t.unit_id, unitLabel: t.unit?.label,
+              partyId: t.party_id, partyLabel: t.party?.label
+            })} disabled={busy}
+            className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-100 hover:bg-stone-200 text-stone-700 flex items-center gap-1 disabled:opacity-50">
+            <Clock size={10} /> History
+          </button>
+        )}
+      </div>
+
+      {/* === ACTION BUTTON ROW =========================================
+         All buttons share h-9 / px-3 / text-xs / inline-flex so they
+         line up symmetrically regardless of which subset is showing.
+         Order: Start → Pause → Move to pending → Done → Reopen →
+         Blocked → Reassign. Reassign no longer has ml-auto so the
+         row stays uniform. */}
       <div className="flex gap-2 flex-wrap">
         {(t.status === 'pending' || t.status === 'blocked' || t.status === 'in_progress' || t.status === 'paused') && (
           <button onClick={onStart} disabled={busy}
@@ -14118,20 +14237,16 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
             <Pause size={12} /> Pause
           </button>
         )}
-        {/* Paused → Pending: undo a mistaken start. Cleaner gets the
-           assignment back into the unstarted queue. Use this when the
-           pause was a mistake; if the cleaner actually did some of
-           the work and wants to come back to it, they should Resume. */}
         {onMoveToPending && t.status === 'paused' && (
           <button onClick={onMoveToPending} disabled={busy}
             className="h-9 px-3 rounded-lg border border-stone-300 hover:bg-stone-50 text-stone-700 text-xs font-medium flex items-center gap-1 disabled:opacity-50">
             <ArrowLeft size={12} /> Move to pending
           </button>
         )}
-        {(t.status === 'pending' || t.status === 'in_progress' || t.status === 'blocked' || t.status === 'paused') && (
+        {(t.status === 'pending' || t.status === 'in_progress' || t.status === 'blocked' || t.status === 'paused') && canMarkDone && (
           <button onClick={onDone} disabled={busy}
             className="h-9 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-medium flex items-center gap-1 disabled:opacity-50">
-            <Check size={12} /> Done
+            <Check size={12} /> Mark complete
           </button>
         )}
         {isDone && (
@@ -14148,11 +14263,16 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
         )}
         {onReassign && (t.unit_id || t.party_id) && (
           <button onClick={onReassign} disabled={busy}
-            className="h-9 px-3 rounded-lg border border-stone-300 hover:bg-stone-50 text-stone-600 text-xs font-medium flex items-center gap-1 disabled:opacity-50 ml-auto">
+            className="h-9 px-3 rounded-lg border border-stone-300 hover:bg-stone-50 text-stone-600 text-xs font-medium flex items-center gap-1 disabled:opacity-50">
             <Edit2 size={12} /> Reassign
           </button>
         )}
       </div>
+
+      {/* === PRIMARY CTA ================================================
+         "Go to this bedroom" is intentionally the only larger button
+         to stand out as the main workflow action for cleaners. Hidden
+         on Done assignments since there's nothing to do. */}
       {canGo && !isDone && (
         <button onClick={onGoToBedroom} disabled={busy}
           className="mt-2 w-full px-3 py-2.5 rounded-lg bg-stone-900 hover:bg-stone-800 text-stone-50 text-sm font-medium flex items-center justify-center gap-2 disabled:opacity-50">
@@ -14322,6 +14442,18 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
   }, [propertyId, targets.length]);
 
   const updateStatus = async (target, newStatus, statusNotes) => {
+    // OPTIMISTIC: since this tab filters by statusFilter, an item that
+    // just changed status no longer belongs in the current view —
+    // remove it immediately so the cleaner sees the result of their
+    // tap with zero delay. Reload below fetches the authoritative
+    // state; realtime reconciles any discrepancy.
+    const movedOffTab = newStatus !== statusFilter;
+    if (movedOffTab) {
+      setTargets(prev => prev.filter(t => t.id !== target.id));
+    } else {
+      setTargets(prev => prev.map(t => t.id === target.id ? { ...t, status: newStatus } : t));
+    }
+
     setBusy(true);
     const patch = { status: newStatus };
     if (newStatus === 'in_progress') {
@@ -14343,7 +14475,12 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
     if (statusNotes !== undefined) patch.status_notes = statusNotes || null;
     const { error } = await supabase.from('assignment_targets').update(patch).eq('id', target.id);
     setBusy(false);
-    if (error) { alert('Could not update: ' + error.message); return; }
+    if (error) {
+      // Roll back optimistic on failure so the user sees the truth
+      load();
+      alert('Could not update: ' + error.message);
+      return;
+    }
     setStatusModal(null);
     load();
     if (onUpdate) onUpdate();
@@ -14557,12 +14694,13 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
       groups.get(key).items.push(t);
     });
 
-    // Sort: bundles first (more items first), then singles
-    const entries = Array.from(groups.entries()).sort((a, b) => {
-      const lenDiff = b[1].items.length - a[1].items.length;
-      if (lenDiff !== 0) return lenDiff;
-      return naturalCompare(a[1].unit?.label || '', b[1].unit?.label || '');
-    });
+    // Sort apartments strictly by their label (natural compare). Per
+    // the owner's request, multi-assignment apartments no longer
+    // automatically jump to the top — order stays numerical so the
+    // cleaner reads top-down 101, 102, 103, 201, 202, etc.
+    const entries = Array.from(groups.entries()).sort((a, b) =>
+      naturalCompare(a[1].unit?.label || '', b[1].unit?.label || '')
+    );
 
     return (
       <div className="space-y-2">
@@ -14581,6 +14719,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                 onBlocked={() => setStatusModal({ target: t })}
                 onReassign={() => setReassignTarget(t)}
                 onTogglePriority={togglePriority}
+              canMarkDone={can(employee, 'mark_assignments_done') || t.started_by === employee?.id}
                 onGoToBedroom={onGoToBedroom ? () => startAndGo(t) : null}
                 onOpenBedroomHistory={onOpenBedroomHistory} />
             );
@@ -14619,6 +14758,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                       onBlocked={() => setStatusModal({ target: t })}
                       onReassign={() => setReassignTarget(t)}
                       onTogglePriority={togglePriority}
+              canMarkDone={can(employee, 'mark_assignments_done') || t.started_by === employee?.id}
                 onGoToBedroom={onGoToBedroom ? () => startAndGo(t) : null}
                       onOpenBedroomHistory={onOpenBedroomHistory} />
                   ))}
@@ -14647,6 +14787,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
               onBlocked={() => setStatusModal({ target: t })}
               onReassign={() => setReassignTarget(t)}
               onTogglePriority={togglePriority}
+              canMarkDone={can(employee, 'mark_assignments_done') || t.started_by === employee?.id}
                 onGoToBedroom={onGoToBedroom ? () => startAndGo(t) : null}
               onOpenBedroomHistory={onOpenBedroomHistory} />
           ))}
@@ -14895,6 +15036,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                     onBlocked={() => setStatusModal({ target: t })}
                     onReassign={() => setReassignTarget(t)}
                     onTogglePriority={togglePriority}
+              canMarkDone={can(employee, 'mark_assignments_done') || t.started_by === employee?.id}
                 onGoToBedroom={onGoToBedroom ? () => startAndGo(t) : null}
                     onOpenBedroomHistory={onOpenBedroomHistory} />
                 ))}
@@ -14915,6 +15057,28 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
           const collapsed = !!collapsedBuildings[b];
           // Only show group header if there's more than 1 building total
           const showHeader = buildingKeys.length > 1;
+
+          // Sub-group by FLOOR (first digit of the apartment number).
+          // The owner asked for Floor 1 → Floor 2 → Floor 3 sections
+          // so the cleaner reads the building top-down in the order
+          // they'd physically walk it. Items without a parseable floor
+          // (e.g. property-level no-unit) land in a "—" bucket.
+          const byFloor = {};
+          itemsForBuilding.forEach(t => {
+            const f = floorFromLabel(t.unit?.label);
+            const key = f != null ? String(f) : '—';
+            if (!byFloor[key]) byFloor[key] = [];
+            byFloor[key].push(t);
+          });
+          const floorKeys = Object.keys(byFloor).sort((a, b) => {
+            if (a === '—') return 1;
+            if (b === '—') return -1;
+            return parseInt(a, 10) - parseInt(b, 10);
+          });
+          // If there's only one floor's worth of items, skip the floor
+          // labels — they'd be noise.
+          const showFloorHeaders = floorKeys.length > 1;
+
           return (
             <div key={b}>
               {showHeader && (
@@ -14933,7 +15097,24 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
               {!collapsed && (
                 statusFilter === 'done'
                   ? renderDoneBuckets(itemsForBuilding)
-                  : renderAssignmentList(itemsForBuilding)
+                  : showFloorHeaders ? (
+                      <div className="space-y-3">
+                        {floorKeys.map(fk => (
+                          <div key={fk}>
+                            <div className="flex items-center gap-2 mb-1.5 px-1">
+                              <span className="text-[10px] uppercase tracking-wider font-mono text-stone-500 font-bold">
+                                {fk === '—' ? 'Other' : `Floor ${fk}`}
+                              </span>
+                              <span className="text-[10px] font-mono text-stone-400">({byFloor[fk].length})</span>
+                              <div className="flex-1 h-px bg-stone-200" />
+                            </div>
+                            {renderAssignmentList(byFloor[fk])}
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      renderAssignmentList(itemsForBuilding)
+                    )
               )}
             </div>
           );

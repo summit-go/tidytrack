@@ -2025,61 +2025,69 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
         );
       })()}
 
-      {/* NOT-STARTED TAB — shows ALL 4 sections inline with their
-         pending items so the cleaner sees everything at once and
-         can checkmark across sections in a single pass. No need to
-         click a section button first. The section buttons up top
-         are still there (with counts) but they now scroll to the
-         matching panel instead of being a required gate.
+      {/* NOT-STARTED TAB — single-open accordion. The 4 main-section
+         buttons show counts as (in_progress / total). Tapping a
+         button opens THAT section's subsection list below (others
+         stay closed). Picking subsections + Start task creates one
+         task with the picked items.
          
-         Layout per section:
-         - Header: "Bedroom (7)" + count chip
-         - 2-col grid of subsections as checkboxes
-         - Empty / all-done states get a small note instead
-         
-         Cross-section selection IS allowed — picking 3 bedroom
-         items + 2 bathroom items + tap Start creates a single task
-         "Item 1 + Item 2 + …" and flips all 5 targets to in_progress
-         at once. They'll show up under their respective sections in
-         the Active tab. */}
+         For LEGACY bedrooms with no template items, the buttons
+         still work — tapping just sets the category so the custom
+         input + legacy variant subgrid render normally. Nothing
+         in this picker forces template behaviour on legacy work.
+      */}
       {(!checklistMode || checklistTargets.length === 0 || pickerTab === 'not_started') && (
       <div>
         <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Pick what you'll clean</label>
-        {/* Quick-jump section pills with counts. Tapping scrolls to
-           the section's panel below — handy when there's a long list. */}
-        <div className="grid grid-cols-4 gap-2 mb-3">
+        <div className="grid grid-cols-4 gap-2">
           {(() => {
-            const counts = { bedroom: 0, vanity: 0, bathroom: 0, general: 0 };
+            // Per-section counts. total = pending+in_progress (work
+            // that exists at this bedroom for this section), busy =
+            // in_progress (currently being worked). Display as X/N
+            // so the cleaner sees "8/9" — 8 in progress out of 9.
+            const stats = {
+              bedroom:  { busy: 0, total: 0 },
+              vanity:   { busy: 0, total: 0 },
+              bathroom: { busy: 0, total: 0 },
+              general:  { busy: 0, total: 0 },
+            };
             checklistTargets.forEach(t => {
               const sec = (t.template_section || '').toLowerCase();
-              if (sec in counts && t.status === 'pending') counts[sec] += 1;
+              if (!(sec in stats)) return;
+              if (t.status === 'done') return;
+              stats[sec].total += 1;
+              if (t.status === 'in_progress') stats[sec].busy += 1;
             });
             return TASK_CATEGORIES.map(c => {
-              const n = counts[c.id] || 0;
+              const s = stats[c.id] || { busy: 0, total: 0 };
               const inChecklist = checklistMode && checklistTargets.length > 0;
-              const isHighlighted = category === c.id;
-              const isEmpty = inChecklist && n === 0;
+              const isOpen = category === c.id;
+              const isEmpty = inChecklist && s.total === 0;
               return (
                 <button key={c.id} type="button" onClick={() => {
-                  // Set category so the legacy subgrid (for non-checklist
-                  // mode) knows which one to render. Also scroll to the
-                  // matching panel below for quick jump. Don't reset
-                  // selectedTargetIds — we WANT cross-section picks to
-                  // persist when the cleaner browses sections.
-                  setCategory(c.id);
-                  setSelectedSubs(new Set());
-                  // Scroll the panel into view; tiny delay so the panel
-                  // exists in the DOM before we try to focus it.
-                  setTimeout(() => {
-                    const el = document.getElementById(`picker-sec-${c.id}`);
-                    if (el && el.scrollIntoView) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                  }, 10);
+                  // Toggle: tapping the open section closes it; tapping
+                  // a closed one opens it (closing whatever was open).
+                  // The accordion is single-open by construction since
+                  // category is a single value.
+                  if (category === c.id) {
+                    setCategory(null);
+                  } else {
+                    setCategory(c.id);
+                    setSelectedSubs(new Set());
+                    // Keep selectedTargetIds — cleaner may have picked
+                    // items in another section already. The Start
+                    // button will work across sections.
+                  }
                 }}
-                  className={`py-3 px-2 rounded-xl border-2 font-medium text-sm transition-all flex flex-col items-center gap-0.5 ${isHighlighted ? 'border-stone-900 bg-stone-900 text-stone-50' : isEmpty ? 'border-stone-100 bg-stone-50 text-stone-400' : 'border-stone-200 bg-white text-stone-700 hover:border-stone-400'}`}>
+                  className={`py-3 px-2 rounded-xl border-2 font-medium text-sm transition-all flex flex-col items-center gap-0.5 ${
+                    isOpen ? 'border-stone-900 bg-stone-900 text-stone-50' :
+                    isEmpty ? 'border-stone-100 bg-stone-50 text-stone-400' :
+                    'border-stone-200 bg-white text-stone-700 hover:border-stone-400'
+                  }`}>
                   <span>{c.label}</span>
                   {inChecklist && (
-                    <span className={`text-[10px] font-mono ${isHighlighted ? 'text-stone-300' : isEmpty ? 'text-stone-400' : 'text-amber-700'}`}>
-                      ({n})
+                    <span className={`text-[10px] font-mono ${isOpen ? 'text-stone-300' : isEmpty ? 'text-stone-400' : 'text-amber-700'}`}>
+                      ({s.busy}/{s.total})
                     </span>
                   )}
                 </button>
@@ -2090,97 +2098,90 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
       </div>
       )}
 
-      {/* All-sections inline panel — only shows in checklist mode
-         with at least one assigned item. For each section that has
-         pending items, render a card with its 2-col item grid.
-         Sections with 0 pending get skipped (the section pill
-         above already shows the (0) state). */}
-      {checklistMode && checklistTargets.length > 0 && pickerTab === 'not_started' && (() => {
-        const sectionOrder = ['bedroom', 'vanity', 'bathroom', 'general'];
+      {/* Dropdown panel for the open section (checklist mode only).
+         Renders only ONE section at a time — whichever the cleaner
+         tapped — keeping the screen short. If no section is open or
+         there are no items in the open one, nothing renders here.
+         Legacy bedrooms with 0 checklist items skip this panel and
+         fall through to the custom-name + variant subgrid below. */}
+      {checklistMode && checklistTargets.length > 0 && pickerTab === 'not_started' && category && (() => {
         const sectionLabels = { bedroom: 'Bedroom', vanity: 'Vanity', bathroom: 'Bathroom', general: 'General' };
-        const pendingBySection = {};
-        checklistTargets.forEach(t => {
-          if (t.status !== 'pending') return;
-          const sec = (t.template_section || '').toLowerCase();
-          if (!sectionOrder.includes(sec)) return;
-          if (!pendingBySection[sec]) pendingBySection[sec] = [];
-          pendingBySection[sec].push(t);
-        });
-        const sectionsWithWork = sectionOrder.filter(sec => pendingBySection[sec]?.length);
-        if (sectionsWithWork.length === 0) {
+        const items = checklistTargets.filter(t =>
+          (t.template_section || '').toLowerCase() === category &&
+          t.status === 'pending'
+        );
+        if (items.length === 0) {
+          // Only show "all started" copy when there's at least one
+          // non-pending item — otherwise legacy bedrooms with 0 in
+          // this section would see a misleading "all started" note.
+          const allItems = checklistTargets.filter(t =>
+            (t.template_section || '').toLowerCase() === category
+          );
+          if (allItems.length === 0) return null;
           return (
             <div className="rounded-2xl bg-emerald-50 border-2 border-emerald-200 p-3 text-center">
               <Check size={18} className="inline text-emerald-700 mb-1" />
               <div className="text-xs text-emerald-800 font-medium">
-                Everything at this bedroom is started or done.
+                Every {sectionLabels[category]} item is started or done.
               </div>
               <div className="text-[10px] text-emerald-700 mt-1">
-                Switch to the <span className="font-medium">Active</span> tab to see what's in progress.
+                Active items live in the <span className="font-medium">Active</span> tab.
               </div>
             </div>
           );
         }
+        // Group by parent assignment so General with two variants
+        // shows the variant labels. Other sections flatten.
+        const showSubheaders = category === 'general';
+        const byAssignment = new Map();
+        items.forEach(t => {
+          const aid = t.assignment?.id;
+          if (!byAssignment.has(aid)) byAssignment.set(aid, { assignment: t.assignment, items: [] });
+          byAssignment.get(aid).items.push(t);
+        });
         return (
-          <div className="space-y-2.5">
-            {sectionsWithWork.map(sec => {
-              const items = pendingBySection[sec];
-              // Group by parent assignment ONLY within General — that's
-              // the section that can have multiple variants assigned
-              // to the same bedroom. For Bedroom/Vanity/Bathroom we
-              // flatten because the parent grouping is just noise.
-              const showAsignmentSubheaders = sec === 'general';
-              const byAssignment = new Map();
-              items.forEach(t => {
-                const aid = t.assignment?.id;
-                if (!byAssignment.has(aid)) byAssignment.set(aid, { assignment: t.assignment, items: [] });
-                byAssignment.get(aid).items.push(t);
-              });
-              return (
-                <div id={`picker-sec-${sec}`} key={sec} className="rounded-2xl bg-emerald-50 border-2 border-emerald-200 p-3">
-                  <div className="flex items-center gap-2 mb-2">
-                    <FileText size={14} className="text-emerald-700 flex-shrink-0" />
-                    <span className="text-[11px] uppercase tracking-wider font-mono text-emerald-800 font-bold flex-1">
-                      {sectionLabels[sec]}
-                    </span>
-                    <span className="text-[10px] font-mono text-emerald-700">
-                      {items.length} left
-                    </span>
-                  </div>
-                  <div className="space-y-2">
-                    {Array.from(byAssignment.values()).map(group => (
-                      <div key={group.assignment.id}>
-                        {showAsignmentSubheaders && byAssignment.size > 1 && (
-                          <div className="text-[10px] uppercase tracking-wider font-mono text-emerald-700 mb-1 px-1">
-                            variant {(group.assignment.general_variant || '?').toUpperCase()}
+          <div className="rounded-2xl bg-emerald-50 border-2 border-emerald-200 p-3">
+            <div className="flex items-center gap-2 mb-2">
+              <FileText size={14} className="text-emerald-700 flex-shrink-0" />
+              <span className="text-[11px] uppercase tracking-wider font-mono text-emerald-800 font-bold flex-1">
+                {sectionLabels[category]} — pick what you'll start
+              </span>
+              <span className="text-[10px] font-mono text-emerald-700">
+                {items.length} left
+              </span>
+            </div>
+            <div className="space-y-2">
+              {Array.from(byAssignment.values()).map(group => (
+                <div key={group.assignment.id}>
+                  {showSubheaders && byAssignment.size > 1 && (
+                    <div className="text-[10px] uppercase tracking-wider font-mono text-emerald-700 mb-1 px-1">
+                      variant {(group.assignment.general_variant || '?').toUpperCase()}
+                    </div>
+                  )}
+                  <div className="grid grid-cols-2 gap-1.5">
+                    {group.items.map(t => {
+                      const checked = selectedTargetIds.has(t.id);
+                      return (
+                        <button key={t.id} type="button" onClick={() => toggleTarget(t.id)}
+                          className={`flex items-start gap-2 px-3 py-2.5 rounded-xl border-2 text-left transition-all ${checked ? 'border-amber-600 bg-amber-50' : 'border-stone-200 bg-white hover:border-stone-400'}`}>
+                          <div className={`mt-0.5 w-4 h-4 rounded border-2 flex-shrink-0 flex items-center justify-center ${checked ? 'border-amber-600 bg-amber-600' : 'border-stone-300'}`}>
+                            {checked && <Check size={11} className="text-white" />}
                           </div>
-                        )}
-                        <div className="grid grid-cols-2 gap-1.5">
-                          {group.items.map(t => {
-                            const checked = selectedTargetIds.has(t.id);
-                            return (
-                              <button key={t.id} type="button" onClick={() => toggleTarget(t.id)}
-                                className={`flex items-start gap-2 px-3 py-2.5 rounded-xl border-2 text-left transition-all ${checked ? 'border-amber-600 bg-amber-50' : 'border-stone-200 bg-white hover:border-stone-400'}`}>
-                                <div className={`mt-0.5 w-4 h-4 rounded border-2 flex-shrink-0 flex items-center justify-center ${checked ? 'border-amber-600 bg-amber-600' : 'border-stone-300'}`}>
-                                  {checked && <Check size={11} className="text-white" />}
-                                </div>
-                                <div className="flex-1 min-w-0">
-                                  <div className="text-sm text-stone-900">{labelForTarget(t)}</div>
-                                  {t.priority && (
-                                    <span className="inline-block mt-0.5 text-[9px] uppercase tracking-wider font-mono px-1.5 py-0.5 rounded-full bg-red-50 border border-red-200 text-red-700 font-bold">
-                                      Priority
-                                    </span>
-                                  )}
-                                </div>
-                              </button>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    ))}
+                          <div className="flex-1 min-w-0">
+                            <div className="text-sm text-stone-900">{labelForTarget(t)}</div>
+                            {t.priority && (
+                              <span className="inline-block mt-0.5 text-[9px] uppercase tracking-wider font-mono px-1.5 py-0.5 rounded-full bg-red-50 border border-red-200 text-red-700 font-bold">
+                                Priority
+                              </span>
+                            )}
+                          </div>
+                        </button>
+                      );
+                    })}
                   </div>
                 </div>
-              );
-            })}
+              ))}
+            </div>
           </div>
         );
       })()}
@@ -2660,8 +2661,10 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       return [...closed, data];
     });
     setActiveBlock(data); setTasks(data.tasks || []); setBlockStartFlow(null);
-    // Auto-start any pending assignments at this bedroom
-    autoStartAssignmentsAtBedroom(unit.id, party.id);
+    // No auto-start: tapping "Start cleaning" only starts the WORK BLOCK
+    // timer. Targets stay pending until the cleaner explicitly picks
+    // them in the task picker. This stops the surprise where every
+    // assignment at the bedroom flipped to in_progress on entry.
   };
 
   const finishBlock = async () => {
@@ -2972,8 +2975,11 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     setActiveBlock(data);
     setTasks(data.tasks || []);
     setPendingStart(null);
-    // Auto-start any pending assignments at this bedroom
-    autoStartAssignmentsAtBedroom(pendingStart.unitId, pendingStart.partyId);
+    // No auto-start: starting the work block only starts the TIMER.
+    // The cleaner explicitly picks items from the picker (or taps
+    // Start on individual assignment cards) to flip them to
+    // in_progress. Stops the "I tapped Start cleaning and everything
+    // is suddenly marked in progress" surprise.
   };
 
   // Cancel the pending start (cleaner decides not to start after all)
@@ -18198,8 +18204,6 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
               {isOpen && (
                 <div className="px-3 pb-3 space-y-2 border-t border-amber-100 pt-3">
                   {bedroomEntries.map(([pid, bed]) => {
-                    const bedroomKey = `${key}::${pid}`;
-                    const isBedOpen = !!bundleOpen[bedroomKey];
                     const bedLabel = bed.party?.label || (pid === 'no-party' ? 'Unassigned' : pid);
                     const sectionCounts = {
                       bedroom: bed.sectionItems.bedroom.length,
@@ -18207,15 +18211,34 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                       bathroom: bed.sectionItems.bathroom.length,
                       general: bed.sectionItems.general.length,
                     };
+                    // Items NOT in any of the 4 known sections (legacy
+                    // assignments that have no template_section set,
+                    // or one-off custom rows). Count them so the row's
+                    // "N items" total stays accurate without losing
+                    // the items entirely.
+                    const knownSectioned =
+                      sectionCounts.bedroom + sectionCounts.vanity +
+                      sectionCounts.bathroom + sectionCounts.general;
+                    const otherCount = bed.items.length - knownSectioned;
                     const sectionBits = [];
                     if (sectionCounts.bedroom)  sectionBits.push(`Bedroom (${sectionCounts.bedroom})`);
                     if (sectionCounts.vanity)   sectionBits.push(`Vanity (${sectionCounts.vanity})`);
                     if (sectionCounts.bathroom) sectionBits.push(`Bathroom (${sectionCounts.bathroom})`);
                     if (sectionCounts.general)  sectionBits.push(`General (${sectionCounts.general})`);
+                    if (otherCount > 0)        sectionBits.push(`Other (${otherCount})`);
+                    // Clicking the bedroom row NAVIGATES to that bedroom
+                    // (PreparingBlockView with the "Start cleaning"
+                    // button). It does not expand further or auto-start
+                    // anything. From the bedroom landing the cleaner
+                    // explicitly chooses to begin work.
+                    const firstTarget = bed.items[0];
+                    const canGoToBedroom = !!(onGoToBedroom && firstTarget?.unit_id && firstTarget?.party_id);
                     return (
-                      <div key={pid} className="rounded-xl border border-stone-200 bg-white overflow-hidden">
-                        <button onClick={() => toggleBundle(bedroomKey)}
-                          className="w-full px-3 py-2.5 flex items-center justify-between hover:bg-stone-50 text-left">
+                      <button key={pid}
+                        onClick={() => { if (canGoToBedroom) startAndGo(firstTarget); }}
+                        disabled={!canGoToBedroom}
+                        className={`w-full text-left rounded-xl border border-stone-200 bg-white p-3 ${canGoToBedroom ? 'hover:border-stone-900 active:scale-98 transition-all' : 'opacity-70'}`}>
+                        <div className="flex items-center justify-between gap-2">
                           <div className="flex-1 min-w-0">
                             <div className="flex items-center gap-2 flex-wrap">
                               <span className="font-serif text-sm text-stone-900">{bedLabel}</span>
@@ -18230,43 +18253,9 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                               </div>
                             )}
                           </div>
-                          <ChevronRight size={14} className={`text-stone-500 flex-shrink-0 transition-transform ml-2 ${isBedOpen ? 'rotate-90' : ''}`} />
-                        </button>
-                        {isBedOpen && (
-                          <div className="px-2 pb-2 pt-1 space-y-2 border-t border-stone-100">
-                            {/* Within a bedroom, group items by section.
-                               Each section header is sticky-ish so the
-                               owner can quickly scan what's pending in
-                               Bedroom vs Bathroom vs General. */}
-                            {['bedroom','vanity','bathroom','general'].filter(sec => bed.sectionItems[sec].length > 0).map(sec => (
-                              <div key={sec}>
-                                <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1 px-1">
-                                  {sec === 'bedroom' ? 'Bedroom' : sec === 'vanity' ? 'Vanity' : sec === 'bathroom' ? 'Bathroom' : 'General'}
-                                  <span className="text-stone-400"> · {bed.sectionItems[sec].length}</span>
-                                </div>
-                                <div className="space-y-1.5">
-                                  {bed.sectionItems[sec].map(t => (
-                                    <AssignmentCard key={t.id} target={t} busy={busy} propertyId={propertyId}
-                                      onView={() => setOpened(t)}
-                                      onStart={() => startAndGo(t)}
-                                      onPause={() => updateStatus(t, 'paused')}
-                                      onMoveToPending={() => updateStatus(t, 'pending')}
-                                      onDone={() => updateStatus(t, 'done')}
-                                      onReopen={() => updateStatus(t, 'pending')}
-                                      onBlocked={() => setStatusModal({ target: t })}
-                                      onReassign={() => setReassignTarget(t)}
-                                      onTogglePriority={togglePriority}
-                                      canMarkDone={can(employee, 'mark_assignments_done') || t.started_by === employee?.id}
-                                      currentEmployeeId={employee?.id}
-                                      onGoToBedroom={onGoToBedroom ? () => startAndGo(t) : null}
-                                      onOpenBedroomHistory={onOpenBedroomHistory} />
-                                  ))}
-                                </div>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                      </div>
+                          {canGoToBedroom && <ChevronRight size={14} className="text-stone-400 flex-shrink-0" />}
+                        </div>
+                      </button>
                     );
                   })}
                 </div>

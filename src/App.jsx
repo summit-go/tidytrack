@@ -2756,6 +2756,38 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
         </div>
       </div>
 
+      {/* Active work resume banner — only shows when there's an open
+         work block (one without an end_time) for THIS shift. Tapping
+         the banner reopens that block so the cleaner picks up exactly
+         where they left off. Useful after an accidental back tap or a
+         browser refresh that lands them here. */}
+      {(() => {
+        const openBlock = workBlocks.find(b => !b.end_time);
+        if (!openBlock) return null;
+        const partyLabel = openBlock.party?.label || 'a bedroom';
+        const unitLabel = openBlock.unit?.label || '';
+        return (
+          <div className="mx-4 mt-4 p-4 rounded-2xl bg-amber-100 border-2 border-amber-500 shadow-sm flex items-center gap-3">
+            <div className="w-10 h-10 rounded-full bg-amber-500 text-white flex items-center justify-center flex-shrink-0">
+              <Play size={18} />
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="text-[10px] uppercase tracking-wider font-mono text-amber-700">Resume your work</div>
+              <div className="text-base font-serif text-amber-900 truncate">
+                {unitLabel} · {partyLabel}
+              </div>
+              <div className="text-[11px] font-mono text-amber-700">
+                Started {fmtClock(openBlock.start_time)}
+              </div>
+            </div>
+            <button onClick={() => onReopen(openBlock)} disabled={busy}
+              className="px-4 py-2 rounded-full bg-amber-700 hover:bg-amber-800 text-white text-sm font-bold flex items-center gap-1.5 active:scale-95 disabled:opacity-50">
+              <ChevronRight size={14} /> Resume
+            </button>
+          </div>
+        );
+      })()}
+
       <AssignmentsPanel propertyId={shift.customer_id} employee={employee} onGoToBedroom={onGoToBedroom} onOpenBedroomHistory={onOpenBedroomHistory} />
 
       {can(employee, 'upload_assignments') && (
@@ -4781,7 +4813,10 @@ function Header({ name, onSignOut, role, employee, onOpenMessages, onLogoClick, 
 // =================================================================
 
 function ManagerShell({ employee, onSignOut }) {
-  const [tab, setTab] = useState('daily');
+  // Persist the active tab in localStorage so an accidental refresh
+  // brings the user back to where they were (Assignments, Properties,
+  // etc) instead of always dumping them on Daily.
+  const [tab, setTab] = usePagePersistence(`manager_tab_${employee.id}`, 'daily');
   const [showMessages, setShowMessages] = useState(false);
   // "Preview as cleaner" mode — owner can browse the cleaner UI as
   // themselves (replaces the need for a dummy "Beta" account). All
@@ -14196,6 +14231,40 @@ function AssignmentForm({ property, employee, onCancel, onSaved }) {
 // assignments created so cleaners can still view the original paper
 // sheet if they want.
 // =================================================================
+// Lightweight overlay that pops a single sheet attachment so the
+// uploader can confirm which file is which without leaving the wizard.
+// Clicking anywhere outside the image (the dark backdrop) closes it.
+// Images render full-fit; PDFs render in an embedded iframe.
+function SheetQuickViewModal({ file, url, onClose }) {
+  if (!file || !url) return null;
+  const isImage = file.type && file.type.startsWith('image/');
+  return (
+    <div
+      onClick={onClose}
+      className="fixed inset-0 bg-stone-900/90 z-[60] flex items-center justify-center p-4">
+      <div className="absolute top-4 right-4 flex items-center gap-2">
+        <div className="text-xs text-stone-300 font-mono bg-stone-800 px-3 py-1.5 rounded-full">
+          {file.name}
+        </div>
+        <button onClick={onClose}
+          className="p-2 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-50"
+          title="Close">
+          <X size={20} />
+        </button>
+      </div>
+      {/* Stop propagation on the content so tapping the image itself
+         doesn't close the modal — only the backdrop should. */}
+      <div onClick={e => e.stopPropagation()} className="max-w-5xl max-h-[85vh] w-full flex items-center justify-center">
+        {isImage ? (
+          <img src={url} alt={file.name} className="max-w-full max-h-[85vh] rounded-lg object-contain" />
+        ) : (
+          <iframe src={url} title={file.name} className="w-full h-[85vh] rounded-lg bg-white" />
+        )}
+      </div>
+    </div>
+  );
+}
+
 function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
   // 6 steps total. The wizard is short enough that an accidental
   // refresh just starts over — no state persistence here.
@@ -14252,6 +14321,10 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
   // with an incomplete bedroom — used to gate the red error dots so
   // we don't show them before they've even tried.
   const [nextAttempted, setNextAttempted] = useState(false);
+  // Sheet preview overlay — set to { file, url } when the user taps
+  // the eye/quick-view button on a sheet card. Tapping the backdrop
+  // clears this and closes the overlay.
+  const [quickView, setQuickView] = useState(null);
 
   // -----------------------------------------------------------------
   // Load units (apartments) for this property
@@ -14359,6 +14432,74 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
     setSheetFiles(prev => prev.filter((_, i) => i !== idx));
   };
 
+  // Renames a sheet file at the given index. We can't mutate the File
+  // object's name directly (it's read-only) so we wrap the file with a
+  // new File that has the new name but the same content and type. We
+  // also need to update any per-bedroom sheetFileName references that
+  // pointed at the old name so the assignment still works at submit.
+  const renameSheetFile = (idx, newName) => {
+    setSheetFiles(prev => {
+      if (idx < 0 || idx >= prev.length) return prev;
+      const orig = prev[idx];
+      // Preserve the original extension if user dropped it
+      const origExt = (orig.name.match(/\.[^.]+$/) || [''])[0];
+      const cleaned = newName.trim() || orig.name;
+      const finalName = /\.[^.]+$/.test(cleaned) ? cleaned : `${cleaned}${origExt}`;
+      if (finalName === orig.name) return prev;
+      const wrapped = new File([orig], finalName, { type: orig.type, lastModified: orig.lastModified });
+      const next = [...prev];
+      next[idx] = wrapped;
+      // Update any per-bedroom assignment that pointed at the old name
+      setConfig(cfg => {
+        const out = { ...cfg };
+        Object.keys(out).forEach(pid => {
+          if (out[pid]?.sheetFileName === orig.name) {
+            out[pid] = { ...out[pid], sheetFileName: finalName };
+          }
+        });
+        return out;
+      });
+      return next;
+    });
+  };
+
+  // Build a sensible suggested filename from the currently selected
+  // bedrooms. Examples:
+  //   1 bedroom, 1 apartment:   "B1-101 Bedroom 1"
+  //   2 bedrooms, 1 apartment:  "B1-101 Bedrooms 1 + 2"
+  //   bedrooms across apts:     "Multi-apartment"
+  // Falls back to "" when nothing's picked yet — that disables the
+  // suggestion button on the sheet card.
+  const suggestedSheetName = () => {
+    const ids = Object.keys(selectedParties).filter(k => selectedParties[k]);
+    if (ids.length === 0) return '';
+    const grouped = {};
+    ids.forEach(id => {
+      const p = parties.find(x => x.id === id);
+      if (!p) return;
+      if (!grouped[p.unit_id]) grouped[p.unit_id] = [];
+      grouped[p.unit_id].push(p);
+    });
+    const unitIds = Object.keys(grouped);
+    if (unitIds.length > 1) return 'Multi-apartment';
+    const uid = unitIds[0];
+    const u = units.find(uu => uu.id === uid);
+    const aptLabel = u?.label || '';
+    const ps = grouped[uid].sort((a, b) => {
+      const an = parseInt((a.label || '').match(/(\d+)/)?.[1] || '0', 10);
+      const bn = parseInt((b.label || '').match(/(\d+)/)?.[1] || '0', 10);
+      return an - bn;
+    });
+    if (ps.length === 1) return `${aptLabel} ${ps[0].label}`;
+    const nums = ps.map(p => (p.label || '').match(/(\d+)/)?.[1]).filter(Boolean);
+    return `${aptLabel} Bedrooms ${nums.join(' + ')}`;
+  };
+
+  // Track which sheet card is currently being edited (idx) + its
+  // in-progress new name. null when nothing's being edited.
+  const [renamingIdx, setRenamingIdx] = useState(null);
+  const [renamingValue, setRenamingValue] = useState('');
+
   // Helper lookups against template data
   const variantsBySection = (sectionKey) =>
     variants.filter(v => v.section_key === sectionKey);
@@ -14387,9 +14528,14 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
     setConfig(prev => {
       if (prev[partyId]) return prev;
       const party = parties.find(p => p.id === partyId);
-      const partner = bathroomNumberForBedroom(party?.label);
-      // Bathroom 1 = tub variant (a), Bathroom 2 = toilet variant (b)
-      const bathroomVariant = partner === 1 ? 'a' : partner === 2 ? 'b' : null;
+      // Default bathroom variant uses bedroom-number PARITY so partners
+      // start opposite by default:
+      //   1, 3 (odd)  → 'a' (tub responsibility)
+      //   2, 4 (even) → 'b' (toilet responsibility)
+      // This matches the convention where the lower-numbered bedroom
+      // owns the tub side and the higher one owns the toilet side.
+      const num = parseInt((party?.label || '').match(/(\d+)/)?.[1] || '0', 10);
+      const bathroomVariant = num > 0 ? (num % 2 === 1 ? 'a' : 'b') : null;
       return {
         ...prev,
         [partyId]: {
@@ -14437,22 +14583,23 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
         const partnerNum = myBathroom === 1
           ? (myNum === 1 ? 2 : 1)
           : (myNum === 3 ? 4 : 3);
+        // CRITICAL: scope partner search to the SAME apartment. Without
+        // this guard, multi-apartment selections would match the first
+        // bedroom with the right number anywhere — likely the wrong
+        // apartment's partner.
         const partnerParty = parties.find(p => {
           const n = parseInt((p.label || '').match(/(\d+)/)?.[1] || '0', 10);
-          return n === partnerNum;
+          return n === partnerNum && p.unit_id === party?.unit_id;
         });
-        if (partnerParty && selectedParties[partnerParty.id] && next[partnerParty.id]) {
-          // Only autofill if partner doesn't have a variant set yet.
+        if (partnerParty && selectedParties[partnerParty.id]) {
           // Roommates SPLIT the bathroom — one has tub responsibility,
           // the other has toilet responsibility. So the partner's
-          // variant is the OPPOSITE of this one.
-          if (!next[partnerParty.id].bathroomVariant) {
-            const opposite = variant === 'a' ? 'b' : 'a';
-            next[partnerParty.id] = {
-              ...next[partnerParty.id],
-              bathroomVariant: opposite,
-            };
-          }
+          // variant is FORCED to the opposite of this one whenever this
+          // bedroom's variant changes. The uploader can still go to the
+          // partner's tab and override manually if they really need to.
+          const opposite = variant === 'a' ? 'b' : 'a';
+          const partnerCurrent = next[partnerParty.id] || { mode: 'configure', checked: {}, passedSections: {} };
+          next[partnerParty.id] = { ...partnerCurrent, bathroomVariant: opposite };
         }
       }
       return next;
@@ -14774,6 +14921,8 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
               // it already exists.
               const viewUrl = sheetPreviews[f.name] || (f.type ? URL.createObjectURL(f) : null);
               const isImage = f.type && f.type.startsWith('image/');
+              const isRenaming = renamingIdx === idx;
+              const suggestion = suggestedSheetName();
               return (
                 <div key={`${f.name}-${idx}`} className="p-3 rounded-xl border border-emerald-300 bg-emerald-50">
                   <div className="flex items-center gap-3">
@@ -14785,16 +14934,61 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
                       </div>
                     )}
                     <div className="flex-1 min-w-0">
-                      <div className="text-sm font-medium text-emerald-900 truncate">{f.name}</div>
-                      <div className="text-[10px] font-mono text-emerald-700">
-                        {(f.size / 1024).toFixed(0)} KB · {f.type === 'application/pdf' ? 'PDF' : 'Image'}
+                      {isRenaming ? (
+                        <input
+                          autoFocus
+                          value={renamingValue}
+                          onChange={e => setRenamingValue(e.target.value)}
+                          onBlur={() => {
+                            renameSheetFile(idx, renamingValue);
+                            setRenamingIdx(null);
+                          }}
+                          onKeyDown={e => {
+                            if (e.key === 'Enter') {
+                              renameSheetFile(idx, renamingValue);
+                              setRenamingIdx(null);
+                            }
+                            if (e.key === 'Escape') {
+                              setRenamingIdx(null);
+                            }
+                          }}
+                          className="w-full px-2 py-1 rounded-md border border-emerald-400 bg-white text-sm text-stone-900" />
+                      ) : (
+                        <button
+                          onClick={() => { setRenamingIdx(idx); setRenamingValue(f.name.replace(/\.[^.]+$/, '')); }}
+                          className="text-sm font-medium text-emerald-900 truncate text-left w-full hover:underline"
+                          title="Tap to rename">
+                          {f.name}
+                        </button>
+                      )}
+                      <div className="text-[10px] font-mono text-emerald-700 flex items-center gap-1 mt-0.5">
+                        <span>{(f.size / 1024).toFixed(0)} KB · {f.type === 'application/pdf' ? 'PDF' : 'Image'}</span>
+                        {/* Suggested name button — appears when bedrooms
+                           are selected and the current name doesn't
+                           already match the suggestion. One tap renames
+                           the file. */}
+                        {suggestion && !f.name.startsWith(suggestion) && (
+                          <button
+                            onClick={() => renameSheetFile(idx, suggestion)}
+                            className="ml-1 px-1.5 py-0.5 rounded bg-emerald-200 text-emerald-900 hover:bg-emerald-300"
+                            title="Rename using selected apartment/bedroom">
+                            Use: {suggestion}
+                          </button>
+                        )}
                       </div>
                     </div>
-                    {/* Quick view: opens the file in a new tab so the
-                       uploader can confirm which sheet is which before
-                       assigning it to a specific bedroom. */}
+                    {/* Rename pencil — alternate way to enter edit mode */}
+                    <button
+                      onClick={() => { setRenamingIdx(idx); setRenamingValue(f.name.replace(/\.[^.]+$/, '')); }}
+                      className="p-2 rounded-lg hover:bg-emerald-100 text-emerald-700 flex-shrink-0"
+                      title="Rename">
+                      <Edit2 size={16} />
+                    </button>
+                    {/* Quick view: opens an overlay preview so the
+                       uploader can confirm which sheet is which. Tap
+                       the backdrop to close. */}
                     {viewUrl && (
-                      <button onClick={() => window.open(viewUrl, '_blank', 'noopener')}
+                      <button onClick={() => setQuickView({ file: f, url: viewUrl })}
                         className="p-2 rounded-lg hover:bg-emerald-100 text-emerald-700 flex-shrink-0"
                         title="Quick view">
                         <Eye size={16} />
@@ -14890,12 +15084,29 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
           Are you uploading for one bedroom or multiple bedrooms?
         </div>
         <div className="grid grid-cols-2 gap-2 mb-4">
-          <button onClick={() => setUploadMode('single')}
+          <button onClick={() => {
+              // Switching modes clears selections + per-bedroom config.
+              // In particular, 4 bedrooms checked in multi mode can't
+              // survive a switch to single mode (which permits only 1).
+              if (uploadMode !== 'single') {
+                setSelectedParties({});
+                setConfig({});
+                setActivePartyId(null);
+              }
+              setUploadMode('single');
+            }}
             className={`px-4 py-3 rounded-xl border-2 transition-colors ${uploadMode === 'single' ? 'bg-amber-50 border-amber-500 text-amber-900' : 'bg-white border-stone-200 text-stone-700'}`}>
             <div className="font-bold">Single bedroom</div>
             <div className="text-[10px] font-mono text-stone-500 mt-1">One person's checkout / spot check</div>
           </button>
-          <button onClick={() => setUploadMode('multi')}
+          <button onClick={() => {
+              if (uploadMode !== 'multi') {
+                setSelectedParties({});
+                setConfig({});
+                setActivePartyId(null);
+              }
+              setUploadMode('multi');
+            }}
             className={`px-4 py-3 rounded-xl border-2 transition-colors ${uploadMode === 'multi' ? 'bg-amber-50 border-amber-500 text-amber-900' : 'bg-white border-stone-200 text-stone-700'}`}>
             <div className="font-bold">Multiple bedrooms</div>
             <div className="text-[10px] font-mono text-stone-500 mt-1">Up to 4 roommates / full apartment</div>
@@ -15046,6 +15257,69 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
       <div>
         <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-1">Step 4 · Configure each bedroom</div>
         <div className="text-sm text-stone-600 mb-3">Tap a bedroom tab, then mark sections as passed or check the items that need cleaning.</div>
+
+        {/* Sheet strip — only shows when one or more sheets were
+           uploaded in step 0. Lets the uploader quick-view each sheet
+           and tap one to attach it to the currently active bedroom.
+           Replaces the dropdown approach for assigning sheets. The
+           dropdown still lives inside the bedroom config below for
+           accessibility, but this strip is the faster path. */}
+        {sheetFiles.length > 0 && (
+          <div className="mb-3 p-2 bg-stone-100 rounded-xl">
+            <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1.5 px-1">
+              Sheets — tap to assign to {parties.find(p => p.id === activePartyId)?.label || 'active bedroom'}
+            </div>
+            <div className="flex gap-2 overflow-x-auto pb-1">
+              {sheetFiles.map((f, idx) => {
+                const isImage = f.type && f.type.startsWith('image/');
+                const previewUrl = sheetPreviews[f.name];
+                const assignedToActive = activePartyId && config[activePartyId]?.sheetFileName === f.name;
+                return (
+                  <div key={`${f.name}-${idx}`}
+                    className={`flex-shrink-0 w-28 rounded-lg border-2 overflow-hidden bg-white transition-colors ${
+                      assignedToActive ? 'border-amber-500' : 'border-stone-200'
+                    }`}>
+                    <button
+                      onClick={() => {
+                        // Tapping the body of the card toggles the
+                        // assignment for the currently active bedroom.
+                        if (!activePartyId) return;
+                        const current = config[activePartyId]?.sheetFileName;
+                        setSheetForBedroom(activePartyId, current === f.name ? null : f.name);
+                      }}
+                      className="w-full text-left">
+                      <div className="aspect-[4/3] bg-stone-100 flex items-center justify-center">
+                        {isImage && previewUrl ? (
+                          <img src={previewUrl} alt={f.name} className="w-full h-full object-cover" />
+                        ) : (
+                          <FileText size={28} className="text-stone-400" />
+                        )}
+                      </div>
+                      <div className="px-1.5 py-1 text-[10px] font-mono truncate text-stone-700">
+                        {f.name}
+                      </div>
+                    </button>
+                    <div className="flex items-center border-t border-stone-200">
+                      <button
+                        onClick={() => setQuickView({ file: f, url: previewUrl || (f.type ? URL.createObjectURL(f) : null) })}
+                        className="flex-1 py-1.5 hover:bg-stone-50 flex items-center justify-center"
+                        title="Quick view">
+                        <Eye size={12} className="text-stone-600" />
+                      </button>
+                      <div className="w-px h-4 bg-stone-200" />
+                      <div className="flex-1 py-1.5 flex items-center justify-center text-[10px] font-mono">
+                        {assignedToActive
+                          ? <span className="text-amber-700">✓ assigned</span>
+                          : <span className="text-stone-400">tap card</span>}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
         {/* Bedroom tabs */}
         <div className="flex gap-2 mb-3 overflow-x-auto pb-1">
           {sortedIds.map(id => {
@@ -15344,6 +15618,7 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
   // is hidden when the wizard renders inside ManagerShell, which has its
   // own bottom tab bar.
   return (
+    <>
     <div className="min-h-screen bg-stone-50 pb-[136px]">
       <div className="px-5 py-4 border-b border-stone-200 bg-white sticky top-0 z-10">
         <div className="flex items-center gap-3 mb-3">
@@ -15462,6 +15737,13 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
         )}
       </div>
     </div>
+    {/* Sheet quick-view overlay — opened from the eye icon on any
+       sheet card. Closes when the user taps outside the image. */}
+    {quickView && (
+      <SheetQuickViewModal file={quickView.file} url={quickView.url}
+        onClose={() => setQuickView(null)} />
+    )}
+    </>
   );
 }
 

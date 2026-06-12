@@ -4727,11 +4727,22 @@ function Header({ name, onSignOut, role, employee, onOpenMessages, onLogoClick, 
             <span className="text-xs font-mono">Back</span>
           </button>
         )}
-        {onLogoClick ? (
-          <button onClick={onLogoClick} className="active:scale-95 transition-transform flex items-center gap-1" title="Home">
-            {logoBlock}
-          </button>
-        ) : logoBlock}
+        {/* Logo button — always clickable so the user has a reliable
+           "go home" tap target on every screen. When the parent supplies
+           onLogoClick we use that (typically navigates to the screen's
+           local home, e.g. PropertyHub for cleaners). Otherwise we
+           fall back to reloading the root URL, which sends them to
+           sign-in / landing. A subtle title attribute confirms the
+           action so users know what tapping the logo does. */}
+        <button
+          onClick={() => {
+            if (onLogoClick) onLogoClick();
+            else window.location.hash = '';
+          }}
+          className="active:scale-95 transition-transform flex items-center gap-1"
+          title="Home">
+          {logoBlock}
+        </button>
       </div>
       <div className="flex items-center gap-2" data-no-translate>
         {/* Locale toggle: cleaner can flip the entire UI to Spanish.
@@ -14237,6 +14248,10 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [submitted, setSubmitted] = useState(false);
+  // True once the uploader has tapped "Next" on the configure step
+  // with an incomplete bedroom — used to gate the red error dots so
+  // we don't show them before they've even tried.
+  const [nextAttempted, setNextAttempted] = useState(false);
 
   // -----------------------------------------------------------------
   // Load units (apartments) for this property
@@ -14451,6 +14466,26 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
     }));
   };
 
+  // Per-bedroom cleaning type. Lives on the assignment row as the
+  // existing `assignment_type` column at submit time so downstream
+  // filtering/coloring still works.
+  const setCleaningType = (partyId, value) => {
+    setConfig(prev => ({
+      ...prev,
+      [partyId]: { ...(prev[partyId] || { mode: 'configure', checked: {} }), cleaningType: value },
+    }));
+  };
+
+  // Per-bedroom sheet file assignment. Stores the file NAME so we can
+  // look up the actual File object at submit time. Null = no sheet
+  // attached to this bedroom.
+  const setSheetForBedroom = (partyId, fileName) => {
+    setConfig(prev => ({
+      ...prev,
+      [partyId]: { ...(prev[partyId] || { mode: 'configure', checked: {} }), sheetFileName: fileName },
+    }));
+  };
+
   const toggleItem = (partyId, sectionKey, itemKey) => {
     const key = `${sectionKey}:${itemKey}`;
     setConfig(prev => {
@@ -14546,33 +14581,42 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
     }
     if (step === 2) return !!sheetType;
     if (step === 3) {
-      // Every selected bedroom must satisfy ONE of:
-      //   - Whole-bedroom Pass (mode === 'pass')
-      //   - At least one section configured: either passed OR has items
-      //     checked. For bathroom/general sections WITH items checked
-      //     we also need their variant set so we know which template to use.
+      // Configure step. Every selected bedroom must have EVERY section
+      // accounted for. A section is "done" when it's either passed
+      // (passedSections[s] === true) or has at least one item checked.
+      // Bathroom/General with items checked also need their variant
+      // picked so we know which template to use.
+      //
+      // Whole-bedroom Pass (mode === 'pass') short-circuits all of this.
       const ids = Object.keys(selectedParties).filter(k => selectedParties[k]);
-      return ids.every(id => {
-        const c = config[id];
-        if (!c) return false;
-        if (c.mode === 'pass') return true;
-
-        const checked = c.checked || {};
-        const passed = c.passedSections || {};
-        const hasAnyChecked = Object.keys(checked).length > 0;
-        const hasAnyPassed = Object.keys(passed).length > 0;
-        if (!hasAnyChecked && !hasAnyPassed) return false;
-
-        // For any section with checked items that needs a variant,
-        // confirm variant is set.
-        const hasBathroomItems = Object.keys(checked).some(k => k.startsWith('bathroom:'));
-        if (hasBathroomItems && !c.bathroomVariant) return false;
-        const hasGeneralItems = Object.keys(checked).some(k => k.startsWith('general:'));
-        if (hasGeneralItems && !c.generalVariant) return false;
-        return true;
-      });
+      return ids.every(id => sectionsForBedroomComplete(id).every(Boolean));
     }
     return true;
+  };
+
+  // Returns an array [bedroom, vanity, bathroom, general] of booleans
+  // indicating whether each section is "done". Used by the validation
+  // gate and by the section-tab error indicators so the uploader sees
+  // exactly which sections still need attention.
+  const sectionsForBedroomComplete = (partyId) => {
+    const c = config[partyId];
+    if (!c) return [false, false, false, false];
+    if (c.mode === 'pass') return [true, true, true, true];
+    const checked = c.checked || {};
+    const passed = c.passedSections || {};
+    const sectionDone = (key, variantNeeded, variantValue) => {
+      if (passed[key]) return true;
+      const hasItems = Object.keys(checked).some(k => k.startsWith(`${key}:`));
+      if (!hasItems) return false;
+      if (variantNeeded && !variantValue) return false;
+      return true;
+    };
+    return [
+      sectionDone('bedroom',  false, null),
+      sectionDone('vanity',   false, null),
+      sectionDone('bathroom', true,  c.bathroomVariant),
+      sectionDone('general',  true,  c.generalVariant),
+    ];
   };
 
   // -----------------------------------------------------------------
@@ -14586,25 +14630,21 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
     if (busy) return;
     setBusy(true); setError('');
     try {
-      // Upload all sheet files first; collect URLs in order.
-      const uploadedUrls = [];
+      // Upload all sheet files first; collect URLs by file NAME so we
+      // can look up the URL for each bedroom's chosen sheet.
+      const uploadedByName = {};
       for (const sf of sheetFiles) {
         const safe = sf.name.replace(/[^a-zA-Z0-9._-]/g, '_');
         const path = `assignments/${property.id}/${Date.now()}-${safe}`;
         const { error: upErr } = await supabase.storage.from('assignments').upload(path, sf);
         if (upErr) throw new Error('Sheet upload failed: ' + upErr.message);
         const { data: urlData } = supabase.storage.from('assignments').getPublicUrl(path);
-        uploadedUrls.push({ url: urlData?.publicUrl || null, kind: sf.type === 'application/pdf' ? 'pdf' : 'image', name: sf.name });
+        uploadedByName[sf.name] = {
+          url: urlData?.publicUrl || null,
+          kind: sf.type === 'application/pdf' ? 'pdf' : 'image',
+          name: sf.name,
+        };
       }
-      const primaryFile = uploadedUrls[0] || null;
-      const fileUrl = primaryFile?.url || null;
-      const fileKind = primaryFile?.kind || null;
-      // Extra-sheet URLs appended to assignment notes so they're still
-      // accessible. Cleaners can paste them into a browser or, ideally,
-      // we'll add a sheet_files column in a follow-up migration.
-      const extraSheetsNote = uploadedUrls.length > 1
-        ? `\n\nAdditional sheets attached:\n${uploadedUrls.slice(1).map(u => `• ${u.name}: ${u.url}`).join('\n')}`
-        : '';
 
       // Determine the friendly assignment title from sheet type
       const titleBase = sheetType === 'cleaning_check'
@@ -14624,14 +14664,27 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
         if (!partyUnit) {
           throw new Error(`Couldn't find the apartment for ${party?.label || partyId}.`);
         }
+        // Sheet for this bedroom. If the uploader picked a specific
+        // sheet via the dropdown use that. Otherwise default to the
+        // single uploaded sheet (if any). With zero sheets, no file
+        // is attached.
+        let bedroomSheet = null;
+        if (c.sheetFileName && uploadedByName[c.sheetFileName]) {
+          bedroomSheet = uploadedByName[c.sheetFileName];
+        } else if (Object.keys(uploadedByName).length === 1) {
+          bedroomSheet = uploadedByName[Object.keys(uploadedByName)[0]];
+        }
+        // Per-bedroom cleaning type. Defaults from sheet type.
+        const cleaningType = c.cleaningType
+          || (sheetType === 'cleaning_check' ? 'cleaning_check' : 'move_out_check');
         const assignmentInsert = {
           customer_id: property.id,
           unit_id: partyUnit?.id || null,
           title: `${titleBase} · ${partyUnit?.label || ''}${party?.label ? ' · ' + party.label : ''}`.trim(),
-          notes: extraSheetsNote ? extraSheetsNote.trim() : null,
-          file_url: fileUrl,
-          file_kind: fileKind,
-          assignment_type: sheetType === 'cleaning_check' ? 'cleaning_check' : 'move_out',
+          notes: null,
+          file_url: bedroomSheet?.url || null,
+          file_kind: bedroomSheet?.kind || null,
+          assignment_type: cleaningType,
           active: true,
           source: 'staff',
           uploader_employee_id: employee?.id || null,
@@ -14715,30 +14768,47 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
         {/* Already-attached files */}
         {sheetFiles.length > 0 && (
           <div className="space-y-2 mb-3">
-            {sheetFiles.map((f, idx) => (
-              <div key={`${f.name}-${idx}`} className="p-3 rounded-xl border border-emerald-300 bg-emerald-50">
-                <div className="flex items-center gap-3">
-                  {sheetPreviews[f.name] ? (
-                    <img src={sheetPreviews[f.name]} alt="" className="w-12 h-12 rounded-lg object-cover flex-shrink-0" />
-                  ) : (
-                    <div className="w-12 h-12 rounded-lg bg-stone-200 flex items-center justify-center flex-shrink-0">
-                      <FileText size={20} className="text-stone-500" />
+            {sheetFiles.map((f, idx) => {
+              // Build a blob URL for both images and PDFs so quick-view
+              // works for either kind. Reuse the image preview URL when
+              // it already exists.
+              const viewUrl = sheetPreviews[f.name] || (f.type ? URL.createObjectURL(f) : null);
+              const isImage = f.type && f.type.startsWith('image/');
+              return (
+                <div key={`${f.name}-${idx}`} className="p-3 rounded-xl border border-emerald-300 bg-emerald-50">
+                  <div className="flex items-center gap-3">
+                    {isImage ? (
+                      <img src={sheetPreviews[f.name]} alt="" className="w-12 h-12 rounded-lg object-cover flex-shrink-0" />
+                    ) : (
+                      <div className="w-12 h-12 rounded-lg bg-stone-200 flex items-center justify-center flex-shrink-0">
+                        <FileText size={20} className="text-stone-500" />
+                      </div>
+                    )}
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm font-medium text-emerald-900 truncate">{f.name}</div>
+                      <div className="text-[10px] font-mono text-emerald-700">
+                        {(f.size / 1024).toFixed(0)} KB · {f.type === 'application/pdf' ? 'PDF' : 'Image'}
+                      </div>
                     </div>
-                  )}
-                  <div className="flex-1 min-w-0">
-                    <div className="text-sm font-medium text-emerald-900 truncate">{f.name}</div>
-                    <div className="text-[10px] font-mono text-emerald-700">
-                      {(f.size / 1024).toFixed(0)} KB · {f.type === 'application/pdf' ? 'PDF' : 'Image'}
-                    </div>
+                    {/* Quick view: opens the file in a new tab so the
+                       uploader can confirm which sheet is which before
+                       assigning it to a specific bedroom. */}
+                    {viewUrl && (
+                      <button onClick={() => window.open(viewUrl, '_blank', 'noopener')}
+                        className="p-2 rounded-lg hover:bg-emerald-100 text-emerald-700 flex-shrink-0"
+                        title="Quick view">
+                        <Eye size={16} />
+                      </button>
+                    )}
+                    <button onClick={() => removeSheetFile(idx)}
+                      className="p-2 rounded-lg hover:bg-red-100 text-red-600 flex-shrink-0"
+                      title="Remove">
+                      <X size={16} />
+                    </button>
                   </div>
-                  <button onClick={() => removeSheetFile(idx)}
-                    className="p-2 rounded-lg hover:bg-red-100 text-red-600 flex-shrink-0"
-                    title="Remove">
-                    <X size={16} />
-                  </button>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
 
@@ -14935,13 +15005,11 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
         <div className="space-y-3">
           <button onClick={() => setSheetType('cleaning_check')}
             className={`w-full text-left p-4 rounded-2xl border-2 transition-colors ${sheetType === 'cleaning_check' ? 'bg-amber-50 border-amber-500' : 'bg-white border-stone-200 hover:border-stone-400'}`}>
-            <div className="font-serif text-lg text-stone-900 font-bold mb-1">Cleaning check</div>
-            <div className="text-sm text-stone-600">Mid-tenancy inspection. Tenants get charged from their deposit for unclean items.</div>
+            <div className="font-serif text-lg text-stone-900 font-bold">Cleaning check</div>
           </button>
           <button onClick={() => setSheetType('move_out_clean')}
             className={`w-full text-left p-4 rounded-2xl border-2 transition-colors ${sheetType === 'move_out_clean' ? 'bg-amber-50 border-amber-500' : 'bg-white border-stone-200 hover:border-stone-400'}`}>
-            <div className="font-serif text-lg text-stone-900 font-bold mb-1">Move-out clean</div>
-            <div className="text-sm text-stone-600">Final white-glove inspection at move-out. Failed items get cleaned by Summit Clean.</div>
+            <div className="font-serif text-lg text-stone-900 font-bold">Move-out clean</div>
           </button>
         </div>
       </div>
@@ -15068,6 +15136,42 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
 
     return (
       <div className="space-y-3">
+        {/* Cleaning type + sheet assignment row. Cleaning type defaults
+           from the sheet type chosen at step 3 (cleaning_check →
+           cleaning_check; move_out_clean → move_out_check) but the
+           uploader can override per bedroom — useful when one bedroom
+           needs a deep clean and another only needs a recheck. The
+           dropdown is the existing ASSIGNMENT_TYPES list. */}
+        <div className={`grid ${sheetFiles.length > 1 ? 'sm:grid-cols-2' : ''} gap-2`}>
+          <div>
+            <label className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1 block">Cleaning type</label>
+            <select value={c.cleaningType || (sheetType === 'cleaning_check' ? 'cleaning_check' : 'move_out_check')}
+              onChange={e => setCleaningType(partyId, e.target.value)}
+              className="w-full px-3 py-2 rounded-lg border border-stone-300 bg-white text-sm">
+              {ASSIGNMENT_TYPES.map(t => (
+                <option key={t.value} value={t.value}>{t.label}</option>
+              ))}
+            </select>
+          </div>
+          {/* Per-bedroom sheet assignment — only shown when there's
+             more than one sheet uploaded. With a single sheet it's
+             auto-attached to every bedroom; with multiple, the
+             uploader picks which one goes to which bedroom. */}
+          {sheetFiles.length > 1 && (
+            <div>
+              <label className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1 block">Sheet for this bedroom</label>
+              <select value={c.sheetFileName || ''}
+                onChange={e => setSheetForBedroom(partyId, e.target.value || null)}
+                className="w-full px-3 py-2 rounded-lg border border-stone-300 bg-white text-sm">
+                <option value="">No sheet</option>
+                {sheetFiles.map(f => (
+                  <option key={f.name} value={f.name}>{f.name}</option>
+                ))}
+              </select>
+            </div>
+          )}
+        </div>
+
         {/* Pass / Fail-Entire toggle row. Both buttons are clearly
            clickable and show pressed state when active. Clicking the
            active one again toggles it back off. */}
@@ -15095,22 +15199,31 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
           </div>
         )}
 
-        {/* Section tabs (Bedroom / Vanity / Bathroom / General) */}
+        {/* Section tabs (Bedroom / Vanity / Bathroom / General). A
+           red dot appears on any section that isn't done yet — but
+           only AFTER the uploader has tried to advance, so we don't
+           scream at them on first arrival. */}
         <div className="flex gap-1 bg-stone-100 p-1 rounded-xl overflow-x-auto">
-          {sections.map(s => {
+          {sections.map((s, idx) => {
             const cnt = sectionCount(s.key);
             const isPassed = !!passedSecs[s.key];
             const isActive = activeSection === s.key;
+            const sectionDoneFlags = sectionsForBedroomComplete(partyId);
+            const isIncomplete = !sectionDoneFlags[idx];
+            const showError = nextAttempted && isIncomplete;
             return (
               <button key={s.key} onClick={() => setActiveSection(s.key)}
-                className={`flex-1 min-w-fit py-2 px-3 rounded-lg text-xs font-medium whitespace-nowrap transition-colors ${
+                className={`relative flex-1 min-w-fit py-2 px-3 rounded-lg text-xs font-medium whitespace-nowrap transition-colors ${
                   isActive
                     ? (isPassed ? 'bg-emerald-100 text-emerald-900 font-bold shadow-sm' : 'bg-white text-stone-900 font-bold shadow-sm')
                     : (isPassed ? 'text-emerald-700' : 'text-stone-600')
                 }`}>
+                {showError && (
+                  <span className="absolute top-1 right-1 w-2 h-2 rounded-full bg-red-500" title="Needs an action" />
+                )}
                 <div>{s.label}</div>
                 <div className="text-[9px] font-mono opacity-70">
-                  {isPassed ? 'passed' : cnt > 0 ? `${cnt} items` : ' '}
+                  {isPassed ? 'passed' : cnt > 0 ? `${cnt} items` : (showError ? 'needs action' : ' ')}
                 </div>
               </button>
             );
@@ -15200,7 +15313,7 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
                   {items.filter(i => checked[`${sectionKey}:${i.item_key}`]).length}/{items.length}
                 </div>
               </div>
-              <div className="p-2 space-y-1 max-h-[50vh] overflow-y-auto">
+              <div className="p-2 grid grid-cols-1 sm:grid-cols-2 gap-1 max-h-[50vh] overflow-y-auto">
                 {items.map(item => {
                   const key = `${sectionKey}:${item.item_key}`;
                   const isChecked = !!checked[key];
@@ -15317,9 +15430,28 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
          to avoid two redundant back affordances. */}
       <div className="fixed bottom-[64px] left-0 right-0 bg-white border-t border-stone-200 px-5 py-3 flex gap-2 z-30 shadow-[0_-4px_12px_rgba(0,0,0,0.06)]">
         {step < 4 && (
-          <button onClick={() => setStep(step + 1)} disabled={!canAdvanceFromStep()}
-            className="flex-1 py-3 rounded-xl bg-stone-900 text-stone-50 text-sm font-medium disabled:opacity-50">
-            {step === 0 && sheetFiles.length === 0 ? 'Skip & continue' : 'Next'}
+          <button
+            onClick={() => {
+              if (canAdvanceFromStep()) {
+                setNextAttempted(false);
+                setStep(step + 1);
+              } else if (step === 3) {
+                // On the configure step we let the button stay tappable
+                // so the user gets visible feedback (red dots on the
+                // section tabs). For other steps the disabled state is
+                // still meaningful.
+                setNextAttempted(true);
+              }
+            }}
+            disabled={step !== 3 && !canAdvanceFromStep()}
+            className={`flex-1 py-3 rounded-xl text-sm font-medium ${
+              !canAdvanceFromStep() && step === 3
+                ? 'bg-stone-400 text-stone-50'
+                : 'bg-stone-900 text-stone-50 disabled:opacity-50'
+            }`}>
+            {step === 0 && sheetFiles.length === 0 ? 'Skip & continue'
+              : step === 3 && !canAdvanceFromStep() ? 'Finish each section first'
+              : 'Next'}
           </button>
         )}
         {step === 4 && !submitted && (

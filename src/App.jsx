@@ -14190,9 +14190,12 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
   // refresh just starts over — no state persistence here.
   const [step, setStep] = useState(0);
 
-  // === Step 1: pick the apartment + upload mode ===
+  // === Step 1: pick the apartment(s) + upload mode ===
+  // We no longer keep a single "selectedUnit" — the new tree shows
+  // all apartments at once and the uploader can pick bedrooms across
+  // multiple apartments. The apartment for any given assignment is
+  // looked up via party.unit_id at submit time.
   const [units, setUnits] = useState([]);
-  const [selectedUnit, setSelectedUnit] = useState(null);
   const [unitSearch, setUnitSearch] = useState('');
   // 'single' = one bedroom only · 'multi' = up to 4 bedrooms at once
   const [uploadMode, setUploadMode] = useState(null);
@@ -14214,9 +14217,14 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
   // Which party we're currently editing inside step 4
   const [activePartyId, setActivePartyId] = useState(null);
 
-  // === Step 0: sheet image attachment (optional) ===
-  const [sheetFile, setSheetFile] = useState(null);
-  const [sheetPreviewUrl, setSheetPreviewUrl] = useState(null);
+  // === Step 0: sheet image attachments (optional, multiple allowed) ===
+  // Uploaders often have ONE sheet per bedroom and want to attach them
+  // all so cleaners can pick the right one. We accept any number of
+  // image/PDF files and upload each one on submit.
+  const [sheetFiles, setSheetFiles] = useState([]);
+  // Map of fileName → object URL for image previews. Built lazily as
+  // files are added so we don't leak object URLs.
+  const [sheetPreviews, setSheetPreviews] = useState({});
 
   // Template data
   const [templateSet, setTemplateSet] = useState(null);
@@ -14284,27 +14292,51 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
   }, [property.id]);
 
   // -----------------------------------------------------------------
-  // Load parties when unit chosen
+  // Load ALL parties for ALL units of this property up-front. The
+  // legacy-style tree shows every apartment with its bedrooms inline
+  // so the uploader can check any combination, even across apartments.
   // -----------------------------------------------------------------
   useEffect(() => {
-    if (!selectedUnit) { setParties([]); return; }
+    if (units.length === 0) { setParties([]); return; }
     (async () => {
+      const unitIds = units.map(u => u.id);
       const { data } = await supabase.from('parties').select('*')
-        .eq('unit_id', selectedUnit.id).eq('active', true)
+        .in('unit_id', unitIds).eq('active', true)
         .order('sort_order').order('label');
       setParties(data || []);
     })();
-  }, [selectedUnit?.id]);
+  }, [units]);
 
   // -----------------------------------------------------------------
-  // Sheet image preview
+  // Sheet image previews — build object URLs for any image files in
+  // sheetFiles, revoke them on cleanup so the browser doesn't leak.
   // -----------------------------------------------------------------
   useEffect(() => {
-    if (!sheetFile) { setSheetPreviewUrl(null); return; }
-    const url = URL.createObjectURL(sheetFile);
-    setSheetPreviewUrl(url);
-    return () => URL.revokeObjectURL(url);
-  }, [sheetFile]);
+    const urls = {};
+    sheetFiles.forEach(f => {
+      if (f.type && f.type.startsWith('image/')) {
+        urls[f.name] = URL.createObjectURL(f);
+      }
+    });
+    setSheetPreviews(urls);
+    return () => {
+      Object.values(urls).forEach(u => URL.revokeObjectURL(u));
+    };
+  }, [sheetFiles]);
+
+  // Append new sheet files to the list. Filters out files already
+  // present by name+size so re-tapping the input doesn't duplicate.
+  const addSheetFiles = (newFiles) => {
+    setSheetFiles(prev => {
+      const existing = new Set(prev.map(f => `${f.name}-${f.size}`));
+      const additions = Array.from(newFiles).filter(f => !existing.has(`${f.name}-${f.size}`));
+      return [...prev, ...additions];
+    });
+  };
+
+  const removeSheetFile = (idx) => {
+    setSheetFiles(prev => prev.filter((_, i) => i !== idx));
+  };
 
   // Helper lookups against template data
   const variantsBySection = (sectionKey) =>
@@ -14326,19 +14358,11 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
   }, [step, selectedParties, activePartyId]);
 
   // -----------------------------------------------------------------
-  // Toggle a bedroom on/off. In single mode the uploader can only have
-  // ONE bedroom selected at a time — picking a new bedroom replaces
-  // the previous one. Multi mode allows up to all 4 bedrooms.
+  // Make sure a config shell exists for a bedroom. Called when the
+  // bedroom is first selected (either via individual toggle or via
+  // "Select all bedrooms in this apartment" in multi mode).
   // -----------------------------------------------------------------
-  const togglePartySelection = (partyId) => {
-    setSelectedParties(prev => {
-      const next = uploadMode === 'single' ? {} : { ...prev };
-      if (prev[partyId] && uploadMode !== 'single') { delete next[partyId]; }
-      else { next[partyId] = true; }
-      return next;
-    });
-    // Default config: bathroom variant inferred from bedroom number,
-    // general variant left null until uploader picks one.
+  const ensureConfigShell = (partyId) => {
     setConfig(prev => {
       if (prev[partyId]) return prev;
       const party = parties.find(p => p.id === partyId);
@@ -14352,9 +14376,26 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
           bathroomVariant,
           generalVariant: null,
           checked: {},
+          passedSections: {},
         },
       };
     });
+  };
+
+  // -----------------------------------------------------------------
+  // Toggle a bedroom on/off. In single mode the uploader can only have
+  // ONE bedroom selected at a time — picking a new bedroom replaces
+  // the previous one (even if it's in a different apartment). Multi
+  // mode allows free selection across apartments.
+  // -----------------------------------------------------------------
+  const togglePartySelection = (partyId) => {
+    setSelectedParties(prev => {
+      const next = uploadMode === 'single' ? {} : { ...prev };
+      if (prev[partyId] && uploadMode !== 'single') { delete next[partyId]; }
+      else { next[partyId] = true; }
+      return next;
+    });
+    ensureConfigShell(partyId);
   };
 
   // -----------------------------------------------------------------
@@ -14488,8 +14529,10 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
   const canAdvanceFromStep = () => {
     if (step === 0) return true; // sheet upload is optional
     if (step === 1) {
-      // Apartment + mode + bedrooms all on one step now.
-      if (!selectedUnit || !uploadMode) return false;
+      // Apartment + mode + bedrooms all on one step now. Need a mode
+      // chosen and at least one bedroom checked. In single mode the
+      // selection is capped at 1 (enforced by togglePartySelection).
+      if (!uploadMode) return false;
       const ids = Object.keys(selectedParties).filter(k => selectedParties[k]);
       if (ids.length === 0) return false;
       if (uploadMode === 'single' && ids.length > 1) return false;
@@ -14527,23 +14570,35 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
   };
 
   // -----------------------------------------------------------------
-  // Submit: create one assignment per non-pass bedroom with its targets
+  // Submit: create one assignment per non-pass bedroom with its targets.
+  // Multiple sheet uploads: all files are uploaded to storage. The
+  // first becomes the assignment's primary `file_url`; the rest are
+  // listed in the title/notes for now (a future migration can add a
+  // proper `sheet_files JSONB` column).
   // -----------------------------------------------------------------
   const submit = async () => {
     if (busy) return;
     setBusy(true); setError('');
     try {
-      // Upload sheet file once (if attached) so all assignments reference it
-      let fileUrl = null, fileKind = null;
-      if (sheetFile) {
-        const safe = sheetFile.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+      // Upload all sheet files first; collect URLs in order.
+      const uploadedUrls = [];
+      for (const sf of sheetFiles) {
+        const safe = sf.name.replace(/[^a-zA-Z0-9._-]/g, '_');
         const path = `assignments/${property.id}/${Date.now()}-${safe}`;
-        const { error: upErr } = await supabase.storage.from('assignments').upload(path, sheetFile);
+        const { error: upErr } = await supabase.storage.from('assignments').upload(path, sf);
         if (upErr) throw new Error('Sheet upload failed: ' + upErr.message);
         const { data: urlData } = supabase.storage.from('assignments').getPublicUrl(path);
-        fileUrl = urlData?.publicUrl || null;
-        fileKind = sheetFile.type === 'application/pdf' ? 'pdf' : 'image';
+        uploadedUrls.push({ url: urlData?.publicUrl || null, kind: sf.type === 'application/pdf' ? 'pdf' : 'image', name: sf.name });
       }
+      const primaryFile = uploadedUrls[0] || null;
+      const fileUrl = primaryFile?.url || null;
+      const fileKind = primaryFile?.kind || null;
+      // Extra-sheet URLs appended to assignment notes so they're still
+      // accessible. Cleaners can paste them into a browser or, ideally,
+      // we'll add a sheet_files column in a follow-up migration.
+      const extraSheetsNote = uploadedUrls.length > 1
+        ? `\n\nAdditional sheets attached:\n${uploadedUrls.slice(1).map(u => `• ${u.name}: ${u.url}`).join('\n')}`
+        : '';
 
       // Determine the friendly assignment title from sheet type
       const titleBase = sheetType === 'cleaning_check'
@@ -14556,11 +14611,18 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
         const c = config[partyId];
         if (!c || c.mode === 'pass') continue;
         const party = parties.find(p => p.id === partyId);
+        // Each bedroom's assignment lives at its own apartment. The
+        // wizard supports cross-apartment selections so we look the
+        // unit up from the party itself, not from a single state var.
+        const partyUnit = units.find(u => u.id === party?.unit_id);
+        if (!partyUnit) {
+          throw new Error(`Couldn't find the apartment for ${party?.label || partyId}.`);
+        }
         const assignmentInsert = {
           customer_id: property.id,
-          unit_id: selectedUnit.id,
-          title: `${titleBase} · ${selectedUnit.label}${party?.label ? ' · ' + party.label : ''}`,
-          notes: null,
+          unit_id: partyUnit?.id || null,
+          title: `${titleBase} · ${partyUnit?.label || ''}${party?.label ? ' · ' + party.label : ''}`.trim(),
+          notes: extraSheetsNote ? extraSheetsNote.trim() : null,
           file_url: fileUrl,
           file_kind: fileKind,
           assignment_type: sheetType === 'cleaning_check' ? 'cleaning_check' : 'move_out',
@@ -14582,7 +14644,7 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
           const [sectionKey, itemKey] = k.split(':', 2);
           targetRows.push({
             assignment_id: created_assignment.id,
-            unit_id: selectedUnit.id,
+            unit_id: partyUnit?.id || null,
             party_id: partyId,
             status: 'pending',
             template_section: sectionKey,
@@ -14632,71 +14694,118 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
   }
 
   // -----------------------------------------------------------------
-  // Step 0 — Sheet upload (optional). Owners told us they want this
-  // FIRST so they can reference the paper sheet while configuring.
+  // Step 0 — Sheet uploads (optional, multiple allowed). The uploader
+  // can attach one sheet per bedroom — cleaners will see all attached
+  // sheets inside their assignment.
   // -----------------------------------------------------------------
   const renderSheetUpload = () => {
     return (
       <div>
-        <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-1">Step 1 · Attach the paper sheet (optional)</div>
+        <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-1">Step 1 · Attach paper sheets (optional)</div>
         <div className="text-sm text-stone-600 mb-4">
-          Take a photo or attach a PDF of the inspection sheet. Cleaners can view it from inside the assignment for reference.
-          You can skip this and configure manually.
+          Take photos or attach PDFs of the inspection sheets. You can attach more than one — for example, one sheet per bedroom. Cleaners will see all sheets inside the assignment. Skip if you don't have them.
         </div>
+
+        {/* Already-attached files */}
+        {sheetFiles.length > 0 && (
+          <div className="space-y-2 mb-3">
+            {sheetFiles.map((f, idx) => (
+              <div key={`${f.name}-${idx}`} className="p-3 rounded-xl border border-emerald-300 bg-emerald-50">
+                <div className="flex items-center gap-3">
+                  {sheetPreviews[f.name] ? (
+                    <img src={sheetPreviews[f.name]} alt="" className="w-12 h-12 rounded-lg object-cover flex-shrink-0" />
+                  ) : (
+                    <div className="w-12 h-12 rounded-lg bg-stone-200 flex items-center justify-center flex-shrink-0">
+                      <FileText size={20} className="text-stone-500" />
+                    </div>
+                  )}
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-medium text-emerald-900 truncate">{f.name}</div>
+                    <div className="text-[10px] font-mono text-emerald-700">
+                      {(f.size / 1024).toFixed(0)} KB · {f.type === 'application/pdf' ? 'PDF' : 'Image'}
+                    </div>
+                  </div>
+                  <button onClick={() => removeSheetFile(idx)}
+                    className="p-2 rounded-lg hover:bg-red-100 text-red-600 flex-shrink-0"
+                    title="Remove">
+                    <X size={16} />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Dropzone — always shown, lets uploader add more */}
         <label className="block">
-          <input type="file" accept="image/*,application/pdf" className="hidden"
-            onChange={e => setSheetFile(e.target.files?.[0] || null)} />
-          <div className={`px-4 py-6 rounded-2xl border-2 border-dashed text-center cursor-pointer ${sheetFile ? 'bg-emerald-50 border-emerald-400 text-emerald-800' : 'border-stone-300 text-stone-600 hover:border-stone-500'}`}>
-            {sheetFile ? (
-              <>
-                <Check size={20} className="mx-auto mb-2" />
-                <div className="font-medium text-sm">{sheetFile.name}</div>
-                <div className="text-xs mt-1">Tap to replace</div>
-              </>
-            ) : (
-              <>
-                <Camera size={24} className="mx-auto mb-2 text-stone-400" />
-                <div className="font-medium text-sm">Tap to attach sheet photo or PDF</div>
-                <div className="text-xs mt-1 text-stone-500">Or skip this step</div>
-              </>
-            )}
+          <input type="file" accept="image/*,application/pdf" className="hidden" multiple
+            onChange={e => { addSheetFiles(e.target.files); e.target.value = ''; }} />
+          <div className="px-4 py-6 rounded-2xl border-2 border-dashed border-stone-300 text-center text-stone-600 hover:border-stone-500 cursor-pointer">
+            <Camera size={24} className="mx-auto mb-2 text-stone-400" />
+            <div className="font-medium text-sm">
+              {sheetFiles.length === 0 ? 'Tap to attach sheet photos or PDFs' : 'Add another sheet'}
+            </div>
+            <div className="text-xs mt-1 text-stone-500">
+              {sheetFiles.length === 0 ? 'Or skip this step' : 'You can attach as many as you need'}
+            </div>
           </div>
         </label>
-        {sheetPreviewUrl && sheetFile?.type?.startsWith('image/') && (
-          <img src={sheetPreviewUrl} alt="" className="mt-3 max-h-64 rounded-xl mx-auto" />
-        )}
-        {sheetFile && (
-          <button onClick={() => setSheetFile(null)}
-            className="mt-3 w-full px-3 py-2 rounded-lg border border-stone-300 text-stone-600 text-sm font-medium">
-            Remove attachment
-          </button>
-        )}
       </div>
     );
   };
 
   // -----------------------------------------------------------------
-  // Step 1 — Apartment + mode + bedrooms (all on one screen)
+  // Step 1 — Apartment + bedrooms
   //
-  // Order: mode picker → apartment search → (once apartment picked)
-  // bedroom list pops out below for the uploader to check off which
-  // bedrooms need cleaning.
+  // Mode toggle FIRST. The apartment tree stays hidden until the
+  // uploader picks Single or Multi mode. Once mode is picked, every
+  // apartment in the property renders with its bedrooms inline as
+  // checkbox cards (legacy style). Single mode: tapping a bedroom
+  // replaces any previously checked bedroom across the whole tree.
+  // Multi mode: tap freely, including across different apartments.
   // -----------------------------------------------------------------
   const renderUnitPicker = () => {
+    // Filter apartments by the search text — applied to the LABEL
     const q = unitSearch.trim().toLowerCase();
-    const visible = units.filter(u => !q || (u.label || '').toLowerCase().includes(q));
-    // Sort bedrooms by trailing number so they read Bedroom 1, 2, 3, 4
-    // regardless of insertion order in the DB.
-    const sortedParties = [...parties].sort((a, b) => {
-      const an = parseInt((a.label || '').match(/(\d+)/)?.[1] || '0', 10);
-      const bn = parseInt((b.label || '').match(/(\d+)/)?.[1] || '0', 10);
-      return an - bn;
+    const visibleUnits = units.filter(u => !q || (u.label || '').toLowerCase().includes(q));
+    // Map of unitId → its bedrooms (sorted by trailing number)
+    const partiesByUnit = {};
+    parties.forEach(p => {
+      if (!partiesByUnit[p.unit_id]) partiesByUnit[p.unit_id] = [];
+      partiesByUnit[p.unit_id].push(p);
     });
+    Object.keys(partiesByUnit).forEach(k => {
+      partiesByUnit[k].sort((a, b) => {
+        const an = parseInt((a.label || '').match(/(\d+)/)?.[1] || '0', 10);
+        const bn = parseInt((b.label || '').match(/(\d+)/)?.[1] || '0', 10);
+        return an - bn;
+      });
+    });
+
+    // "Select all bedrooms in this apartment" (multi mode only)
+    const toggleAllInUnit = (unit) => {
+      if (uploadMode !== 'multi') return;
+      const ps = partiesByUnit[unit.id] || [];
+      const allSelected = ps.length > 0 && ps.every(p => selectedParties[p.id]);
+      setSelectedParties(prev => {
+        const next = { ...prev };
+        if (allSelected) {
+          ps.forEach(p => { delete next[p.id]; });
+        } else {
+          ps.forEach(p => { next[p.id] = true; });
+        }
+        return next;
+      });
+      // Also seed config defaults for any newly selected bedrooms
+      if (!allSelected) ps.forEach(p => ensureConfigShell(p.id));
+    };
 
     return (
       <div>
-        <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-1">Step 2 · Apartment + bedrooms</div>
-        <div className="text-sm text-stone-600 mb-2">Are you uploading for one bedroom or multiple bedrooms?</div>
+        <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-1">Step 2 · Send to</div>
+        <div className="text-sm text-stone-600 mb-2">
+          Are you uploading for one bedroom or multiple bedrooms?
+        </div>
         <div className="grid grid-cols-2 gap-2 mb-4">
           <button onClick={() => setUploadMode('single')}
             className={`px-4 py-3 rounded-xl border-2 transition-colors ${uploadMode === 'single' ? 'bg-amber-50 border-amber-500 text-amber-900' : 'bg-white border-stone-200 text-stone-700'}`}>
@@ -14705,111 +14814,103 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
           </button>
           <button onClick={() => setUploadMode('multi')}
             className={`px-4 py-3 rounded-xl border-2 transition-colors ${uploadMode === 'multi' ? 'bg-amber-50 border-amber-500 text-amber-900' : 'bg-white border-stone-200 text-stone-700'}`}>
-            <div className="font-bold">Multi-bedroom</div>
+            <div className="font-bold">Multiple bedrooms</div>
             <div className="text-[10px] font-mono text-stone-500 mt-1">Up to 4 roommates / full apartment</div>
           </button>
         </div>
 
-        <div className="text-sm text-stone-600 mb-2">Search for the apartment.</div>
-        <input value={unitSearch} onChange={e => setUnitSearch(e.target.value)}
-          placeholder={`Search ${units.length} apartments…`}
-          className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white text-sm mb-3" />
-        <div className="space-y-2 max-h-[40vh] overflow-y-auto mb-4">
-          {visible.map(u => (
-            <button key={u.id} onClick={() => setSelectedUnit(u)}
-              className={`w-full text-left px-4 py-3 rounded-xl border transition-colors ${selectedUnit?.id === u.id ? 'bg-amber-50 border-amber-400' : 'bg-white border-stone-200 hover:border-stone-400'}`}>
-              <div className="font-mono text-base text-stone-900 font-bold">{u.label}</div>
-            </button>
-          ))}
-          {visible.length === 0 && (
-            <div className="text-center py-8 text-stone-400 text-sm">No apartments match.</div>
-          )}
-        </div>
-
-        {/* Bedrooms appear here once an apartment is picked. In single
-           mode tapping a bedroom replaces the prior selection (max 1);
-           in multi mode the uploader can pick as many as needed. */}
-        {selectedUnit && uploadMode && (
-          <div className="pt-4 border-t-2 border-stone-200">
-            <div className="text-sm text-stone-700 font-bold mb-1">
-              {uploadMode === 'single'
-                ? `Which bedroom in ${selectedUnit.label} needs work?`
-                : `Which bedrooms in ${selectedUnit.label} need work?`}
-            </div>
-            <div className="text-xs text-stone-500 mb-3">
-              {uploadMode === 'single' ? 'Tap one bedroom.' : 'Tap each bedroom. One assignment will be created per bedroom.'}
-            </div>
+        {/* Apartment tree — hidden until a mode is picked. Once visible
+           it lives in a single scrollable region so nothing hides
+           behind the action bar. */}
+        {uploadMode && (
+          <div className="border-t-2 border-stone-200 pt-4">
+            <input value={unitSearch} onChange={e => setUnitSearch(e.target.value)}
+              placeholder="Filter apartments…"
+              className="w-full px-4 py-2.5 rounded-xl border border-stone-300 bg-white text-sm mb-3" />
             <div className="space-y-2">
-              {sortedParties.map(p => {
-                const selected = !!selectedParties[p.id];
-                const bathroomNum = bathroomNumberForBedroom(p.label);
-                return (
-                  <button key={p.id} onClick={() => togglePartySelection(p.id)}
-                    className={`w-full text-left px-4 py-3 rounded-xl border-2 transition-colors ${selected ? 'bg-amber-50 border-amber-500' : 'bg-white border-stone-200 hover:border-stone-400'}`}>
-                    <div className="flex items-center gap-3">
-                      <div className={`w-5 h-5 rounded border-2 flex items-center justify-center ${selected ? 'bg-amber-600 border-amber-600 text-white' : 'border-stone-300'}`}>
-                        {selected && <Check size={12} />}
-                      </div>
-                      <div className="flex-1">
-                        <div className="font-serif text-base text-stone-900">{p.label}</div>
-                        {bathroomNum && (
-                          <div className="text-xs text-stone-500 font-mono mt-0.5">
-                            Shares Bathroom {bathroomNum}
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  </button>
-                );
-              })}
-              {sortedParties.length === 0 && (
-                <div className="text-center py-6 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-xl">
-                  No bedrooms set up for this apartment yet.
+              {visibleUnits.length === 0 && (
+                <div className="text-center py-8 text-stone-400 text-sm">
+                  {units.length === 0 ? 'No apartments set up for this property.' : 'No apartments match.'}
                 </div>
               )}
-            </div>
-          </div>
-        )}
-      </div>
-    );
-  };
-
-  const renderPartyPicker = () => {
-    return (
-      <div>
-        <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-1">Step 4 · Which bedrooms?</div>
-        <div className="text-sm text-stone-600 mb-3">
-          {uploadMode === 'single'
-            ? 'Pick the one bedroom that needs work. One assignment will be created.'
-            : 'Tap each bedroom that needs work. One assignment will be created per bedroom.'}
-        </div>
-        <div className="space-y-2">
-          {parties.map(p => {
-            const selected = !!selectedParties[p.id];
-            const bathroomNum = bathroomNumberForBedroom(p.label);
-            return (
-              <button key={p.id} onClick={() => togglePartySelection(p.id)}
-                className={`w-full text-left px-4 py-3 rounded-xl border-2 transition-colors ${selected ? 'bg-amber-50 border-amber-500' : 'bg-white border-stone-200 hover:border-stone-400'}`}>
-                <div className="flex items-center gap-3">
-                  <div className={`w-5 h-5 rounded border-2 flex items-center justify-center ${selected ? 'bg-amber-600 border-amber-600 text-white' : 'border-stone-300'}`}>
-                    {selected && <Check size={12} />}
-                  </div>
-                  <div className="flex-1">
-                    <div className="font-serif text-base text-stone-900">{p.label}</div>
-                    {bathroomNum && (
-                      <div className="text-xs text-stone-500 font-mono mt-0.5">
-                        Shares Bathroom {bathroomNum}
+              {visibleUnits.map(u => {
+                const ps = partiesByUnit[u.id] || [];
+                const someSelected = ps.some(p => selectedParties[p.id]);
+                const allSelected = ps.length > 0 && ps.every(p => selectedParties[p.id]);
+                return (
+                  <div key={u.id} className={`bg-white rounded-xl border-2 p-3 ${someSelected ? 'border-amber-300' : 'border-stone-200'}`}>
+                    {/* Apartment header — clickable in multi mode to
+                       select/deselect all bedrooms in this apartment */}
+                    <div className="flex items-center gap-2 mb-2">
+                      {uploadMode === 'multi' ? (
+                        <button onClick={() => toggleAllInUnit(u)}
+                          className="flex items-center gap-2 flex-1 text-left">
+                          <div className={`w-5 h-5 rounded border-2 flex items-center justify-center flex-shrink-0 ${
+                            allSelected ? 'bg-amber-600 border-amber-600 text-white'
+                            : someSelected ? 'bg-amber-100 border-amber-600'
+                            : 'border-stone-300'
+                          }`}>
+                            {allSelected && <Check size={12} />}
+                            {!allSelected && someSelected && <div className="w-2 h-2 bg-amber-600 rounded-sm" />}
+                          </div>
+                          <span className="text-sm font-bold text-stone-900">{u.label}</span>
+                        </button>
+                      ) : (
+                        <span className="text-sm font-bold text-stone-900 flex-1">{u.label}</span>
+                      )}
+                      <span className="text-[10px] font-mono text-stone-500">
+                        {ps.length} bedroom{ps.length === 1 ? '' : 's'}
+                      </span>
+                    </div>
+                    {/* Bedrooms — 2-column grid like the legacy form.
+                       Each checkbox is independently tappable so the
+                       uploader can pick just the rooms that need work. */}
+                    {ps.length > 0 && (
+                      <div className="grid grid-cols-2 gap-1.5">
+                        {ps.map(p => {
+                          const checked = !!selectedParties[p.id];
+                          const bathroomNum = bathroomNumberForBedroom(p.label);
+                          return (
+                            <button key={p.id} onClick={() => togglePartySelection(p.id)}
+                              className={`flex items-center gap-2 px-2.5 py-2 rounded-lg border-2 text-left transition-colors ${
+                                checked ? 'border-amber-600 bg-amber-50' : 'border-stone-200 bg-white hover:border-stone-400'
+                              }`}>
+                              <div className={`w-4 h-4 rounded border-2 flex items-center justify-center flex-shrink-0 ${checked ? 'border-amber-600 bg-amber-600 text-white' : 'border-stone-300'}`}>
+                                {checked && <Check size={10} />}
+                              </div>
+                              <div className="min-w-0 flex-1">
+                                <div className="text-xs font-medium text-stone-900 truncate">{p.label}</div>
+                                {bathroomNum && (
+                                  <div className="text-[9px] font-mono text-stone-500 truncate">Bath {bathroomNum}</div>
+                                )}
+                              </div>
+                            </button>
+                          );
+                        })}
                       </div>
                     )}
                   </div>
+                );
+              })}
+            </div>
+            {/* Summary line at the bottom — shows what's selected so
+               the uploader can scan before tapping Next. */}
+            {Object.keys(selectedParties).filter(k => selectedParties[k]).length > 0 && (
+              <div className="mt-3 p-3 rounded-xl bg-amber-50 border border-amber-200">
+                <div className="text-[10px] uppercase tracking-wider font-mono text-amber-700 mb-1">
+                  Creating {Object.keys(selectedParties).filter(k => selectedParties[k]).length} assignment{Object.keys(selectedParties).filter(k => selectedParties[k]).length === 1 ? '' : 's'}:
                 </div>
-              </button>
-            );
-          })}
-          {parties.length === 0 && (
-            <div className="text-center py-8 text-stone-400 text-sm">No bedrooms in this apartment yet.</div>
-          )}
-        </div>
+                <div className="text-xs text-amber-900">
+                  {Object.keys(selectedParties).filter(k => selectedParties[k]).map(id => {
+                    const p = parties.find(x => x.id === id);
+                    const u = units.find(uu => uu.id === p?.unit_id);
+                    return `${u?.label || ''} · ${p?.label || ''}`;
+                  }).join(', ')}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
       </div>
     );
   };
@@ -14842,23 +14943,33 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
   // everything that isn't the active section.
   const renderConfigure = () => {
     const selectedIds = Object.keys(selectedParties).filter(k => selectedParties[k]);
-    // Sort bedroom tabs by the trailing number in the label so they
-    // always read 1, 2, 3, 4 left-to-right regardless of selection order.
-    const sortByLabelNumber = (a, b) => {
-      const an = parseInt((parties.find(p => p.id === a)?.label || '').match(/(\d+)/)?.[1] || '0', 10);
-      const bn = parseInt((parties.find(p => p.id === b)?.label || '').match(/(\d+)/)?.[1] || '0', 10);
+    // Sort by apartment label first, then by bedroom number within
+    // that apartment — so multi-apartment selections read naturally.
+    const sortBedrooms = (a, b) => {
+      const pa = parties.find(p => p.id === a);
+      const pb = parties.find(p => p.id === b);
+      const ua = units.find(u => u.id === pa?.unit_id);
+      const ub = units.find(u => u.id === pb?.unit_id);
+      const cmpUnit = naturalCompare(ua?.label || '', ub?.label || '');
+      if (cmpUnit !== 0) return cmpUnit;
+      const an = parseInt((pa?.label || '').match(/(\d+)/)?.[1] || '0', 10);
+      const bn = parseInt((pb?.label || '').match(/(\d+)/)?.[1] || '0', 10);
       return an - bn;
     };
-    const sortedIds = [...selectedIds].sort(sortByLabelNumber);
+    const sortedIds = [...selectedIds].sort(sortBedrooms);
+    // Show apartment label on tabs only if multiple apartments are selected
+    const uniqueUnitIds = new Set(selectedIds.map(id => parties.find(p => p.id === id)?.unit_id));
+    const showAptLabel = uniqueUnitIds.size > 1;
 
     return (
       <div>
-        <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-1">Step 5 · Configure each bedroom</div>
+        <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-1">Step 4 · Configure each bedroom</div>
         <div className="text-sm text-stone-600 mb-3">Tap a bedroom tab, then mark sections as passed or check the items that need cleaning.</div>
         {/* Bedroom tabs */}
         <div className="flex gap-2 mb-3 overflow-x-auto pb-1">
           {sortedIds.map(id => {
             const p = parties.find(x => x.id === id);
+            const u = units.find(uu => uu.id === p?.unit_id);
             const c = config[id];
             const isActive = activePartyId === id;
             const isPass = c?.mode === 'pass';
@@ -14878,6 +14989,9 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
                   : isFailAll ? 'bg-red-50 border-red-300'
                   : 'bg-white border-stone-200'
                 }`}>
+                {showAptLabel && (
+                  <div className="text-[9px] font-mono text-stone-500 uppercase tracking-wider">{u?.label}</div>
+                )}
                 <div className="font-mono font-bold text-stone-900">{p?.label}</div>
                 <div className="text-[10px] font-mono text-stone-500">{labelExtra || ' '}</div>
               </button>
@@ -15133,22 +15247,39 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
           <div>
             <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-2">Step 5 · Review</div>
             <div className="space-y-2 mb-4">
-              {sheetFile && <ReviewLine label="Sheet attached" value={sheetFile.name} />}
-              <ReviewLine label="Apartment" value={selectedUnit?.label || '—'} />
-              <ReviewLine label="Mode" value={uploadMode === 'single' ? 'Single bedroom' : 'Multi-bedroom'} />
+              {sheetFiles.length > 0 && (
+                <ReviewLine label="Sheets attached" value={
+                  sheetFiles.length === 1 ? sheetFiles[0].name : `${sheetFiles.length} files`
+                } />
+              )}
+              <ReviewLine label="Apartments" value={
+                Array.from(new Set(
+                  Object.keys(selectedParties)
+                    .filter(k => selectedParties[k])
+                    .map(k => {
+                      const p = parties.find(x => x.id === k);
+                      const u = units.find(uu => uu.id === p?.unit_id);
+                      return u?.label;
+                    })
+                    .filter(Boolean)
+                )).join(', ') || '—'
+              } />
+              <ReviewLine label="Mode" value={uploadMode === 'single' ? 'Single bedroom' : 'Multiple bedrooms'} />
               <ReviewLine label="Sheet type" value={sheetType === 'cleaning_check' ? 'Cleaning check' : 'Move-out clean'} />
               <ReviewLine label="Bedrooms" value={
                 Object.keys(selectedParties).filter(k => selectedParties[k]).map(k => {
                   const p = parties.find(x => x.id === k);
+                  const u = units.find(uu => uu.id === p?.unit_id);
                   const c = config[k];
-                  if (c?.mode === 'pass') return `${p?.label} (Pass)`;
-                  if (c?.mode === 'fail_entire') return `${p?.label} (Fail all)`;
+                  const prefix = `${u?.label || ''} · ${p?.label || ''}`;
+                  if (c?.mode === 'pass') return `${prefix} (Pass)`;
+                  if (c?.mode === 'fail_entire') return `${prefix} (Fail all)`;
                   const n = c?.checked ? Object.keys(c.checked).length : 0;
                   const passedSecs = Object.keys(c?.passedSections || {}).length;
                   const parts = [];
                   if (n > 0) parts.push(`${n} items`);
                   if (passedSecs > 0) parts.push(`${passedSecs} sec. passed`);
-                  return `${p?.label} (${parts.join(', ') || 'no items'})`;
+                  return `${prefix} (${parts.join(', ') || 'no items'})`;
                 }).join(', ')
               } />
             </div>
@@ -15175,7 +15306,7 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
         {step < 4 && (
           <button onClick={() => setStep(step + 1)} disabled={!canAdvanceFromStep()}
             className="flex-1 py-3 rounded-xl bg-stone-900 text-stone-50 text-sm font-medium disabled:opacity-50">
-            {step === 0 && !sheetFile ? 'Skip & continue' : 'Next'}
+            {step === 0 && sheetFiles.length === 0 ? 'Skip & continue' : 'Next'}
           </button>
         )}
         {step === 4 && !submitted && (

@@ -13878,6 +13878,22 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
     if (onUpdate) onUpdate();
   };
 
+  // Flip the priority flag on a single target. Per-target (not per-
+  // assignment) since AssignmentCard shows one card per target. Owners
+  // can toggle right from the capsule without opening the detail.
+  const togglePriority = async (target) => {
+    const next = !target.priority;
+    setTargets(prev => prev.map(t => t.id === target.id ? { ...t, priority: next } : t));
+    const { error } = await supabase.from('assignment_targets')
+      .update({ priority: next }).eq('id', target.id);
+    if (error) {
+      alert('Could not update priority: ' + error.message);
+      setTargets(prev => prev.map(t => t.id === target.id ? { ...t, priority: !next } : t));
+    } else if (onUpdate) {
+      onUpdate();
+    }
+  };
+
   if (!loaded || targets.length === 0) return null;
 
   return (
@@ -13908,6 +13924,7 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
             onReopen={() => updateStatus(t, 'pending')}
             onBlocked={() => setStatusModal({ target: t })}
             onReassign={() => setReassignTarget(t)}
+            onTogglePriority={togglePriority}
             onOpenBedroomHistory={onOpenBedroomHistory} />
         );
         return (
@@ -13953,7 +13970,7 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
 }
 
 // Reusable card for one assignment target, used in banner + panel
-function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPending, onDone, onReopen, onBlocked, onReassign, onGoToBedroom, onOpenBedroomHistory, propertyId }) {
+function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPending, onDone, onReopen, onBlocked, onReassign, onGoToBedroom, onOpenBedroomHistory, onTogglePriority, propertyId }) {
   const t = target;
   const s = ASSIGNMENT_STATUSES[t.status] || ASSIGNMENT_STATUSES.pending;
   const isDone = t.status === 'done';
@@ -14002,10 +14019,25 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
           )}
           {/* Priority + cleaning-type + assignee chips — all use the
              shared chip components so the visual language is consistent
-             everywhere a bedroom/assignment is shown. */}
-          {(t.priority || t.assignedTo || t.assignment?.assignment_type) && (
+             everywhere a bedroom/assignment is shown. When the parent
+             passes onTogglePriority, the priority chip becomes a
+             clickable toggle (gray = not priority, red = priority).
+             Always render the priority slot for non-done targets so
+             owners can flag urgency directly from the capsule. */}
+          {(!isDone || t.priority || t.assignedTo || t.assignment?.assignment_type) && (
             <div className="mt-1 flex items-center gap-1.5 flex-wrap">
-              <PriorityChip on={t.priority && !isDone} />
+              {!isDone && onTogglePriority ? (
+                <button
+                  onClick={(e) => { e.stopPropagation(); onTogglePriority(t); }}
+                  disabled={busy}
+                  className={`text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full border inline-flex items-center gap-1 transition-colors disabled:opacity-50 ${t.priority
+                      ? 'bg-red-100 text-red-800 border-red-300 font-bold hover:bg-red-200'
+                      : 'bg-stone-100 text-stone-500 border-stone-200 hover:bg-stone-200'}`}>
+                  <AlertCircle size={10} /> {t.priority ? 'Priority' : 'Mark priority'}
+                </button>
+              ) : (
+                <PriorityChip on={t.priority && !isDone} />
+              )}
               <AssignmentTypeChip type={t.assignment?.assignment_type} />
               {t.assignedTo?.name && !isDone && (
                 <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-purple-100 text-purple-800 border border-purple-300 inline-flex items-center gap-1">
@@ -14317,6 +14349,22 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
     if (onUpdate) onUpdate();
   };
 
+  // Flip the priority flag on a single target. Same per-target model
+  // as elsewhere — one card = one target, one toggle. Optimistic
+  // update so the chip flips instantly; rolls back on DB error.
+  const togglePriority = async (target) => {
+    const next = !target.priority;
+    setTargets(prev => prev.map(t => t.id === target.id ? { ...t, priority: next } : t));
+    const { error } = await supabase.from('assignment_targets')
+      .update({ priority: next }).eq('id', target.id);
+    if (error) {
+      alert('Could not update priority: ' + error.message);
+      setTargets(prev => prev.map(t => t.id === target.id ? { ...t, priority: !next } : t));
+    } else if (onUpdate) {
+      onUpdate();
+    }
+  };
+
   // Tapping "Start" on an assignment card should both flag it as
   // in_progress AND auto-navigate the cleaner to the bedroom (without
   // actually starting the work-block timer — the cleaner confirms by
@@ -14532,6 +14580,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                 onReopen={() => updateStatus(t, 'pending')}
                 onBlocked={() => setStatusModal({ target: t })}
                 onReassign={() => setReassignTarget(t)}
+                onTogglePriority={togglePriority}
                 onGoToBedroom={onGoToBedroom ? () => startAndGo(t) : null}
                 onOpenBedroomHistory={onOpenBedroomHistory} />
             );
@@ -14569,7 +14618,8 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                       onReopen={() => updateStatus(t, 'pending')}
                       onBlocked={() => setStatusModal({ target: t })}
                       onReassign={() => setReassignTarget(t)}
-                      onGoToBedroom={onGoToBedroom ? () => startAndGo(t) : null}
+                      onTogglePriority={togglePriority}
+                onGoToBedroom={onGoToBedroom ? () => startAndGo(t) : null}
                       onOpenBedroomHistory={onOpenBedroomHistory} />
                   ))}
                 </div>
@@ -14596,7 +14646,8 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
               onReopen={() => updateStatus(t, 'pending')}
               onBlocked={() => setStatusModal({ target: t })}
               onReassign={() => setReassignTarget(t)}
-              onGoToBedroom={onGoToBedroom ? () => startAndGo(t) : null}
+              onTogglePriority={togglePriority}
+                onGoToBedroom={onGoToBedroom ? () => startAndGo(t) : null}
               onOpenBedroomHistory={onOpenBedroomHistory} />
           ))}
         </div>
@@ -14843,7 +14894,8 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                     onReopen={() => updateStatus(t, 'pending')}
                     onBlocked={() => setStatusModal({ target: t })}
                     onReassign={() => setReassignTarget(t)}
-                    onGoToBedroom={onGoToBedroom ? () => startAndGo(t) : null}
+                    onTogglePriority={togglePriority}
+                onGoToBedroom={onGoToBedroom ? () => startAndGo(t) : null}
                     onOpenBedroomHistory={onOpenBedroomHistory} />
                 ))}
             </div>
@@ -16665,19 +16717,47 @@ function InboxView({ employee, onBack }) {
   const [loaded, setLoaded] = useState(false);
   const [reviewAssignment, setReviewAssignment] = useState(null);
   const [reviewPhoto, setReviewPhoto] = useState(null);
+  const [togglingAssignmentId, setTogglingAssignmentId] = useState(null);
+
+  // Flip priority on every target of an assignment from the inbox row.
+  // Sweep mode: if ANY target is priority, turn all off; otherwise turn
+  // all on. Lets owners flag urgent PM submissions without opening the
+  // review modal.
+  const togglePmAssignmentPriority = async (assignment) => {
+    if (togglingAssignmentId) return;
+    const targetIds = (assignment.targets || []).map(t => t.id);
+    if (targetIds.length === 0) return;
+    const anyPriority = (assignment.targets || []).some(t => t.priority);
+    const newPriority = !anyPriority;
+    setTogglingAssignmentId(assignment.id);
+    // Optimistic update across both lists (might appear in either)
+    const flip = list => list.map(a => a.id === assignment.id ? {
+      ...a,
+      targets: (a.targets || []).map(t => ({ ...t, priority: newPriority }))
+    } : a);
+    setPendingAssignments(prev => flip(prev));
+    setReviewedAssignments(prev => flip(prev));
+    const { error } = await supabase.from('assignment_targets')
+      .update({ priority: newPriority }).in('id', targetIds);
+    setTogglingAssignmentId(null);
+    if (error) {
+      alert('Could not update priority: ' + error.message);
+      load();
+    }
+  };
 
   const load = async () => {
     setLoaded(false);
     // Pending assignments
     const { data: aData } = await supabase.from('assignments')
-      .select('*, property:customers(id, name, property_type), targets:assignment_targets(id, unit:units(label), party:parties(label))')
+      .select('*, property:customers(id, name, property_type), targets:assignment_targets(id, priority, unit:units(label), party:parties(label))')
       .eq('source', 'pm').eq('pm_status', 'pending')
       .order('created_at', { ascending: false });
     setPendingAssignments(aData || []);
 
     // Already-reviewed PM assignments (approved or rejected) — for the "Reviewed" tab
     const { data: rData } = await supabase.from('assignments')
-      .select('*, property:customers(id, name, property_type), targets:assignment_targets(id, unit:units(label), party:parties(label))')
+      .select('*, property:customers(id, name, property_type), targets:assignment_targets(id, priority, unit:units(label), party:parties(label))')
       .eq('source', 'pm').in('pm_status', ['approved', 'rejected'])
       .order('approved_at', { ascending: false, nullsFirst: false })
       .limit(50);
@@ -16770,36 +16850,58 @@ function InboxView({ employee, onBack }) {
             </div>
           ) : (
             <div className="space-y-2">
-              {pendingAssignments.map(a => (
-                <button key={a.id} onClick={() => setReviewAssignment(a)}
-                  className="w-full text-left p-4 rounded-2xl bg-white border-2 border-amber-200 hover:border-amber-500 transition-colors">
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2 mb-1 flex-wrap">
-                        {a.file_kind === 'pdf'
-                          ? <FileText size={14} className="text-stone-500 flex-shrink-0" />
-                          : <ImageIcon size={14} className="text-stone-500 flex-shrink-0" />}
-                        <span className="font-serif text-base text-stone-900 truncate">{a.title}</span>
-                      </div>
-                      <div className="text-xs text-stone-600 font-mono mb-1 flex items-center gap-1.5">
-                        <Building2 size={11} /> {a.property?.name}
-                      </div>
-                      {a.targets?.[0] && (a.targets[0].unit?.label || a.targets[0].party?.label) && (
-                        <div className="text-xs text-stone-500 font-mono">
-                          {a.targets[0].unit?.label}{a.targets[0].party?.label && ` · ${a.targets[0].party.label}`}
+              {pendingAssignments.map(a => {
+                const anyPriority = (a.targets || []).some(t => t.priority);
+                const isToggling = togglingAssignmentId === a.id;
+                return (
+                  <div key={a.id} onClick={() => setReviewAssignment(a)}
+                    tabIndex={0}
+                    role="button"
+                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setReviewAssignment(a); } }}
+                    className="w-full text-left p-4 rounded-2xl bg-white border-2 border-amber-200 hover:border-amber-500 transition-colors cursor-pointer">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 mb-1 flex-wrap">
+                          {a.file_kind === 'pdf'
+                            ? <FileText size={14} className="text-stone-500 flex-shrink-0" />
+                            : <ImageIcon size={14} className="text-stone-500 flex-shrink-0" />}
+                          <span className="font-serif text-base text-stone-900 truncate">{a.title}</span>
                         </div>
-                      )}
-                      <div className="text-xs text-stone-400 font-mono mt-1 flex items-center gap-2">
-                        Submitted {fmtDate(a.created_at)}
-                        {a.actor_kind === 'pm_staff' && (
-                          <span className="text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-stone-100 text-stone-600">PM staff</span>
+                        {/* Priority + cleaning-type chips. Priority is a
+                           click-to-toggle button right on the capsule —
+                           owners can flag urgent PM submissions without
+                           opening the review modal. */}
+                        <div className="flex items-center gap-1.5 flex-wrap mb-1">
+                          <button
+                            onClick={(e) => { e.stopPropagation(); togglePmAssignmentPriority(a); }}
+                            disabled={isToggling}
+                            className={`text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full border inline-flex items-center gap-1 transition-colors disabled:opacity-50 ${anyPriority
+                                ? 'bg-red-100 text-red-800 border-red-300 font-bold hover:bg-red-200'
+                                : 'bg-stone-100 text-stone-500 border-stone-200 hover:bg-stone-200'}`}>
+                            <AlertCircle size={10} /> {anyPriority ? 'Priority' : 'Mark priority'}
+                          </button>
+                          <AssignmentTypeChip type={a.assignment_type} />
+                        </div>
+                        <div className="text-xs text-stone-600 font-mono mb-1 flex items-center gap-1.5">
+                          <Building2 size={11} /> {a.property?.name}
+                        </div>
+                        {a.targets?.[0] && (a.targets[0].unit?.label || a.targets[0].party?.label) && (
+                          <div className="text-xs text-stone-500 font-mono">
+                            {a.targets[0].unit?.label}{a.targets[0].party?.label && ` · ${a.targets[0].party.label}`}
+                          </div>
                         )}
+                        <div className="text-xs text-stone-400 font-mono mt-1 flex items-center gap-2">
+                          Submitted {fmtDate(a.created_at)}
+                          {a.actor_kind === 'pm_staff' && (
+                            <span className="text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-stone-100 text-stone-600">PM staff</span>
+                          )}
+                        </div>
                       </div>
+                      <ChevronRight size={16} className="text-stone-400 flex-shrink-0" />
                     </div>
-                    <ChevronRight size={16} className="text-stone-400 flex-shrink-0" />
                   </div>
-                </button>
-              ))}
+                );
+              })}
             </div>
           )
         ) : tab === 'photos' ? (

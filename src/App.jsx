@@ -870,7 +870,10 @@ function Splash({ text }) {
 //                    later segments are gray
 //   complete=true  → all segments emerald
 // =================================================================
-function ProgressBar({ steps, currentStep, complete = false }) {
+// ProgressBar with optional click-to-navigate. When `onStepClick` is
+// provided, past steps (i < currentStep) become tappable so the user
+// can jump back. Future steps are NEVER clickable (can't skip ahead).
+function ProgressBar({ steps, currentStep, complete = false, onStepClick }) {
   if (!steps || steps.length === 0) return null;
   return (
     <div className="w-full">
@@ -885,10 +888,15 @@ function ProgressBar({ steps, currentStep, complete = false }) {
               : isCurrent
                 ? 'bg-amber-300'
                 : 'bg-stone-200';
+          const canClick = onStepClick && isPast;
+          const Wrapper = canClick ? 'button' : 'div';
+          const wrapperProps = canClick
+            ? { onClick: () => onStepClick(i), className: 'flex-1 group cursor-pointer', title: `Back to ${label}` }
+            : { className: 'flex-1' };
           return (
-            <div key={i} className="flex-1">
-              <div className={`h-1.5 rounded-full transition-colors ${fillClass}`} />
-            </div>
+            <Wrapper key={i} {...wrapperProps}>
+              <div className={`h-1.5 rounded-full transition-colors ${fillClass} ${canClick ? 'group-hover:opacity-80' : ''}`} />
+            </Wrapper>
           );
         })}
       </div>
@@ -903,12 +911,17 @@ function ProgressBar({ steps, currentStep, complete = false }) {
               : isCurrent
                 ? 'text-stone-900 font-bold'
                 : 'text-stone-400';
+          const canClick = onStepClick && isPast;
+          const Wrapper = canClick ? 'button' : 'div';
+          const wrapperProps = canClick
+            ? { onClick: () => onStepClick(i), className: 'flex-1 text-center cursor-pointer' }
+            : { className: 'flex-1 text-center' };
           return (
-            <div key={i} className="flex-1 text-center">
+            <Wrapper key={i} {...wrapperProps}>
               <span className={`text-[9px] uppercase tracking-wider font-mono ${textClass}`}>
                 {label}
               </span>
-            </div>
+            </Wrapper>
           );
         })}
       </div>
@@ -14304,7 +14317,7 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
 
   // For configure step: pick the active party, default to first selected
   useEffect(() => {
-    if (step !== 4) return;
+    if (step !== 3) return;
     const ids = Object.keys(selectedParties).filter(k => selectedParties[k]);
     if (ids.length === 0) return;
     if (!activePartyId || !selectedParties[activePartyId]) {
@@ -14367,13 +14380,15 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
           return n === partnerNum;
         });
         if (partnerParty && selectedParties[partnerParty.id] && next[partnerParty.id]) {
-          // Only autofill if partner doesn't have a variant set yet
+          // Only autofill if partner doesn't have a variant set yet.
+          // Roommates SPLIT the bathroom — one has tub responsibility,
+          // the other has toilet responsibility. So the partner's
+          // variant is the OPPOSITE of this one.
           if (!next[partnerParty.id].bathroomVariant) {
+            const opposite = variant === 'a' ? 'b' : 'a';
             next[partnerParty.id] = {
               ...next[partnerParty.id],
-              // Both bedrooms in a bathroom group clean the SAME variant.
-              // (Bedrooms 1+2 share bathroom 1 → both get variant 'a' = tub side)
-              bathroomVariant: variant,
+              bathroomVariant: opposite,
             };
           }
         }
@@ -14399,31 +14414,65 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
     });
   };
 
+  // Pass/Fail Entire is now a toggle: clicking the same mode again
+  // flips back to 'configure' (so neither button is active). Fail
+  // Entire auto-fills missing variants with defaults ('a' for both)
+  // so the cleaner has SOMETHING checked even if the uploader didn't
+  // pick variants first — they can still fix variants on the next
+  // pass.
   const setMode = (partyId, mode) => {
     setConfig(prev => {
-      const current = prev[partyId] || { bathroomVariant: null, generalVariant: null, checked: {} };
+      const current = prev[partyId] || { bathroomVariant: null, generalVariant: null, checked: {}, passedSections: {} };
+      // Toggle off: clicking the same mode again clears it back to configure
+      if (current.mode === mode) {
+        return { ...prev, [partyId]: { ...current, mode: 'configure' } };
+      }
       if (mode === 'fail_entire') {
-        // Pre-check every item in the bedroom's configured sections
+        // Auto-default variants if not set so we can pre-check every item
+        const bathroomVariant = current.bathroomVariant || 'a';
+        const generalVariant = current.generalVariant || 'a';
         const checked = {};
-        // Bedroom (universal, single variant)
-        const bedroomVariant = variantBySectionKey('bedroom', 'default');
-        if (bedroomVariant) itemsForVariant(bedroomVariant.id).forEach(i => { checked[`bedroom:${i.item_key}`] = true; });
-        const vanityVariant = variantBySectionKey('vanity', 'default');
-        if (vanityVariant) itemsForVariant(vanityVariant.id).forEach(i => { checked[`vanity:${i.item_key}`] = true; });
-        if (current.bathroomVariant) {
-          const bv = variantBySectionKey('bathroom', current.bathroomVariant);
-          if (bv) itemsForVariant(bv.id).forEach(i => { checked[`bathroom:${i.item_key}`] = true; });
-        }
-        if (current.generalVariant) {
-          const gv = variantBySectionKey('general', current.generalVariant);
-          if (gv) itemsForVariant(gv.id).forEach(i => { checked[`general:${i.item_key}`] = true; });
-        }
-        return { ...prev, [partyId]: { ...current, mode, checked } };
+        const bedroomV = variantBySectionKey('bedroom', 'default');
+        if (bedroomV) itemsForVariant(bedroomV.id).forEach(i => { checked[`bedroom:${i.item_key}`] = true; });
+        const vanityV = variantBySectionKey('vanity', 'default');
+        if (vanityV) itemsForVariant(vanityV.id).forEach(i => { checked[`vanity:${i.item_key}`] = true; });
+        const bv = variantBySectionKey('bathroom', bathroomVariant);
+        if (bv) itemsForVariant(bv.id).forEach(i => { checked[`bathroom:${i.item_key}`] = true; });
+        const gv = variantBySectionKey('general', generalVariant);
+        if (gv) itemsForVariant(gv.id).forEach(i => { checked[`general:${i.item_key}`] = true; });
+        return { ...prev, [partyId]: {
+          ...current, mode, bathroomVariant, generalVariant, checked,
+          passedSections: {}, // un-pass any sections that were marked
+        } };
       }
       if (mode === 'pass') {
-        return { ...prev, [partyId]: { ...current, mode, checked: {} } };
+        return { ...prev, [partyId]: { ...current, mode, checked: {}, passedSections: {} } };
       }
       return { ...prev, [partyId]: { ...current, mode } };
+    });
+  };
+
+  // Section-level pass toggle. When marked, the section's items are
+  // visually grayed and won't be submitted. The cleaner can un-pass to
+  // bring items back. Section pass is independent of whole-bedroom pass.
+  const toggleSectionPass = (partyId, sectionKey) => {
+    setConfig(prev => {
+      const current = prev[partyId] || { mode: 'configure', checked: {}, passedSections: {} };
+      const passedSections = { ...(current.passedSections || {}) };
+      const willPass = !passedSections[sectionKey];
+      if (willPass) {
+        passedSections[sectionKey] = true;
+        // Also un-check all items in that section so a passed section
+        // never contributes targets at submit time.
+        const cleared = { ...(current.checked || {}) };
+        Object.keys(cleared).forEach(k => {
+          if (k.startsWith(`${sectionKey}:`)) delete cleared[k];
+        });
+        return { ...prev, [partyId]: { ...current, passedSections, checked: cleared } };
+      } else {
+        delete passedSections[sectionKey];
+        return { ...prev, [partyId]: { ...current, passedSections } };
+      }
     });
   };
 
@@ -14438,24 +14487,40 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
   // -----------------------------------------------------------------
   const canAdvanceFromStep = () => {
     if (step === 0) return true; // sheet upload is optional
-    if (step === 1) return !!selectedUnit && !!uploadMode;
-    if (step === 2) return !!sheetType;
-    if (step === 3) {
+    if (step === 1) {
+      // Apartment + mode + bedrooms all on one step now.
+      if (!selectedUnit || !uploadMode) return false;
       const ids = Object.keys(selectedParties).filter(k => selectedParties[k]);
       if (ids.length === 0) return false;
       if (uploadMode === 'single' && ids.length > 1) return false;
       return true;
     }
-    if (step === 4) {
-      // Every selected bedroom needs to be either passed or have a
-      // non-pass configuration with at least one item checked.
+    if (step === 2) return !!sheetType;
+    if (step === 3) {
+      // Every selected bedroom must satisfy ONE of:
+      //   - Whole-bedroom Pass (mode === 'pass')
+      //   - At least one section configured: either passed OR has items
+      //     checked. For bathroom/general sections WITH items checked
+      //     we also need their variant set so we know which template to use.
       const ids = Object.keys(selectedParties).filter(k => selectedParties[k]);
       return ids.every(id => {
         const c = config[id];
         if (!c) return false;
         if (c.mode === 'pass') return true;
-        if (!c.bathroomVariant || !c.generalVariant) return false;
-        return Object.keys(c.checked || {}).length > 0;
+
+        const checked = c.checked || {};
+        const passed = c.passedSections || {};
+        const hasAnyChecked = Object.keys(checked).length > 0;
+        const hasAnyPassed = Object.keys(passed).length > 0;
+        if (!hasAnyChecked && !hasAnyPassed) return false;
+
+        // For any section with checked items that needs a variant,
+        // confirm variant is set.
+        const hasBathroomItems = Object.keys(checked).some(k => k.startsWith('bathroom:'));
+        if (hasBathroomItems && !c.bathroomVariant) return false;
+        const hasGeneralItems = Object.keys(checked).some(k => k.startsWith('general:'));
+        if (hasGeneralItems && !c.generalVariant) return false;
+        return true;
       });
     }
     return true;
@@ -14541,14 +14606,15 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
     }
   };
 
-  // Steps for the progress bar. New order per owner request:
-  //   0. Sheet upload (optional — attach the paper sheet image)
-  //   1. Apartment + mode (single bedroom or multi-bedroom)
-  //   2. Sheet type (cleaning check vs move-out clean)
-  //   3. Bedrooms (multi-select — capped at 1 if mode = single)
-  //   4. Configure each bedroom (bathroom, general, items)
-  //   5. Review + submit
-  const stepLabels = ['Sheet', 'Apartment', 'Type', 'Bedrooms', 'Configure', 'Done'];
+  // Steps for the progress bar. Apartment + bedrooms are now ONE
+  // combined step — after the uploader picks an apartment, the
+  // bedrooms appear inline below the apartment list.
+  //   0. Sheet upload (optional)
+  //   1. Apartment + mode + bedrooms (multi: pick many, single: pick one)
+  //   2. Sheet type (cleaning check / move-out clean)
+  //   3. Configure each bedroom (sections + items)
+  //   4. Review + submit
+  const stepLabels = ['Sheet', 'Apartment', 'Type', 'Configure', 'Done'];
 
   // === Render ======================================================
   if (templateLoading) return <Splash text="Loading templates…" />;
@@ -14610,16 +14676,27 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
   };
 
   // -----------------------------------------------------------------
-  // Step 1 — Apartment + mode (single bedroom vs multi-bedroom)
+  // Step 1 — Apartment + mode + bedrooms (all on one screen)
+  //
+  // Order: mode picker → apartment search → (once apartment picked)
+  // bedroom list pops out below for the uploader to check off which
+  // bedrooms need cleaning.
   // -----------------------------------------------------------------
   const renderUnitPicker = () => {
     const q = unitSearch.trim().toLowerCase();
     const visible = units.filter(u => !q || (u.label || '').toLowerCase().includes(q));
+    // Sort bedrooms by trailing number so they read Bedroom 1, 2, 3, 4
+    // regardless of insertion order in the DB.
+    const sortedParties = [...parties].sort((a, b) => {
+      const an = parseInt((a.label || '').match(/(\d+)/)?.[1] || '0', 10);
+      const bn = parseInt((b.label || '').match(/(\d+)/)?.[1] || '0', 10);
+      return an - bn;
+    });
+
     return (
       <div>
-        <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-1">Step 2 · Apartment + mode</div>
-        {/* Mode picker first — sets expectation for how many bedrooms */}
-        <div className="text-sm text-stone-600 mb-2">Are you uploading for one bedroom or multiple bedrooms in this apartment?</div>
+        <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-1">Step 2 · Apartment + bedrooms</div>
+        <div className="text-sm text-stone-600 mb-2">Are you uploading for one bedroom or multiple bedrooms?</div>
         <div className="grid grid-cols-2 gap-2 mb-4">
           <button onClick={() => setUploadMode('single')}
             className={`px-4 py-3 rounded-xl border-2 transition-colors ${uploadMode === 'single' ? 'bg-amber-50 border-amber-500 text-amber-900' : 'bg-white border-stone-200 text-stone-700'}`}>
@@ -14632,11 +14709,12 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
             <div className="text-[10px] font-mono text-stone-500 mt-1">Up to 4 roommates / full apartment</div>
           </button>
         </div>
+
         <div className="text-sm text-stone-600 mb-2">Search for the apartment.</div>
         <input value={unitSearch} onChange={e => setUnitSearch(e.target.value)}
           placeholder={`Search ${units.length} apartments…`}
           className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white text-sm mb-3" />
-        <div className="space-y-2 max-h-[50vh] overflow-y-auto">
+        <div className="space-y-2 max-h-[40vh] overflow-y-auto mb-4">
           {visible.map(u => (
             <button key={u.id} onClick={() => setSelectedUnit(u)}
               className={`w-full text-left px-4 py-3 rounded-xl border transition-colors ${selectedUnit?.id === u.id ? 'bg-amber-50 border-amber-400' : 'bg-white border-stone-200 hover:border-stone-400'}`}>
@@ -14647,6 +14725,51 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
             <div className="text-center py-8 text-stone-400 text-sm">No apartments match.</div>
           )}
         </div>
+
+        {/* Bedrooms appear here once an apartment is picked. In single
+           mode tapping a bedroom replaces the prior selection (max 1);
+           in multi mode the uploader can pick as many as needed. */}
+        {selectedUnit && uploadMode && (
+          <div className="pt-4 border-t-2 border-stone-200">
+            <div className="text-sm text-stone-700 font-bold mb-1">
+              {uploadMode === 'single'
+                ? `Which bedroom in ${selectedUnit.label} needs work?`
+                : `Which bedrooms in ${selectedUnit.label} need work?`}
+            </div>
+            <div className="text-xs text-stone-500 mb-3">
+              {uploadMode === 'single' ? 'Tap one bedroom.' : 'Tap each bedroom. One assignment will be created per bedroom.'}
+            </div>
+            <div className="space-y-2">
+              {sortedParties.map(p => {
+                const selected = !!selectedParties[p.id];
+                const bathroomNum = bathroomNumberForBedroom(p.label);
+                return (
+                  <button key={p.id} onClick={() => togglePartySelection(p.id)}
+                    className={`w-full text-left px-4 py-3 rounded-xl border-2 transition-colors ${selected ? 'bg-amber-50 border-amber-500' : 'bg-white border-stone-200 hover:border-stone-400'}`}>
+                    <div className="flex items-center gap-3">
+                      <div className={`w-5 h-5 rounded border-2 flex items-center justify-center ${selected ? 'bg-amber-600 border-amber-600 text-white' : 'border-stone-300'}`}>
+                        {selected && <Check size={12} />}
+                      </div>
+                      <div className="flex-1">
+                        <div className="font-serif text-base text-stone-900">{p.label}</div>
+                        {bathroomNum && (
+                          <div className="text-xs text-stone-500 font-mono mt-0.5">
+                            Shares Bathroom {bathroomNum}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </button>
+                );
+              })}
+              {sortedParties.length === 0 && (
+                <div className="text-center py-6 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-xl">
+                  No bedrooms set up for this apartment yet.
+                </div>
+              )}
+            </div>
+          </div>
+        )}
       </div>
     );
   };
@@ -14712,26 +14835,51 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
   };
 
   // -- Step 5: Configure ------------------------------------------------
+  // Bedroom tabs across the top (sorted by bedroom number).
+  // Inside each bedroom: Pass/Fail Entire toggle row + section tabs
+  // (Bedroom / Vanity / Bathroom / General) with the active section's
+  // content below. Section tabs reduce vertical scroll by collapsing
+  // everything that isn't the active section.
   const renderConfigure = () => {
     const selectedIds = Object.keys(selectedParties).filter(k => selectedParties[k]);
+    // Sort bedroom tabs by the trailing number in the label so they
+    // always read 1, 2, 3, 4 left-to-right regardless of selection order.
+    const sortByLabelNumber = (a, b) => {
+      const an = parseInt((parties.find(p => p.id === a)?.label || '').match(/(\d+)/)?.[1] || '0', 10);
+      const bn = parseInt((parties.find(p => p.id === b)?.label || '').match(/(\d+)/)?.[1] || '0', 10);
+      return an - bn;
+    };
+    const sortedIds = [...selectedIds].sort(sortByLabelNumber);
+
     return (
       <div>
         <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-1">Step 5 · Configure each bedroom</div>
-        <div className="text-sm text-stone-600 mb-3">Pick the bathroom and general area for each bedroom, then check the items that need cleaning.</div>
+        <div className="text-sm text-stone-600 mb-3">Tap a bedroom tab, then mark sections as passed or check the items that need cleaning.</div>
         {/* Bedroom tabs */}
         <div className="flex gap-2 mb-3 overflow-x-auto pb-1">
-          {selectedIds.map(id => {
+          {sortedIds.map(id => {
             const p = parties.find(x => x.id === id);
             const c = config[id];
             const isActive = activePartyId === id;
             const isPass = c?.mode === 'pass';
+            const isFailAll = c?.mode === 'fail_entire';
             const checkCount = c?.checked ? Object.keys(c.checked).length : 0;
-            const labelExtra = isPass ? '· Pass' : checkCount > 0 ? `· ${checkCount}` : '';
+            const passedSecs = Object.keys(c?.passedSections || {}).length;
+            const labelExtra = isPass ? '· Pass'
+              : isFailAll ? '· Fail all'
+              : checkCount > 0 ? `· ${checkCount} items`
+              : passedSecs > 0 ? `· ${passedSecs} passed`
+              : '';
             return (
               <button key={id} onClick={() => setActivePartyId(id)}
-                className={`px-3 py-2 rounded-xl border-2 text-sm whitespace-nowrap flex-shrink-0 ${isActive ? 'bg-amber-50 border-amber-500' : isPass ? 'bg-emerald-50 border-emerald-300' : 'bg-white border-stone-200'}`}>
+                className={`px-3 py-2 rounded-xl border-2 text-sm whitespace-nowrap flex-shrink-0 transition-colors ${
+                  isActive ? 'bg-amber-50 border-amber-500'
+                  : isPass ? 'bg-emerald-50 border-emerald-300'
+                  : isFailAll ? 'bg-red-50 border-red-300'
+                  : 'bg-white border-stone-200'
+                }`}>
                 <div className="font-mono font-bold text-stone-900">{p?.label}</div>
-                <div className="text-[10px] font-mono text-stone-500">{labelExtra}</div>
+                <div className="text-[10px] font-mono text-stone-500">{labelExtra || ' '}</div>
               </button>
             );
           })}
@@ -14742,119 +14890,226 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
   };
 
   const renderBedroomConfig = (partyId) => {
-    const c = config[partyId] || { mode: 'configure', checked: {} };
+    const c = config[partyId] || { mode: 'configure', checked: {}, passedSections: {} };
     const party = parties.find(x => x.id === partyId);
     const bathroomNum = bathroomNumberForBedroom(party?.label);
+    const activeSection = c.activeSection || 'bedroom';
+
+    // Helper to set the active section for THIS bedroom (stored on config)
+    const setActiveSection = (key) => {
+      setConfig(prev => ({
+        ...prev,
+        [partyId]: { ...(prev[partyId] || { mode: 'configure', checked: {} }), activeSection: key },
+      }));
+    };
 
     if (c.mode === 'pass') {
       return (
-        <div className="p-4 rounded-2xl bg-emerald-50 border-2 border-emerald-300">
-          <div className="font-serif text-lg text-emerald-900 mb-2">Passed — no assignment will be created</div>
-          <div className="text-sm text-emerald-800 mb-3">This bedroom doesn't need cleaning. Tap Configure to change.</div>
-          <button onClick={() => setMode(partyId, 'configure')}
-            className="px-3 py-2 rounded-lg bg-white border border-emerald-300 text-emerald-800 text-sm font-medium">
-            Configure instead
+        <div className="p-4 rounded-2xl bg-emerald-50 border-2 border-emerald-500">
+          <div className="flex items-center gap-2 mb-2">
+            <div className="w-6 h-6 rounded-full bg-emerald-600 text-white flex items-center justify-center">
+              <Check size={14} />
+            </div>
+            <div className="font-serif text-lg text-emerald-900 font-bold">Passed — no assignment</div>
+          </div>
+          <div className="text-sm text-emerald-800 mb-3">This bedroom doesn't need any cleaning. No assignment will be created for it.</div>
+          <button onClick={() => setMode(partyId, 'pass')}
+            className="px-3 py-2 rounded-lg bg-white border border-emerald-400 text-emerald-800 text-sm font-medium">
+            Un-pass and configure instead
           </button>
         </div>
       );
     }
 
+    // Section tabs definition. Bedroom and vanity have no variant; bathroom and
+    // general use the variant set on the config.
+    const sections = [
+      { key: 'bedroom',  label: 'Bedroom',  variantKey: 'default' },
+      { key: 'vanity',   label: 'Vanity',   variantKey: 'default' },
+      { key: 'bathroom', label: 'Bathroom', variantKey: c.bathroomVariant },
+      { key: 'general',  label: 'General',  variantKey: c.generalVariant },
+    ];
+
+    const passedSecs = c.passedSections || {};
+    const checked = c.checked || {};
+
+    // Count for tabs: items checked in this section
+    const sectionCount = (key) => Object.keys(checked).filter(k => k.startsWith(`${key}:`)).length;
+
+    const isPassMode = c.mode === 'pass'; // can't actually hit here but defensive
+    const isFailMode = c.mode === 'fail_entire';
+
     return (
-      <div className="space-y-4">
-        {/* Pass / Fail-Entire shortcuts */}
+      <div className="space-y-3">
+        {/* Pass / Fail-Entire toggle row. Both buttons are clearly
+           clickable and show pressed state when active. Clicking the
+           active one again toggles it back off. */}
         <div className="flex gap-2">
           <button onClick={() => setMode(partyId, 'pass')}
-            className="flex-1 py-2 rounded-xl border-2 border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 text-sm font-medium flex items-center justify-center gap-1.5">
-            <Check size={14} /> Pass — no work needed
+            className={`flex-1 py-2.5 rounded-xl border-2 text-sm font-bold flex items-center justify-center gap-1.5 transition-colors ${
+              isPassMode
+                ? 'bg-emerald-600 border-emerald-700 text-white shadow-inner'
+                : 'border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-emerald-800'
+            }`}>
+            <Check size={14} /> Pass — no work
           </button>
           <button onClick={() => setMode(partyId, 'fail_entire')}
-            className="flex-1 py-2 rounded-xl border-2 border-red-300 bg-red-50 hover:bg-red-100 text-red-800 text-sm font-medium flex items-center justify-center gap-1.5">
-            <AlertCircle size={14} /> Fail entire
+            className={`flex-1 py-2.5 rounded-xl border-2 text-sm font-bold flex items-center justify-center gap-1.5 transition-colors ${
+              isFailMode
+                ? 'bg-red-600 border-red-700 text-white shadow-inner'
+                : 'border-red-300 bg-red-50 hover:bg-red-100 text-red-800'
+            }`}>
+            <AlertCircle size={14} /> Fail entire bedroom
           </button>
         </div>
-
-        {/* Bathroom variant picker */}
-        <div className="p-3 rounded-xl bg-stone-50 border border-stone-200">
-          <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-2">
-            Bathroom {bathroomNum ? `(this is Bathroom ${bathroomNum})` : ''}
+        {isFailMode && (
+          <div className="text-[11px] font-mono text-red-700 -mt-1 px-1">
+            All items in every section are checked. Tap again to clear.
           </div>
-          <div className="flex gap-2">
-            {variantsBySection('bathroom').map(v => (
-              <button key={v.id} onClick={() => setBathroomVariantWithAutofill(partyId, v.variant_key)}
-                className={`flex-1 px-3 py-2 rounded-lg border-2 text-sm font-medium ${c.bathroomVariant === v.variant_key ? 'bg-amber-50 border-amber-500 text-amber-900' : 'bg-white border-stone-200 text-stone-700'}`}>
-                {v.label}
-              </button>
-            ))}
-          </div>
-        </div>
+        )}
 
-        {/* General variant picker */}
-        <div className="p-3 rounded-xl bg-stone-50 border border-stone-200">
-          <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-2">General area</div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-            {variantsBySection('general').map(v => (
-              <button key={v.id} onClick={() => setGeneralVariant(partyId, v.variant_key)}
-                className={`text-left px-3 py-2 rounded-lg border-2 text-sm font-medium ${c.generalVariant === v.variant_key ? 'bg-amber-50 border-amber-500 text-amber-900' : 'bg-white border-stone-200 text-stone-700'}`}>
-                {v.label}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {/* Section checklists */}
-        {renderSectionChecklist(partyId, 'bedroom', 'default', 'Bedroom items')}
-        {renderSectionChecklist(partyId, 'vanity', 'default', 'Vanity items')}
-        {c.bathroomVariant
-          ? renderSectionChecklist(partyId, 'bathroom', c.bathroomVariant, 'Bathroom items')
-          : <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-sm text-amber-800">Pick a bathroom variant above to see its items.</div>
-        }
-        {c.generalVariant
-          ? renderSectionChecklist(partyId, 'general', c.generalVariant, 'General items')
-          : <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-sm text-amber-800">Pick a general variant above to see its items.</div>
-        }
-      </div>
-    );
-  };
-
-  const renderSectionChecklist = (partyId, sectionKey, variantKey, title) => {
-    const variant = variantBySectionKey(sectionKey, variantKey);
-    if (!variant) return null;
-    const sectionItems = itemsForVariant(variant.id);
-    const c = config[partyId] || { checked: {} };
-    return (
-      <div className="rounded-xl bg-white border-2 border-stone-200">
-        <div className="px-3 py-2 border-b border-stone-200 bg-stone-50 flex items-center justify-between">
-          <div className="font-serif text-sm text-stone-900 font-bold">{title}</div>
-          <div className="text-[10px] font-mono text-stone-500">
-            {sectionItems.filter(i => c.checked[`${sectionKey}:${i.item_key}`]).length}/{sectionItems.length}
-          </div>
-        </div>
-        <div className="p-2 space-y-1 max-h-72 overflow-y-auto">
-          {sectionItems.map(item => {
-            const key = `${sectionKey}:${item.item_key}`;
-            const isChecked = !!c.checked[key];
+        {/* Section tabs (Bedroom / Vanity / Bathroom / General) */}
+        <div className="flex gap-1 bg-stone-100 p-1 rounded-xl overflow-x-auto">
+          {sections.map(s => {
+            const cnt = sectionCount(s.key);
+            const isPassed = !!passedSecs[s.key];
+            const isActive = activeSection === s.key;
             return (
-              <button key={item.id} onClick={() => toggleItem(partyId, sectionKey, item.item_key)}
-                className={`w-full text-left px-2 py-1.5 rounded-lg flex items-center gap-2 transition-colors ${isChecked ? 'bg-amber-50' : 'hover:bg-stone-50'}`}>
-                <div className={`w-4 h-4 rounded border-2 flex items-center justify-center flex-shrink-0 ${isChecked ? 'bg-amber-600 border-amber-600 text-white' : 'border-stone-300'}`}>
-                  {isChecked && <Check size={10} />}
+              <button key={s.key} onClick={() => setActiveSection(s.key)}
+                className={`flex-1 min-w-fit py-2 px-3 rounded-lg text-xs font-medium whitespace-nowrap transition-colors ${
+                  isActive
+                    ? (isPassed ? 'bg-emerald-100 text-emerald-900 font-bold shadow-sm' : 'bg-white text-stone-900 font-bold shadow-sm')
+                    : (isPassed ? 'text-emerald-700' : 'text-stone-600')
+                }`}>
+                <div>{s.label}</div>
+                <div className="text-[9px] font-mono opacity-70">
+                  {isPassed ? 'passed' : cnt > 0 ? `${cnt} items` : ' '}
                 </div>
-                <div className="text-xs text-stone-800">{item.label}</div>
               </button>
             );
           })}
         </div>
+
+        {/* Active section content */}
+        {renderSectionContent(partyId, activeSection, sections, bathroomNum)}
+      </div>
+    );
+  };
+
+  // Render the content for whichever section tab is active inside a
+  // bedroom. For Bathroom and General, the variant picker shows above
+  // the checklist; for Bedroom and Vanity, the checklist is universal.
+  const renderSectionContent = (partyId, sectionKey, sections, bathroomNum) => {
+    const c = config[partyId] || { checked: {}, passedSections: {} };
+    const checked = c.checked || {};
+    const passed = !!(c.passedSections || {})[sectionKey];
+    const section = sections.find(s => s.key === sectionKey);
+
+    // Pick variant — bathroom and general need one before items render.
+    const variantKey = sectionKey === 'bathroom' ? c.bathroomVariant
+      : sectionKey === 'general' ? c.generalVariant
+      : 'default';
+    const variant = variantKey ? variantBySectionKey(sectionKey, variantKey) : null;
+    const items = variant ? itemsForVariant(variant.id) : [];
+
+    return (
+      <div className="space-y-3">
+        {/* "Pass this section" toggle — independent of bedroom-level Pass.
+           When passed, items are grayed out and excluded from submit. */}
+        <button onClick={() => toggleSectionPass(partyId, sectionKey)}
+          className={`w-full p-3 rounded-xl border-2 text-sm font-medium flex items-center justify-between transition-colors ${
+            passed
+              ? 'bg-emerald-50 border-emerald-500 text-emerald-900'
+              : 'bg-white border-stone-200 hover:border-stone-400 text-stone-700'
+          }`}>
+          <div className="flex items-center gap-2">
+            <div className={`w-5 h-5 rounded border-2 flex items-center justify-center ${passed ? 'bg-emerald-600 border-emerald-600 text-white' : 'border-stone-300'}`}>
+              {passed && <Check size={12} />}
+            </div>
+            <span>{passed ? `${section?.label} passed — no items` : `Pass entire ${section?.label.toLowerCase()} section`}</span>
+          </div>
+          {passed && <span className="text-[10px] font-mono">Tap to un-pass</span>}
+        </button>
+
+        {/* Variant picker for bathroom and general sections */}
+        {sectionKey === 'bathroom' && !passed && (
+          <div className="p-3 rounded-xl bg-stone-50 border border-stone-200">
+            <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-2">
+              Bathroom responsibility{bathroomNum ? ` (this is Bathroom ${bathroomNum})` : ''}
+            </div>
+            <div className="flex gap-2">
+              {variantsBySection('bathroom').map(v => (
+                <button key={v.id} onClick={() => setBathroomVariantWithAutofill(partyId, v.variant_key)}
+                  className={`flex-1 px-3 py-2 rounded-lg border-2 text-sm font-medium transition-colors ${c.bathroomVariant === v.variant_key ? 'bg-amber-50 border-amber-500 text-amber-900' : 'bg-white border-stone-200 text-stone-700'}`}>
+                  {/* Rename "tub side" → "tub responsibility" per request */}
+                  {v.label.replace(/ side$/i, ' responsibility')}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+        {sectionKey === 'general' && !passed && (
+          <div className="p-3 rounded-xl bg-stone-50 border border-stone-200">
+            <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-2">General area</div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              {variantsBySection('general').map(v => (
+                <button key={v.id} onClick={() => setGeneralVariant(partyId, v.variant_key)}
+                  className={`text-left px-3 py-2 rounded-lg border-2 text-sm font-medium transition-colors ${c.generalVariant === v.variant_key ? 'bg-amber-50 border-amber-500 text-amber-900' : 'bg-white border-stone-200 text-stone-700'}`}>
+                  {v.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Items checklist — only shown when section isn't passed AND
+           variant is picked (for bathroom/general). */}
+        {!passed && (
+          variant ? (
+            <div className="rounded-xl bg-white border-2 border-stone-200">
+              <div className="px-3 py-2 border-b border-stone-200 bg-stone-50 flex items-center justify-between">
+                <div className="font-serif text-sm text-stone-900 font-bold">{section.label} items</div>
+                <div className="text-[10px] font-mono text-stone-500">
+                  {items.filter(i => checked[`${sectionKey}:${i.item_key}`]).length}/{items.length}
+                </div>
+              </div>
+              <div className="p-2 space-y-1 max-h-[50vh] overflow-y-auto">
+                {items.map(item => {
+                  const key = `${sectionKey}:${item.item_key}`;
+                  const isChecked = !!checked[key];
+                  return (
+                    <button key={item.id} onClick={() => toggleItem(partyId, sectionKey, item.item_key)}
+                      className={`w-full text-left px-2 py-2 rounded-lg flex items-center gap-2 transition-colors ${isChecked ? 'bg-amber-50' : 'hover:bg-stone-50'}`}>
+                      <div className={`w-4 h-4 rounded border-2 flex items-center justify-center flex-shrink-0 ${isChecked ? 'bg-amber-600 border-amber-600 text-white' : 'border-stone-300'}`}>
+                        {isChecked && <Check size={10} />}
+                      </div>
+                      <div className="text-xs text-stone-800 leading-snug">{item.label}</div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          ) : (
+            <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-sm text-amber-800">
+              Pick {sectionKey === 'bathroom' ? 'a bathroom responsibility' : 'a general area'} above to see its items.
+            </div>
+          )
+        )}
       </div>
     );
   };
 
   // -- Main render ------------------------------------------------------
+  // pb-[136px] = action bar (~68px) + manager tab bar (~64px) so nothing
+  // is hidden when the wizard renders inside ManagerShell, which has its
+  // own bottom tab bar.
   return (
-    <div className="fixed inset-0 bg-stone-50 z-50 flex flex-col">
-      <div className="px-5 py-4 border-b border-stone-200 bg-white flex-shrink-0">
+    <div className="min-h-screen bg-stone-50 pb-[136px]">
+      <div className="px-5 py-4 border-b border-stone-200 bg-white sticky top-0 z-10">
         <div className="flex items-center gap-3 mb-3">
           <button onClick={() => { if (step > 0) setStep(step - 1); else onCancel(); }}
-            className="p-2 -ml-2 rounded-full hover:bg-stone-100">
+            className="p-2 -ml-2 rounded-full hover:bg-stone-100"
+            title="Back">
             <ArrowLeft size={20} />
           </button>
           <div className="flex-1 min-w-0">
@@ -14862,22 +15117,21 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
             <div className="font-serif text-lg text-stone-900 font-bold">New checklist assignment</div>
           </div>
         </div>
-        <ProgressBar steps={stepLabels} currentStep={step} complete={submitted} />
+        <ProgressBar steps={stepLabels} currentStep={step} complete={submitted}
+          onStepClick={(targetStep) => { if (!submitted) setStep(targetStep); }} />
       </div>
 
-      {/* Scrollable content area. flex-1 takes remaining height between
-         the header and the action bar — the page itself doesn't scroll,
-         only this region does, so the Next button stays parked at the
-         bottom regardless of how tall step content gets. */}
-      <div className="flex-1 overflow-y-auto px-5 py-5">
+      {/* Step content. The wizard root has pb-[136px] so the fixed
+         action bar AND the manager tab bar below it don't hide any
+         content. */}
+      <div className="px-5 py-5">
         {step === 0 && renderSheetUpload()}
         {step === 1 && renderUnitPicker()}
         {step === 2 && renderSheetTypePicker()}
-        {step === 3 && renderPartyPicker()}
-        {step === 4 && renderConfigure()}
-        {step === 5 && (
+        {step === 3 && renderConfigure()}
+        {step === 4 && (
           <div>
-            <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-2">Step 6 · Review</div>
+            <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-2">Step 5 · Review</div>
             <div className="space-y-2 mb-4">
               {sheetFile && <ReviewLine label="Sheet attached" value={sheetFile.name} />}
               <ReviewLine label="Apartment" value={selectedUnit?.label || '—'} />
@@ -14888,8 +15142,13 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
                   const p = parties.find(x => x.id === k);
                   const c = config[k];
                   if (c?.mode === 'pass') return `${p?.label} (Pass)`;
+                  if (c?.mode === 'fail_entire') return `${p?.label} (Fail all)`;
                   const n = c?.checked ? Object.keys(c.checked).length : 0;
-                  return `${p?.label} (${n} items)`;
+                  const passedSecs = Object.keys(c?.passedSections || {}).length;
+                  const parts = [];
+                  if (n > 0) parts.push(`${n} items`);
+                  if (passedSecs > 0) parts.push(`${passedSecs} sec. passed`);
+                  return `${p?.label} (${parts.join(', ') || 'no items'})`;
                 }).join(', ')
               } />
             </div>
@@ -14907,23 +15166,19 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
         )}
       </div>
 
-      {/* Action bar — last child of the flex column, so it parks at
-         the bottom of the wizard overlay. No `fixed` positioning
-         needed since the wizard itself is fullscreen. */}
-      <div className="bg-white border-t border-stone-200 px-5 py-3 flex gap-2 flex-shrink-0">
-        {step > 0 && !submitted && (
-          <button onClick={() => setStep(step - 1)} disabled={busy}
-            className="px-4 py-3 rounded-xl border-2 border-stone-300 text-stone-700 text-sm font-medium disabled:opacity-50">
-            Back
-          </button>
-        )}
-        {step < 5 && (
+      {/* Action bar — fixed above the manager tab bar (~64px tall)
+         when this wizard renders inside ManagerShell. z-30 matches
+         the manager bar so they stack predictably without overlap.
+         No Back button here: the arrow at the top header handles that
+         to avoid two redundant back affordances. */}
+      <div className="fixed bottom-[64px] left-0 right-0 bg-white border-t border-stone-200 px-5 py-3 flex gap-2 z-30 shadow-[0_-4px_12px_rgba(0,0,0,0.06)]">
+        {step < 4 && (
           <button onClick={() => setStep(step + 1)} disabled={!canAdvanceFromStep()}
             className="flex-1 py-3 rounded-xl bg-stone-900 text-stone-50 text-sm font-medium disabled:opacity-50">
             {step === 0 && !sheetFile ? 'Skip & continue' : 'Next'}
           </button>
         )}
-        {step === 5 && !submitted && (
+        {step === 4 && !submitted && (
           <button onClick={submit} disabled={busy}
             className="flex-1 py-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-medium disabled:opacity-50">
             {busy ? 'Creating…' : 'Create assignments'}

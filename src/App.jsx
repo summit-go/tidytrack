@@ -3445,18 +3445,13 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
       )}
 
       <div className="px-4 pt-6">
-        <button onClick={onStartNew} disabled={busy}
-          className="w-full py-5 rounded-2xl bg-stone-900 text-stone-50 font-medium text-lg flex items-center justify-center gap-3 active:scale-98 transition-transform disabled:opacity-50 shadow-md">
-          <Plus size={22} /> Start cleaning a bedroom
-        </button>
-
-        <div className="mt-8">
+        <div className="mt-2">
           <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-3">
             Today's work blocks ({workBlocks.length})
           </div>
           {workBlocks.length === 0 ? (
             <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
-              No work yet. Tap "Start cleaning a bedroom" above.
+              No work yet. Tap a bedroom in the assignments above to begin.
             </div>
           ) : (
             <div className="space-y-2">
@@ -3963,7 +3958,7 @@ function PreparingBlockView({ shift, pendingStart, employeeName, employee,
         </button>
         <button onClick={onCancel} disabled={busy}
           className="w-full py-3 rounded-2xl border-2 border-stone-300 hover:bg-stone-100 text-stone-700 text-sm font-medium disabled:opacity-50 mb-3">
-          Not now — back to property home
+          Back to assignments
         </button>
 
         {/* Show assignment(s) for this bedroom so the cleaner can read
@@ -19076,6 +19071,83 @@ function AssignmentViewer({ target, onClose }) {
   const translateTexts = a.extracted_text && a.extracted_text.trim()
     ? [a.title, a.notes, a.extracted_text].filter(Boolean)
     : [a.title, a.notes].filter(Boolean);
+
+  // For template-based (NEW) assignments, load every target row for
+  // this assignment plus the template items so we can render a
+  // section-by-section "quick view" — the cleaner sees Bedroom →
+  // items, Vanity → items, Bathroom → items, General → items, all
+  // collapsible, all read-only. They can NOT tap into anything from
+  // here; this view is for orientation only. Status changes still
+  // happen via the picker or the bedroom card buttons.
+  const isTemplate = !!a.template_set_id;
+  const [allTargets, setAllTargets] = useState([]);
+  const [templateItems, setTemplateItems] = useState([]); // [{ id, item_key, label, variant_id, section_id }]
+  const [openSection, setOpenSection] = useState(null); // 'bedroom' | 'vanity' | 'bathroom' | 'general' | null
+
+  useEffect(() => {
+    if (!isTemplate) return;
+    (async () => {
+      // Pull every target for this assignment so we get the full
+      // checklist (not just the row we were clicked from).
+      const { data: tData } = await supabase.from('assignment_targets')
+        .select('id, template_section, template_item_key, status, priority')
+        .eq('assignment_id', a.id);
+      setAllTargets(tData || []);
+      // Pull template items so we can map template_item_key → human
+      // label. We need every variant under this template_set; items
+      // belong to variants, variants belong to sections.
+      const { data: vData } = await supabase.from('section_template_variants')
+        .select('id, variant_key, section:section_template_sections!inner(id, section_key)')
+        .eq('template_set_id', a.template_set_id);
+      const variantIds = (vData || []).map(v => v.id);
+      if (variantIds.length === 0) { setTemplateItems([]); return; }
+      const { data: iData } = await supabase.from('section_template_items')
+        .select('id, item_key, label, variant_id')
+        .in('variant_id', variantIds);
+      // Decorate items with section info via the variants list.
+      const variantInfo = new Map((vData || []).map(v => [v.id, v]));
+      const decorated = (iData || []).map(i => {
+        const v = variantInfo.get(i.variant_id);
+        return {
+          item_key: i.item_key,
+          label: i.label,
+          section_key: (v?.section?.section_key || '').toLowerCase(),
+          variant_key: v?.variant_key || null,
+        };
+      });
+      setTemplateItems(decorated);
+    })();
+  }, [a.id, a.template_set_id, isTemplate]);
+
+  // Build the section view: for each section, list the targets that
+  // belong to it, with their human-friendly labels.
+  const sectionsView = (() => {
+    if (!isTemplate) return null;
+    const sectionOrder = ['bedroom', 'vanity', 'bathroom', 'general'];
+    const sectionLabels = { bedroom: 'Bedroom', vanity: 'Vanity', bathroom: 'Bathroom', general: 'General' };
+    // Map item_key → label for fast lookup. Two items can share an
+    // item_key across variants of the same section (e.g. bathroom
+    // variant a vs b), so we scope by section_key + item_key.
+    const labelMap = new Map();
+    templateItems.forEach(i => {
+      labelMap.set(`${i.section_key}::${i.item_key}`, i.label);
+    });
+    return sectionOrder.map(sec => {
+      const targets = allTargets.filter(t =>
+        (t.template_section || '').toLowerCase() === sec
+      );
+      if (targets.length === 0) return null;
+      const items = targets.map(t => {
+        const lbl = labelMap.get(`${sec}::${(t.template_item_key || '').replace(/^[a-z]:/, '')}`)
+          || labelMap.get(`${sec}::${t.template_item_key}`)
+          || t.template_item_key
+          || '(unnamed item)';
+        return { id: t.id, label: lbl, status: t.status, priority: t.priority };
+      });
+      return { key: sec, label: sectionLabels[sec], items };
+    }).filter(Boolean);
+  })();
+
   return (
     <div className="fixed inset-0 bg-stone-900/95 z-50 flex flex-col">
       <div className="p-4 text-stone-50 bg-stone-900">
@@ -19092,18 +19164,89 @@ function AssignmentViewer({ target, onClose }) {
         <TranslateButton texts={translateTexts} />
       </div>
       <div className="flex-1 overflow-auto bg-stone-100">
-        {a.file_kind === 'image' ? (
-          <ZoomableImage src={a.file_url} alt={a.title} />
-        ) : (
-          <iframe src={a.file_url} className="w-full h-full min-h-[60vh]" title={a.title} />
+        {/* TEMPLATE QUICK VIEW — read-only accordion of items by
+           section. Tap a section header to expand its items. Items
+           cannot be tapped (no actions). This is just an at-a-glance
+           "what does this bedroom need" reference. */}
+        {isTemplate && sectionsView && sectionsView.length > 0 && (
+          <div className="p-3 space-y-2">
+            <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 px-1 mb-1">
+              Quick view — what this bedroom needs
+            </div>
+            {sectionsView.map(sec => {
+              const isOpen = openSection === sec.key;
+              const doneCount = sec.items.filter(i => i.status === 'done').length;
+              return (
+                <div key={sec.key} className="rounded-xl bg-white border border-stone-200 overflow-hidden">
+                  <button onClick={() => setOpenSection(isOpen ? null : sec.key)}
+                    className="w-full px-3 py-2.5 flex items-center justify-between hover:bg-stone-50 text-left">
+                    <div className="flex items-center gap-2">
+                      <span className="font-serif text-sm text-stone-900 font-bold">{sec.label}</span>
+                      <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-stone-200 text-stone-700">
+                        {doneCount}/{sec.items.length}
+                      </span>
+                    </div>
+                    <ChevronRight size={14} className={`text-stone-400 transition-transform ${isOpen ? 'rotate-90' : ''}`} />
+                  </button>
+                  {isOpen && (
+                    <div className="px-2 pb-2 pt-1 border-t border-stone-100">
+                      <ul className="text-xs text-stone-700 space-y-1">
+                        {sec.items.map(item => {
+                          const isDone = item.status === 'done';
+                          return (
+                            <li key={item.id} className={`flex items-start gap-2 px-2 py-1 rounded ${isDone ? 'opacity-60' : ''}`}>
+                              <span className={`mt-0.5 w-3.5 h-3.5 rounded border flex-shrink-0 flex items-center justify-center ${isDone ? 'border-emerald-600 bg-emerald-600' : 'border-stone-300'}`}>
+                                {isDone && <Check size={9} className="text-white" />}
+                              </span>
+                              <span className={`flex-1 ${isDone ? 'line-through' : ''}`}>{item.label}</span>
+                              {item.priority && !isDone && (
+                                <span className="text-[9px] uppercase tracking-wider font-mono px-1.5 py-0.5 rounded-full bg-red-50 border border-red-200 text-red-700 font-bold flex-shrink-0">
+                                  Priority
+                                </span>
+                              )}
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+            {/* Visual divider before the original file (when one exists) */}
+            {a.file_url && (
+              <div className="pt-3 pb-1 flex items-center gap-2 px-1">
+                <div className="flex-1 h-px bg-stone-300" />
+                <span className="text-[10px] uppercase tracking-wider font-mono text-stone-500">Original sheet</span>
+                <div className="flex-1 h-px bg-stone-300" />
+              </div>
+            )}
+          </div>
+        )}
+        {/* Original file viewer — kept for legacy assignments AND
+           shown beneath the quick view for new ones (so the cleaner
+           can still cross-reference the source sheet if needed). */}
+        {a.file_url && (
+          a.file_kind === 'image' ? (
+            <ZoomableImage src={a.file_url} alt={a.title} />
+          ) : (
+            <iframe src={a.file_url} className="w-full h-full min-h-[60vh]" title={a.title} />
+          )
+        )}
+        {!a.file_url && !isTemplate && (
+          <div className="p-8 text-center text-stone-400 text-sm">
+            No file attached to this assignment.
+          </div>
         )}
       </div>
-      <div className="p-4 bg-stone-900">
-        <a href={a.file_url} target="_blank" rel="noreferrer"
-          className="w-full inline-flex items-center justify-center gap-2 py-3 rounded-xl bg-stone-50 text-stone-900 text-sm font-medium">
-          <Download size={14} /> Open / download
-        </a>
-      </div>
+      {a.file_url && (
+        <div className="p-4 bg-stone-900">
+          <a href={a.file_url} target="_blank" rel="noreferrer"
+            className="w-full inline-flex items-center justify-center gap-2 py-3 rounded-xl bg-stone-50 text-stone-900 text-sm font-medium">
+            <Download size={14} /> Open / download
+          </a>
+        </div>
+      )}
     </div>
   );
 }

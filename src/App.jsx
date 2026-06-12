@@ -1789,21 +1789,38 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
     const customTrimmed = customName.trim();
 
     // CHECKLIST-ITEM PATH: cleaner picked one or more existing
-    // assignment_targets for this section. Flip them to in_progress
-    // and create ONE combined task that references the items. This
-    // is preferred over the generic path when targets are picked.
+    // assignment_targets — possibly across multiple sections.
+    // We flip them all to in_progress in one shot and create ONE
+    // combined task. The task's category is the most-represented
+    // section so reports & the Active tab grouping land sensibly.
+    // The name lists the picked items; if the cleaner provided a
+    // customName we use that instead.
     if (hasTargetPicks && onStartChecklistItems) {
       const pickedRows = checklistTargets.filter(t => selectedTargetIds.has(t.id));
+      // Section count to pick the "primary" section for the task.
+      // Ties go to the order we iterate (which is checklistTargets
+      // load order — generally deterministic).
+      const sectionCounts = {};
+      pickedRows.forEach(t => {
+        const s = (t.template_section || '').toLowerCase() || 'other';
+        sectionCounts[s] = (sectionCounts[s] || 0) + 1;
+      });
+      const primarySection = Object.entries(sectionCounts)
+        .sort((a, b) => b[1] - a[1])[0]?.[0] || category || null;
       const labels = pickedRows.map(labelForTarget);
-      const combinedName = customTrimmed || labels.join(' + ');
-      // For single picks we tag the task with category/subcategory so
-      // existing reports keep grouping. For multi-picks we use the
-      // first target's section as the category.
-      const sectionForTask = pickedRows[0]?.template_section || category || null;
+      // If picks cross sections, prefix with section name so the
+      // single task name reads cleanly. Else just join the labels.
+      const crossSection = Object.keys(sectionCounts).length > 1;
+      const sectionLabel = { bedroom: 'Bedroom', vanity: 'Vanity', bathroom: 'Bathroom', general: 'General' };
+      const combinedName = customTrimmed || (crossSection
+        ? Object.entries(sectionCounts)
+            .map(([s, n]) => `${sectionLabel[s] || s} (${n})`)
+            .join(' + ')
+        : labels.join(' + '));
       await onStartChecklistItems({
         targets: pickedRows,
         name: combinedName,
-        category: sectionForTask,
+        category: primarySection,
       });
       reset();
       return;
@@ -2008,18 +2025,30 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
         );
       })()}
 
-      {/* NOT-STARTED TAB — the existing category buttons + items panel.
-         Renders when (a) we're not in checklist mode (legacy free-form
-         picker), or (b) we ARE in checklist mode and the tab is
-         not_started. */}
+      {/* NOT-STARTED TAB — shows ALL 4 sections inline with their
+         pending items so the cleaner sees everything at once and
+         can checkmark across sections in a single pass. No need to
+         click a section button first. The section buttons up top
+         are still there (with counts) but they now scroll to the
+         matching panel instead of being a required gate.
+         
+         Layout per section:
+         - Header: "Bedroom (7)" + count chip
+         - 2-col grid of subsections as checkboxes
+         - Empty / all-done states get a small note instead
+         
+         Cross-section selection IS allowed — picking 3 bedroom
+         items + 2 bathroom items + tap Start creates a single task
+         "Item 1 + Item 2 + …" and flips all 5 targets to in_progress
+         at once. They'll show up under their respective sections in
+         the Active tab. */}
       {(!checklistMode || checklistTargets.length === 0 || pickerTab === 'not_started') && (
       <div>
-        <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Pick a category</label>
-        <div className="grid grid-cols-4 gap-2">
+        <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Pick what you'll clean</label>
+        {/* Quick-jump section pills with counts. Tapping scrolls to
+           the section's panel below — handy when there's a long list. */}
+        <div className="grid grid-cols-4 gap-2 mb-3">
           {(() => {
-            // Compute counts inline so the button row reads them
-            // directly. The loader excludes done items, so anything
-            // in checklistTargets is "needs work".
             const counts = { bedroom: 0, vanity: 0, bathroom: 0, general: 0 };
             checklistTargets.forEach(t => {
               const sec = (t.template_section || '').toLowerCase();
@@ -2028,16 +2057,28 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
             return TASK_CATEGORIES.map(c => {
               const n = counts[c.id] || 0;
               const inChecklist = checklistMode && checklistTargets.length > 0;
+              const isHighlighted = category === c.id;
+              const isEmpty = inChecklist && n === 0;
               return (
                 <button key={c.id} type="button" onClick={() => {
+                  // Set category so the legacy subgrid (for non-checklist
+                  // mode) knows which one to render. Also scroll to the
+                  // matching panel below for quick jump. Don't reset
+                  // selectedTargetIds — we WANT cross-section picks to
+                  // persist when the cleaner browses sections.
                   setCategory(c.id);
                   setSelectedSubs(new Set());
-                  setSelectedTargetIds(new Set());
+                  // Scroll the panel into view; tiny delay so the panel
+                  // exists in the DOM before we try to focus it.
+                  setTimeout(() => {
+                    const el = document.getElementById(`picker-sec-${c.id}`);
+                    if (el && el.scrollIntoView) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                  }, 10);
                 }}
-                  className={`py-3 px-2 rounded-xl border-2 font-medium text-sm transition-all flex flex-col items-center gap-0.5 ${category === c.id ? 'border-stone-900 bg-stone-900 text-stone-50' : 'border-stone-200 bg-white text-stone-700 hover:border-stone-400'}`}>
+                  className={`py-3 px-2 rounded-xl border-2 font-medium text-sm transition-all flex flex-col items-center gap-0.5 ${isHighlighted ? 'border-stone-900 bg-stone-900 text-stone-50' : isEmpty ? 'border-stone-100 bg-stone-50 text-stone-400' : 'border-stone-200 bg-white text-stone-700 hover:border-stone-400'}`}>
                   <span>{c.label}</span>
                   {inChecklist && (
-                    <span className={`text-[10px] font-mono ${category === c.id ? 'text-stone-300' : n === 0 ? 'text-stone-400' : 'text-amber-700'}`}>
+                    <span className={`text-[10px] font-mono ${isHighlighted ? 'text-stone-300' : isEmpty ? 'text-stone-400' : 'text-amber-700'}`}>
                       ({n})
                     </span>
                   )}
@@ -2049,126 +2090,97 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
       </div>
       )}
 
-      {/* CHECKLIST-ITEM PANEL — when bedroom context is set AND we
-         have active checklist targets in the picked category, show
-         the actual items here as the FIRST choice. Cleaner taps
-         items + Start to advance those targets and create a linked
-         task. The legacy picker (custom-name + variant groups)
-         remains below for ad-hoc tasks. */}
-      {checklistMode && category && (!checklistMode || checklistTargets.length === 0 || pickerTab === 'not_started') && (() => {
-        // In the Not-started tab we show ONLY pending items (the cleaner
-        // hasn't begun them yet). Active/paused/blocked items live in
-        // the Active tab. This keeps the two tabs cleanly separated.
-        const sectionTargets = checklistTargets.filter(t => {
-          if ((t.template_section || '').toLowerCase() !== category) return false;
-          if (t.status !== 'pending') return false;
-          return true;
+      {/* All-sections inline panel — only shows in checklist mode
+         with at least one assigned item. For each section that has
+         pending items, render a card with its 2-col item grid.
+         Sections with 0 pending get skipped (the section pill
+         above already shows the (0) state). */}
+      {checklistMode && checklistTargets.length > 0 && pickerTab === 'not_started' && (() => {
+        const sectionOrder = ['bedroom', 'vanity', 'bathroom', 'general'];
+        const sectionLabels = { bedroom: 'Bedroom', vanity: 'Vanity', bathroom: 'Bathroom', general: 'General' };
+        const pendingBySection = {};
+        checklistTargets.forEach(t => {
+          if (t.status !== 'pending') return;
+          const sec = (t.template_section || '').toLowerCase();
+          if (!sectionOrder.includes(sec)) return;
+          if (!pendingBySection[sec]) pendingBySection[sec] = [];
+          pendingBySection[sec].push(t);
         });
-        // If there are no targets at all for this section but the
-        // bedroom IS in checklist mode, show a friendly notice instead
-        // of silently rendering nothing. Lets the cleaner know they
-        // can still create an ad-hoc task or move on to another
-        // section.
-        if (sectionTargets.length === 0) {
-          // Only show the "nothing to do" notice when there's at least
-          // ONE assignment at this bedroom — otherwise the picker is
-          // in pure ad-hoc mode and the legacy subgrid covers it.
-          if (checklistTargets.length === 0) return null;
-          return (
-            <div className="rounded-2xl bg-stone-50 border-2 border-dashed border-stone-200 p-3 text-center">
-              <div className="text-xs text-stone-500">
-                Nothing assigned in <span className="font-medium text-stone-700">{TASK_CATEGORIES.find(c => c.id === category)?.label || category}</span> for this bedroom.
-              </div>
-              <div className="text-[10px] text-stone-400 mt-1">
-                You can still add a custom task with the input below.
-              </div>
-            </div>
-          );
-        }
-        const allDone = sectionTargets.every(t => t.status === 'done');
-        if (allDone) {
+        const sectionsWithWork = sectionOrder.filter(sec => pendingBySection[sec]?.length);
+        if (sectionsWithWork.length === 0) {
           return (
             <div className="rounded-2xl bg-emerald-50 border-2 border-emerald-200 p-3 text-center">
               <Check size={18} className="inline text-emerald-700 mb-1" />
               <div className="text-xs text-emerald-800 font-medium">
-                All {TASK_CATEGORIES.find(c => c.id === category)?.label} items are done.
+                Everything at this bedroom is started or done.
+              </div>
+              <div className="text-[10px] text-emerald-700 mt-1">
+                Switch to the <span className="font-medium">Active</span> tab to see what's in progress.
               </div>
             </div>
           );
         }
-        // Group by parent assignment for context (sheet type / variant)
-        const byAssignment = new Map();
-        sectionTargets.forEach(t => {
-          const aid = t.assignment?.id;
-          if (!byAssignment.has(aid)) byAssignment.set(aid, { assignment: t.assignment, items: [] });
-          byAssignment.get(aid).items.push(t);
-        });
         return (
-          <div className="rounded-2xl bg-emerald-50 border-2 border-emerald-200 p-3">
-            <div className="flex items-center gap-2 mb-2">
-              <FileText size={14} className="text-emerald-700 flex-shrink-0" />
-              <span className="text-[11px] uppercase tracking-wider font-mono text-emerald-800 font-bold flex-1">
-                Check off what you're cleaning
-              </span>
-              <span className="text-[10px] font-mono text-emerald-700">
-                {sectionTargets.filter(t => t.status !== 'done').length} left
-              </span>
-            </div>
-            <div className="space-y-2.5">
-              {Array.from(byAssignment.values()).map(group => (
-                <div key={group.assignment.id}>
-                  {/* Only show the parent-assignment subheader when
-                     there are MULTIPLE assignments contributing items
-                     to this section (e.g. cleaning_check + move_out
-                     both active). With a single parent it's just
-                     noise — the section button up top already says
-                     "Bedroom" or whatever. */}
-                  {byAssignment.size > 1 && (
-                    <div className="text-[10px] uppercase tracking-wider font-mono text-emerald-700 mb-1 px-1">
-                      {group.assignment.sheet_type === 'cleaning_check' ? 'Cleaning check' : 'Move-out clean'}
-                      {category === 'general' && group.assignment.general_variant && (
-                        <span className="ml-1 normal-case text-stone-500">· variant {group.assignment.general_variant.toUpperCase()}</span>
-                      )}
-                    </div>
-                  )}
-                  <div className="grid grid-cols-2 gap-1.5">
-                    {group.items.map(t => {
-                      const checked = selectedTargetIds.has(t.id);
-                      const inProg = t.status === 'in_progress';
-                      const paused = t.status === 'paused';
-                      const blocked = t.status === 'blocked';
-                      const statusChip = inProg ? { label: 'In progress', cls: 'bg-amber-100 text-amber-800 border-amber-300' }
-                        : paused ? { label: 'Paused', cls: 'bg-blue-100 text-blue-800 border-blue-300' }
-                        : blocked ? { label: 'Blocked', cls: 'bg-red-100 text-red-800 border-red-300' }
-                        : null;
-                      return (
-                        <button key={t.id} type="button" onClick={() => toggleTarget(t.id)}
-                          className={`flex items-start gap-2 px-3 py-2.5 rounded-xl border-2 text-left transition-all ${checked ? 'border-amber-600 bg-amber-50' : 'border-stone-200 bg-white hover:border-stone-400'}`}>
-                          <div className={`mt-0.5 w-4 h-4 rounded border-2 flex-shrink-0 flex items-center justify-center ${checked ? 'border-amber-600 bg-amber-600' : 'border-stone-300'}`}>
-                            {checked && <Check size={11} className="text-white" />}
+          <div className="space-y-2.5">
+            {sectionsWithWork.map(sec => {
+              const items = pendingBySection[sec];
+              // Group by parent assignment ONLY within General — that's
+              // the section that can have multiple variants assigned
+              // to the same bedroom. For Bedroom/Vanity/Bathroom we
+              // flatten because the parent grouping is just noise.
+              const showAsignmentSubheaders = sec === 'general';
+              const byAssignment = new Map();
+              items.forEach(t => {
+                const aid = t.assignment?.id;
+                if (!byAssignment.has(aid)) byAssignment.set(aid, { assignment: t.assignment, items: [] });
+                byAssignment.get(aid).items.push(t);
+              });
+              return (
+                <div id={`picker-sec-${sec}`} key={sec} className="rounded-2xl bg-emerald-50 border-2 border-emerald-200 p-3">
+                  <div className="flex items-center gap-2 mb-2">
+                    <FileText size={14} className="text-emerald-700 flex-shrink-0" />
+                    <span className="text-[11px] uppercase tracking-wider font-mono text-emerald-800 font-bold flex-1">
+                      {sectionLabels[sec]}
+                    </span>
+                    <span className="text-[10px] font-mono text-emerald-700">
+                      {items.length} left
+                    </span>
+                  </div>
+                  <div className="space-y-2">
+                    {Array.from(byAssignment.values()).map(group => (
+                      <div key={group.assignment.id}>
+                        {showAsignmentSubheaders && byAssignment.size > 1 && (
+                          <div className="text-[10px] uppercase tracking-wider font-mono text-emerald-700 mb-1 px-1">
+                            variant {(group.assignment.general_variant || '?').toUpperCase()}
                           </div>
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-1.5 flex-wrap">
-                              <span className="text-sm text-stone-900">{labelForTarget(t)}</span>
-                              {statusChip && (
-                                <span className={`text-[9px] uppercase tracking-wider font-mono px-1.5 py-0.5 rounded-full border ${statusChip.cls}`}>
-                                  {statusChip.label}
-                                </span>
-                              )}
-                              {t.priority && (
-                                <span className="text-[9px] uppercase tracking-wider font-mono px-1.5 py-0.5 rounded-full bg-red-50 border border-red-200 text-red-700 font-bold">
-                                  Priority
-                                </span>
-                              )}
-                            </div>
-                          </div>
-                        </button>
-                      );
-                    })}
+                        )}
+                        <div className="grid grid-cols-2 gap-1.5">
+                          {group.items.map(t => {
+                            const checked = selectedTargetIds.has(t.id);
+                            return (
+                              <button key={t.id} type="button" onClick={() => toggleTarget(t.id)}
+                                className={`flex items-start gap-2 px-3 py-2.5 rounded-xl border-2 text-left transition-all ${checked ? 'border-amber-600 bg-amber-50' : 'border-stone-200 bg-white hover:border-stone-400'}`}>
+                                <div className={`mt-0.5 w-4 h-4 rounded border-2 flex-shrink-0 flex items-center justify-center ${checked ? 'border-amber-600 bg-amber-600' : 'border-stone-300'}`}>
+                                  {checked && <Check size={11} className="text-white" />}
+                                </div>
+                                <div className="flex-1 min-w-0">
+                                  <div className="text-sm text-stone-900">{labelForTarget(t)}</div>
+                                  {t.priority && (
+                                    <span className="inline-block mt-0.5 text-[9px] uppercase tracking-wider font-mono px-1.5 py-0.5 rounded-full bg-red-50 border border-red-200 text-red-700 font-bold">
+                                      Priority
+                                    </span>
+                                  )}
+                                </div>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    ))}
                   </div>
                 </div>
-              ))}
-            </div>
+              );
+            })}
           </div>
         );
       })()}
@@ -2255,10 +2267,10 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
           {hasTargetPicks
             ? (() => {
                 // If every picked target is currently paused, this is
-                // a Resume action. Mixed or pending → Start.
+                // a Resume action. Mixed or pending → Start workblock.
                 const pickedRows = checklistTargets.filter(t => selectedTargetIds.has(t.id));
                 const allPaused = pickedRows.length > 0 && pickedRows.every(t => t.status === 'paused');
-                const verb = allPaused ? 'Resume' : 'Start';
+                const verb = allPaused ? 'Resume' : 'Start workblock';
                 return `${verb} · ${selectedTargetIds.size} item${selectedTargetIds.size === 1 ? '' : 's'}`;
               })()
             : isGeneral && selectedSubs.size > 1
@@ -4977,12 +4989,39 @@ function PartyPicker({ property, unit, onPick, onBack, busy }) {
   const [picked, setPicked] = useState(null);
   const [notes, setNotes] = useState('');
   const [search, setSearch] = useState('');
+  // Per-bedroom subsection counts so the cleaner sees at a glance
+  // which bedrooms have how much work, broken down by main section.
+  // Shape: { party_id: { total: N, bedroom: N, vanity: N, bathroom: N, general: N } }
+  const [counts, setCounts] = useState({});
   useEffect(() => { (async () => {
-    const { data } = await supabase.from('parties').select('*')
-      .eq('unit_id', unit.id).eq('active', true)
-      .order('sort_order').order('label');
-    setParties(data || []); setLoaded(true);
-  })(); }, [unit.id]);
+    const [partiesRes, targetsRes] = await Promise.all([
+      supabase.from('parties').select('*')
+        .eq('unit_id', unit.id).eq('active', true)
+        .order('sort_order').order('label'),
+      supabase.from('assignment_targets')
+        .select('party_id, template_section, status, assignment:assignments!inner(customer_id, active, source, pm_status)')
+        .eq('unit_id', unit.id)
+        .neq('status', 'done'),
+    ]);
+    // Build the section-by-section counts per party. Only count
+    // open targets on active, customer-matched assignments (so
+    // legacy archived rows don't inflate the totals).
+    const c = {};
+    (targetsRes.data || []).forEach(t => {
+      const a = t.assignment;
+      if (!a || a.active === false) return;
+      if (a.customer_id !== property.id) return;
+      if (a.source === 'pm' && a.pm_status !== 'approved') return;
+      if (!t.party_id) return;
+      if (!c[t.party_id]) c[t.party_id] = { total: 0, bedroom: 0, vanity: 0, bathroom: 0, general: 0 };
+      c[t.party_id].total += 1;
+      const sec = (t.template_section || '').toLowerCase();
+      if (sec in c[t.party_id]) c[t.party_id][sec] += 1;
+    });
+    setParties(partiesRes.data || []);
+    setCounts(c);
+    setLoaded(true);
+  })(); }, [unit.id, property.id]);
 
   const q = search.trim().toLowerCase();
   const filteredParties = q
@@ -5052,19 +5091,49 @@ function PartyPicker({ property, unit, onPick, onBack, busy }) {
           </div>
         ) : (
           <div className="space-y-2">
-            {filteredParties.map(p => (
-              <button key={p.id} onClick={() => setPicked(p)} disabled={busy}
-                className="w-full text-left p-4 rounded-2xl bg-white border-2 border-stone-200 hover:border-stone-900 active:scale-98 transition-all disabled:opacity-50">
-                <div className="flex items-center justify-between">
-                  <div className="flex-1 min-w-0">
-                    <div className="font-serif text-lg text-stone-900">{p.label}</div>
-                    {p.full_name && <div className="text-sm text-stone-600">{p.full_name}</div>}
-                    {p.notes && <div className="text-xs text-stone-500 mt-1 italic line-clamp-1">{p.notes}</div>}
+            {/* Sort bedrooms-with-open-work to the top so the cleaner
+               sees what needs cleaning first. Within each bucket keep
+               the original (label/sort_order) order. */}
+            {filteredParties.slice().sort((a, b) => {
+              const aHas = (counts[a.id]?.total || 0) > 0 ? 1 : 0;
+              const bHas = (counts[b.id]?.total || 0) > 0 ? 1 : 0;
+              return bHas - aHas;
+            }).map(p => {
+              const c = counts[p.id];
+              const total = c?.total || 0;
+              const sectionBits = [];
+              if (c) {
+                if (c.bedroom)  sectionBits.push(`Bedroom (${c.bedroom})`);
+                if (c.vanity)   sectionBits.push(`Vanity (${c.vanity})`);
+                if (c.bathroom) sectionBits.push(`Bathroom (${c.bathroom})`);
+                if (c.general)  sectionBits.push(`General (${c.general})`);
+              }
+              return (
+                <button key={p.id} onClick={() => setPicked(p)} disabled={busy}
+                  className="w-full text-left p-4 rounded-2xl bg-white border-2 border-stone-200 hover:border-stone-900 active:scale-98 transition-all disabled:opacity-50">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 mb-1 flex-wrap">
+                        <span className="font-serif text-lg text-stone-900">{p.label}</span>
+                        {total > 0 && (
+                          <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-amber-600 text-white font-bold flex items-center gap-1">
+                            <FileText size={10} /> {total} to clean
+                          </span>
+                        )}
+                      </div>
+                      {p.full_name && <div className="text-sm text-stone-600">{p.full_name}</div>}
+                      {sectionBits.length > 0 && (
+                        <div className="text-[11px] text-stone-500 font-mono mt-1">
+                          {sectionBits.join(' · ')}
+                        </div>
+                      )}
+                      {p.notes && <div className="text-xs text-stone-500 mt-1 italic line-clamp-1">{p.notes}</div>}
+                    </div>
+                    <ChevronRight size={16} className="text-stone-400 flex-shrink-0 mt-1" />
                   </div>
-                  <ChevronRight size={16} className="text-stone-400" />
-                </div>
-              </button>
-            ))}
+                </button>
+              );
+            })}
           </div>
         )}
       </div>

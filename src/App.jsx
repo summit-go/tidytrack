@@ -21,7 +21,7 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 // and restrict to the Cloud Translation API only.
 // If empty, the Translate button is hidden.
 // =================================================================
-const GOOGLE_TRANSLATE_API_KEY = "PASTE_YOUR_GOAIzaSyD7ceHPryMzs45hWJOyFNBxtOzQOEmJcSA";
+const GOOGLE_TRANSLATE_API_KEY = "AIzaSyD7ceHPryMzs45hWJOyFNBxtOzQOEmJcSA";
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 const PHOTO_BUCKET = 'task-photos';
@@ -1654,17 +1654,20 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   const startNewBlock = () => setBlockStartFlow({ step: 'unit' });
   const onPickBlockUnit = (unit) => setBlockStartFlow({ step: 'party', unit });
 
-  // When a cleaner starts work in a bedroom, automatically mark any pending
-  // assignments at that bedroom as in_progress so other cleaners can see
-  // that someone's on it. Matches both bedroom-specific and property-wide targets.
+  // When a cleaner confirms Start in PreparingBlockView, flip any
+  // pending OR paused assignments at this bedroom to in_progress.
+  // This is the SINGLE confirmation point — tapping Start/Resume on a
+  // card just navigates to the prep screen; status only flips here so
+  // the cleaner has one chance to back out before the assignment
+  // moves out of Pending.
   const autoStartAssignmentsAtBedroom = async (unitId, partyId) => {
     if (!shift?.customer_id) return;
     try {
-      // Find pending targets at this exact bedroom OR property-wide for this customer
+      // Find pending OR paused targets at this exact bedroom OR property-wide for this customer
       const { data: targets } = await supabase
         .from('assignment_targets')
-        .select('id, assignment:assignments!inner(id, customer_id, active, source, pm_status)')
-        .eq('status', 'pending')
+        .select('id, status, assignment:assignments!inner(id, customer_id, active, source, pm_status)')
+        .in('status', ['pending', 'paused'])
         .or(`and(unit_id.eq.${unitId},party_id.eq.${partyId}),and(unit_id.is.null,party_id.is.null)`);
       const eligible = (targets || []).filter(t =>
         t.assignment?.customer_id === shift.customer_id &&
@@ -1947,6 +1950,41 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   // Cancel the pending start (cleaner decides not to start after all)
   const cancelPendingStart = () => setPendingStart(null);
 
+  // Send-back-to-pending: cleaner navigated here but realized it's
+  // the wrong bedroom (or changed their mind). Resets any of THEIR
+  // OWN in_progress/paused targets at this bedroom to pending so the
+  // queue looks fresh again. Only touches targets they personally
+  // started — coworkers' work is never disturbed. Then cancels the
+  // pending start so they go back to the property hub.
+  const sendBackToPendingFromPrepare = async () => {
+    if (!pendingStart || !employee?.id) {
+      setPendingStart(null);
+      return;
+    }
+    try {
+      const { data: mine } = await supabase
+        .from('assignment_targets')
+        .select('id, assignment:assignments!inner(customer_id, active)')
+        .eq('unit_id', pendingStart.unitId)
+        .eq('party_id', pendingStart.partyId)
+        .in('status', ['in_progress', 'paused'])
+        .eq('started_by', employee.id);
+      const eligible = (mine || []).filter(t =>
+        t.assignment?.customer_id === shift?.customer_id && t.assignment?.active
+      );
+      if (eligible.length > 0) {
+        await supabase.from('assignment_targets').update({
+          status: 'pending',
+          started_at: null,
+          started_by: null,
+        }).in('id', eligible.map(t => t.id));
+      }
+    } catch (e) {
+      console.warn('[sendBackToPending] failed', e);
+    }
+    setPendingStart(null);
+  };
+
   // Tasks
   const startTask = async (overrideName = null, category = null, subcategory = null) => {
     const nameToUse = (overrideName || newTaskName || '').trim();
@@ -2189,6 +2227,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       onSignOut={signOutWithCleanup}
       onCancel={cancelPendingStart}
       onStart={confirmPendingStart}
+      onSendBackToPending={sendBackToPendingFromPrepare}
       onOpenMessages={() => setShowMessages(true)}
       onOpenBedroomHistory={setBedroomHistory}
       busy={busy} />);
@@ -2709,7 +2748,7 @@ function OtherCleanersTasksPanel({ block }) {
 // would tangle the logic. Cleaner to have a dedicated screen.
 // =================================================================
 function PreparingBlockView({ shift, pendingStart, employeeName, employee,
-  onSignOut, onCancel, onStart, onOpenMessages, onOpenBedroomHistory, busy }) {
+  onSignOut, onCancel, onStart, onSendBackToPending, onOpenMessages, onOpenBedroomHistory, busy }) {
   const handleLogoClick = () => onCancel();
 
   // Load priority + cleaning types for this bedroom's open assignments
@@ -2737,23 +2776,36 @@ function PreparingBlockView({ shift, pendingStart, employeeName, employee,
       <Header name={employeeName} onSignOut={onSignOut} role={employee?.role} employee={employee}
         onOpenMessages={onOpenMessages} onLogoClick={handleLogoClick} />
       <div className="bg-stone-900 text-stone-50 px-5 py-5 sticky top-0 z-10 shadow-md">
-        <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center justify-between mb-3 gap-2 flex-wrap">
           <button onClick={onCancel}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-50 text-xs font-medium">
             <Home size={12} /> Property home
           </button>
-          {/* Bedroom history shortcut so the cleaner can see what was
-             last done here before they start — useful for catching
-             "wrong bedroom" mistakes early. */}
-          {onOpenBedroomHistory && (
-            <button onClick={() => onOpenBedroomHistory({
-                unitId: pendingStart.unitId, unitLabel: pendingStart.unitLabel,
-                partyId: pendingStart.partyId, partyLabel: pendingStart.partyLabel
-              })}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-50 text-xs font-medium">
-              <Clock size={12} /> History
-            </button>
-          )}
+          <div className="flex items-center gap-2 flex-wrap">
+            {/* Send back to pending: cleaner navigated here by mistake
+               or changed their mind. Resets any of their in_progress
+               or paused targets at this bedroom back to pending so
+               the next cleaner sees a fresh state, then sends them
+               home. Doesn't touch other cleaners' work. */}
+            {onSendBackToPending && (
+              <button onClick={onSendBackToPending} disabled={busy}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-50 text-xs font-medium disabled:opacity-50">
+                <ArrowLeft size={12} /> Send back to pending
+              </button>
+            )}
+            {/* Bedroom history shortcut so the cleaner can see what was
+               last done here before they start — useful for catching
+               "wrong bedroom" mistakes early. */}
+            {onOpenBedroomHistory && (
+              <button onClick={() => onOpenBedroomHistory({
+                  unitId: pendingStart.unitId, unitLabel: pendingStart.unitLabel,
+                  partyId: pendingStart.partyId, partyLabel: pendingStart.partyLabel
+                })}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-50 text-xs font-medium">
+                <Clock size={12} /> History
+              </button>
+            )}
+          </div>
         </div>
         <div className="text-xs uppercase tracking-widest text-amber-400 font-mono">Ready to start</div>
         <div className="font-serif text-2xl text-stone-50 leading-tight">
@@ -12989,11 +13041,11 @@ function AssignmentList({ property, employee, onBack, onNew, onOpen }) {
                         return floorKeys.map(fk => (
                           <div key={fk}>
                             <div className="flex items-center gap-2 mb-1.5 px-1">
-                              <span className="text-[10px] uppercase tracking-wider font-mono text-stone-500 font-bold">
+                              <span className="text-sm font-bold text-stone-800 tracking-wide">
                                 {fk === '—' ? 'Other' : `Floor ${fk}`}
                               </span>
-                              <span className="text-[10px] font-mono text-stone-400">({byFloor[fk].length})</span>
-                              <div className="flex-1 h-px bg-stone-200" />
+                              <span className="text-xs font-mono text-stone-500">({byFloor[fk].length})</span>
+                              <div className="flex-1 h-px bg-stone-300" />
                             </div>
                             <div className="space-y-2">
                               {byFloor[fk].map(renderUnitKey)}
@@ -14029,6 +14081,7 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
             onReassign={() => setReassignTarget(t)}
             onTogglePriority={togglePriority}
               canMarkDone={can(employee, 'mark_assignments_done') || t.started_by === employee?.id}
+              currentEmployeeId={employee?.id}
             onOpenBedroomHistory={onOpenBedroomHistory} />
         );
         return (
@@ -14074,7 +14127,7 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
 }
 
 // Reusable card for one assignment target, used in banner + panel
-function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPending, onDone, onReopen, onBlocked, onReassign, onGoToBedroom, onOpenBedroomHistory, onTogglePriority, canMarkDone = true, propertyId }) {
+function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPending, onDone, onReopen, onBlocked, onReassign, onGoToBedroom, onOpenBedroomHistory, onTogglePriority, canMarkDone = true, currentEmployeeId, propertyId }) {
   const t = target;
   const s = ASSIGNMENT_STATUSES[t.status] || ASSIGNMENT_STATUSES.pending;
   const isDone = t.status === 'done';
@@ -14106,7 +14159,7 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
   }, [t.unit_id, t.party_id, isDone, propertyId, t.status]);
 
   return (
-    <div className={`p-3 rounded-xl border ${isDone ? 'bg-stone-50 border-stone-200 opacity-90' : 'bg-white border-stone-200'}`}>
+    <div className={`p-2.5 sm:p-3 rounded-xl border ${isDone ? 'bg-stone-50 border-stone-200 opacity-90' : 'bg-white border-stone-200'}`}>
       {/* === HEADER ROW =================================================
          Apartment info BOLD up top. Never truncated — long bedroom
          labels wrap to a second line rather than being cut. Right side
@@ -14128,7 +14181,9 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
             <div className="font-serif text-lg text-stone-900 font-bold">Whole property</div>
           )}
         </div>
-        <div className="flex items-center gap-1.5 flex-shrink-0 flex-wrap justify-end">
+        <div className="flex items-center gap-1.5 flex-shrink-0 flex-wrap justify-end max-w-[60%]">
+          {/* Priority toggle (gray ↔ red) when parent passes it; else
+             read-only chip. */}
           {!isDone && onTogglePriority ? (
             <button
               onClick={(e) => { e.stopPropagation(); onTogglePriority(t); }}
@@ -14141,9 +14196,26 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
           ) : (
             <PriorityChip on={t.priority && !isDone} />
           )}
+          {/* Status pill — read-only, just a visual cue. */}
           <span className={`text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full border ${s.color}`}>
             {s.label}
           </span>
+          {/* View doc + History live here too so the title row below
+             gets the full width — fixes the mobile cut-off. They share
+             the same chip language as priority/status. */}
+          <button onClick={onView}
+            className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-100 hover:bg-stone-200 text-stone-700 flex items-center gap-1">
+            <Eye size={10} /> View doc
+          </button>
+          {onOpenBedroomHistory && t.unit_id && t.party_id && (
+            <button onClick={() => onOpenBedroomHistory({
+                unitId: t.unit_id, unitLabel: t.unit?.label,
+                partyId: t.party_id, partyLabel: t.party?.label
+              })} disabled={busy}
+              className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-100 hover:bg-stone-200 text-stone-700 flex items-center gap-1 disabled:opacity-50">
+              <Clock size={10} /> History
+            </button>
+          )}
         </div>
       </div>
 
@@ -14200,24 +14272,6 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
         )}
       </div>
 
-      {/* === ANCILLARY PILLS — View doc + History. Their own row so
-         they don't compete visually with the main action buttons. */}
-      <div className="flex items-center gap-1.5 flex-wrap mb-2">
-        <button onClick={onView}
-          className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-100 hover:bg-stone-200 text-stone-700 flex items-center gap-1">
-          <Eye size={10} /> View doc
-        </button>
-        {onOpenBedroomHistory && t.unit_id && t.party_id && (
-          <button onClick={() => onOpenBedroomHistory({
-              unitId: t.unit_id, unitLabel: t.unit?.label,
-              partyId: t.party_id, partyLabel: t.party?.label
-            })} disabled={busy}
-            className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-100 hover:bg-stone-200 text-stone-700 flex items-center gap-1 disabled:opacity-50">
-            <Clock size={10} /> History
-          </button>
-        )}
-      </div>
-
       {/* === ACTION BUTTON ROW =========================================
          All buttons share h-9 / px-3 / text-xs / inline-flex so they
          line up symmetrically regardless of which subset is showing.
@@ -14225,12 +14279,31 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
          Blocked → Reassign. Reassign no longer has ml-auto so the
          row stays uniform. */}
       <div className="flex gap-2 flex-wrap">
-        {(t.status === 'pending' || t.status === 'blocked' || t.status === 'in_progress' || t.status === 'paused') && (
-          <button onClick={onStart} disabled={busy}
-            className="h-9 px-3 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-medium flex items-center gap-1 disabled:opacity-50">
-            <Play size={12} /> {t.status === 'in_progress' ? 'I\'m on it too' : (t.status === 'paused' ? 'Resume' : 'Start')}
-          </button>
-        )}
+        {(t.status === 'pending' || t.status === 'blocked' || t.status === 'in_progress' || t.status === 'paused') && (() => {
+          // "I'm on it too" only makes sense when SOMEONE ELSE is on it.
+          // If the current cleaner started this assignment, show a
+          // disabled gray "You're on it" pill so they see the state
+          // without a misleading button to "join themselves".
+          const iStartedThis = t.status === 'in_progress'
+            && currentEmployeeId
+            && t.started_by === currentEmployeeId;
+          if (iStartedThis) {
+            return (
+              <button disabled
+                className="h-9 px-3 rounded-lg bg-stone-200 text-stone-500 text-xs font-medium flex items-center gap-1 cursor-not-allowed">
+                <Check size={12} /> You're on it
+              </button>
+            );
+          }
+          const label = t.status === 'in_progress' ? "I'm on it too"
+            : t.status === 'paused' ? 'Resume' : 'Start';
+          return (
+            <button onClick={onStart} disabled={busy}
+              className="h-9 px-3 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-medium flex items-center gap-1 disabled:opacity-50">
+              <Play size={12} /> {label}
+            </button>
+          );
+        })()}
         {onPause && (t.status === 'in_progress') && (
           <button onClick={onPause} disabled={busy}
             className="h-9 px-3 rounded-lg border border-blue-200 hover:bg-blue-50 text-blue-700 text-xs font-medium flex items-center gap-1 disabled:opacity-50">
@@ -14243,12 +14316,21 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
             <ArrowLeft size={12} /> Move to pending
           </button>
         )}
-        {(t.status === 'pending' || t.status === 'in_progress' || t.status === 'blocked' || t.status === 'paused') && canMarkDone && (
-          <button onClick={onDone} disabled={busy}
-            className="h-9 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-medium flex items-center gap-1 disabled:opacity-50">
-            <Check size={12} /> Mark complete
-          </button>
-        )}
+        {(t.status === 'pending' || t.status === 'in_progress' || t.status === 'blocked' || t.status === 'paused') && canMarkDone && (() => {
+          // On Pending we keep the button VISIBLE but disabled — the
+          // cleaner sees the action exists, just needs to Start first.
+          // This avoids the confusing "button vanished" feeling.
+          const pendingDisabled = t.status === 'pending';
+          return (
+            <button onClick={onDone} disabled={busy || pendingDisabled}
+              title={pendingDisabled ? 'Start this assignment before marking it complete' : ''}
+              className={`h-9 px-3 rounded-lg text-xs font-medium flex items-center gap-1 ${pendingDisabled
+                ? 'bg-stone-200 text-stone-500 cursor-not-allowed'
+                : 'bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-50'}`}>
+              <Check size={12} /> Mark complete
+            </button>
+          );
+        })()}
         {isDone && (
           <button onClick={onReopen} disabled={busy}
             className="h-9 px-3 rounded-lg border border-stone-300 hover:bg-stone-50 text-stone-700 text-xs font-medium flex items-center gap-1 disabled:opacity-50">
@@ -14502,13 +14584,14 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
     }
   };
 
-  // Tapping "Start" on an assignment card should both flag it as
-  // in_progress AND auto-navigate the cleaner to the bedroom (without
-  // actually starting the work-block timer — the cleaner confirms by
-  // tapping Start cleaning on the bedroom screen). The navigation
-  // handler `onGoToBedroom` upstream handles the pending-start UX.
+  // Tapping "Start" / "Resume" / "Go to this bedroom" on an assignment
+  // card no longer mutates status. It just navigates to the prep
+  // screen. The cleaner confirms with the big Start cleaning button
+  // there — that's the SINGLE confirmation point. confirmPendingStart
+  // → autoStartAssignmentsAtBedroom is what actually flips pending/
+  // paused targets to in_progress. This stops "I clicked Go and now
+  // the assignment is in_progress even though I didn't start work."
   const startAndGo = async (target) => {
-    await updateStatus(target, 'in_progress');
     if (onGoToBedroom && target.unit_id && target.party_id) {
       onGoToBedroom(target);
     }
@@ -14720,6 +14803,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                 onReassign={() => setReassignTarget(t)}
                 onTogglePriority={togglePriority}
               canMarkDone={can(employee, 'mark_assignments_done') || t.started_by === employee?.id}
+              currentEmployeeId={employee?.id}
                 onGoToBedroom={onGoToBedroom ? () => startAndGo(t) : null}
                 onOpenBedroomHistory={onOpenBedroomHistory} />
             );
@@ -14759,6 +14843,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                       onReassign={() => setReassignTarget(t)}
                       onTogglePriority={togglePriority}
               canMarkDone={can(employee, 'mark_assignments_done') || t.started_by === employee?.id}
+              currentEmployeeId={employee?.id}
                 onGoToBedroom={onGoToBedroom ? () => startAndGo(t) : null}
                       onOpenBedroomHistory={onOpenBedroomHistory} />
                   ))}
@@ -14788,6 +14873,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
               onReassign={() => setReassignTarget(t)}
               onTogglePriority={togglePriority}
               canMarkDone={can(employee, 'mark_assignments_done') || t.started_by === employee?.id}
+              currentEmployeeId={employee?.id}
                 onGoToBedroom={onGoToBedroom ? () => startAndGo(t) : null}
               onOpenBedroomHistory={onOpenBedroomHistory} />
           ))}
@@ -15037,6 +15123,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                     onReassign={() => setReassignTarget(t)}
                     onTogglePriority={togglePriority}
               canMarkDone={can(employee, 'mark_assignments_done') || t.started_by === employee?.id}
+              currentEmployeeId={employee?.id}
                 onGoToBedroom={onGoToBedroom ? () => startAndGo(t) : null}
                     onOpenBedroomHistory={onOpenBedroomHistory} />
                 ))}
@@ -15083,15 +15170,15 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
             <div key={b}>
               {showHeader && (
                 <button onClick={() => toggleCollapse(b)}
-                  className="w-full flex items-center justify-between mb-2 px-1 py-1 hover:bg-stone-50 rounded">
+                  className="w-full flex items-center justify-between mb-2 px-1 py-2 hover:bg-stone-50 rounded">
                   <div className="flex items-center gap-2">
-                    <Building2 size={14} className="text-stone-500" />
-                    <span className="text-xs uppercase tracking-wider font-mono text-stone-600">
+                    <Building2 size={18} className="text-stone-700" />
+                    <span className="font-serif text-base text-stone-900 font-bold">
                       {b === '—' ? 'No unit' : `Building ${b.replace(/^B/i, '')}`}
                     </span>
-                    <span className="text-xs font-mono text-stone-400">({itemsForBuilding.length})</span>
+                    <span className="text-xs font-mono text-stone-500">({itemsForBuilding.length})</span>
                   </div>
-                  <ChevronRight size={14} className={`text-stone-400 transition-transform ${collapsed ? '' : 'rotate-90'}`} />
+                  <ChevronRight size={16} className={`text-stone-500 transition-transform ${collapsed ? '' : 'rotate-90'}`} />
                 </button>
               )}
               {!collapsed && (
@@ -15102,11 +15189,11 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                         {floorKeys.map(fk => (
                           <div key={fk}>
                             <div className="flex items-center gap-2 mb-1.5 px-1">
-                              <span className="text-[10px] uppercase tracking-wider font-mono text-stone-500 font-bold">
+                              <span className="text-sm font-bold text-stone-800 tracking-wide">
                                 {fk === '—' ? 'Other' : `Floor ${fk}`}
                               </span>
-                              <span className="text-[10px] font-mono text-stone-400">({byFloor[fk].length})</span>
-                              <div className="flex-1 h-px bg-stone-200" />
+                              <span className="text-xs font-mono text-stone-500">({byFloor[fk].length})</span>
+                              <div className="flex-1 h-px bg-stone-300" />
                             </div>
                             {renderAssignmentList(byFloor[fk])}
                           </div>

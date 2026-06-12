@@ -1651,14 +1651,79 @@ function BedBathPicker({ bedrooms, bathrooms, onChange }) {
 //   defaultName, setDefaultName: shared freeform name state (for the
 //                                 existing "type your own name" flow)
 // =================================================================
-function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDefaultName }) {
+function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDefaultName,
+  // NEW: bedroom context. When provided, the picker becomes
+  // checklist-aware: it loads active assignment_targets at this
+  // bedroom and surfaces them as quick-pick items, filters General by
+  // the actual assigned variant, etc. Passing all three is required
+  // for checklist mode; if any is missing the picker falls back to
+  // the legacy free-form behavior.
+  customerId, unitId, partyId, employee,
+  // Handler called when one or more checklist items are picked and
+  // the cleaner taps Start. Receives an array of target rows + a
+  // combined display name. Parent advances those targets to
+  // in_progress AND creates a linked task in one shot.
+  onStartChecklistItems,
+}) {
   const [category, setCategory] = useState(null); // 'bedroom'|'bathroom'|'vanity'|'general'|null
   const [selectedSubs, setSelectedSubs] = useState(new Set()); // for 'general' only
   const [customName, setCustomName] = useState('');
+  // Checklist-aware state: targets at this bedroom + the assigned
+  // bathroom/general variants for the apartment (so we can hide
+  // unused variant groups in the General picker).
+  const [checklistTargets, setChecklistTargets] = useState([]);
+  // selectedTargetIds is the cleaner's pick within a section's
+  // checklist items. They tap items + Start to flip them to
+  // in_progress. Reset when category changes.
+  const [selectedTargetIds, setSelectedTargetIds] = useState(new Set());
+  // Active variant from the assigned checklist assignments at this
+  // bedroom. Used to filter the General groups. Bathroom variant
+  // follows the same rule but the legacy picker doesn't split
+  // bathroom by variant so it's informational only here.
+  const checklistMode = !!(customerId && unitId && partyId);
+  useEffect(() => {
+    if (!checklistMode) { setChecklistTargets([]); return; }
+    (async () => {
+      const { data } = await supabase.from('assignment_targets')
+        .select('*, assignment:assignments!inner(id, customer_id, active, source, pm_status, sheet_type, template_set_id, bathroom_variant, general_variant)')
+        .eq('unit_id', unitId).eq('party_id', partyId)
+        .neq('status', 'done');
+      const open = (data || []).filter(t =>
+        t.assignment?.customer_id === customerId &&
+        t.assignment?.active &&
+        (t.assignment?.source !== 'pm' || t.assignment?.pm_status === 'approved') &&
+        // Only template-based checklist targets — legacy single-row
+        // assignments don't have item-level granularity to pick from.
+        !!t.assignment?.template_set_id
+      );
+      setChecklistTargets(open);
+    })();
+  }, [checklistMode, customerId, unitId, partyId]);
+
+  // Friendly label for a target — uses status_notes (custom request
+  // text) when present, else the template_item_key in a humanized
+  // form. Keeps the picker readable without needing the full
+  // template_items join (cleaners don't care about the key column).
+  const labelForTarget = (t) => {
+    if (t.status_notes && t.template_item_key?.startsWith?.('requested:')) return t.status_notes;
+    const key = t.template_item_key || '';
+    return key.replace(/^[a-z]+:/, '').replace(/_/g, ' ').replace(/^./, c => c.toUpperCase());
+  };
+
+  // The assigned general_variant(s) for this bedroom — pulled from
+  // any active checklist assignment. In normal usage there's exactly
+  // one; if there are multiple (e.g. cleaning_check + move_out for
+  // the same bedroom) we show the union.
+  const assignedGeneralVariants = checklistMode
+    ? Array.from(new Set(checklistTargets
+        .map(t => t.assignment?.general_variant)
+        .filter(Boolean))).map(v => v.toLowerCase())
+    : [];
 
   const reset = () => {
     setCategory(null);
     setSelectedSubs(new Set());
+    setSelectedTargetIds(new Set());
     setCustomName('');
     setDefaultName && setDefaultName('');
   };
@@ -1672,19 +1737,58 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
     });
   };
 
+  // Toggle a checklist item pick (one target row). Multi-select; on
+  // Start we'll flip all picked targets to in_progress and create one
+  // combined task.
+  const toggleTarget = (tid) => {
+    setSelectedTargetIds(prev => {
+      const next = new Set(prev);
+      if (next.has(tid)) next.delete(tid);
+      else next.add(tid);
+      return next;
+    });
+  };
+
   const cat = TASK_CATEGORIES.find(c => c.id === category);
   const isGeneral = category === 'general';
   const hasSubs = isGeneral && selectedSubs.size > 0;
+  const hasTargetPicks = selectedTargetIds.size > 0;
   // For non-general, name auto-fills with the category label
   // For general with subs, name comes from the subcategory itself
   // For general with no subs, just "General"
   // Cleaner can override with customName for any of those.
 
-  const canSubmit = !!category && !busy;
+  const canSubmit = !!category && !busy && (
+    // Standard category submit is allowed any time a category is
+    // picked. Checklist mode also allows submit when targets are
+    // picked even without selectedSubs.
+    true
+  );
 
   const submit = async () => {
     if (!canSubmit) return;
     const customTrimmed = customName.trim();
+
+    // CHECKLIST-ITEM PATH: cleaner picked one or more existing
+    // assignment_targets for this section. Flip them to in_progress
+    // and create ONE combined task that references the items. This
+    // is preferred over the generic path when targets are picked.
+    if (hasTargetPicks && onStartChecklistItems) {
+      const pickedRows = checklistTargets.filter(t => selectedTargetIds.has(t.id));
+      const labels = pickedRows.map(labelForTarget);
+      const combinedName = customTrimmed || labels.join(' + ');
+      // For single picks we tag the task with category/subcategory so
+      // existing reports keep grouping. For multi-picks we use the
+      // first target's section as the category.
+      const sectionForTask = pickedRows[0]?.template_section || category || null;
+      await onStartChecklistItems({
+        targets: pickedRows,
+        name: combinedName,
+        category: sectionForTask,
+      });
+      reset();
+      return;
+    }
 
     // SIMPLE single-task path: non-General OR General with 0/1 sub
     if (!isGeneral || selectedSubs.size <= 1) {
@@ -1721,6 +1825,7 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
             <button key={c.id} type="button" onClick={() => {
               setCategory(c.id);
               setSelectedSubs(new Set());
+              setSelectedTargetIds(new Set());
             }}
               className={`py-3 px-2 rounded-xl border-2 font-medium text-sm transition-all ${category === c.id ? 'border-stone-900 bg-stone-900 text-stone-50' : 'border-stone-200 bg-white text-stone-700 hover:border-stone-400'}`}>
               {c.label}
@@ -1729,16 +1834,115 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
         </div>
       </div>
 
+      {/* CHECKLIST-ITEM PANEL — when bedroom context is set AND we
+         have active checklist targets in the picked category, show
+         the actual items here as the FIRST choice. Cleaner taps
+         items + Start to advance those targets and create a linked
+         task. The legacy picker (custom-name + variant groups)
+         remains below for ad-hoc tasks. */}
+      {checklistMode && category && (() => {
+        // Filter targets to this section. For General we ALSO filter
+        // by the assigned general_variant — this satisfies the
+        // "only show items assigned to this bedroom" requirement.
+        const sectionTargets = checklistTargets.filter(t => {
+          if ((t.template_section || '').toLowerCase() !== category) return false;
+          return true;
+        });
+        if (sectionTargets.length === 0) return null;
+        // Group by parent assignment for context (sheet type / variant)
+        const byAssignment = new Map();
+        sectionTargets.forEach(t => {
+          const aid = t.assignment?.id;
+          if (!byAssignment.has(aid)) byAssignment.set(aid, { assignment: t.assignment, items: [] });
+          byAssignment.get(aid).items.push(t);
+        });
+        return (
+          <div className="rounded-2xl bg-emerald-50 border-2 border-emerald-200 p-3">
+            <div className="flex items-center gap-2 mb-2">
+              <FileText size={14} className="text-emerald-700 flex-shrink-0" />
+              <span className="text-[11px] uppercase tracking-wider font-mono text-emerald-800 font-bold">
+                Pick what you're cleaning right now
+              </span>
+            </div>
+            <div className="space-y-2.5">
+              {Array.from(byAssignment.values()).map(group => (
+                <div key={group.assignment.id}>
+                  <div className="text-[10px] uppercase tracking-wider font-mono text-emerald-700 mb-1 px-1">
+                    {group.assignment.sheet_type === 'cleaning_check' ? 'Cleaning check' : 'Move-out clean'}
+                    {category === 'general' && group.assignment.general_variant && (
+                      <span className="ml-1 normal-case text-stone-500">· variant {group.assignment.general_variant.toUpperCase()}</span>
+                    )}
+                  </div>
+                  <div className="grid grid-cols-1 gap-1.5">
+                    {group.items.map(t => {
+                      const checked = selectedTargetIds.has(t.id);
+                      const inProg = t.status === 'in_progress';
+                      const paused = t.status === 'paused';
+                      const blocked = t.status === 'blocked';
+                      const statusChip = inProg ? { label: 'In progress', cls: 'bg-amber-100 text-amber-800 border-amber-300' }
+                        : paused ? { label: 'Paused', cls: 'bg-blue-100 text-blue-800 border-blue-300' }
+                        : blocked ? { label: 'Blocked', cls: 'bg-red-100 text-red-800 border-red-300' }
+                        : null;
+                      return (
+                        <button key={t.id} type="button" onClick={() => toggleTarget(t.id)}
+                          className={`flex items-start gap-2 px-3 py-2.5 rounded-xl border-2 text-left transition-all ${checked ? 'border-amber-600 bg-amber-50' : 'border-stone-200 bg-white hover:border-stone-400'}`}>
+                          <div className={`mt-0.5 w-4 h-4 rounded border-2 flex-shrink-0 flex items-center justify-center ${checked ? 'border-amber-600 bg-amber-600' : 'border-stone-300'}`}>
+                            {checked && <Check size={11} className="text-white" />}
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <span className="text-sm text-stone-900">{labelForTarget(t)}</span>
+                              {statusChip && (
+                                <span className={`text-[9px] uppercase tracking-wider font-mono px-1.5 py-0.5 rounded-full border ${statusChip.cls}`}>
+                                  {statusChip.label}
+                                </span>
+                              )}
+                              {t.priority && (
+                                <span className="text-[9px] uppercase tracking-wider font-mono px-1.5 py-0.5 rounded-full bg-red-50 border border-red-200 text-red-700 font-bold">
+                                  Priority
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div className="mt-2 text-[10px] font-mono text-emerald-800">
+              Don't see what you're cleaning? Use the options below for a custom task.
+            </div>
+          </div>
+        );
+      })()}
+
       {isGeneral && cat.subcategories && (
         <div>
           <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">
-            Pick one or more areas {selectedSubs.size > 1 && <span className="normal-case text-amber-700">· creates 1 combined task</span>}
+            {checklistMode && checklistTargets.some(t => (t.template_section || '').toLowerCase() === 'general')
+              ? 'Or pick a custom area'
+              : <>Pick one or more areas {selectedSubs.size > 1 && <span className="normal-case text-amber-700">· creates 1 combined task</span>}</>}
           </label>
-          {/* Render items grouped by their A/B/C/D/Other group — mirrors
+          {/* Render items grouped by their A/B/C/D group — mirrors
              the upload wizard's General variant structure so cleaners
-             see the same mental model on both sides. */}
+             see the same mental model on both sides. STRICT VARIANT
+             GATING: in checklist mode, only show groups whose key
+             matches one of the assigned general_variants at this
+             bedroom. If no variants are assigned (no checklist mode
+             or no general targets), show all groups. */}
           <div className="space-y-3">
             {GENERAL_GROUP_ORDER.map(groupKey => {
+              // Variant-gating: hide groups that aren't assigned to
+              // this bedroom when we're in checklist mode AND we have
+              // at least one general_variant on file. If no variants
+              // are loaded (legacy assignment, or no assignments at
+              // all) we fall back to showing everything.
+              if (checklistMode && assignedGeneralVariants.length > 0
+                  && !assignedGeneralVariants.includes(groupKey)) {
+                return null;
+              }
               const groupItems = cat.subcategories.filter(s => s.group === groupKey);
               if (groupItems.length === 0) return null;
               const groupLabel = groupItems[0].groupLabel;
@@ -1788,7 +1992,11 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
         <button onClick={submit} disabled={!canSubmit}
           className="flex-1 py-3 rounded-xl bg-stone-900 text-stone-50 font-medium text-sm disabled:opacity-50 flex items-center justify-center gap-1.5">
           <Play size={14} />
-          {isGeneral && selectedSubs.size > 1 ? `Start 1 task (${selectedSubs.size} areas)` : 'Start task'}
+          {hasTargetPicks
+            ? `Start work · ${selectedTargetIds.size} item${selectedTargetIds.size === 1 ? '' : 's'}`
+            : isGeneral && selectedSubs.size > 1
+              ? `Start 1 task (${selectedSubs.size} areas)`
+              : 'Start task'}
         </button>
         {category && (
           <button onClick={reset} disabled={busy} type="button"
@@ -2313,6 +2521,57 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     }
   };
 
+  // Cleaner picked one or more checklist items in the TaskCategoryPicker
+  // and tapped Start. We do TWO things in one shot:
+  //  1) Flip every picked assignment_target from pending/paused to
+  //     in_progress so the AssignmentBanner and ChecklistAssignmentView
+  //     immediately reflect that work is happening.
+  //  2) Create ONE combined task tied to the current shift+block so
+  //     time tracking + reports stay aligned with the legacy flow.
+  // This is the bridge between the new checklist data model and the
+  // existing tasks/work_blocks pipeline.
+  const startTasksFromChecklistItems = async ({ targets: pickedTargets, name, category }) => {
+    if (!pickedTargets || pickedTargets.length === 0) return;
+    // Stop the current active task before starting a new one (matches
+    // legacy onStartTask behavior — only ONE task active at a time).
+    if (activeTask) await stopTask(activeTask, false);
+    // 1) Advance picked targets to in_progress in a single update
+    const ids = pickedTargets.map(t => t.id);
+    const toAdvance = pickedTargets.filter(t => t.status === 'pending' || t.status === 'paused');
+    if (toAdvance.length > 0) {
+      const { error: tErr } = await supabase.from('assignment_targets')
+        .update({
+          status: 'in_progress',
+          started_at: new Date().toISOString(),
+          started_by: employee.id,
+        })
+        .in('id', toAdvance.map(t => t.id));
+      if (tErr) {
+        console.warn('[startTasksFromChecklistItems] target advance failed:', tErr);
+      }
+    }
+    // 2) Create one task that represents this work session. Tag with
+    //    category so reports show what was covered. We store the
+    //    combined item names so PMs see the full picture.
+    const ins = {
+      shift_id: shift.id,
+      name,
+      category: category || null,
+      subcategory: null,
+      is_preview: previewMode,
+    };
+    if (activeBlock) ins.work_block_id = activeBlock.id;
+    const { data: row, error } = await supabase.from('tasks')
+      .insert(ins).select('*, photos(*)').single();
+    if (error) {
+      alert('Could not start task: ' + error.message);
+      return;
+    }
+    setTasks(prev => [...prev, row]);
+    setActiveTask(row.id);
+    setNewTaskName('');
+  };
+
   // Tapping an assignment from outside a bedroom: take the cleaner to
   // PropertyHub with a "pending start" banner for the target bedroom.
   // We DO NOT create the work_block here — that happens when the cleaner
@@ -2720,6 +2979,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       onPause={() => setActiveBlock(null)}
       newTaskName={newTaskName} setNewTaskName={setNewTaskName}
       onStartTask={startTask} onStartTasksFromPicker={startTasksFromPicker}
+      onStartChecklistItems={startTasksFromChecklistItems}
       onStopTask={stopTask} onResumeTask={resumeTask}
       onAddPhoto={(taskId, kind) => setPhotoModal({ taskId, kind })}
       photoModal={photoModal} onClosePhotoModal={() => setPhotoModal(null)}
@@ -2737,6 +2997,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     onAttachProperty={startAttachProperty}
     newTaskName={newTaskName} setNewTaskName={setNewTaskName}
     onStartTask={startTask} onStartTasksFromPicker={startTasksFromPicker}
+    onStartChecklistItems={startTasksFromChecklistItems}
     onStopTask={stopTask} onResumeTask={resumeTask}
     onAddPhoto={(taskId, kind) => setPhotoModal({ taskId, kind })}
     photoModal={photoModal} onClosePhotoModal={() => setPhotoModal(null)}
@@ -3412,7 +3673,7 @@ function PreparingBlockView({ shift, pendingStart, employeeName, employee,
 }
 
 function BlockView({ shift, block, tasks, activeTask, employeeName, employee, onSignOut, onFinish, onPause,
-  newTaskName, setNewTaskName, onStartTask, onStartTasksFromPicker, onStopTask, onResumeTask, onAddPhoto,
+  newTaskName, setNewTaskName, onStartTask, onStartTasksFromPicker, onStartChecklistItems, onStopTask, onResumeTask, onAddPhoto,
   photoModal, onClosePhotoModal, onUploadPhoto, onSavePhotoNote, onOpenMessages, onOpenBedroomHistory,
   onMoveBlock, previewMode, busy }) {
   useTick(true);
@@ -3584,6 +3845,11 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
               busy={busy}
               onStartOne={(name, category, subcategory) => onStartTask(name, category, subcategory)}
               onStartMany={onStartTasksFromPicker}
+              onStartChecklistItems={onStartChecklistItems}
+              customerId={shift.customer_id}
+              unitId={block.unit_id}
+              partyId={block.party_id}
+              employee={employee}
               defaultName={newTaskName}
               setDefaultName={setNewTaskName} />
           </div>
@@ -3792,7 +4058,7 @@ function MoveBlockModalInline({ block, propertyId, currentEmployeeId, onSave, on
 // SIMPLE SHIFT VIEW (single-bill properties)
 // =================================================================
 function SimpleShiftView({ shift, tasks, activeTask, employeeName, employee, onSignOut, onClockOut, onSwitchProperty, onAttachProperty,
-  newTaskName, setNewTaskName, onStartTask, onStartTasksFromPicker, onStopTask, onResumeTask, onAddPhoto,
+  newTaskName, setNewTaskName, onStartTask, onStartTasksFromPicker, onStartChecklistItems, onStopTask, onResumeTask, onAddPhoto,
   photoModal, onClosePhotoModal, onUploadPhoto, onSavePhotoNote, onOpenMessages, onOpenChangePin, busy }) {
   const [showMenu, setShowMenu] = useState(false);
   const [taskInputMode, setTaskInputMode] = useState('picker'); // 'picker' | 'custom'
@@ -3891,6 +4157,9 @@ function SimpleShiftView({ shift, tasks, activeTask, employeeName, employee, onS
               busy={busy}
               onStartOne={(name, category, subcategory) => onStartTask(name, category, subcategory)}
               onStartMany={onStartTasksFromPicker}
+              onStartChecklistItems={onStartChecklistItems}
+              customerId={shift.customer_id}
+              employee={employee}
               defaultName={newTaskName}
               setDefaultName={setNewTaskName} />
           </div>
@@ -14407,6 +14676,12 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [submitted, setSubmitted] = useState(false);
+  // Synchronous lock against double-submit. setBusy is async (React
+  // batches state) so two rapid taps can both pass the `if (busy)`
+  // check before busy=true takes effect. A ref flips synchronously
+  // and is the reliable guard. The old setBusy-based check stays as
+  // the visual disabled state for the button.
+  const submittingRef = useRef(false);
   // True once the uploader has tapped "Next" on the configure step
   // with an incomplete bedroom — used to gate the red error dots so
   // we don't show them before they've even tried.
@@ -14864,7 +15139,37 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
   // proper `sheet_files JSONB` column).
   // -----------------------------------------------------------------
   const submit = async () => {
-    if (busy) return;
+    // Ref-based lock: flips synchronously so a second rapid tap never
+    // gets through. setBusy is async and can be raced.
+    if (submittingRef.current || busy) return;
+    // Pre-count what we're about to create so the user can sanity-
+    // check before we hit the database. This guards against the
+    // "I clicked once and now there are 57 cards" surprise that comes
+    // from Fail-Entire mode quietly checking ~28 items per bedroom.
+    const selectedPartyIds = Object.keys(selectedParties).filter(k => selectedParties[k]);
+    const previewCounts = selectedPartyIds.reduce((acc, pid) => {
+      const cc = config[pid];
+      if (!cc || cc.mode === 'pass') return acc;
+      acc.assignments += 1;
+      acc.items += Object.keys(cc.checked || {}).length;
+      return acc;
+    }, { assignments: 0, items: 0 });
+    if (previewCounts.assignments === 0) {
+      setError('Nothing to create — every bedroom is set to Pass.');
+      return;
+    }
+    // Confirmation only fires above a reasonable threshold to avoid
+    // nagging on small uploads. 25 items is enough to span 1 bedroom
+    // in Fail-Entire mode; anything more and we ask.
+    if (previewCounts.items >= 25) {
+      const ok = confirm(
+        `About to create ${previewCounts.assignments} assignment${previewCounts.assignments === 1 ? '' : 's'} ` +
+        `with ${previewCounts.items} checklist item${previewCounts.items === 1 ? '' : 's'} total.\n\n` +
+        `Continue?`
+      );
+      if (!ok) return;
+    }
+    submittingRef.current = true;
     setBusy(true); setError('');
     try {
       // Upload all sheet files first; collect URLs by file NAME so we
@@ -14888,7 +15193,8 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
         ? 'Cleaning check'
         : 'Move-out clean';
 
-      const selectedPartyIds = Object.keys(selectedParties).filter(k => selectedParties[k]);
+      // selectedPartyIds is computed at the top of submit (used by
+      // the pre-create confirm). Reuse it here.
       const created = [];
       for (const partyId of selectedPartyIds) {
         const c = config[partyId];
@@ -14972,6 +15278,7 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
       setError(e.message || 'Something went wrong.');
     } finally {
       setBusy(false);
+      submittingRef.current = false;
     }
   };
 
@@ -15851,11 +16158,21 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
                 <AlertCircle size={16} className="flex-shrink-0 mt-0.5" /><span>{error}</span>
               </div>
             )}
-            {submitted && (
-              <div className="mb-3 p-3 rounded-xl bg-emerald-50 border-2 border-emerald-300 text-emerald-800 text-sm font-medium flex items-center gap-2">
-                <Check size={16} /> Assignments created. Returning to your list…
-              </div>
-            )}
+            {submitted && (() => {
+              const assignmentCount = Object.keys(selectedParties)
+                .filter(k => selectedParties[k] && config[k] && config[k].mode !== 'pass').length;
+              const itemCount = Object.keys(selectedParties)
+                .filter(k => selectedParties[k] && config[k] && config[k].mode !== 'pass')
+                .reduce((sum, k) => sum + Object.keys(config[k].checked || {}).length, 0);
+              return (
+                <div className="mb-3 p-3 rounded-xl bg-emerald-50 border-2 border-emerald-300 text-emerald-800 text-sm font-medium flex items-center gap-2">
+                  <Check size={16} />
+                  <span>
+                    Created {assignmentCount} assignment{assignmentCount === 1 ? '' : 's'} with {itemCount} checklist item{itemCount === 1 ? '' : 's'}. Returning to your list…
+                  </span>
+                </div>
+              );
+            })()}
           </div>
         )}
       </div>
@@ -16313,24 +16630,64 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
 
   if (!loaded || targets.length === 0) return null;
 
+  // Group checklist-style targets (template_set_id is set) under their
+  // parent assignment so the banner shows ONE card per inspection
+  // sheet instead of one per item. Legacy targets (no template) stay
+  // as individual cards because each IS the unit of work.
+  // Returns: { groups: [{ assignment, items: [...], legacy: bool }] }
+  const buildGroups = (list) => {
+    const byAssignmentId = new Map();
+    list.forEach(t => {
+      const aid = t.assignment?.id;
+      const isChecklist = !!t.assignment?.template_set_id;
+      const key = isChecklist ? `cl:${aid}` : `lg:${t.id}`;
+      if (!byAssignmentId.has(key)) {
+        byAssignmentId.set(key, {
+          key,
+          assignment: t.assignment,
+          isChecklist,
+          items: [],
+          // Use the first target as the "representative" for actions
+          // like View doc / start-by-section that operate at parent level.
+          representative: t,
+        });
+      }
+      byAssignmentId.get(key).items.push(t);
+    });
+    return Array.from(byAssignmentId.values());
+  };
+
   return (
     <div className="mx-2 sm:mx-4 mt-4 p-3 sm:p-4 rounded-2xl bg-blue-50 border-2 border-blue-200">
       <button onClick={() => setCollapsed(c => !c)}
         className={`w-full flex items-center gap-2 active:opacity-80 ${collapsed ? '' : 'mb-3'}`}>
         <FileText size={16} className="text-blue-700 flex-shrink-0" />
         <span className="text-xs uppercase tracking-wider text-blue-800 font-mono flex-1 text-left">
-          {targets.length} assignment{targets.length === 1 ? '' : 's'} for this bedroom
+          {(() => {
+            const groups = buildGroups(targets);
+            const assignmentCount = groups.length;
+            return `${assignmentCount} assignment${assignmentCount === 1 ? '' : 's'} · ${targets.length} item${targets.length === 1 ? '' : 's'}`;
+          })()}
         </span>
         <ChevronRight size={14} className={`text-blue-700 transition-transform ${collapsed ? '' : 'rotate-90'}`} />
       </button>
       {!collapsed && (() => {
+        const groups = buildGroups(targets);
         // Split priority and non-priority so the visual divider matches
         // the rest of the app — priority items live at the top, then a
-        // small "everything else" separator. When there's no priority
-        // (or no non-priority) the divider doesn't render — single-group
-        // case is just a flat list.
-        const priorityT = targets.filter(t => t.priority && t.status !== 'done');
-        const restT = targets.filter(t => !(t.priority && t.status !== 'done'));
+        // small "everything else" separator. A group is "priority" if
+        // ANY of its items are priority + not done. Legacy (single
+        // target) groups behave exactly as before.
+        const groupIsPriority = (g) => g.items.some(t => t.priority && t.status !== 'done');
+        const priorityGroups = groups.filter(groupIsPriority);
+        const restGroups = groups.filter(g => !groupIsPriority(g));
+        // Render a LEGACY group as its single card (existing behavior).
+        // Render a CHECKLIST group as a summary card with item counts
+        // and a "View items" button that opens ChecklistAssignmentView.
+        const renderGroup = (g) => {
+          if (!g.isChecklist) return renderCard(g.items[0]);
+          return renderChecklistGroupCard(g);
+        };
         const renderCard = (t) => (
           <AssignmentCard key={t.id} target={t} busy={busy} propertyId={propertyId}
             onView={() => setOpened(t)}
@@ -16346,28 +16703,123 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
               currentEmployeeId={employee?.id}
             onOpenBedroomHistory={onOpenBedroomHistory} />
         );
+        // Checklist group card: ONE card representing a whole inspection
+        // sheet. Shows progress + a View items button. Tapping View
+        // items opens ChecklistAssignmentView with full per-item
+        // controls. Pause / Start operate on ALL items in the group.
+        const renderChecklistGroupCard = (g) => {
+          const a = g.assignment;
+          const items = g.items;
+          const counts = {
+            pending:     items.filter(i => i.status === 'pending').length,
+            in_progress: items.filter(i => i.status === 'in_progress').length,
+            done:        items.filter(i => i.status === 'done').length,
+            paused:      items.filter(i => i.status === 'paused').length,
+            blocked:     items.filter(i => i.status === 'blocked').length,
+          };
+          const total = items.length;
+          const isAllDone = counts.done === total;
+          const anyInProgress = counts.in_progress > 0;
+          const anyPaused = counts.paused > 0;
+          const startAll = async () => {
+            const eligible = items.filter(i => i.status === 'pending' || i.status === 'paused');
+            for (const t of eligible) await updateStatus(t, 'in_progress');
+          };
+          const pauseAll = async () => {
+            const eligible = items.filter(i => i.status === 'in_progress');
+            for (const t of eligible) await updateStatus(t, 'paused');
+          };
+          const sheetTypeLabel = a?.sheet_type === 'cleaning_check' ? 'Cleaning check'
+            : a?.sheet_type === 'move_out_clean' ? 'Move-out clean' : 'Checklist';
+          return (
+            <div key={g.key} className="p-3 sm:p-4 rounded-xl bg-white border-2 border-blue-300">
+              <div className="flex items-start gap-2 mb-2 flex-wrap">
+                <div className="flex-1 min-w-0">
+                  <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-0.5">{sheetTypeLabel}</div>
+                  <div className="font-serif text-base text-stone-900 leading-tight break-words">{a?.title || 'Checklist assignment'}</div>
+                </div>
+                {isAllDone && (
+                  <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 border border-emerald-300 flex items-center gap-1">
+                    <Check size={10} /> Done
+                  </span>
+                )}
+              </div>
+              {/* Item-status summary chips */}
+              <div className="flex flex-wrap gap-1.5 mb-3">
+                <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-stone-100 text-stone-700">
+                  {counts.done}/{total} done
+                </span>
+                {counts.in_progress > 0 && (
+                  <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-amber-100 text-amber-800">
+                    {counts.in_progress} in progress
+                  </span>
+                )}
+                {counts.pending > 0 && (
+                  <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-stone-100 text-stone-600">
+                    {counts.pending} pending
+                  </span>
+                )}
+                {counts.paused > 0 && (
+                  <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-blue-100 text-blue-700">
+                    {counts.paused} paused
+                  </span>
+                )}
+                {counts.blocked > 0 && (
+                  <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-red-100 text-red-700">
+                    {counts.blocked} blocked
+                  </span>
+                )}
+              </div>
+              {/* Action row — same buttons family as legacy AssignmentCard */}
+              <div className="flex flex-wrap items-center gap-1.5">
+                <button onClick={() => setOpened(g.representative)}
+                  className="h-9 px-3 rounded-lg bg-stone-900 hover:bg-stone-700 text-white text-xs font-medium flex items-center gap-1">
+                  <Eye size={12} /> View items
+                </button>
+                {!isAllDone && (counts.pending > 0 || counts.paused > 0) && (
+                  <button onClick={startAll} disabled={busy}
+                    className="h-9 px-3 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-medium flex items-center gap-1 disabled:opacity-50">
+                    <Play size={12} /> {anyPaused && !counts.pending ? 'Resume all' : 'Start all'}
+                  </button>
+                )}
+                {anyInProgress && (
+                  <button onClick={pauseAll} disabled={busy}
+                    className="h-9 px-3 rounded-lg border border-blue-300 hover:bg-blue-50 text-blue-700 text-xs font-medium flex items-center gap-1 disabled:opacity-50">
+                    <Pause size={12} /> Pause all
+                  </button>
+                )}
+                {a?.file_url && (
+                  <button onClick={() => setOpened(g.representative)}
+                    className="h-9 px-3 rounded-lg border border-stone-300 hover:bg-stone-50 text-stone-700 text-xs font-medium flex items-center gap-1">
+                    <FileText size={12} /> View doc
+                  </button>
+                )}
+              </div>
+            </div>
+          );
+        };
         return (
           <div className="space-y-2">
-            {priorityT.length > 0 && (
+            {priorityGroups.length > 0 && (
               <>
                 <div className="flex items-center gap-2 px-1">
                   <AlertCircle size={12} className="text-red-700 flex-shrink-0" />
                   <span className="text-[10px] uppercase tracking-wider font-mono font-bold text-red-700">
-                    Priority — do these first ({priorityT.length})
+                    Priority — do these first ({priorityGroups.length})
                   </span>
                   <div className="flex-1 h-px bg-red-200" />
                 </div>
-                {priorityT.map(renderCard)}
+                {priorityGroups.map(renderGroup)}
               </>
             )}
-            {priorityT.length > 0 && restT.length > 0 && (
+            {priorityGroups.length > 0 && restGroups.length > 0 && (
               <div className="py-1 flex items-center gap-2 px-1">
                 <div className="flex-1 h-px bg-blue-200" />
                 <span className="text-[10px] uppercase tracking-wider font-mono text-blue-700">Everything else</span>
                 <div className="flex-1 h-px bg-blue-200" />
               </div>
             )}
-            {restT.map(renderCard)}
+            {restGroups.map(renderGroup)}
           </div>
         );
       })()}
@@ -17819,6 +18271,11 @@ function ChecklistAssignmentView({ assignment, employee, onClose, onOpenSheet })
   const [loaded, setLoaded] = useState(false);
   const [tab, setTab] = useState('not_started'); // 'not_started' | 'in_progress' | 'done'
   const [busyId, setBusyId] = useState(null);
+  // Bulk-action busy + "request new item" modal — these surface the
+  // owner-requested missing controls (pause whole assignment, request
+  // an additional item the inspection sheet didn't cover, etc.)
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [requestModalOpen, setRequestModalOpen] = useState(false);
 
   // -----------------------------------------------------------------
   // Load targets (the actual checklist items) + template metadata so
@@ -18061,6 +18518,49 @@ function ChecklistAssignmentView({ assignment, employee, onClose, onOpenSheet })
           {counts.in_progress > 0 && ` · ${counts.in_progress} in progress`}
           {isAllDone && <span className="text-emerald-400 font-bold ml-1">✓ All done!</span>}
         </div>
+        {/* Bulk action row — start all pending items, pause all in-progress
+           ones, request a new item that's not on the sheet. Mirrors the
+           legacy AssignmentCard buttons so cleaners aren't missing
+           workflow controls when they open the checklist view. */}
+        <div className="mt-3 flex flex-wrap gap-1.5">
+          {(counts.not_started > 0 || counts.paused > 0) && (
+            <button
+              onClick={async () => {
+                if (bulkBusy) return;
+                setBulkBusy(true);
+                const eligible = targets.filter(t => t.status === 'pending' || t.status === 'paused');
+                for (const t of eligible) {
+                  await updateStatus(t, 'in_progress');
+                }
+                setBulkBusy(false);
+              }}
+              disabled={bulkBusy}
+              className="px-3 py-1.5 rounded-full bg-amber-600 hover:bg-amber-700 text-white text-xs font-medium flex items-center gap-1.5 disabled:opacity-50">
+              <Play size={12} /> Start all
+            </button>
+          )}
+          {counts.in_progress > 0 && (
+            <button
+              onClick={async () => {
+                if (bulkBusy) return;
+                setBulkBusy(true);
+                const eligible = targets.filter(t => t.status === 'in_progress');
+                for (const t of eligible) {
+                  await updateStatus(t, 'paused');
+                }
+                setBulkBusy(false);
+              }}
+              disabled={bulkBusy}
+              className="px-3 py-1.5 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-50 text-xs font-medium flex items-center gap-1.5 disabled:opacity-50">
+              <Pause size={12} /> Pause all
+            </button>
+          )}
+          <button
+            onClick={() => setRequestModalOpen(true)}
+            className="px-3 py-1.5 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-50 text-xs font-medium flex items-center gap-1.5">
+            <Plus size={12} /> Request item
+          </button>
+        </div>
       </div>
 
       {/* Tab toggle */}
@@ -18130,6 +18630,110 @@ function ChecklistAssignmentView({ assignment, employee, onClose, onOpenSheet })
       <div className="bg-stone-900 px-5 py-3">
         <div className="text-[10px] uppercase tracking-wider font-mono text-stone-400 text-center">
           Tap any item to advance · {tab === 'not_started' ? 'Pending → In progress' : tab === 'in_progress' ? 'In progress → Done' : 'Done → Re-open'}
+        </div>
+      </div>
+      {/* Request-item modal — cleaner taps "Request item" to log an
+         extra cleaning task that wasn't on the inspection sheet. We
+         insert a new assignment_target on this assignment with a
+         status_notes payload describing the request. Manager/owner
+         sees it next to the rest of the items. */}
+      {requestModalOpen && (
+        <RequestNewItemModal
+          assignment={assignment}
+          employee={employee}
+          onClose={() => setRequestModalOpen(false)}
+          onSaved={() => { setRequestModalOpen(false); load(); }} />
+      )}
+    </div>
+  );
+}
+
+// Quick-entry modal for a cleaner to request an additional item on a
+// checklist assignment when the inspection sheet missed something.
+// Creates a new assignment_target on the parent assignment under a
+// pseudo template_section of 'requested' so it surfaces distinctly.
+function RequestNewItemModal({ assignment, employee, onClose, onSaved }) {
+  const [text, setText] = useState('');
+  const [section, setSection] = useState('bedroom');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  const save = async () => {
+    const trimmed = text.trim();
+    if (!trimmed) { setErr('Describe what needs cleaning.'); return; }
+    if (busy) return;
+    setBusy(true); setErr('');
+    // Pull the assignment's unit/party from any existing target on it
+    // so the request lives at the same bedroom.
+    const { data: sib } = await supabase.from('assignment_targets')
+      .select('unit_id, party_id').eq('assignment_id', assignment.id).limit(1).maybeSingle();
+    const { error } = await supabase.from('assignment_targets').insert({
+      assignment_id: assignment.id,
+      unit_id: sib?.unit_id || null,
+      party_id: sib?.party_id || null,
+      status: 'pending',
+      template_section: section,
+      // Use a clearly-marked custom item key so it's obvious downstream
+      // that this came from a cleaner request and not a template seed.
+      template_item_key: `requested:${Date.now()}`,
+      status_notes: trimmed,
+    });
+    setBusy(false);
+    if (error) { setErr('Could not save: ' + error.message); return; }
+    onSaved();
+  };
+  return (
+    <div className="fixed inset-0 bg-stone-900/80 z-[60] flex items-end sm:items-center justify-center p-0 sm:p-4">
+      <div className="bg-stone-50 w-full sm:max-w-md sm:rounded-3xl rounded-t-3xl flex flex-col">
+        <div className="flex items-center justify-between p-5 border-b border-stone-200">
+          <div>
+            <div className="font-serif text-xl text-stone-900">Request a new item</div>
+            <div className="text-xs text-stone-500 font-mono mt-0.5">
+              Add a cleaning task not on the sheet
+            </div>
+          </div>
+          <button onClick={onClose} className="p-2 rounded-full hover:bg-stone-100">
+            <X size={20} className="text-stone-600" />
+          </button>
+        </div>
+        <div className="p-5 space-y-4">
+          <div>
+            <label className="text-[10px] uppercase tracking-wider text-stone-500 font-mono mb-1 block">Section</label>
+            <div className="grid grid-cols-4 gap-1">
+              {[
+                { id: 'bedroom', label: 'Bedroom' },
+                { id: 'vanity', label: 'Vanity' },
+                { id: 'bathroom', label: 'Bathroom' },
+                { id: 'general', label: 'General' },
+              ].map(s => (
+                <button key={s.id} onClick={() => setSection(s.id)}
+                  className={`py-2 px-2 rounded-lg border-2 text-xs font-medium ${section === s.id ? 'border-amber-500 bg-amber-50 text-amber-900' : 'border-stone-200 bg-white text-stone-700'}`}>
+                  {s.label}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div>
+            <label className="text-[10px] uppercase tracking-wider text-stone-500 font-mono mb-1 block">What needs cleaning?</label>
+            <textarea
+              value={text}
+              onChange={e => setText(e.target.value)}
+              rows={3}
+              placeholder="e.g. Sticky stain on the ceiling near the vent"
+              className="w-full px-3 py-2.5 rounded-xl border border-stone-300 bg-white text-sm focus:outline-none focus:border-stone-900 resize-none" />
+          </div>
+          {err && (
+            <div className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2">{err}</div>
+          )}
+        </div>
+        <div className="p-5 pt-0 flex gap-2">
+          <button onClick={onClose} disabled={busy}
+            className="flex-1 py-3 rounded-xl border border-stone-300 text-stone-700 font-medium text-sm disabled:opacity-50">
+            Cancel
+          </button>
+          <button onClick={save} disabled={busy || !text.trim()}
+            className="flex-1 py-3 rounded-xl bg-stone-900 text-stone-50 font-medium text-sm disabled:opacity-50">
+            {busy ? 'Saving…' : 'Add item'}
+          </button>
         </div>
       </div>
     </div>

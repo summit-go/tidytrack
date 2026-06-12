@@ -1474,6 +1474,20 @@ const taskCategoryShortLabel = (category, subcategory) => {
   return cat.label;
 };
 
+// Split a task name into individual items when it was built from a
+// multi-item pick (cleaner ticked several subsections + Start). The
+// picker joins picks with " + " so we use that as the splitter.
+// Returns an array — single-item tasks return [name].
+const splitTaskName = (name) => {
+  if (!name) return [];
+  // The picker uses " + " as the join string. Also handle " · " which
+  // some older paths used as a separator.
+  if (name.includes(' + ')) {
+    return name.split(' + ').map(s => s.trim()).filter(Boolean);
+  }
+  return [name];
+};
+
 // =================================================================
 // ADDRESS LINK — tappable address chip. Opens the address in the
 // user's default maps app (native on phones, Google Maps in browser
@@ -2668,7 +2682,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   };
 
   const finishBlock = async () => {
-    if (!confirm(`Done cleaning ${activeBlock.party?.label} in ${activeBlock.unit?.label}?`)) return;
+    if (!confirm(`Done in ${activeBlock.party?.label} at ${activeBlock.unit?.label}? You'll go back to the assignments.`)) return;
     setBusy(true);
     if (activeTask) await stopTask(activeTask, false);
     const ts = new Date().toISOString();
@@ -4045,7 +4059,7 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
           </button>
           <button onClick={onFinish} disabled={busy}
             className="px-4 py-2 rounded-full bg-amber-700 text-stone-50 text-sm font-medium flex items-center gap-2 active:scale-95 transition-transform disabled:opacity-50">
-            <Check size={14} /> Finish this bedroom
+            <Check size={14} /> I finished in this bedroom
           </button>
         </div>
         <div className="text-xs uppercase tracking-widest text-stone-400 font-mono">Working on</div>
@@ -5160,10 +5174,28 @@ function TaskCard({ task, isActive, onStop, onResume, onAddPhoto }) {
       style={{ touchAction: 'manipulation' }}>
       <div className="flex items-start justify-between mb-4">
         <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 mb-1 flex-wrap">
-            {isDone && <Check size={14} className="text-emerald-600 flex-shrink-0" />}
-            {isActive && <span className="w-2 h-2 rounded-full bg-amber-600 animate-pulse flex-shrink-0" />}
-            <span className="font-serif text-lg text-stone-900 truncate">{task.name}</span>
+          <div className="flex items-start gap-2 mb-1 flex-wrap">
+            {isDone && <Check size={14} className="text-emerald-600 flex-shrink-0 mt-1.5" />}
+            {isActive && <span className="w-2 h-2 rounded-full bg-amber-600 animate-pulse flex-shrink-0 mt-2.5" />}
+            {(() => {
+              // Multi-item task → bullet list, one item per line so
+              // the cleaner can read each picked subsection clearly.
+              // Single-item tasks render the original single line.
+              const parts = splitTaskName(task.name);
+              if (parts.length > 1) {
+                return (
+                  <ul className="font-serif text-base text-stone-900 flex-1 min-w-0 space-y-0.5">
+                    {parts.map((p, i) => (
+                      <li key={i} className="flex items-start gap-1.5">
+                        <span className="text-amber-600 flex-shrink-0">•</span>
+                        <span className="break-words">{p}</span>
+                      </li>
+                    ))}
+                  </ul>
+                );
+              }
+              return <span className="font-serif text-lg text-stone-900 truncate">{task.name}</span>;
+            })()}
             {damage.length > 0 && (
               <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-red-100 text-red-700 flex-shrink-0">
                 ⚠ {damage.length}
@@ -17464,19 +17496,37 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
                  (template-based assignments are 1 per bedroom so this
                  is the right one to act on). */}
               <div className="flex gap-2 flex-wrap">
-                {!isAllDone && counts.pending + counts.paused > 0 && (
-                  <button onClick={() => {
-                    const eligible = items.filter(i => i.status === 'pending' || i.status === 'paused');
-                    bulkUpdateStatus(eligible, 'in_progress');
-                  }} disabled={busy}
-                    className="h-9 px-3 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-medium flex items-center gap-1 disabled:opacity-50">
-                    <Play size={12} /> {counts.paused > 0 && counts.pending === 0 ? 'Resume' : 'Start'}
-                  </button>
-                )}
                 {!isAllDone && (can(employee, 'mark_assignments_done')) && (
-                  <button onClick={() => {
-                    if (confirm(`Mark all ${openItems.length} item${openItems.length === 1 ? '' : 's'} at this bedroom complete?`)) {
-                      bulkUpdateStatus(openItems, 'done');
+                  <button onClick={async () => {
+                    if (!confirm(`Close out this entire bedroom? Marks ${openItems.length} item${openItems.length === 1 ? '' : 's'} complete and ends the work block if one is open.`)) return;
+                    await bulkUpdateStatus(openItems, 'done');
+                    // Also close any open work_block at this exact
+                    // bedroom for this property. "Close out the bedroom"
+                    // means the cleaner is done here — the timer should
+                    // stop too. We scope to (employee_id, unit_id,
+                    // party_id, customer_id) so we never touch someone
+                    // else's open block at the same bedroom.
+                    if (rep?.unit_id && rep?.party_id && employee?.id) {
+                      try {
+                        const { data: openBlocks } = await supabase
+                          .from('work_blocks')
+                          .select('id, shift:shifts!inner(employee_id, customer_id)')
+                          .eq('unit_id', rep.unit_id)
+                          .eq('party_id', rep.party_id)
+                          .is('end_time', null);
+                        const mine = (openBlocks || []).filter(b =>
+                          b.shift?.employee_id === employee.id &&
+                          b.shift?.customer_id === propertyId
+                        );
+                        if (mine.length > 0) {
+                          await supabase.from('work_blocks')
+                            .update({ end_time: new Date().toISOString() })
+                            .in('id', mine.map(b => b.id));
+                          if (onUpdate) onUpdate();
+                        }
+                      } catch (e) {
+                        console.warn('[banner mark-complete] could not close work block', e);
+                      }
                     }
                   }} disabled={busy}
                     className="h-9 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-medium flex items-center gap-1 disabled:opacity-50">
@@ -19362,17 +19412,23 @@ function ChecklistAssignmentView({ assignment, employee, onClose, onOpenSheet })
     // Done), not assignment_target rows. Items inside a block can
     // be tapped to navigate into the block for detail.
     if (firstTarget?.unit_id && firstTarget?.party_id) {
-      const { data: blocks } = await supabase
+      // unit_id + party_id already scopes to this exact bedroom which
+      // belongs to exactly one property; the customer_id JOIN check we
+      // had earlier was redundant AND was filtering everything out
+      // whenever the embed didn't resolve. Drop it and trust the
+      // bedroom-level scope. Also drop the is_preview filter — preview
+      // blocks at this bedroom should also show so the owner testing
+      // the app can see what they've started.
+      const { data: blocks, error: blocksErr } = await supabase
         .from('work_blocks')
-        .select('id, start_time, end_time, work_notes, shift:shifts(employee:employees(id, name), customer_id), tasks(id, name, category, end_time)')
+        .select('id, start_time, end_time, work_notes, is_preview, shift:shifts(employee:employees(id, name)), tasks(id, name, category, end_time)')
         .eq('unit_id', firstTarget.unit_id)
         .eq('party_id', firstTarget.party_id)
-        .eq('is_preview', false)
         .order('start_time', { ascending: false });
-      // Same-customer only (defensive — work_blocks have a shift FK
-      // and shifts carry the customer_id).
-      const scoped = (blocks || []).filter(b => b.shift?.customer_id === assignment.customer_id);
-      setWorkBlocks(scoped);
+      if (blocksErr) {
+        console.warn('[ChecklistAssignmentView] work_blocks load error:', blocksErr);
+      }
+      setWorkBlocks(blocks || []);
     }
 
     setLoaded(true);

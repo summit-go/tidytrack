@@ -15172,8 +15172,10 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
     submittingRef.current = true;
     setBusy(true); setError('');
     try {
-      // Upload all sheet files first; collect URLs by file NAME so we
-      // can look up the URL for each bedroom's chosen sheet.
+      // Upload all sheet files first; collect URL + storage path by
+      // file NAME so we can look up both for each bedroom's chosen
+      // sheet. file_path is also stored on the assignment so the
+      // delete-assignment flow can clean up the storage object.
       const uploadedByName = {};
       for (const sf of sheetFiles) {
         const safe = sf.name.replace(/[^a-zA-Z0-9._-]/g, '_');
@@ -15183,6 +15185,7 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
         const { data: urlData } = supabase.storage.from('assignments').getPublicUrl(path);
         uploadedByName[sf.name] = {
           url: urlData?.publicUrl || null,
+          path,
           kind: sf.type === 'application/pdf' ? 'pdf' : 'image',
           name: sf.name,
         };
@@ -15220,11 +15223,20 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
         // Per-bedroom cleaning type. Defaults from sheet type.
         const cleaningType = c.cleaningType
           || (sheetType === 'cleaning_check' ? 'cleaning_check' : 'move_out_check');
-        const assignmentInsert = {
+        // Build the insert payload as a FRESH object literal so there's
+        // zero possibility of a stale field sneaking in. Only the
+        // schema's actual assignments columns are listed here, so any
+        // accidental reference to unit_id / party_id / source from a
+        // future refactor would not survive this rebuild. We also use
+        // an explicit .select() column list below — never .select()
+        // unqualified — to keep PostgREST's column resolution from
+        // touching anything outside this list.
+        const SAFE_COLS = {
           customer_id: property.id,
           title: `${titleBase} · ${partyUnit?.label || ''}${party?.label ? ' · ' + party.label : ''}`.trim(),
           notes: null,
           file_url: bedroomSheet?.url || null,
+          file_path: bedroomSheet?.path || null,
           file_kind: bedroomSheet?.kind || null,
           assignment_type: cleaningType,
           active: true,
@@ -15234,22 +15246,22 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
           bathroom_variant: c.bathroomVariant || null,
           general_variant: c.generalVariant || null,
         };
-        // Belt-and-suspenders: strip any keys not in the known column
-        // set before sending. If a column is missing in the schema,
-        // dropping it here prevents the "Could not find column" error.
-        // Drop unit_id/party_id explicitly — those belong on
-        // assignment_targets, never on assignments itself. Drop source
-        // because the CHECK constraint only accepts 'pm' (or NULL);
-        // staff-created assignments leave it unset (matches legacy).
-        delete assignmentInsert.unit_id;
-        delete assignmentInsert.party_id;
-        delete assignmentInsert.source;
+        const assignmentInsert = JSON.parse(JSON.stringify(SAFE_COLS));
         if (typeof console !== 'undefined') {
-          console.log('[wizard] assignments insert payload keys:', Object.keys(assignmentInsert));
+          console.log('[wizard] assignments insert FULL payload:', assignmentInsert);
         }
         const { data: created_assignment, error: aErr } = await supabase.from('assignments')
-          .insert(assignmentInsert).select().single();
-        if (aErr) throw new Error('Assignment insert failed: ' + aErr.message);
+          .insert(assignmentInsert)
+          // Explicit column list — never bare .select() — so PostgREST
+          // doesn't try to resolve columns that aren't in our payload.
+          .select('id, customer_id, title, file_url, file_kind, file_path, assignment_type, active, sheet_type, template_set_id, bathroom_variant, general_variant, uploaded_by, created_at')
+          .single();
+        if (aErr) {
+          if (typeof console !== 'undefined') {
+            console.error('[wizard] assignment insert error RAW:', aErr);
+          }
+          throw new Error('Assignment insert failed: ' + aErr.message);
+        }
 
         // Build the target rows — one per checked item
         const targetRows = [];

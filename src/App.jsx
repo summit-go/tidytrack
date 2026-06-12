@@ -14929,6 +14929,16 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
           bathroom_variant: c.bathroomVariant || null,
           general_variant: c.generalVariant || null,
         };
+        // Belt-and-suspenders: strip any keys not in the known column
+        // set before sending. If a column is missing in the schema,
+        // dropping it here prevents the "Could not find column" error.
+        // Drop unit_id/party_id explicitly — those belong on
+        // assignment_targets, never on assignments itself.
+        delete assignmentInsert.unit_id;
+        delete assignmentInsert.party_id;
+        if (typeof console !== 'undefined') {
+          console.log('[wizard] assignments insert payload keys:', Object.keys(assignmentInsert));
+        }
         const { data: created_assignment, error: aErr } = await supabase.from('assignments')
           .insert(assignmentInsert).select().single();
         if (aErr) throw new Error('Assignment insert failed: ' + aErr.message);

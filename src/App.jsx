@@ -15313,6 +15313,22 @@ function PortalPhotoSection({ label, photos, highlight, description, onResolve, 
 function DailyView({ employee, onSignOut, onOpenMessages, onLogoClick }) {
   const [view, setView] = useState({ kind: 'calendar' });
   const showMoney = canSeeMoney(employee);
+  // Persistent state for the Assigned vs Cleaned audit so its filters
+  // / property / date range survive a side trip into BedroomHistoryView.
+  // Lifted from AssignedVsCleanedView itself because that component
+  // unmounts when the user navigates to a bedroom's history and back —
+  // local useState would reset every time. Held at this level (the
+  // common parent of both views) so neither leg of the journey loses it.
+  const todayISO = new Date().toISOString().split('T')[0];
+  const [auditState, setAuditState] = useState({
+    selectedPropertyId: '',
+    start: todayISO,
+    end: todayISO,
+    filterBuildings: [],
+    filterStatuses: [],
+    collapsedBuildings: [],
+    scrollY: 0,
+  });
 
   const openBedroomHistory = (params) => setView({ kind: 'bedroom-history', ...params, from: view });
 
@@ -15344,7 +15360,9 @@ function DailyView({ employee, onSignOut, onOpenMessages, onLogoClick }) {
   if (view.kind === 'assigned-vs-cleaned') {
     return <AssignedVsCleanedView employee={employee}
       onBack={() => setView({ kind: 'calendar' })}
-      onOpenBedroomHistory={openBedroomHistory} />;
+      onOpenBedroomHistory={openBedroomHistory}
+      persistedState={auditState}
+      onStateChange={setAuditState} />;
   }
 
   return <DailyCalendar employee={employee} onSignOut={onSignOut}
@@ -15572,13 +15590,17 @@ function WhosWherePanel({ employee }) {
 // Tapping a row opens the existing Quick glance (AssignmentViewer) so
 // the owner can drill into specific items. The History button on each
 // row goes to the bedroom history overlay.
-function AssignedVsCleanedView({ employee, onBack, onOpenBedroomHistory }) {
+function AssignedVsCleanedView({ employee, onBack, onOpenBedroomHistory, persistedState, onStateChange }) {
   const today = new Date(); today.setHours(0, 0, 0, 0);
   const isoDate = (d) => d.toISOString().split('T')[0];
-  const [start, setStart] = useState(isoDate(today));
-  const [end, setEnd] = useState(isoDate(today));
+  // Initialize state from the parent-held persistedState. This is what
+  // lets the audit's filters / property / dates survive a round trip to
+  // BedroomHistoryView and back. Falls back to today / empty on first
+  // mount when persistedState defaults are still in place.
+  const [start, setStart] = useState(persistedState?.start || isoDate(today));
+  const [end, setEnd] = useState(persistedState?.end || isoDate(today));
   const [properties, setProperties] = useState([]);
-  const [selectedPropertyId, setSelectedPropertyId] = useState('');
+  const [selectedPropertyId, setSelectedPropertyId] = useState(persistedState?.selectedPropertyId || '');
   const [rows, setRows] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -15589,16 +15611,56 @@ function AssignedVsCleanedView({ employee, onBack, onOpenBedroomHistory }) {
   //   filterStatuses  — 'done' | 'partial' | 'not_started'
   // Collapsed buildings are tracked separately so the user can hide
   // ones they don't care about.
-  const [filterBuildings, setFilterBuildings] = useState(new Set());
-  const [filterStatuses, setFilterStatuses] = useState(new Set());
-  const [collapsedBuildings, setCollapsedBuildings] = useState(new Set());
+  const [filterBuildings, setFilterBuildings] = useState(new Set(persistedState?.filterBuildings || []));
+  const [filterStatuses, setFilterStatuses] = useState(new Set(persistedState?.filterStatuses || []));
+  const [collapsedBuildings, setCollapsedBuildings] = useState(new Set(persistedState?.collapsedBuildings || []));
   // Reset all sub-state when the data set changes so the chips don't
-  // reference values that no longer exist.
+  // reference values that no longer exist. Skip the first mount so we
+  // don't immediately wipe whatever persistedState we just restored —
+  // useEffect always fires once with the initial values, which would
+  // otherwise blank the filters as the component remounts after a
+  // BedroomHistoryView round trip.
+  const isInitialResetMountRef = useRef(true);
   useEffect(() => {
+    if (isInitialResetMountRef.current) {
+      isInitialResetMountRef.current = false;
+      return;
+    }
     setFilterBuildings(new Set());
     setFilterStatuses(new Set());
     setCollapsedBuildings(new Set());
   }, [selectedPropertyId, start, end]);
+
+  // Push every state change up to the parent so it persists across
+  // unmount/remount cycles. Sets are serialized to plain arrays so
+  // React state comparisons stay shallow + cheap.
+  useEffect(() => {
+    if (typeof onStateChange === 'function') {
+      onStateChange(prev => ({
+        ...(prev || {}),
+        start, end, selectedPropertyId,
+        filterBuildings: [...filterBuildings],
+        filterStatuses: [...filterStatuses],
+        collapsedBuildings: [...collapsedBuildings],
+      }));
+    }
+  }, [start, end, selectedPropertyId, filterBuildings, filterStatuses, collapsedBuildings]);
+
+  // Restore scroll position from the persisted state on first mount,
+  // then save current scrollY back to it on unmount so a return trip
+  // from BedroomHistoryView lands in the same place.
+  useEffect(() => {
+    if (persistedState?.scrollY) {
+      // Defer to next tick so the rows have rendered before scrolling.
+      setTimeout(() => window.scrollTo(0, persistedState.scrollY), 0);
+    }
+    return () => {
+      if (typeof onStateChange === 'function') {
+        onStateChange(prev => ({ ...(prev || {}), scrollY: window.scrollY }));
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Building prefix extracted from a unit label. "B1-101" → "B1",
   // "B7-326" → "B7". If there's no dash we fall back to the whole
@@ -24022,13 +24084,22 @@ function AssignmentViewer({ target, onClose, employee }) {
   const [bedroomTargets, setBedroomTargets] = useState([]);
   const [busyId, setBusyId] = useState(null);
   const loadTargets = async () => {
-    if (!target.unit_id || !target.party_id || !a?.id) return;
+    // Resolve bedroom keys — different callers populate the scalar
+    // FK columns vs the nested objects. The audit view's SELECT,
+    // for example, only joins unit:units(id, label) without picking
+    // unit_id as a scalar, so without this fallback the query
+    // .eq('unit_id', undefined) returns nothing and the panel never
+    // renders. This was the root cause of "the blocked indicator
+    // still doesn't show in Quick glance from the audit".
+    const unitId = target.unit_id || target.unit?.id || null;
+    const partyId = target.party_id || target.party?.id || null;
+    if (!unitId || !partyId || !a?.id) return;
     const { data } = await supabase
       .from('assignment_targets')
       .select('*')
       .eq('assignment_id', a.id)
-      .eq('unit_id', target.unit_id)
-      .eq('party_id', target.party_id);
+      .eq('unit_id', unitId)
+      .eq('party_id', partyId);
     setBedroomTargets(data || []);
   };
   useEffect(() => { loadTargets(); }, [target.id]);

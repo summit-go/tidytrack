@@ -15733,7 +15733,7 @@ function AssignedVsCleanedView({ employee, onBack, onOpenBedroomHistory, persist
         if (!groups.has(key)) groups.set(key, {
           key, unitId: t.unit?.id, unitLabel: t.unit?.label || 'Unit',
           partyId: t.party?.id, partyLabel: t.party?.label || 'Bedroom',
-          total: 0, doneInRange: 0, doneAnyTime: 0,
+          total: 0, doneInRange: 0, doneAnyTime: 0, blockedCount: 0,
           sampleTarget: t,
           assignmentType: t.assignment?.assignment_type,
           hasFile: !!t.assignment?.file_url,
@@ -15746,6 +15746,16 @@ function AssignedVsCleanedView({ employee, onBack, onOpenBedroomHistory, persist
             const ts = new Date(t.completed_at).getTime();
             if (ts >= startMs && ts <= endMs) g.doneInRange += 1;
           }
+        }
+        // Blocked items count toward "done" for the audit — the cleaner
+        // is finished dealing with them (just waiting on owner review),
+        // not still pending. We also track blockedCount separately so
+        // the row can surface a visible Blocked badge instead of just
+        // a green check pretending nothing's wrong.
+        if (t.status === 'blocked') {
+          g.doneAnyTime += 1;
+          g.doneInRange += 1; // blocked is always "in-range" — it's still active
+          g.blockedCount += 1;
         }
       }
       // Sort naturally by unit label then bedroom label
@@ -15763,11 +15773,85 @@ function AssignedVsCleanedView({ employee, onBack, onOpenBedroomHistory, persist
   };
   useEffect(() => { load(); }, [selectedPropertyId, start, end]);
 
-  // Status helper — returns { icon, color, label }
+  // Permission flags + bedroom-level bulk actions for blocked items.
+  // Audit is owner-side, but we still gate Mark done by permission
+  // (owner / manager always; cleaners need explicit can() permission).
+  // Reopen is more permissive — anyone with an employee identity.
+  const isStaff = employee?.role === 'owner' || employee?.role === 'manager';
+  const canMarkDone = isStaff || can(employee, 'mark_assignments_done');
+  const canReopen = !!employee?.id;
+
+  // Bulk update every relevant item at this bedroom. Used by the
+  // inline Reopen / Mark done buttons on each audit row so the owner
+  // can resolve a whole bedroom in one tap.
+  //
+  // For "done": targets any item NOT already done (pending, paused,
+  // in_progress, blocked) and flips it to done.
+  // For "pending": targets any item NOT already pending (in_progress,
+  // paused, blocked, done) and resets it.
+  const bulkUpdateAllAtBedroom = async (g, newStatus) => {
+    if (!g.unitId || !g.partyId) return;
+    // Pre-check what we'd actually change so the confirm prompt and
+    // skip-on-empty path are accurate.
+    const { data: existing } = await supabase.from('assignment_targets')
+      .select('id, status, assignment:assignments!inner(customer_id, active, source, pm_status)')
+      .eq('unit_id', g.unitId)
+      .eq('party_id', g.partyId);
+    const scoped = (existing || []).filter(t =>
+      t.assignment?.customer_id === selectedPropertyId &&
+      t.assignment?.active &&
+      (t.assignment?.source !== 'pm' || t.assignment?.pm_status === 'approved')
+    );
+    const targets = scoped.filter(t => t.status !== newStatus);
+    if (targets.length === 0) {
+      alert(`Nothing to change — every item at ${g.unitLabel} · ${g.partyLabel} is already ${newStatus === 'done' ? 'done' : 'pending'}.`);
+      return;
+    }
+    if (!confirm(
+      newStatus === 'done'
+        ? `Mark all ${targets.length} item${targets.length === 1 ? '' : 's'} at ${g.unitLabel} · ${g.partyLabel} as done?`
+        : `Send all ${targets.length} item${targets.length === 1 ? '' : 's'} at ${g.unitLabel} · ${g.partyLabel} back to pending?`
+    )) return;
+    setBusy(true);
+    try {
+      const ids = targets.map(t => t.id);
+      const patch = { status: newStatus };
+      if (newStatus === 'done') {
+        patch.completed_at = new Date().toISOString();
+        patch.completed_by = employee?.id || null;
+      } else if (newStatus === 'pending') {
+        // Clear blocker reason + start stamps so reopened items start
+        // truly fresh. Audit trail (photos, history) is preserved
+        // elsewhere — we're not destroying anything.
+        patch.status_notes = null;
+        patch.started_at = null;
+        patch.started_by = null;
+        patch.completed_at = null;
+        patch.completed_by = null;
+      }
+      await supabase.from('assignment_targets').update(patch).in('id', ids);
+    } catch (e) {
+      alert('Could not update: ' + (e.message || e));
+    }
+    setBusy(false);
+    load();
+  };
+
+  // Status helper — returns { icon, color, label }. Blocked items
+  // count toward "done" so a bedroom is never marked as red X just
+  // because the cleaner had to flag something — they're done dealing
+  // with it. A separate amber "Blocked" state surfaces when one or
+  // more items at the bedroom are blocked so the owner knows review
+  // is needed without losing the "completed" signal.
   const statusFor = (g) => {
     if (g.total === 0) return { Icon: Square, color: 'text-stone-300', bg: 'bg-stone-50', label: 'No items' };
     if (g.doneAnyTime === 0) return { Icon: X, color: 'text-red-600', bg: 'bg-red-50', label: 'Nothing started' };
-    if (g.doneAnyTime >= g.total) return { Icon: Check, color: 'text-emerald-600', bg: 'bg-emerald-50', label: 'All done' };
+    if (g.doneAnyTime >= g.total) {
+      if (g.blockedCount > 0) {
+        return { Icon: AlertCircle, color: 'text-amber-700', bg: 'bg-amber-50', label: 'Done with blockers' };
+      }
+      return { Icon: Check, color: 'text-emerald-600', bg: 'bg-emerald-50', label: 'All done' };
+    }
     return { Icon: Circle, color: 'text-amber-600', bg: 'bg-amber-50', label: 'Partial' };
   };
 
@@ -15998,6 +16082,15 @@ function AssignedVsCleanedView({ employee, onBack, onOpenBedroomHistory, persist
                                       {g.assignmentType && (
                                         <AssignmentTypeChip type={g.assignmentType} />
                                       )}
+                                      {/* Blocked badge — clear visible signal that
+                                         items at this bedroom need owner review even
+                                         though the bedroom counts as "complete". */}
+                                      {g.blockedCount > 0 && (
+                                        <span className="text-[9px] uppercase tracking-widest font-mono px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-800 border border-amber-300 inline-flex items-center gap-0.5">
+                                          <AlertCircle size={9} />
+                                          Blocked {g.blockedCount > 1 ? `· ${g.blockedCount}` : ''}
+                                        </span>
+                                      )}
                                     </div>
                                     <div className="flex items-center gap-2 mt-1">
                                       <div className="text-[11px] text-stone-600 font-mono whitespace-nowrap">
@@ -16006,15 +16099,17 @@ function AssignedVsCleanedView({ employee, onBack, onOpenBedroomHistory, persist
                                         <span>{g.total}</span>
                                       </div>
                                       <div className="flex-1 h-1 bg-stone-200 rounded-full overflow-hidden">
-                                        <div className={`h-full transition-all ${pct >= 100 ? 'bg-emerald-500' : pct > 0 ? 'bg-amber-500' : 'bg-red-400'}`}
+                                        <div className={`h-full transition-all ${pct >= 100 ? (g.blockedCount > 0 ? 'bg-amber-500' : 'bg-emerald-500') : pct > 0 ? 'bg-amber-500' : 'bg-red-400'}`}
                                           style={{ width: `${pct}%` }} />
                                       </div>
                                       <div className="text-[10px] font-mono text-stone-500 whitespace-nowrap">{pct}%</div>
                                     </div>
                                   </div>
-                                  {/* Inline action buttons — icon-only to save vertical
-                                     space. Quick glance + History live on the right
-                                     side of the row instead of a second line. */}
+                                  {/* Inline action buttons. Quick glance + History
+                                     are always present. Reopen + Mark done only
+                                     appear when this bedroom has blocked items,
+                                     so the owner can resolve them in one tap
+                                     without opening Quick glance. */}
                                   <div className="flex items-center gap-0.5 flex-shrink-0">
                                     <button onClick={() => setOpened(g.sampleTarget)}
                                       className="p-1.5 rounded-full hover:bg-stone-100 text-stone-500 hover:text-stone-900"
@@ -16030,6 +16125,22 @@ function AssignedVsCleanedView({ employee, onBack, onOpenBedroomHistory, persist
                                         className="p-1.5 rounded-full hover:bg-stone-100 text-stone-500 hover:text-stone-900"
                                         title="History">
                                         <Clock size={14} />
+                                      </button>
+                                    )}
+                                    {canReopen && (
+                                      <button onClick={() => bulkUpdateAllAtBedroom(g, 'pending')}
+                                        disabled={busy}
+                                        className="p-1.5 rounded-full hover:bg-stone-100 text-stone-500 hover:text-stone-900 disabled:opacity-50"
+                                        title="Reopen everything at this bedroom">
+                                        <Play size={14} />
+                                      </button>
+                                    )}
+                                    {canMarkDone && (
+                                      <button onClick={() => bulkUpdateAllAtBedroom(g, 'done')}
+                                        disabled={busy}
+                                        className="p-1.5 rounded-full hover:bg-emerald-50 text-emerald-700 disabled:opacity-50"
+                                        title="Mark everything at this bedroom done">
+                                        <Check size={14} />
                                       </button>
                                     )}
                                   </div>

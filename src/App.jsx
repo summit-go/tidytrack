@@ -4690,9 +4690,16 @@ function ClosedBlockMenu({ onUndo, onMove }) {
 // "one bedroom is fully done, two still need work", which matches how
 // cleaners think about apartment-level progress better than item
 // counts ("8 of 24 items").
-function ApartmentProgressList({ propertyId }) {
+function ApartmentProgressList({ propertyId, workBlocks }) {
   const [apartments, setApartments] = useState([]);
   const [loaded, setLoaded] = useState(false);
+
+  // Refresh signal — bumps whenever a work block opens or closes at
+  // this property. finishBlock auto-completes in_progress targets, so
+  // we need this fingerprint to bring the counter back in sync without
+  // requiring the cleaner to leave the Home tab.
+  const blocksFingerprint = (workBlocks || [])
+    .map(b => `${b.id}:${b.end_time || 'open'}`).join('|');
 
   useEffect(() => {
     let cancelled = false;
@@ -4717,7 +4724,11 @@ function ApartmentProgressList({ propertyId }) {
       // counts as "done" only if every one of its items has status='done'.
       const byApt = new Map();
       // First pass: build bedroom-level rollup so we can tell which
-      // bedrooms are fully done vs partial.
+      // bedrooms are fully done vs partial. A bedroom counts as "done"
+      // when every item is either DONE or BLOCKED — blocked means the
+      // cleaner is finished dealing with it (waiting on owner review),
+      // not still pending work. Treating blocked as done here keeps
+      // the apartment counter from getting stuck.
       const bedrooms = new Map(); // key = unit_id::party_id → { allDone: true, unit_id, label }
       filtered.forEach(t => {
         const key = `${t.unit_id}::${t.party_id}`;
@@ -4726,7 +4737,7 @@ function ApartmentProgressList({ propertyId }) {
           unit_label: t.unit?.label || 'Apartment',
           allDone: true,
         });
-        if (t.status !== 'done') bedrooms.get(key).allDone = false;
+        if (t.status !== 'done' && t.status !== 'blocked') bedrooms.get(key).allDone = false;
       });
       // Second pass: aggregate per apartment.
       bedrooms.forEach((b) => {
@@ -4745,7 +4756,7 @@ function ApartmentProgressList({ propertyId }) {
       setLoaded(true);
     })();
     return () => { cancelled = true; };
-  }, [propertyId]);
+  }, [propertyId, blocksFingerprint]);
 
   if (!loaded || apartments.length === 0) return null;
 
@@ -4946,7 +4957,7 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
              can see at a glance what's left where. Only apartments
              with at least one incomplete item are shown so the list
              stays focused on what still needs attention. */}
-          <ApartmentProgressList propertyId={shift.customer_id} />
+          <ApartmentProgressList propertyId={shift.customer_id} workBlocks={workBlocks} />
 
           {/* Today's activity — Mine / Others toggle */}
           <div className="px-4 pt-6">
@@ -6705,7 +6716,7 @@ function ViewOnlyAssignmentsPanel({ propertyId, employee, onOpenBedroomHistory }
         </div>
       )}
 
-      {opened && <AssignmentViewer target={opened} onClose={() => setOpened(null)} />}
+      {opened && <AssignmentViewer target={opened} employee={employee} onClose={() => setOpened(null)} />}
     </div>
   );
 }
@@ -8889,7 +8900,7 @@ function useAssignmentsForBedroomOnDate({ propertyId, unitId, partyId, dateISO }
 // the assignment doc associated with a work block. Tappable to open
 // AssignmentViewer modal. Shows "no assignment doc" if nothing exists.
 // =================================================================
-function WorkBlockAssignmentLink({ block, propertyId, compact = false }) {
+function WorkBlockAssignmentLink({ block, propertyId, compact = false, employee }) {
   const date = block?.start_time || block?.end_time;
   const unitId = block?.unit_id || block?.unit?.id || null;
   const partyId = block?.party_id || block?.party?.id || null;
@@ -8937,7 +8948,7 @@ function WorkBlockAssignmentLink({ block, propertyId, compact = false }) {
           );
         })}
       </div>
-      {opened && <AssignmentViewer target={opened} onClose={() => setOpened(null)} />}
+      {opened && <AssignmentViewer target={opened} employee={employee} onClose={() => setOpened(null)} />}
     </>
   );
 }
@@ -8966,7 +8977,7 @@ function WorkBlockDetail({ block, rate, showMoney, canEdit, onEdit, onDelete, on
       </div>
       {propertyId && (
         <div className="mb-2 flex flex-wrap items-center gap-2">
-          <WorkBlockAssignmentLink block={block} propertyId={propertyId} compact />
+          <WorkBlockAssignmentLink block={block} propertyId={propertyId} employee={employee} compact />
           {onOpenBedroomHistory && block.unit?.id && block.party?.id && (
             <button onClick={() => onOpenBedroomHistory({
                 unitId: block.unit.id, unitLabel: block.unit.label,
@@ -15991,7 +16002,7 @@ function AssignedVsCleanedView({ employee, onBack, onOpenBedroomHistory }) {
               onOpenSheet={opened.assignment?.file_url
                 ? () => window.open(opened.assignment.file_url, '_blank', 'noopener')
                 : null} />
-          : <AssignmentViewer target={opened} onClose={() => setOpened(null)} />
+          : <AssignmentViewer target={opened} employee={employee} onClose={() => setOpened(null)} />
       )}
     </div>
   );
@@ -17496,7 +17507,7 @@ function BedroomHistoryView({ propertyId, propertyName, unitId, unitLabel, party
       </div>
 
       {openedAssignment && (
-        <AssignmentViewer target={openedAssignment} onClose={() => setOpenedAssignment(null)} />
+        <AssignmentViewer target={openedAssignment} employee={employee} onClose={() => setOpenedAssignment(null)} />
       )}
       </div>
     </div>
@@ -17674,7 +17685,7 @@ function DailyUnitDayDetail({ date, propertyId, unitId, unitLabel, propertyName,
                       {pg.party.full_name && <span className="text-sm text-stone-500">{pg.party.full_name}</span>}
                     </div>
                     <div className="mt-2 flex items-center gap-2 flex-wrap">
-                      <WorkBlockAssignmentLink block={sampleBlock} propertyId={propertyId} compact />
+                      <WorkBlockAssignmentLink block={sampleBlock} propertyId={propertyId} employee={employee} compact />
                       <button onClick={() => onOpenBedroomHistory && onOpenBedroomHistory({
                           propertyId, propertyName, unitId, unitLabel,
                           partyId: pg.party.id, partyLabel: pg.party.label
@@ -21447,7 +21458,7 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
               onOpenSheet={opened.assignment?.file_url
                 ? () => window.open(opened.assignment.file_url, '_blank', 'noopener')
                 : null} />
-          : <AssignmentViewer target={opened} onClose={() => setOpened(null)} />
+          : <AssignmentViewer target={opened} employee={employee} onClose={() => setOpened(null)} />
       )}
       {statusModal && (
         <BlockedNoteModal target={statusModal.target}
@@ -22312,7 +22323,7 @@ function SuggestedTabContent({ propertyId, employee, onGoToBedroom, onOpenBedroo
               onOpenSheet={opened.assignment?.file_url
                 ? () => window.open(opened.assignment.file_url, '_blank', 'noopener')
                 : null} />
-          : <AssignmentViewer target={opened} onClose={() => setOpened(null)} />
+          : <AssignmentViewer target={opened} employee={employee} onClose={() => setOpened(null)} />
       )}
       {statusModal && (
         <BlockedNoteModal target={statusModal.target}
@@ -23475,7 +23486,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
               onOpenSheet={opened.assignment?.file_url
                 ? () => window.open(opened.assignment.file_url, '_blank', 'noopener')
                 : null} />
-          : <AssignmentViewer target={opened} onClose={() => setOpened(null)} />
+          : <AssignmentViewer target={opened} employee={employee} onClose={() => setOpened(null)} />
       )}
       {statusModal && (
         <BlockedNoteModal target={statusModal.target}
@@ -23994,13 +24005,86 @@ function ZoomableImage({ src, alt }) {
   );
 }
 
-function AssignmentViewer({ target, onClose }) {
+function AssignmentViewer({ target, onClose, employee }) {
   const a = target.assignment;
   // For "other language" translation: prefer extracted_text (the full OCR output)
   // if available, otherwise fall back to title + notes.
   const translateTexts = a.extracted_text && a.extracted_text.trim()
     ? [a.title, a.notes, a.extracted_text].filter(Boolean)
     : [a.title, a.notes].filter(Boolean);
+
+  // Bedroom-scoped target panel. We re-query targets at THIS bedroom
+  // (unit + party that the row was opened from) so the audit Quick
+  // glance shows the same status + notes + actions the cleaner-side
+  // ChecklistAssignmentView Quick glance offers. Previously this
+  // viewer only showed the file — blocked items with reasons were
+  // invisible unless the owner clicked all the way in.
+  const [bedroomTargets, setBedroomTargets] = useState([]);
+  const [busyId, setBusyId] = useState(null);
+  const loadTargets = async () => {
+    if (!target.unit_id || !target.party_id || !a?.id) return;
+    const { data } = await supabase
+      .from('assignment_targets')
+      .select('*')
+      .eq('assignment_id', a.id)
+      .eq('unit_id', target.unit_id)
+      .eq('party_id', target.party_id);
+    setBedroomTargets(data || []);
+  };
+  useEffect(() => { loadTargets(); }, [target.id]);
+
+  // Permission gates — match how AssignmentCard decides who can do what.
+  // Owner / manager can always act. Cleaners need explicit permission
+  // (mark_assignments_done) to mark done. Anyone with an employee
+  // identity can Reopen since it just sends an item back to pending.
+  const isStaff = employee?.role === 'owner' || employee?.role === 'manager';
+  const canMarkDone = isStaff || can(employee, 'mark_assignments_done');
+  const canReopen = !!employee?.id;
+
+  const setStatus = async (t, newStatus) => {
+    if (busyId) return;
+    setBusyId(t.id);
+    const patch = { status: newStatus };
+    if (newStatus === 'done') {
+      patch.completed_at = new Date().toISOString();
+      patch.completed_by = employee?.id || null;
+    } else if (t.status === 'done') {
+      patch.completed_at = null;
+      patch.completed_by = null;
+    }
+    if (newStatus === 'pending') {
+      // Clear blocked notes when reopening so the next cleaner sees
+      // a fresh slate; the audit trail still has the photos / block
+      // history if anyone needs to know why it was blocked before.
+      patch.status_notes = null;
+      patch.started_at = null;
+      patch.started_by = null;
+    }
+    setBedroomTargets(prev => prev.map(x => x.id === t.id ? { ...x, ...patch } : x));
+    const { error } = await supabase.from('assignment_targets').update(patch).eq('id', t.id);
+    setBusyId(null);
+    if (error) {
+      alert('Could not update: ' + error.message);
+      loadTargets(); // re-fetch authoritative
+    }
+  };
+
+  const labelForT = (t) => {
+    if (t.status_notes && t.template_item_key?.startsWith?.('requested:')) return t.status_notes;
+    const k = t.template_item_key || '';
+    return k.replace(/^[a-z_]+:/, '').replace(/_/g, ' ').replace(/^./, c => c.toUpperCase()) || 'Item';
+  };
+
+  // Visual color for the status dot
+  const dotFor = (t) => {
+    if (t.recheck_passed_at) return { color: 'bg-purple-500', label: 'recheck-passed' };
+    if (t.status === 'done') return { color: 'bg-emerald-500', label: 'done' };
+    if (t.status === 'in_progress') return { color: 'bg-amber-500', label: 'in progress' };
+    if (t.status === 'paused') return { color: 'bg-amber-300', label: 'paused' };
+    if (t.status === 'blocked') return { color: 'bg-red-500', label: 'blocked' };
+    return { color: 'bg-stone-300', label: 'pending' };
+  };
+
   // Modal-with-backdrop layout (was full-screen). Cleaner can tap the
   // dark area around the card to close, same as tapping the X.
   return (
@@ -24012,6 +24096,13 @@ function AssignmentViewer({ target, onClose }) {
           <div className="flex items-start justify-between gap-2">
             <div className="flex-1 min-w-0">
               <div className="font-serif text-lg truncate">{a.title}</div>
+              {/* Bedroom context — so the owner knows which bedroom's
+                 items the panel below refers to. */}
+              {(target.unit?.label || target.party?.label) && (
+                <div className="text-xs text-stone-300 mt-0.5 font-mono">
+                  {target.unit?.label}{target.party?.label && ` · ${target.party.label}`}
+                </div>
+              )}
               {a.notes && <div className="text-xs text-stone-400 mt-0.5 whitespace-pre-wrap break-words">{a.notes}</div>}
             </div>
             <button onClick={onClose} className="p-2 rounded-full bg-stone-800 flex-shrink-0">
@@ -24021,6 +24112,74 @@ function AssignmentViewer({ target, onClose }) {
           <SpanishTranslationPanel assignment={a} />
           <TranslateButton texts={translateTexts} />
         </div>
+        {/* Item / target panel — surfaces blocked items + reasons +
+           Reopen / Mark done actions. Sits above the file so the
+           owner sees the actionable info before having to scroll
+           through a PDF. Only shown when we have bedroom context. */}
+        {bedroomTargets.length > 0 && (
+          <div className="p-3 bg-white border-b border-stone-200">
+            <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-2">
+              Items at this bedroom ({bedroomTargets.length})
+            </div>
+            <div className="space-y-1.5">
+              {bedroomTargets.map(t => {
+                const d = dotFor(t);
+                const isBlocked = t.status === 'blocked';
+                const isDone = t.status === 'done';
+                return (
+                  <div key={t.id} className={`text-sm rounded-lg ${isBlocked ? 'bg-red-50 border border-red-200 p-2' : 'p-1'}`}>
+                    <div className="flex items-center gap-2">
+                      <span className={`w-2 h-2 rounded-full ${d.color} flex-shrink-0`} title={d.label} />
+                      <span className={`flex-1 min-w-0 ${isDone ? 'text-stone-500 line-through' : 'text-stone-900'}`}>
+                        {labelForT(t)}
+                      </span>
+                      {isBlocked && (
+                        <span className="text-[9px] uppercase tracking-widest font-mono px-1.5 py-0.5 rounded-full bg-red-200 text-red-800 flex-shrink-0">
+                          Blocked
+                        </span>
+                      )}
+                      {isDone && (
+                        <span className="text-[9px] uppercase tracking-widest font-mono px-1.5 py-0.5 rounded-full bg-emerald-100 text-emerald-800 flex-shrink-0">
+                          Done
+                        </span>
+                      )}
+                    </div>
+                    {/* Blocked reason — the part the user specifically
+                       called out as invisible from the audit. */}
+                    {isBlocked && t.status_notes && (
+                      <div className="text-xs text-red-700 italic mt-1 pl-4">
+                        "{t.status_notes}"
+                      </div>
+                    )}
+                    {/* Action row. Reopen shows for done/blocked/paused
+                       to any signed-in user. Mark done shows for
+                       anything that isn't already done, gated on
+                       canMarkDone (owners + managers + cleaners with
+                       explicit permission). */}
+                    {(canReopen || canMarkDone) && (
+                      <div className="flex items-center gap-1.5 mt-1.5 pl-4">
+                        {canReopen && (isBlocked || isDone || t.status === 'paused') && (
+                          <button onClick={() => setStatus(t, 'pending')}
+                            disabled={busyId === t.id}
+                            className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-100 hover:bg-stone-200 text-stone-700 flex items-center gap-1 disabled:opacity-50">
+                            <Play size={10} /> Reopen
+                          </button>
+                        )}
+                        {canMarkDone && !isDone && (
+                          <button onClick={() => setStatus(t, 'done')}
+                            disabled={busyId === t.id}
+                            className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-emerald-100 hover:bg-emerald-200 text-emerald-800 flex items-center gap-1 disabled:opacity-50">
+                            <Check size={10} /> Mark done
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
         <div className="flex-1 overflow-auto bg-stone-100">
           {a.file_url ? (
             a.file_kind === 'image' ? (

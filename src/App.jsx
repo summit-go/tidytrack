@@ -7,7 +7,7 @@ import {
   Trash2, Eye, EyeOff, LayoutDashboard, FileText, DollarSign,
   Home, Layers, User, Edit2, Copy, Printer, Calendar, HelpCircle,
   MessageCircle, MessageSquare, Settings, Languages, Menu, Square, Share2,
-  ClipboardList, Lock
+  ClipboardList, Lock, Circle
 } from 'lucide-react';
 
 // =================================================================
@@ -3654,8 +3654,10 @@ function WhosHerePopup({ propertyId, myEmployeeId, propertyName, onClose }) {
   const onStandby = others.filter(r => r.kind === 'standby');
 
   return (
-    <div className="fixed inset-0 bg-stone-900/80 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
-      <div className="bg-stone-50 w-full sm:max-w-md sm:rounded-3xl rounded-t-3xl flex flex-col max-h-[80vh]">
+    <div onClick={onClose}
+      className="fixed inset-0 bg-stone-900/80 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
+      <div onClick={(e) => e.stopPropagation()}
+        className="bg-stone-50 w-full sm:max-w-md sm:rounded-3xl rounded-t-3xl flex flex-col max-h-[80vh]">
         <div className="flex items-center justify-between p-5 border-b border-stone-200">
           <div className="min-w-0 flex-1">
             <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">Who's here</div>
@@ -14112,10 +14114,16 @@ function DailyView({ employee, onSignOut, onOpenMessages, onLogoClick }) {
     return <InboxView employee={employee}
       onBack={() => setView({ kind: 'calendar' })} />;
   }
+  if (view.kind === 'assigned-vs-cleaned') {
+    return <AssignedVsCleanedView employee={employee}
+      onBack={() => setView({ kind: 'calendar' })}
+      onOpenBedroomHistory={openBedroomHistory} />;
+  }
 
   return <DailyCalendar employee={employee} onSignOut={onSignOut}
     onPickDay={(date) => setView({ kind: 'day', date })}
     onOpenInbox={() => setView({ kind: 'inbox' })}
+    onOpenAssignedVsCleaned={() => setView({ kind: 'assigned-vs-cleaned' })}
     onOpenMessages={onOpenMessages}
     onLogoClick={onLogoClick} />;
 }
@@ -14328,7 +14336,280 @@ function WhosWherePanel({ employee }) {
   );
 }
 
-function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenMessages, onLogoClick }) {
+// AssignedVsCleanedView — side-by-side audit view for owners. Picks
+// a date range + a property, shows one row per bedroom with what was
+// assigned vs what got done. Status icons make it easy to scan:
+//   ✓ green  — all assigned items are done
+//   ◐ amber  — partial (some done, some still pending)
+//   ✗ red    — nothing started yet
+// Tapping a row opens the existing Quick glance (AssignmentViewer) so
+// the owner can drill into specific items. The History button on each
+// row goes to the bedroom history overlay.
+function AssignedVsCleanedView({ employee, onBack, onOpenBedroomHistory }) {
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const isoDate = (d) => d.toISOString().split('T')[0];
+  const [start, setStart] = useState(isoDate(today));
+  const [end, setEnd] = useState(isoDate(today));
+  const [properties, setProperties] = useState([]);
+  const [selectedPropertyId, setSelectedPropertyId] = useState('');
+  const [rows, setRows] = useState([]);
+  const [loaded, setLoaded] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [opened, setOpened] = useState(null); // assignment_target for Quick glance
+
+  useEffect(() => { (async () => {
+    const { data } = await supabase.from('customers').select('id, name')
+      .eq('active', true).order('name');
+    setProperties(data || []);
+  })(); }, []);
+
+  // Build the per-bedroom comparison:
+  //   - For each (unit, party) at the chosen property with any active
+  //     assignment in the range, count total items and items that
+  //     completed within the range.
+  //   - Status icon derived from done/total counts.
+  const load = async () => {
+    if (!selectedPropertyId) { setRows([]); setLoaded(true); return; }
+    setBusy(true);
+    try {
+      const startISO = new Date(start + 'T00:00:00').toISOString();
+      const endISO = new Date(end + 'T23:59:59.999').toISOString();
+      // Pull every active assignment target at this property along
+      // with completion data. We filter visibility in-memory so the
+      // range filter only applies to the COMPLETED side.
+      const { data } = await supabase.from('assignment_targets')
+        .select(`
+          id, status, completed_at, recheck_passed_at, template_section, template_item_key, status_notes,
+          unit:units(id, label),
+          party:parties(id, label),
+          assignment:assignments!inner(id, title, assignment_type, customer_id, active, source, pm_status, file_url, file_kind)
+        `)
+        .eq('assignment.customer_id', selectedPropertyId);
+      const targets = (data || []).filter(t =>
+        t.assignment?.customer_id === selectedPropertyId &&
+        t.assignment?.active &&
+        (t.assignment?.source !== 'pm' || t.assignment?.pm_status === 'approved')
+      );
+      const startMs = new Date(startISO).getTime();
+      const endMs = new Date(endISO).getTime();
+      // Group by (unit, party). For each: total, doneInRange, doneAnyTime, sampleTarget for quick glance.
+      const groups = new Map();
+      for (const t of targets) {
+        const uId = t.unit?.id || '_no_unit';
+        const pId = t.party?.id || '_no_party';
+        const key = `${uId}::${pId}`;
+        if (!groups.has(key)) groups.set(key, {
+          key, unitId: t.unit?.id, unitLabel: t.unit?.label || 'Unit',
+          partyId: t.party?.id, partyLabel: t.party?.label || 'Bedroom',
+          total: 0, doneInRange: 0, doneAnyTime: 0,
+          sampleTarget: t,
+          assignmentType: t.assignment?.assignment_type,
+          hasFile: !!t.assignment?.file_url,
+        });
+        const g = groups.get(key);
+        g.total += 1;
+        if (t.status === 'done') {
+          g.doneAnyTime += 1;
+          if (t.completed_at) {
+            const ts = new Date(t.completed_at).getTime();
+            if (ts >= startMs && ts <= endMs) g.doneInRange += 1;
+          }
+        }
+      }
+      // Sort naturally by unit label then bedroom label
+      const sorted = Array.from(groups.values()).sort((a, b) =>
+        naturalCompare(a.unitLabel, b.unitLabel) ||
+        naturalCompare(a.partyLabel, b.partyLabel)
+      );
+      setRows(sorted);
+    } catch (e) {
+      console.warn('[AssignedVsCleaned] load failed', e);
+      setRows([]);
+    }
+    setLoaded(true);
+    setBusy(false);
+  };
+  useEffect(() => { load(); }, [selectedPropertyId, start, end]);
+
+  // Status helper — returns { icon, color, label }
+  const statusFor = (g) => {
+    if (g.total === 0) return { Icon: Square, color: 'text-stone-300', bg: 'bg-stone-50', label: 'No items' };
+    if (g.doneAnyTime === 0) return { Icon: X, color: 'text-red-600', bg: 'bg-red-50', label: 'Nothing started' };
+    if (g.doneAnyTime >= g.total) return { Icon: Check, color: 'text-emerald-600', bg: 'bg-emerald-50', label: 'All done' };
+    return { Icon: Circle, color: 'text-amber-600', bg: 'bg-amber-50', label: 'Partial' };
+  };
+
+  return (
+    <div className="min-h-screen bg-stone-50 pb-12">
+      <div className="px-5 py-4 border-b border-stone-200 bg-white sticky top-0 z-10">
+        <div className="flex items-center gap-3">
+          <button onClick={onBack} className="p-2 -ml-2 rounded-full hover:bg-stone-100">
+            <ArrowLeft size={20} className="text-stone-700" />
+          </button>
+          <div className="min-w-0 flex-1">
+            <div className="text-[10px] uppercase tracking-wider text-stone-500 font-mono">Audit</div>
+            <div className="font-serif text-lg text-stone-900">Assigned vs cleaned</div>
+          </div>
+        </div>
+      </div>
+
+      <div className="px-5 pt-4 max-w-3xl mx-auto">
+        {/* Date range — single day allowed (start = end). Quick
+           presets help skip to common windows. */}
+        <div className="rounded-2xl bg-white border border-stone-200 p-4 mb-3">
+          <div className="text-[10px] uppercase tracking-wider text-stone-500 font-mono mb-2">Date range</div>
+          <div className="flex flex-wrap gap-2 mb-3">
+            {[{ d: 1, label: 'Today' }, { d: 7, label: 'Last 7d' }, { d: 14, label: 'Last 14d' }, { d: 30, label: 'Last 30d' }].map(p => (
+              <button key={p.d} onClick={() => {
+                const e = new Date(); e.setHours(0, 0, 0, 0);
+                const s = new Date(e); s.setDate(s.getDate() - (p.d - 1));
+                setStart(isoDate(s)); setEnd(isoDate(e));
+              }}
+                className="px-3 py-1.5 rounded-full bg-stone-100 hover:bg-stone-200 text-stone-700 text-xs font-medium">
+                {p.label}
+              </button>
+            ))}
+          </div>
+          <div className="flex items-center gap-3">
+            <input type="date" value={start} onChange={(e) => setStart(e.target.value)}
+              className="flex-1 px-3 py-2 rounded-lg border border-stone-300 text-sm" />
+            <span className="text-stone-400 text-xs">to</span>
+            <input type="date" value={end} onChange={(e) => setEnd(e.target.value)}
+              className="flex-1 px-3 py-2 rounded-lg border border-stone-300 text-sm" />
+          </div>
+        </div>
+
+        {/* Property selector — required. Without it we'd be summing
+           thousands of bedrooms which isn't useful. */}
+        <div className="rounded-2xl bg-white border border-stone-200 p-4 mb-3">
+          <div className="text-[10px] uppercase tracking-wider text-stone-500 font-mono mb-2">Property</div>
+          <select value={selectedPropertyId} onChange={(e) => setSelectedPropertyId(e.target.value)}
+            className="w-full px-3 py-2 rounded-lg border border-stone-300 text-sm">
+            <option value="">— Pick a property —</option>
+            {properties.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+          </select>
+        </div>
+
+        {/* Results list */}
+        {!selectedPropertyId ? (
+          <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
+            Pick a property to see the audit.
+          </div>
+        ) : busy && !loaded ? (
+          <div className="text-center py-12 text-stone-400 text-sm">Loading…</div>
+        ) : rows.length === 0 ? (
+          <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
+            No active assignments at this property.
+          </div>
+        ) : (
+          <>
+            {/* Top-level summary */}
+            <div className="rounded-2xl bg-white border border-stone-200 p-4 mb-3">
+              <div className="grid grid-cols-3 gap-2 text-center">
+                <div>
+                  <div className="text-2xl font-mono font-light text-emerald-700">
+                    {rows.filter(r => r.doneAnyTime >= r.total && r.total > 0).length}
+                  </div>
+                  <div className="text-[10px] uppercase tracking-wider text-stone-500 font-mono mt-0.5">Fully done</div>
+                </div>
+                <div>
+                  <div className="text-2xl font-mono font-light text-amber-700">
+                    {rows.filter(r => r.doneAnyTime > 0 && r.doneAnyTime < r.total).length}
+                  </div>
+                  <div className="text-[10px] uppercase tracking-wider text-stone-500 font-mono mt-0.5">Partial</div>
+                </div>
+                <div>
+                  <div className="text-2xl font-mono font-light text-red-700">
+                    {rows.filter(r => r.doneAnyTime === 0 && r.total > 0).length}
+                  </div>
+                  <div className="text-[10px] uppercase tracking-wider text-stone-500 font-mono mt-0.5">Not started</div>
+                </div>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              {rows.map(g => {
+                const s = statusFor(g);
+                const StatusIcon = s.Icon;
+                const pct = g.total > 0 ? Math.round((g.doneAnyTime / g.total) * 100) : 0;
+                return (
+                  <div key={g.key} className="rounded-2xl bg-white border border-stone-200 p-3">
+                    <div className="flex items-center gap-3">
+                      {/* Status icon — quick scan */}
+                      <div className={`w-10 h-10 rounded-full ${s.bg} ${s.color} flex items-center justify-center flex-shrink-0`}>
+                        <StatusIcon size={18} strokeWidth={2.5} />
+                      </div>
+                      {/* Bedroom label + counts */}
+                      <div className="flex-1 min-w-0">
+                        <div className="font-serif text-base text-stone-900 truncate">
+                          {g.unitLabel} · <span className="italic text-amber-700">{g.partyLabel}</span>
+                          {g.assignmentType && (
+                            <AssignmentTypeChip type={g.assignmentType} />
+                          )}
+                        </div>
+                        <div className="flex items-center gap-3 mt-1">
+                          <div className="text-xs text-stone-600 font-mono">
+                            <span className="text-stone-900 font-bold">{g.doneAnyTime}</span>
+                            <span className="text-stone-400"> / </span>
+                            <span>{g.total}</span>
+                            <span className="text-stone-400"> done</span>
+                          </div>
+                          {/* Progress bar */}
+                          <div className="flex-1 h-1.5 bg-stone-200 rounded-full overflow-hidden max-w-[120px]">
+                            <div className={`h-full transition-all ${pct >= 100 ? 'bg-emerald-500' : pct > 0 ? 'bg-amber-500' : 'bg-red-400'}`}
+                              style={{ width: `${pct}%` }} />
+                          </div>
+                          <div className="text-[10px] font-mono text-stone-500">
+                            {pct}%
+                          </div>
+                        </div>
+                        {g.doneInRange > 0 && g.doneInRange !== g.doneAnyTime && (
+                          <div className="text-[10px] font-mono text-stone-500 mt-0.5">
+                            {g.doneInRange} done within range · {g.doneAnyTime - g.doneInRange} done outside range
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-1.5 mt-2 justify-end">
+                      <button onClick={() => setOpened(g.sampleTarget)}
+                        className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-100 hover:bg-stone-200 text-stone-700 flex items-center gap-1">
+                        <Eye size={10} /> Quick glance
+                      </button>
+                      {onOpenBedroomHistory && g.unitId && g.partyId && (
+                        <button onClick={() => onOpenBedroomHistory({
+                          propertyId: selectedPropertyId,
+                          unitId: g.unitId, unitLabel: g.unitLabel,
+                          partyId: g.partyId, partyLabel: g.partyLabel,
+                        })}
+                          className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-100 hover:bg-stone-200 text-stone-700 flex items-center gap-1">
+                          <Clock size={10} /> History
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </>
+        )}
+      </div>
+
+      {opened && (
+        opened.assignment?.template_set_id || opened.template_section
+          ? <ChecklistAssignmentView assignment={opened.assignment}
+              employee={employee}
+              quickGlance={true}
+              onClose={() => setOpened(null)}
+              onOpenSheet={opened.assignment?.file_url
+                ? () => window.open(opened.assignment.file_url, '_blank', 'noopener')
+                : null} />
+          : <AssignmentViewer target={opened} onClose={() => setOpened(null)} />
+      )}
+    </div>
+  );
+}
+
+function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenAssignedVsCleaned, onOpenMessages, onLogoClick }) {
   const today = new Date();
   const [viewMonth, setViewMonth] = useState(new Date(today.getFullYear(), today.getMonth(), 1));
   const [activity, setActivity] = useState({});
@@ -14475,6 +14756,28 @@ function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenMess
            cleaner name, property, bedroom, elapsed time. Empty state
            appears when no one is on the clock. */}
         <WhosWherePanel employee={employee} />
+        {/* Quick access to the side-by-side audit view — owner picks
+           a date range and sees what was assigned vs what was
+           actually cleaned, with status symbols per bedroom. */}
+        {onOpenAssignedVsCleaned && (
+          <button onClick={onOpenAssignedVsCleaned}
+            className="w-full mb-5 p-4 rounded-2xl bg-white border-2 border-stone-200 hover:border-stone-400 active:scale-98 transition-all flex items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 rounded-full bg-stone-900 text-stone-50 flex items-center justify-center">
+                <Eye size={16} />
+              </div>
+              <div className="text-left">
+                <div className="font-serif text-base text-stone-900">
+                  Assigned vs cleaned
+                </div>
+                <div className="text-xs text-stone-600 font-mono">
+                  Audit what was actually done vs what was sent
+                </div>
+              </div>
+            </div>
+            <ChevronRight size={18} className="text-stone-400 flex-shrink-0" />
+          </button>
+        )}
         <div className="text-xs uppercase tracking-widest text-stone-400 font-mono mb-3">
           Daily browser
         </div>
@@ -21831,42 +22134,48 @@ function AssignmentViewer({ target, onClose }) {
   const translateTexts = a.extracted_text && a.extracted_text.trim()
     ? [a.title, a.notes, a.extracted_text].filter(Boolean)
     : [a.title, a.notes].filter(Boolean);
+  // Modal-with-backdrop layout (was full-screen). Cleaner can tap the
+  // dark area around the card to close, same as tapping the X.
   return (
-    <div className="fixed inset-0 bg-stone-900/95 z-50 flex flex-col">
-      <div className="p-4 text-stone-50 bg-stone-900">
-        <div className="flex items-start justify-between gap-2">
-          <div className="flex-1 min-w-0">
-            <div className="font-serif text-lg truncate">{a.title}</div>
-            {a.notes && <div className="text-xs text-stone-400 mt-0.5 whitespace-pre-wrap break-words">{a.notes}</div>}
+    <div onClick={onClose}
+      className="fixed inset-0 bg-stone-900/70 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
+      <div onClick={(e) => e.stopPropagation()}
+        className="bg-stone-50 w-full sm:max-w-2xl sm:rounded-3xl rounded-t-3xl flex flex-col max-h-[90vh] overflow-hidden">
+        <div className="p-4 text-stone-50 bg-stone-900 sm:rounded-t-3xl">
+          <div className="flex items-start justify-between gap-2">
+            <div className="flex-1 min-w-0">
+              <div className="font-serif text-lg truncate">{a.title}</div>
+              {a.notes && <div className="text-xs text-stone-400 mt-0.5 whitespace-pre-wrap break-words">{a.notes}</div>}
+            </div>
+            <button onClick={onClose} className="p-2 rounded-full bg-stone-800 flex-shrink-0">
+              <X size={20} />
+            </button>
           </div>
-          <button onClick={onClose} className="p-2 rounded-full bg-stone-800 flex-shrink-0">
-            <X size={20} />
-          </button>
+          <SpanishTranslationPanel assignment={a} />
+          <TranslateButton texts={translateTexts} />
         </div>
-        <SpanishTranslationPanel assignment={a} />
-        <TranslateButton texts={translateTexts} />
-      </div>
-      <div className="flex-1 overflow-auto bg-stone-100">
-        {a.file_url ? (
-          a.file_kind === 'image' ? (
-            <ZoomableImage src={a.file_url} alt={a.title} />
+        <div className="flex-1 overflow-auto bg-stone-100">
+          {a.file_url ? (
+            a.file_kind === 'image' ? (
+              <ZoomableImage src={a.file_url} alt={a.title} />
+            ) : (
+              <iframe src={a.file_url} className="w-full h-full min-h-[60vh]" title={a.title} />
+            )
           ) : (
-            <iframe src={a.file_url} className="w-full h-full min-h-[60vh]" title={a.title} />
-          )
-        ) : (
-          <div className="p-8 text-center text-stone-400 text-sm">
-            No file attached to this assignment.
+            <div className="p-8 text-center text-stone-400 text-sm">
+              No file attached to this assignment.
+            </div>
+          )}
+        </div>
+        {a.file_url && (
+          <div className="p-4 bg-stone-900">
+            <a href={a.file_url} target="_blank" rel="noreferrer"
+              className="w-full inline-flex items-center justify-center gap-2 py-3 rounded-xl bg-stone-50 text-stone-900 text-sm font-medium">
+              <Download size={14} /> Open / download
+            </a>
           </div>
         )}
       </div>
-      {a.file_url && (
-        <div className="p-4 bg-stone-900">
-          <a href={a.file_url} target="_blank" rel="noreferrer"
-            className="w-full inline-flex items-center justify-center gap-2 py-3 rounded-xl bg-stone-50 text-stone-900 text-sm font-medium">
-            <Download size={14} /> Open / download
-          </a>
-        </div>
-      )}
     </div>
   );
 }
@@ -21889,7 +22198,7 @@ function AssignmentViewer({ target, onClose }) {
 // Status changes write directly to assignment_targets and rely on the
 // existing realtime sync to push updates to other viewers.
 // =================================================================
-function ChecklistAssignmentView({ assignment, employee, onClose, onOpenSheet }) {
+function ChecklistAssignmentView({ assignment, employee, onClose, onOpenSheet, quickGlance = false }) {
   const [targets, setTargets] = useState([]);
   const [templateInfo, setTemplateInfo] = useState({ variants: [], items: [] });
   const [otherAssignments, setOtherAssignments] = useState([]);
@@ -22127,7 +22436,87 @@ function ChecklistAssignmentView({ assignment, employee, onClose, onOpenSheet })
     );
   }
 
+  // Quick glance body — read-only summary of items grouped by main
+  // section (Bedroom / Vanity / Bathroom / General). Each item gets
+  // a status dot (done / in_progress / pending) so the owner can scan
+  // completion at a glance without all the cleaner-side controls.
+  // Rendered when the quickGlance prop is true.
+  const quickGlanceBody = (() => {
+    const labelForT = (t) => {
+      if (t.status_notes && t.template_item_key?.startsWith?.('requested:')) return t.status_notes;
+      const k = t.template_item_key || '';
+      return k.replace(/^[a-z_]+:/, '').replace(/_/g, ' ').replace(/^./, c => c.toUpperCase()) || 'Item';
+    };
+    const dotFor = (t) => {
+      if (t.recheck_passed_at) return { color: 'bg-purple-500', label: 'recheck-passed' };
+      if (t.status === 'done') return { color: 'bg-emerald-500', label: 'done' };
+      if (t.status === 'in_progress') return { color: 'bg-amber-500', label: 'in progress' };
+      if (t.status === 'paused') return { color: 'bg-amber-300', label: 'paused' };
+      if (t.status === 'blocked') return { color: 'bg-red-500', label: 'blocked' };
+      return { color: 'bg-stone-300', label: 'pending' };
+    };
+    const sections = { bedroom: [], vanity: [], bathroom: [], general: [], other: [] };
+    targets.forEach(t => {
+      const sec = (t.template_section || 'other').toLowerCase();
+      (sections[sec] || sections.other).push(t);
+    });
+    const order = ['bedroom', 'vanity', 'bathroom', 'general', 'other'];
+    const labels = { bedroom: 'Bedroom', vanity: 'Vanity', bathroom: 'Bathroom', general: 'General', other: 'Other' };
+    return (
+      <div className="p-4 space-y-3">
+        {order.map(secKey => {
+          const items = sections[secKey];
+          if (!items || items.length === 0) return null;
+          const doneCount = items.filter(i => i.status === 'done').length;
+          return (
+            <div key={secKey} className="rounded-2xl bg-white border border-stone-200 p-3">
+              <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-2">
+                {labels[secKey]} <span className="text-stone-400">({doneCount}/{items.length} done)</span>
+              </div>
+              <div className="space-y-1">
+                {items.map(t => {
+                  const d = dotFor(t);
+                  return (
+                    <div key={t.id} className="flex items-center gap-2 text-sm">
+                      <span className={`w-2 h-2 rounded-full ${d.color} flex-shrink-0`} title={d.label} />
+                      <span className={t.status === 'done' ? 'text-stone-500 line-through' : 'text-stone-900'}>
+                        {labelForT(t)}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    );
+  })();
+
   return (
+    quickGlance ? (
+      // Quick glance modal — owner audit view uses this. Backdrop
+      // around a sized card; tap backdrop to close. The CleanerProgress
+      // bar is hidden since this isn't part of the cleaner's journey.
+      <div onClick={onClose}
+        className="fixed inset-0 bg-stone-900/70 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
+        <div onClick={(e) => e.stopPropagation()}
+          className="bg-stone-50 w-full sm:max-w-2xl sm:rounded-3xl rounded-t-3xl flex flex-col max-h-[90vh] overflow-hidden">
+          <div className="p-4 border-b border-stone-200 flex items-start justify-between gap-2">
+            <div className="flex-1 min-w-0">
+              <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">Quick glance</div>
+              <div className="font-serif text-lg text-stone-900 truncate">{assignment.title}</div>
+            </div>
+            <button onClick={onClose} className="p-2 rounded-full hover:bg-stone-100 flex-shrink-0">
+              <X size={20} className="text-stone-600" />
+            </button>
+          </div>
+          <div className="flex-1 overflow-y-auto">
+            {quickGlanceBody}
+          </div>
+        </div>
+      </div>
+    ) : (
     <div className="fixed inset-0 bg-stone-50 z-50 flex flex-col">
       {/* Global cleaner progress bar — same 5 segments as the rest of
          the app. Inside an assignment the cleaner has filled the first
@@ -22408,6 +22797,7 @@ function ChecklistAssignmentView({ assignment, employee, onClose, onOpenSheet })
           onSaved={() => { setRequestModalOpen(false); load(); }} />
       )}
     </div>
+    )
   );
 }
 

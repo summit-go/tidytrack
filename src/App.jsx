@@ -23,6 +23,7 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 // If empty, the Translate button is hidden.
 // =================================================================
 const GOOGLE_TRANSLATE_API_KEY = "AIzaSyD7ceHPryMzs45hWJOyFNBxtOzQOEmJcSA";
+
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 const PHOTO_BUCKET = 'task-photos';
 const ASSIGNMENT_BUCKET = 'assignments';
@@ -2947,6 +2948,59 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     }
   };
 
+  // Multi-block move — used by the "Something's wrong" menu for both
+  //   • Wrong bedroom  — caller passes all blocks at the current
+  //     (unit, party) so the entire bedroom relocates as a unit
+  //   • Wrong workblock — caller passes a user-selected subset of
+  //     blocks within the current unit (any bedroom)
+  // We do conflict checks against the destination only ONCE
+  // (against any of the moved blocks). Reset of source assignment
+  // targets is applied at the end if requested.
+  const moveMultipleWorkBlocksTo = async (blockIds, newUnit, newParty, resetIds = []) => {
+    if (!blockIds || blockIds.length === 0) return;
+    if (!newUnit?.id || !newParty?.id) {
+      alert('Pick a unit and bedroom.');
+      return;
+    }
+    setBusy(true);
+    try {
+      // Update every block to the new (unit, party)
+      const { error: e1 } = await supabase.from('work_blocks')
+        .update({ unit_id: newUnit.id, party_id: newParty.id })
+        .in('id', blockIds);
+      if (e1) { alert('Could not move work blocks: ' + e1.message); setBusy(false); return; }
+      // Reset old-bedroom assignment_targets if asked
+      if (resetIds && resetIds.length > 0) {
+        const { error: e2 } = await supabase.from('assignment_targets')
+          .update({
+            status: 'pending',
+            started_by: null, started_at: null,
+            completed_by: null, completed_at: null,
+          })
+          .in('id', resetIds);
+        if (e2) console.warn('[moveMultipleWorkBlocksTo] reset failed:', e2);
+      }
+      // Refresh state — if the activeBlock was one of the moved ones,
+      // re-fetch it so the BlockView header updates. Same for workBlocks
+      // list (we re-fetch all from the shift).
+      const { data: allBlocks } = await supabase.from('work_blocks')
+        .select('*, unit:units(*), party:parties(*), tasks(*, photos(*))')
+        .eq('shift_id', shift.id)
+        .order('start_time');
+      setWorkBlocks(allBlocks || []);
+      if (activeBlock && blockIds.includes(activeBlock.id)) {
+        const refreshed = (allBlocks || []).find(b => b.id === activeBlock.id);
+        if (refreshed) {
+          setActiveBlock(refreshed);
+          setTasks(refreshed.tasks || []);
+        }
+      }
+    } catch (e) {
+      alert('Could not move work blocks: ' + (e.message || e));
+    }
+    setBusy(false);
+  };
+
   // Cleaner picked one or more checklist items in the TaskCategoryPicker
   // and tapped Start. We do TWO things in one shot:
   //  1) Flip every picked assignment_target from pending/paused to
@@ -3517,6 +3571,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       onOpenMessages={() => setShowMessages(true)}
       onOpenBedroomHistory={setBedroomHistory}
       onMoveBlock={moveActiveBlockTo}
+      onMoveMultiple={moveMultipleWorkBlocksTo}
       cleanerTab={cleanerTab} setCleanerTab={setCleanerTab}
       previewMode={previewMode}
       busy={busy} />);
@@ -4616,7 +4671,7 @@ function UndoMoveMenu({ disabled, canUndo, canMove, onUndo, onMoveBedroom, onMov
 function BlockView({ shift, block, tasks, activeTask, employeeName, employee, onSignOut, onFinish, onPause, onUndo,
   newTaskName, setNewTaskName, onStartTask, onStartTasksFromPicker, onStartChecklistItems, onReleaseTargets, onStopTask, onResumeTask, onAddPhoto,
   photoModal, onClosePhotoModal, onUploadPhoto, onSavePhotoNote, onOpenMessages, onOpenBedroomHistory,
-  onMoveBlock, cleanerTab, setCleanerTab, previewMode, busy }) {
+  onMoveBlock, onMoveMultiple, cleanerTab, setCleanerTab, previewMode, busy }) {
   useTick(true);
   const blockElapsed = Date.now() - new Date(block.start_time).getTime();
   const activeTaskObj = tasks.find(t => t.id === activeTask);
@@ -4866,12 +4921,17 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
         <MoveBlockModalInline
           block={block}
           propertyId={shift.customer_id}
+          shiftId={shift.id}
           currentEmployeeId={employee?.id}
           mode={moveMode}
           onSave={async (newUnit, newParty, resetIds) => {
             await onMoveBlock(newUnit, newParty, resetIds);
             setMoveModalOpen(false);
           }}
+          onSaveMulti={onMoveMultiple ? async (blockIds, newUnit, newParty, resetIds) => {
+            await onMoveMultiple(blockIds, newUnit, newParty, resetIds);
+            setMoveModalOpen(false);
+          } : null}
           onClose={() => setMoveModalOpen(false)} />
       )}
       {/* Persistent bottom nav — lets the cleaner peek at Assignments
@@ -4891,10 +4951,18 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
 // to move the active work block to a different bedroom. Same idea as
 // MoveBlockModal but it calls a parent-supplied onSave with the new
 // unit/party objects so EmployeeApp can update activeBlock in place.
-function MoveBlockModalInline({ block, propertyId, currentEmployeeId, mode = 'bedroom', onSave, onClose }) {
+function MoveBlockModalInline({ block, propertyId, shiftId, currentEmployeeId, mode = 'bedroom', onSave, onSaveMulti, onClose }) {
   const [units, setUnits] = useState([]);
   const [unitId, setUnitId] = useState('');
   const [partyId, setPartyId] = useState('');
+  // Source-side block selection (NEW).
+  // 'bedroom' mode  — auto-include EVERY block at the current
+  //                   (unit_id, party_id). No picker shown.
+  // 'workblock' mode — load every block at the current UNIT (any
+  //                    bedroom) and let the cleaner pick which to
+  //                    move. Pre-checked: the current active block.
+  const [sourceBlocks, setSourceBlocks] = useState([]); // candidates
+  const [selectedBlockIds, setSelectedBlockIds] = useState(new Set([block.id]));
   // Any assignment_targets at the OLD bedroom that this cleaner has
   // touched (started or completed) — those are the ones that, after
   // the move, would point at a bedroom they didn't actually work.
@@ -4918,11 +4986,35 @@ function MoveBlockModalInline({ block, propertyId, currentEmployeeId, mode = 'be
     setUnits((data || []).slice().sort((a, b) => naturalCompare(a.label, b.label)));
   })(); }, [propertyId]);
 
+  // Load candidate source blocks based on mode.
+  useEffect(() => {
+    if (!shiftId || !block.unit_id) return;
+    (async () => {
+      // Mode bedroom = same (unit, party). Mode workblock = same unit
+      // any bedroom. Both restricted to this shift so we don't move
+      // other cleaners' blocks accidentally.
+      let q = supabase.from('work_blocks')
+        .select('id, unit_id, party_id, start_time, end_time, unit:units(label), party:parties(label)')
+        .eq('shift_id', shiftId)
+        .eq('unit_id', block.unit_id);
+      if (mode === 'bedroom') q = q.eq('party_id', block.party_id);
+      const { data } = await q.order('start_time');
+      const blocks = data || [];
+      setSourceBlocks(blocks);
+      if (mode === 'bedroom') {
+        // Auto-include every block at this bedroom
+        setSelectedBlockIds(new Set(blocks.map(b => b.id)));
+      } else {
+        // Workblock mode — default: only the current active block ticked
+        setSelectedBlockIds(new Set([block.id]));
+      }
+    })();
+  }, [shiftId, block.unit_id, block.party_id, block.id, mode]);
+
   // When this modal opens, check if there are assignments at the OLD
   // bedroom that the current cleaner has touched (started_by or
   // completed_by). If yes, offer to reset them to Pending after the
-  // move. Default is checked — most common case is "I worked here by
-  // mistake, please undo the assignment too."
+  // move. Default checked depends on mode (see state init).
   useEffect(() => {
     if (!block.unit_id || !block.party_id || !currentEmployeeId) {
       setTouchedAssignments([]);
@@ -4942,17 +5034,32 @@ function MoveBlockModalInline({ block, propertyId, currentEmployeeId, mode = 'be
   const parties = (units.find(u => u.id === unitId)?.parties || [])
     .filter(p => p.active).sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0));
 
+  const toggleBlockSelected = (id) => {
+    setSelectedBlockIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+
   const save = async () => {
     if (!unitId || !partyId) { setError('Pick a unit and a bedroom.'); return; }
+    if (selectedBlockIds.size === 0) { setError('Pick at least one workblock to move.'); return; }
     const newUnit = units.find(u => u.id === unitId);
     const newParty = (newUnit?.parties || []).find(p => p.id === partyId);
     setBusy(true);
     try {
-      // Pass the reset choice + touched assignment IDs back to the
-      // parent so it can do both the move and the resets atomically.
       const resetIds = (resetOldAssignments && touchedAssignments.length > 0)
         ? touchedAssignments.map(t => t.id) : [];
-      await onSave(newUnit, newParty, resetIds);
+      const ids = Array.from(selectedBlockIds);
+      // Multi-block path preferred when available (handles 1 or more
+      // blocks uniformly). Falls back to legacy single-block onSave if
+      // the parent didn't wire onSaveMulti.
+      if (onSaveMulti && ids.length > 0) {
+        await onSaveMulti(ids, newUnit, newParty, resetIds);
+      } else {
+        await onSave(newUnit, newParty, resetIds);
+      }
     } catch (e) {
       setError(e.message || String(e));
     }
@@ -4964,9 +5071,13 @@ function MoveBlockModalInline({ block, propertyId, currentEmployeeId, mode = 'be
       <div className="bg-stone-50 w-full sm:max-w-md sm:rounded-3xl rounded-t-3xl flex flex-col max-h-[90vh]">
         <div className="flex items-center justify-between p-5 border-b border-stone-200">
           <div>
-            <div className="font-serif text-xl text-stone-900">Move work to a different bedroom</div>
+            <div className="font-serif text-xl text-stone-900">
+              {mode === 'bedroom' ? 'Move this bedroom\u2019s work' : 'Move workblocks'}
+            </div>
             <div className="text-xs text-stone-500 font-mono mt-0.5 truncate">
-              Currently: {block.unit?.label}{block.party?.label && ` · ${block.party.label}`}
+              {mode === 'bedroom'
+                ? <>Moving {sourceBlocks.length || 1} block{(sourceBlocks.length || 1) === 1 ? '' : 's'} at {block.unit?.label}{block.party?.label && ` · ${block.party.label}`}</>
+                : <>From unit {block.unit?.label}</>}
             </div>
           </div>
           <button onClick={onClose} className="p-2 rounded-full hover:bg-stone-100">
@@ -4974,8 +5085,44 @@ function MoveBlockModalInline({ block, propertyId, currentEmployeeId, mode = 'be
           </button>
         </div>
         <div className="p-5 space-y-4 overflow-y-auto">
+          {/* Source picker — only in workblock mode. Lets the cleaner
+             tick which workblocks within the current unit to move.
+             Bedroom mode auto-includes everything at the bedroom. */}
+          {mode === 'workblock' && sourceBlocks.length > 0 && (
+            <div>
+              <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">
+                Workblocks to move
+              </label>
+              <div className="space-y-1.5">
+                {sourceBlocks.map(b => {
+                  const checked = selectedBlockIds.has(b.id);
+                  return (
+                    <button type="button" key={b.id}
+                      onClick={() => toggleBlockSelected(b.id)}
+                      className={`w-full flex items-start gap-3 px-3 py-2.5 rounded-xl border-2 text-left ${checked ? 'border-amber-500 bg-amber-50' : 'border-stone-200 bg-white hover:border-stone-400'}`}>
+                      <div className={`mt-0.5 w-4 h-4 rounded border-2 flex-shrink-0 flex items-center justify-center ${checked ? 'border-amber-600 bg-amber-600' : 'border-stone-300'}`}>
+                        {checked && <Check size={11} className="text-white" />}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="text-sm text-stone-900">
+                          {b.unit?.label}{b.party?.label && <span> · <span className="italic text-amber-800">{b.party.label}</span></span>}
+                          {b.id === block.id && <span className="ml-1 text-[10px] uppercase tracking-wider font-mono px-1.5 py-0.5 rounded-full bg-stone-200 text-stone-700">active</span>}
+                        </div>
+                        <div className="text-[11px] text-stone-500 font-mono mt-0.5">
+                          Started {fmtClock(b.start_time)}{b.end_time ? ` — ${fmtClock(b.end_time)}` : ' · open'}
+                        </div>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
           <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-900">
-            All notes, tasks, and photos from this work block will move with it. The old bedroom will be left untouched (no leftover data).
+            {mode === 'bedroom'
+              ? 'All work at this bedroom (notes, tasks, photos) will move with it. The old bedroom will be left untouched.'
+              : 'Selected workblocks (and their notes, tasks, photos) will move. Other workblocks stay put.'}
           </div>
           <div>
             <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Move to unit</label>

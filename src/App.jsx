@@ -23,7 +23,6 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 // If empty, the Translate button is hidden.
 // =================================================================
 const GOOGLE_TRANSLATE_API_KEY = "AIzaSyD7ceHPryMzs45hWJOyFNBxtOzQOEmJcSA";
-
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 const PHOTO_BUCKET = 'task-photos';
 const ASSIGNMENT_BUCKET = 'assignments';
@@ -3542,6 +3541,156 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
 // =================================================================
 // PROPERTY HUB (multi-unit, between work blocks)
 // =================================================================
+// WhosHerePopup — quick-view modal cleaners open from the header.
+// Shows every OTHER cleaner currently active at this same property,
+// with their bedroom + timer. Acts like the "Quick glance" pattern
+// elsewhere (a peek, not a full screen). Refreshes every 30s while
+// open so the cleaner doesn't see stale info.
+function WhosHerePopup({ propertyId, myEmployeeId, propertyName, onClose }) {
+  const [rows, setRows] = useState([]);
+  const [loaded, setLoaded] = useState(false);
+  useTick(true); // tick so timers update
+
+  const load = async () => {
+    // Open work_blocks for cleaners on shifts at THIS property
+    const { data: blocks } = await supabase.from('work_blocks')
+      .select('id, start_time, unit:units(label), party:parties(label), shift:shifts!inner(id, customer_id, employee:employees(id, name))')
+      .is('end_time', null)
+      .order('start_time', { ascending: true });
+    // Also include cleaners clocked in at this property without an
+    // open work block ("standby" — at property but between bedrooms).
+    const { data: shifts } = await supabase.from('shifts')
+      .select('id, start_time, customer_id, employee:employees(id, name)')
+      .is('end_time', null)
+      .eq('customer_id', propertyId);
+    const propertyBlocks = (blocks || []).filter(b => b.shift?.customer_id === propertyId);
+    const blockedShiftIds = new Set(propertyBlocks.map(b => b.shift?.id).filter(Boolean));
+    const standby = (shifts || []).filter(s => !blockedShiftIds.has(s.id));
+    setRows([
+      ...propertyBlocks.map(b => ({
+        kind: 'block',
+        id: b.id,
+        employeeId: b.shift?.employee?.id,
+        name: b.shift?.employee?.name || '?',
+        unitLabel: b.unit?.label,
+        partyLabel: b.party?.label,
+        startTime: b.start_time,
+      })),
+      ...standby.map(s => ({
+        kind: 'standby',
+        id: s.id,
+        employeeId: s.employee?.id,
+        name: s.employee?.name || '?',
+        startTime: s.start_time,
+      })),
+    ]);
+    setLoaded(true);
+  };
+
+  useEffect(() => {
+    load();
+    const iv = setInterval(load, 30000);
+    return () => clearInterval(iv);
+  }, [propertyId]);
+
+  // Exclude self — the cleaner already knows where THEY are
+  const others = rows.filter(r => r.employeeId !== myEmployeeId);
+  const inBedrooms = others.filter(r => r.kind === 'block');
+  const onStandby = others.filter(r => r.kind === 'standby');
+
+  return (
+    <div className="fixed inset-0 bg-stone-900/80 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
+      <div className="bg-stone-50 w-full sm:max-w-md sm:rounded-3xl rounded-t-3xl flex flex-col max-h-[80vh]">
+        <div className="flex items-center justify-between p-5 border-b border-stone-200">
+          <div className="min-w-0 flex-1">
+            <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">Who's here</div>
+            <div className="font-serif text-lg text-stone-900 truncate">{propertyName}</div>
+          </div>
+          <button onClick={onClose} className="p-2 rounded-full hover:bg-stone-100 flex-shrink-0">
+            <X size={20} className="text-stone-600" />
+          </button>
+        </div>
+        <div className="flex-1 overflow-y-auto p-4">
+          {!loaded ? (
+            <div className="text-center py-8 text-stone-400 text-sm">Loading…</div>
+          ) : others.length === 0 ? (
+            <div className="text-center py-10 text-stone-400 text-sm">
+              You're the only one at this property right now.
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {inBedrooms.length > 0 && (
+                <div>
+                  <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1.5">
+                    In bedrooms ({inBedrooms.length})
+                  </div>
+                  <div className="space-y-1.5">
+                    {inBedrooms.map(r => {
+                      const elapsed = Date.now() - new Date(r.startTime).getTime();
+                      return (
+                        <div key={r.id} className="flex items-center gap-2 px-3 py-2.5 rounded-xl bg-white border border-stone-200">
+                          <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse flex-shrink-0" />
+                          <div className="flex-1 min-w-0">
+                            <div className="text-sm text-stone-900">
+                              <span className="font-bold">{r.name}</span>
+                              {r.unitLabel && (
+                                <>
+                                  <span className="text-stone-400"> · </span>
+                                  <span className="font-mono text-xs text-stone-700">{r.unitLabel}</span>
+                                </>
+                              )}
+                              {r.partyLabel && (
+                                <>
+                                  <span className="text-stone-400"> · </span>
+                                  <span className="italic text-amber-700 text-xs">{r.partyLabel}</span>
+                                </>
+                              )}
+                            </div>
+                          </div>
+                          <div className="text-[11px] font-mono text-stone-500 flex-shrink-0">
+                            {fmtTimeShort(elapsed)}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+              {onStandby.length > 0 && (
+                <div>
+                  <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1.5">
+                    On standby ({onStandby.length})
+                  </div>
+                  <div className="space-y-1.5">
+                    {onStandby.map(r => {
+                      const elapsed = Date.now() - new Date(r.startTime).getTime();
+                      return (
+                        <div key={r.id} className="flex items-center gap-2 px-3 py-2.5 rounded-xl bg-white border border-stone-200">
+                          <span className="w-2 h-2 rounded-full bg-stone-400 flex-shrink-0" />
+                          <div className="flex-1 min-w-0">
+                            <div className="text-sm text-stone-900">
+                              <span className="font-bold">{r.name}</span>
+                              <span className="text-stone-400"> · </span>
+                              <span className="text-stone-500 text-xs">between bedrooms</span>
+                            </div>
+                          </div>
+                          <div className="text-[11px] font-mono text-stone-500 flex-shrink-0">
+                            {fmtTimeShort(elapsed)}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // CleanerBottomNav — fixed 3-tab nav at the bottom of cleaner views.
 // Tabs: Home / Assignments / More. The cleaner taps to switch which
 // section of the property hub is visible. Mobile-style nav: large hit
@@ -3718,9 +3867,22 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
     </div>
   ) : null;
 
+  // Quick-view "who's here at this property" popup. Shown from the
+  // header button on the right; cleaner can peek without leaving.
+  const [whosHereOpen, setWhosHereOpen] = useState(false);
+
   return (
     <div className="min-h-screen bg-stone-50 pb-24">
-      <Header name={employeeName} onSignOut={onSignOut} role={employee?.role} employee={employee} onOpenMessages={onOpenMessages} />
+      <Header name={employeeName} onSignOut={onSignOut} role={employee?.role} employee={employee}
+        onOpenMessages={onOpenMessages}
+        onOpenWhosHere={() => setWhosHereOpen(true)} />
+      {whosHereOpen && (
+        <WhosHerePopup
+          propertyId={shift.customer_id}
+          propertyName={shift.customer?.name || 'this property'}
+          myEmployeeId={employee?.id}
+          onClose={() => setWhosHereOpen(false)} />
+      )}
       {/* Global progress bar — visible during the whole cleaner session.
          At PropertyHub the cleaner is on segment 1 (Property). Tapping
          "Property" switches to a different property. Later segments
@@ -4377,6 +4539,80 @@ function PreparingBlockView({ shift, pendingStart, employeeName, employee,
   );
 }
 
+// UndoMoveMenu — consolidated "something's wrong" dropdown shown in
+// the dark BlockView header. One button → popover with three options:
+//   • Started by mistake → undo the workblock (delete + revert items)
+//   • Wrong bedroom      → move the workblock to a different bedroom
+//   • Wrong workblock    → same move flow but reset items at source
+// Replaces the two separate inline links that used to live here so
+// the header stays tidy + the options are discoverable together.
+function UndoMoveMenu({ disabled, canUndo, canMove, onUndo, onMoveBedroom, onMoveWorkblock }) {
+  const [open, setOpen] = useState(false);
+  // Close popover on outside-tap. We attach a window-level mousedown
+  // listener while open and remove it when closed.
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e) => {
+      // Find any element with data-undo-menu="root" — if the click is
+      // inside it, keep the menu open. Otherwise close.
+      let el = e.target;
+      while (el) {
+        if (el.dataset && el.dataset.undoMenu === 'root') return;
+        el = el.parentElement;
+      }
+      setOpen(false);
+    };
+    window.addEventListener('mousedown', handler);
+    window.addEventListener('touchstart', handler);
+    return () => {
+      window.removeEventListener('mousedown', handler);
+      window.removeEventListener('touchstart', handler);
+    };
+  }, [open]);
+  return (
+    <div className="mt-2 inline-block relative" data-undo-menu="root">
+      <button onClick={() => setOpen(o => !o)} disabled={disabled}
+        className="text-[11px] font-mono uppercase tracking-wider px-2.5 py-1 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-200 inline-flex items-center gap-1.5 disabled:opacity-50">
+        <HelpCircle size={11} /> Something's wrong
+      </button>
+      {open && (
+        <div className="absolute z-40 top-full left-0 mt-1 w-72 bg-stone-50 rounded-2xl shadow-xl border border-stone-200 overflow-hidden">
+          {canUndo && (
+            <button onClick={() => { setOpen(false); onUndo(); }}
+              className="w-full text-left px-4 py-3 hover:bg-stone-100 border-b border-stone-100 flex items-start gap-3">
+              <Delete size={16} className="text-red-700 flex-shrink-0 mt-0.5" />
+              <div className="min-w-0">
+                <div className="text-sm font-medium text-stone-900">Started by mistake</div>
+                <div className="text-xs text-stone-500 mt-0.5">Cancel this workblock and go back to assignments.</div>
+              </div>
+            </button>
+          )}
+          {canMove && (
+            <button onClick={() => { setOpen(false); onMoveBedroom(); }}
+              className="w-full text-left px-4 py-3 hover:bg-stone-100 border-b border-stone-100 flex items-start gap-3">
+              <Building2 size={16} className="text-amber-700 flex-shrink-0 mt-0.5" />
+              <div className="min-w-0">
+                <div className="text-sm font-medium text-stone-900">I'm in the wrong bedroom</div>
+                <div className="text-xs text-stone-500 mt-0.5">Move what I've done to a different bedroom. Items I've checked off come with me.</div>
+              </div>
+            </button>
+          )}
+          {canMove && (
+            <button onClick={() => { setOpen(false); onMoveWorkblock(); }}
+              className="w-full text-left px-4 py-3 hover:bg-stone-100 flex items-start gap-3">
+              <Edit2 size={16} className="text-stone-700 flex-shrink-0 mt-0.5" />
+              <div className="min-w-0">
+                <div className="text-sm font-medium text-stone-900">Wrong workblock</div>
+                <div className="text-xs text-stone-500 mt-0.5">Move this workblock to a different bedroom and reset items here back to pending.</div>
+              </div>
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function BlockView({ shift, block, tasks, activeTask, employeeName, employee, onSignOut, onFinish, onPause, onUndo,
   newTaskName, setNewTaskName, onStartTask, onStartTasksFromPicker, onStartChecklistItems, onReleaseTargets, onStopTask, onResumeTask, onAddPhoto,
   photoModal, onClosePhotoModal, onUploadPhoto, onSavePhotoNote, onOpenMessages, onOpenBedroomHistory,
@@ -4391,6 +4627,12 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
   // re-attach their work to the wrong bedroom; managers can fix
   // mistakes after the fact.
   const [moveModalOpen, setMoveModalOpen] = useState(false);
+  // 'bedroom' = move keeping items in their current status (cleaner is
+  // in wrong bedroom physically but the items they advanced still apply
+  // to the destination). 'workblock' = also reset items at the source
+  // back to pending — they shouldn't follow because the cleaner shouldn't
+  // have touched them. Default 'bedroom'.
+  const [moveMode, setMoveMode] = useState('bedroom');
   // Move bedroom is available to anyone with an onMoveBlock handler.
   // Cleaners need to be able to fix their own mistakes (wrong bedroom
   // opened, photos/tasks added to the wrong work block) without
@@ -4422,9 +4664,22 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
     if (confirm('Pause this work block and go back to property home?')) onPause();
   };
 
+  // Quick-view popup for cleaners — peek at who else is at this property
+  const [whosHereOpen, setWhosHereOpen] = useState(false);
+
   return (
     <div className="min-h-screen bg-stone-50 pb-24">
-      <Header name={employeeName} onSignOut={onSignOut} role={employee?.role} employee={employee} onOpenMessages={onOpenMessages} onLogoClick={handleLogoClick} />
+      <Header name={employeeName} onSignOut={onSignOut} role={employee?.role} employee={employee}
+        onOpenMessages={onOpenMessages}
+        onOpenWhosHere={() => setWhosHereOpen(true)}
+        onLogoClick={handleLogoClick} />
+      {whosHereOpen && (
+        <WhosHerePopup
+          propertyId={shift.customer_id}
+          propertyName={shift.customer?.name || 'this property'}
+          myEmployeeId={employee?.id}
+          onClose={() => setWhosHereOpen(false)} />
+      )}
       {/* Cleaner is INSIDE an active work block. Tapping any other
          segment triggers the leave-warning modal. The decision they
          choose (Done / Stay / Pause) is forwarded back here so we
@@ -4458,15 +4713,25 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
           {block.unit?.label} · <span className="italic text-amber-400">{block.party?.label}</span>
         </div>
         {block.party?.full_name && <div className="text-xs text-stone-400 mt-0.5">{block.party.full_name}</div>}
-        {/* Undo — for when a cleaner started this workblock at the
-           wrong bedroom or by accident. Small text link so it doesn't
-           compete with Finish, but discoverable. Owners can undo any
-           block; cleaners can only undo their own (enforced in handler). */}
-        {onUndo && (
-          <button onClick={onUndo} disabled={busy}
-            className="mt-2 text-[11px] font-mono text-stone-400 hover:text-stone-200 underline underline-offset-2 disabled:opacity-50">
-            Started by mistake? Undo this workblock
-          </button>
+        {/* Consolidated "Something's wrong" menu — single button opens a
+           dropdown with three escape hatches:
+             1) Started by mistake   → undo the workblock entirely
+             2) I'm in the wrong bedroom → move the workblock to a
+                                          different bedroom (keep items)
+             3) Wrong workblock        → move the workblock + reset any
+                                          items the cleaner advanced at
+                                          this bedroom back to pending
+           Replaces the two separate inline links so the header stays
+           tidy and the three options are discoverable together. */}
+        {(onUndo || canMoveBlock) && (
+          <UndoMoveMenu
+            disabled={busy}
+            canUndo={!!onUndo}
+            canMove={!!canMoveBlock}
+            onUndo={onUndo}
+            onMoveBedroom={() => { setMoveMode('bedroom'); setMoveModalOpen(true); }}
+            onMoveWorkblock={() => { setMoveMode('workblock'); setMoveModalOpen(true); }}
+          />
         )}
         {/* Context chips for this bedroom — priority + cleaning types
            pulled from the open assignments here. Shown right under
@@ -4478,16 +4743,6 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
               <AssignmentTypeChip key={typ} type={typ} />
             ))}
           </div>
-        )}
-        {/* Move-bedroom escape hatch — shown to owners/managers and in
-           preview mode. Useful when the cleaner accidentally opened the
-           wrong bedroom and put their work there; instead of re-keying
-           everything, just move the block. */}
-        {canMoveBlock && (
-          <button onClick={() => setMoveModalOpen(true)} disabled={busy}
-            className="mt-1.5 text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-amber-900/40 hover:bg-amber-900/60 text-amber-200 inline-flex items-center gap-1 disabled:opacity-50">
-            <Edit2 size={9} /> Wrong bedroom? Move this work
-          </button>
         )}
         {block.unit?.kind === 'townhome' && (block.unit?.bedrooms != null || block.unit?.bathrooms != null) && (
           <div className="mt-1.5 flex items-center gap-1.5 flex-wrap">
@@ -4612,6 +4867,7 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
           block={block}
           propertyId={shift.customer_id}
           currentEmployeeId={employee?.id}
+          mode={moveMode}
           onSave={async (newUnit, newParty, resetIds) => {
             await onMoveBlock(newUnit, newParty, resetIds);
             setMoveModalOpen(false);
@@ -4635,7 +4891,7 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
 // to move the active work block to a different bedroom. Same idea as
 // MoveBlockModal but it calls a parent-supplied onSave with the new
 // unit/party objects so EmployeeApp can update activeBlock in place.
-function MoveBlockModalInline({ block, propertyId, currentEmployeeId, onSave, onClose }) {
+function MoveBlockModalInline({ block, propertyId, currentEmployeeId, mode = 'bedroom', onSave, onClose }) {
   const [units, setUnits] = useState([]);
   const [unitId, setUnitId] = useState('');
   const [partyId, setPartyId] = useState('');
@@ -4643,8 +4899,14 @@ function MoveBlockModalInline({ block, propertyId, currentEmployeeId, onSave, on
   // touched (started or completed) — those are the ones that, after
   // the move, would point at a bedroom they didn't actually work.
   // We surface them so the cleaner can opt-in to resetting them.
+  // Default differs by mode:
+  //   'bedroom'   — cleaner is in the wrong bedroom physically; their
+  //                 progress is still real work and should follow. Don't
+  //                 reset by default.
+  //   'workblock' — wrong workblock; the cleaner shouldn't have touched
+  //                 items at the source. Reset by default.
   const [touchedAssignments, setTouchedAssignments] = useState([]);
-  const [resetOldAssignments, setResetOldAssignments] = useState(true);
+  const [resetOldAssignments, setResetOldAssignments] = useState(mode === 'workblock');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
@@ -5997,7 +6259,7 @@ async function deleteMessagePhoto(path) {
   try { await supabase.storage.from(MESSAGE_BUCKET).remove([path]); } catch {}
 }
 
-function Header({ name, onSignOut, role, employee, onOpenMessages, onLogoClick, onBack }) {
+function Header({ name, onSignOut, role, employee, onOpenMessages, onLogoClick, onBack, onOpenWhosHere }) {
   // Messages icon in header for all signed-in roles (cleaner/manager/owner)
   const showMessagesIcon = !!(onOpenMessages && employee);
   const unread = useUnreadCount({ employee: showMessagesIcon ? employee : null });
@@ -6081,6 +6343,17 @@ function Header({ name, onSignOut, role, employee, onOpenMessages, onLogoClick, 
                 {unread > 99 ? '99+' : unread}
               </span>
             )}
+          </button>
+        )}
+        {/* Quick-view "who's here right now" — shows the cleaner a fast
+           popup of every other cleaner currently working at this same
+           property. Helpful for coordination ("is Maria in B7? is anyone
+           still upstairs?"). Person-standing icon to read as "people". */}
+        {onOpenWhosHere && (
+          <button onClick={onOpenWhosHere}
+            className="relative p-2 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-50"
+            title="Who's here right now">
+            <User size={18} />
           </button>
         )}
         <button onClick={onSignOut} className="text-xs text-stone-300 font-mono hover:text-stone-50">Sign out</button>
@@ -18729,7 +19002,7 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
                   <div className="flex items-center gap-1.5 flex-wrap justify-end">
                     <button onClick={() => setOpened(rep)}
                       className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-100 hover:bg-stone-200 text-stone-700 flex items-center gap-1">
-                      <Eye size={10} /> View doc
+                      <Eye size={10} /> Quick glance
                     </button>
                     {onOpenBedroomHistory && rep?.unit_id && rep?.party_id && (
                       <button onClick={() => onOpenBedroomHistory({
@@ -19008,7 +19281,7 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
           <div className="flex items-center gap-1.5 flex-wrap justify-end">
             <button onClick={onView}
               className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-100 hover:bg-stone-200 text-stone-700 flex items-center gap-1">
-              <Eye size={10} /> View doc
+              <Eye size={10} /> Quick glance
             </button>
             {onOpenBedroomHistory && t.unit_id && t.party_id && (
               <button onClick={() => onOpenBedroomHistory({
@@ -19181,7 +19454,7 @@ function AssignmentsPanel({ propertyId, employee, refreshKey, onGoToBedroom, onO
   const loadCounts = async () => {
     const { data } = await supabase
       .from('assignment_targets')
-      .select('status, completed_by, completed_at, unit_id, party_id, assignment:assignments!inner(customer_id, active, source, pm_status)');
+      .select('status, completed_by, completed_at, unit_id, party_id, recheck_passed_at, assignment:assignments!inner(customer_id, active, source, pm_status)');
     const filtered = (data || []).filter(t =>
       t.assignment?.customer_id === propertyId &&
       t.assignment?.active &&
@@ -19195,10 +19468,14 @@ function AssignmentsPanel({ propertyId, employee, refreshKey, onGoToBedroom, onO
     // statuses (some pending, some in_progress) counts in BOTH buckets
     // intentionally — that bedroom needs attention in both states.
     const bedKey = (t) => `${t.unit_id || ''}::${t.party_id || ''}`;
-    const sets = { pending: new Set(), paused: new Set(), in_progress: new Set(), done: new Set(), blocked: new Set(), mine: new Set() };
+    const sets = { pending: new Set(), paused: new Set(), in_progress: new Set(), done: new Set(), blocked: new Set(), mine: new Set(), recheck_passed: new Set() };
     const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
     filtered.forEach(t => {
       if (sets[t.status]) sets[t.status].add(bedKey(t));
+      // Recheck-passed bedrooms — anywhere the PM marked items passed
+      // on tenant recheck and the owner approved. Bedroom shows up
+      // here AND in 'done' (since items technically end up done).
+      if (t.recheck_passed_at) sets.recheck_passed.add(bedKey(t));
       if (t.completed_by && employee?.id && t.completed_by === employee.id && t.completed_at) {
         const ca = new Date(t.completed_at);
         if (ca >= todayStart) sets.mine.add(bedKey(t));
@@ -19211,6 +19488,7 @@ function AssignmentsPanel({ propertyId, employee, refreshKey, onGoToBedroom, onO
       done: sets.done.size,
       blocked: sets.blocked.size,
       mine: sets.mine.size,
+      recheck_passed: sets.recheck_passed.size,
     });
   };
   useEffect(() => { loadCounts(); }, [propertyId, refreshKey]);
@@ -19249,6 +19527,16 @@ function AssignmentsPanel({ propertyId, employee, refreshKey, onGoToBedroom, onO
           <button onClick={() => setTab('mine')}
             className={`flex-1 min-w-fit py-2 px-2 rounded-lg text-xs font-medium transition-colors whitespace-nowrap ${tab === 'mine' ? 'bg-amber-50 shadow-sm text-amber-900 font-bold' : 'text-stone-500'}`}>
             Mine ({counts.mine})
+          </button>
+        )}
+        {/* Passed recheck — items the PM marked passed on recheck
+           (tenant did it themselves). Owner audit bucket so they
+           can review what was removed from the cleaning workflow.
+           Hidden when zero so the row stays compact. */}
+        {counts.recheck_passed > 0 && (
+          <button onClick={() => setTab('recheck_passed')}
+            className={`flex-1 min-w-fit py-2 px-2 rounded-lg text-xs font-medium transition-colors whitespace-nowrap ${tab === 'recheck_passed' ? 'bg-purple-50 shadow-sm text-purple-900 font-bold' : 'text-stone-500'}`}>
+            Passed recheck ({counts.recheck_passed})
           </button>
         )}
       </div>
@@ -19542,7 +19830,7 @@ function SuggestedTabContent({ propertyId, employee, onGoToBedroom, onOpenBedroo
             <div className="flex items-center gap-1.5 flex-wrap justify-end">
               <button onClick={() => setOpened(rep)}
                 className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-100 hover:bg-stone-200 text-stone-700 flex items-center gap-1">
-                <Eye size={10} /> View doc
+                <Eye size={10} /> Quick glance
               </button>
               {onOpenBedroomHistory && (
                 <button onClick={() => onOpenBedroomHistory({
@@ -19773,7 +20061,10 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
     // Mine = items I personally completed today at this property.
     // We query for status='done' from the DB and filter further in
     // memory below so the schema doesn't need a special path.
-    const effectiveStatus = statusFilter === 'mine' ? 'done' : statusFilter;
+    // Recheck-passed is also a derived view over status='done' (items
+    // the PM marked passed on tenant recheck end up status=done with
+    // recheck_passed_at populated).
+    const effectiveStatus = (statusFilter === 'mine' || statusFilter === 'recheck_passed') ? 'done' : statusFilter;
     const { data, error } = await supabase
       .from('assignment_targets')
       .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, extracted_text, spanish_translation, translation_status, assignment_type, scheduled_date, sheet_type, template_set_id, bathroom_variant, general_variant, created_at), unit:units(id, label), party:parties(id, label), starter:employees!started_by(id, name), completer:employees!completed_by(id, name), assignedTo:employees!assigned_to(id, name)')
@@ -19797,6 +20088,12 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
         t.completed_by && employee?.id && t.completed_by === employee.id
         && t.completed_at && new Date(t.completed_at) >= todayStart
       );
+    }
+    // Passed recheck view: items where the PM said the tenant passed
+    // on recheck and the owner approved. recheck_passed_at is set on
+    // those, distinguishing them from items the cleaner finished.
+    if (statusFilter === 'recheck_passed') {
+      filtered = filtered.filter(t => t.recheck_passed_at);
     }
     if (statusFilter === 'done') {
       // Sort Done by building → unit → bedroom (natural compare on the
@@ -20365,7 +20662,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                               <div className="flex items-center gap-1.5 flex-wrap justify-end">
                                 <button onClick={(e) => { e.stopPropagation(); setOpened(firstTarget); }}
                                   className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-100 hover:bg-stone-200 text-stone-700 flex items-center gap-1">
-                                  <Eye size={10} /> View doc
+                                  <Eye size={10} /> Quick glance
                                 </button>
                                 {onOpenBedroomHistory && firstTarget?.unit_id && firstTarget?.party_id && (
                                   <button onClick={(e) => { e.stopPropagation(); onOpenBedroomHistory({
@@ -21709,7 +22006,7 @@ function ChecklistAssignmentView({ assignment, employee, onClose, onOpenSheet })
           {onOpenSheet && assignment.file_url && (
             <button onClick={onOpenSheet}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-50 text-xs font-medium">
-              <Eye size={12} /> View sheet
+              <Eye size={12} /> View attachment
             </button>
           )}
         </div>
@@ -22752,7 +23049,7 @@ function PortalAssignmentsTab({ property, portalKind, portalUser }) {
       onSaved={() => { setView({ kind: 'list' }); load(); }} />;
   }
   if (view.kind === 'detail') {
-    return <PortalAssignmentDetail property={property} assignment={view.assignment}
+    return <PortalAssignmentDetail property={property} assignment={view.assignment} portalUser={portalUser}
       onBack={() => { setView({ kind: 'list' }); load(); }}
       onEdit={() => setView({ kind: 'edit', assignment: view.assignment })} />;
   }
@@ -23464,7 +23761,7 @@ function PortalAssignmentForm({ property, assignment, portalKind, onCancel, onSa
 // which ones now pass. Submits a recheck_request that the owner
 // approves from their Inbox, which then marks those items done +
 // recheck_passed so cleaners stop seeing them.
-function RecheckRequestModal({ assignment, property, onClose, onSaved }) {
+function RecheckRequestModal({ assignment, property, portalUser, onClose, onSaved }) {
   const [targets, setTargets] = useState([]);
   const [selected, setSelected] = useState(new Set());
   const [notes, setNotes] = useState('');
@@ -23524,6 +23821,7 @@ function RecheckRequestModal({ assignment, property, onClose, onSaved }) {
       //    attribution for now.
       const { data: req, error: e1 } = await supabase.from('recheck_requests').insert({
         assignment_id: assignment.id,
+        created_by: portalUser?.id || null,
         pm_status: 'pending',
         notes: notes.trim() || null,
       }).select('id').single();
@@ -23617,7 +23915,7 @@ function RecheckRequestModal({ assignment, property, onClose, onSaved }) {
   );
 }
 
-function PortalAssignmentDetail({ property, assignment, onBack, onEdit }) {
+function PortalAssignmentDetail({ property, assignment, portalUser, onBack, onEdit }) {
   const [busy, setBusy] = useState(false);
   const canEdit = assignment.pm_status === 'draft' || assignment.pm_status === 'rejected';
   const canDelete = canEdit;
@@ -23788,6 +24086,7 @@ function PortalAssignmentDetail({ property, assignment, onBack, onEdit }) {
         <RecheckRequestModal
           assignment={assignment}
           property={property}
+          portalUser={portalUser}
           onClose={() => setRecheckOpen(false)}
           onSaved={() => {
             setRecheckOpen(false);

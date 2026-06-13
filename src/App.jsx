@@ -14,7 +14,7 @@ import {
 // 🔧 PASTE YOUR SUPABASE KEYS HERE
 // =================================================================
 const SUPABASE_URL = "https://bbaynvqnbkjyqhzhhypr.supabase.co/";
-const SUPABASE_URL = "https://bbaynvqnbkjyqhzhhypr.supabase.co/";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJiYXludnFuYmtqeXFoemhoeXByIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc0NzQ2MTMsImV4cCI6MjA5MzA1MDYxM30.ZXUoHFj_IwMe6rX8RxK8Dj4kAB9AS7X9xZAhQ84wDEk";
 
 // =================================================================
 // 🌍 GOOGLE TRANSLATE API KEY (optional — for the Translate button)
@@ -7025,7 +7025,7 @@ function PhotoModal({ kind, taskName, existing, onUpload, onSaveNote, onClose, e
          viewer also surfaces the photo's note (when present). */}
       {zoomPhoto && (
         <PhotoZoomViewer photos={existingPhotos} initialUrl={zoomPhoto.public_url}
-          onClose={() => setZoomPhoto(null)} />
+          onClose={() => setZoomPhoto(null)} employee={employee} />
       )}
     </div>
   );
@@ -8167,6 +8167,7 @@ function ShiftDetail({ shiftId, viewerRole, viewerEmployee, onBack }) {
                 {workBlocks.map(b => <WorkBlockDetail key={b.id} block={b} rate={shift.customer?.bill_rate_hourly} showMoney={showMoney}
                   canEdit={canEdit}
                   propertyId={shift.customer_id}
+                  employee={viewerEmployee}
                   onEdit={() => setEditingBlock(b)}
                   onDelete={() => setDeletingBlock(b)}
                   onMove={() => setMovingBlock(b)}
@@ -8180,7 +8181,7 @@ function ShiftDetail({ shiftId, viewerRole, viewerEmployee, onBack }) {
             {tasks.length === 0 ? (
               <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">No tasks logged.</div>
             ) : (
-              <div className="space-y-3">{tasks.map(t => <TaskDetail key={t.id} task={t} />)}</div>
+              <div className="space-y-3">{tasks.map(t => <TaskDetail key={t.id} task={t} employee={viewerEmployee} />)}</div>
             )}
           </>
         )}
@@ -8631,7 +8632,7 @@ function WorkBlockAssignmentLink({ block, propertyId, compact = false }) {
   );
 }
 
-function WorkBlockDetail({ block, rate, showMoney, canEdit, onEdit, onDelete, onMove, propertyId, onOpenBedroomHistory }) {
+function WorkBlockDetail({ block, rate, showMoney, canEdit, onEdit, onDelete, onMove, propertyId, onOpenBedroomHistory, employee }) {
   const dur = (block.end_time ? new Date(block.end_time) : new Date()) - new Date(block.start_time);
   const blockRate = block.bill_rate_at_work || rate || 0;
   const billable = block.end_time ? (dur / 1000 / 3600) * blockRate : 0;
@@ -8670,7 +8671,7 @@ function WorkBlockDetail({ block, rate, showMoney, canEdit, onEdit, onDelete, on
       {block.work_notes && <div className="text-xs text-stone-600 italic mt-2">"{block.work_notes}"</div>}
       {block.tasks?.length > 0 && (
         <div className="mt-3 pt-3 border-t border-stone-100 space-y-3">
-          {block.tasks.map(t => <TaskDetail key={t.id} task={t} compact />)}
+          {block.tasks.map(t => <TaskDetail key={t.id} task={t} compact employee={employee} />)}
         </div>
       )}
       {canEdit && (onEdit || onDelete || onMove) && (
@@ -8699,7 +8700,7 @@ function WorkBlockDetail({ block, rate, showMoney, canEdit, onEdit, onDelete, on
   );
 }
 
-function TaskDetail({ task, compact }) {
+function TaskDetail({ task, compact, employee }) {
   const before = (task.photos || []).filter(p => p.kind === 'before');
   const after  = (task.photos || []).filter(p => p.kind === 'after');
   const damage = (task.photos || []).filter(p => p.kind === 'damage');
@@ -8724,16 +8725,16 @@ function TaskDetail({ task, compact }) {
       </div>
       {(before.length > 0 || after.length > 0 || damage.length > 0) && (
         <div className="grid grid-cols-3 gap-2 mt-2">
-          <PhotoColumn label="Before" photos={before} />
-          <PhotoColumn label="After"  photos={after} />
-          <PhotoColumn label="Damage" photos={damage} highlight="red" />
+          <PhotoColumn label="Before" photos={before} employee={employee} />
+          <PhotoColumn label="After"  photos={after} employee={employee} />
+          <PhotoColumn label="Damage" photos={damage} highlight="red" employee={employee} />
         </div>
       )}
     </div>
   );
 }
 
-function PhotoColumn({ label, photos, highlight }) {
+function PhotoColumn({ label, photos, highlight, employee }) {
   const [zoom, setZoom] = useState(null);
   const isDamage = highlight === 'red';
   return (
@@ -8763,7 +8764,7 @@ function PhotoColumn({ label, photos, highlight }) {
         </div>
       )}
       {zoom && (
-        <PhotoZoomViewer photos={photos} initialUrl={zoom} onClose={() => setZoom(null)} />
+        <PhotoZoomViewer photos={photos} initialUrl={zoom} onClose={() => setZoom(null)} employee={employee} />
       )}
     </div>
   );
@@ -8866,11 +8867,46 @@ async function sharePhotos(photos, contextFn) {
 }
 
 // Photo viewer that lets you swipe through all photos in a bucket
-function PhotoZoomViewer({ photos, initialUrl, onClose, onResolveCurrent }) {
+function PhotoZoomViewer({ photos, initialUrl, onClose, onResolveCurrent, employee, onPhotoResolved }) {
   const startIdx = Math.max(0, photos.findIndex(p => p.public_url === initialUrl));
   const [idx, setIdx] = useState(startIdx);
-  const photo = photos[idx];
-  if (!photo) return null;
+  // Local optimistic overlay for resolution state — keyed by photo.id
+  // so flipping a photo doesn't require reloading the whole gallery.
+  // Values: { resolved_at, resolved_by, resolved_by_kind } or null
+  // (null = revert to whatever's on the underlying photo prop).
+  const [localResolveById, setLocalResolveById] = useState({});
+  const [resolveBusy, setResolveBusy] = useState(false);
+  const baseRaw = photos[idx];
+  if (!baseRaw) return null;
+  // Merge optimistic local state on top of the underlying photo so
+  // the UI reflects the change immediately after Mark resolved.
+  const photo = localResolveById[baseRaw.id]
+    ? { ...baseRaw, ...localResolveById[baseRaw.id] }
+    : baseRaw;
+  // Owner-side inline resolve flow. Only when:
+  //   • caller passed an owner/manager employee
+  //   • photo is a damage photo
+  //   • photo isn't already resolved
+  //   • caller didn't already wire onResolveCurrent (PM portal does)
+  const canSelfResolve = !!employee
+    && (employee.role === 'owner' || employee.role === 'manager')
+    && photo.kind === 'damage'
+    && !photo.resolved_at
+    && !onResolveCurrent;
+  const selfResolve = async () => {
+    setResolveBusy(true);
+    const ts = new Date().toISOString();
+    const payload = {
+      resolved_at: ts,
+      resolved_by: employee.id,
+      resolved_by_kind: 'employee',
+    };
+    const { error } = await supabase.from('photos').update(payload).eq('id', photo.id);
+    setResolveBusy(false);
+    if (error) { alert('Could not mark resolved: ' + error.message); return; }
+    setLocalResolveById(prev => ({ ...prev, [photo.id]: payload }));
+    if (typeof onPhotoResolved === 'function') onPhotoResolved(photo, payload);
+  };
   return (
     <div className="fixed inset-0 bg-stone-900/95 z-50 flex flex-col items-center justify-center p-4">
       <button onClick={onClose}
@@ -8891,6 +8927,15 @@ function PhotoZoomViewer({ photos, initialUrl, onClose, onResolveCurrent }) {
           {photo.created_at && (
             <span className="text-stone-400 flex-shrink-0">{fmtDate(photo.created_at)}</span>
           )}
+        </div>
+      )}
+      {/* Resolved-status pill for damage photos. Shown when the photo
+         already has resolved_at (either from server load or our own
+         optimistic update). */}
+      {photo.kind === 'damage' && photo.resolved_at && (
+        <div className="mt-3 max-w-md w-full px-4 py-2 rounded-xl bg-emerald-900/70 text-emerald-100 text-xs font-mono flex items-center gap-2">
+          <Check size={12} />
+          <span className="truncate">Resolved {fmtDate(photo.resolved_at)}</span>
         </div>
       )}
       {/* Show the cleaner's note when one is attached — useful for
@@ -8914,6 +8959,12 @@ function PhotoZoomViewer({ photos, initialUrl, onClose, onResolveCurrent }) {
           <button onClick={() => onResolveCurrent(photo)}
             className="px-4 py-2 rounded-full bg-emerald-700 hover:bg-emerald-800 text-white text-sm font-medium flex items-center gap-2">
             <Check size={14} /> Mark resolved
+          </button>
+        )}
+        {canSelfResolve && (
+          <button onClick={selfResolve} disabled={resolveBusy}
+            className="px-4 py-2 rounded-full bg-emerald-700 hover:bg-emerald-800 text-white text-sm font-medium flex items-center gap-2 disabled:opacity-50">
+            <Check size={14} /> {resolveBusy ? 'Saving…' : 'Mark resolved'}
           </button>
         )}
       </div>
@@ -11693,6 +11744,9 @@ function CleaningsReportView({ employee, onSignOut, onOpenMessages, onLogoClick,
   const [selectedPropertyId, setSelectedPropertyId] = useState('');
   // Selected assignment types — empty means "all". Multi-select chip.
   const [selectedTypes, setSelectedTypes] = useState(new Set());
+  // View mode: 'bedroom' (existing hierarchy) or 'cleaner' (per-cleaner
+  // breakdown — useful for billing or seeing who's productive).
+  const [viewMode, setViewMode] = useState('bedroom');
   const [report, setReport] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -11746,9 +11800,10 @@ function CleaningsReportView({ employee, onSignOut, onOpenMessages, onLogoClick,
       const endISO = endDateObj.toISOString();
       let q = supabase.from('assignment_targets')
         .select(`
-          id, status, completed_at, template_section, template_item_key, status_notes,
+          id, status, completed_at, completed_by, template_section, template_item_key, status_notes,
           unit:units(id, label),
           party:parties(id, label),
+          completed_by_employee:employees!completed_by(id, name),
           assignment:assignments!inner(id, title, assignment_type, customer_id, property:customers(id, name))
         `)
         .gte('completed_at', startISO)
@@ -11841,7 +11896,41 @@ function CleaningsReportView({ employee, onSignOut, onOpenMessages, onLogoClick,
                 .sort((a, b) => a.label.localeCompare(b.label)),
             })),
         }));
-      setReport(out);
+      // Per-cleaner aggregate — used by the "By cleaner" view mode.
+      // For each cleaner that completed at least one item in the
+      // range we tally items, distinct bedrooms (unit+party), distinct
+      // apartments (unit), and the most recent completion timestamp.
+      const cleanerMap = new Map();
+      for (const t of targets) {
+        const cId = t.completed_by;
+        if (!cId) continue;
+        if (!cleanerMap.has(cId)) {
+          cleanerMap.set(cId, {
+            id: cId,
+            name: t.completed_by_employee?.name || 'Unknown',
+            items: 0,
+            bedrooms: new Set(),
+            apartments: new Set(),
+            lastCompletedAt: null,
+          });
+        }
+        const c = cleanerMap.get(cId);
+        c.items += 1;
+        if (t.unit?.id && t.party?.id) c.bedrooms.add(`${t.unit.id}::${t.party.id}`);
+        if (t.unit?.id) c.apartments.add(t.unit.id);
+        const ts = t.completed_at ? new Date(t.completed_at).getTime() : 0;
+        if (ts > (c.lastCompletedAt || 0)) c.lastCompletedAt = ts;
+      }
+      const byCleaner = Array.from(cleanerMap.values()).map(c => ({
+        id: c.id,
+        name: c.name,
+        items: c.items,
+        bedrooms: c.bedrooms.size,
+        apartments: c.apartments.size,
+        avgItemsPerBedroom: c.bedrooms.size > 0 ? Math.round((c.items / c.bedrooms.size) * 10) / 10 : 0,
+        lastCompletedAt: c.lastCompletedAt,
+      })).sort((a, b) => b.items - a.items);
+      setReport({ byBedroom: out, byCleaner });
     } catch (e) {
       setError(e.message || String(e));
     }
@@ -12012,16 +12101,72 @@ function CleaningsReportView({ employee, onSignOut, onOpenMessages, onLogoClick,
 
         {/* === OUTPUT === */}
         {report && (
-          report.length === 0 ? (
+          (report.byBedroom?.length === 0 && (!report.byCleaner || report.byCleaner.length === 0)) ? (
             <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
               No completed cleanings match those filters.
             </div>
           ) : (
             <div className="space-y-3">
-              <div className="text-[10px] uppercase tracking-wider text-stone-500 font-mono">
-                Report · {report.reduce((sum, u) => sum + u.parties.length, 0)} bedroom{report.reduce((sum, u) => sum + u.parties.length, 0) === 1 ? '' : 's'} cleaned
+              {/* View-mode toggle — sits above the output so the owner
+                 can flip between the by-bedroom hierarchy (good for
+                 reviewing what got cleaned where) and the by-cleaner
+                 table (good for billing / accountability). */}
+              <div className="flex items-center gap-2">
+                <div className="text-[10px] uppercase tracking-wider text-stone-500 font-mono flex-1">
+                  Report ·{' '}
+                  {viewMode === 'bedroom'
+                    ? <>{report.byBedroom.reduce((sum, u) => sum + u.parties.length, 0)} bedroom{report.byBedroom.reduce((sum, u) => sum + u.parties.length, 0) === 1 ? '' : 's'} cleaned</>
+                    : <>{report.byCleaner.length} cleaner{report.byCleaner.length === 1 ? '' : 's'}</>}
+                </div>
+                <div className="inline-flex rounded-full bg-stone-100 p-0.5">
+                  <button onClick={() => setViewMode('bedroom')}
+                    className={`text-xs px-3 py-1 rounded-full font-medium transition-colors ${viewMode === 'bedroom' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+                    By bedroom
+                  </button>
+                  <button onClick={() => setViewMode('cleaner')}
+                    className={`text-xs px-3 py-1 rounded-full font-medium transition-colors ${viewMode === 'cleaner' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+                    By cleaner
+                  </button>
+                </div>
               </div>
-              {report.map((u, ui) => (
+              {/* By cleaner — sortable simple table. Default sort is
+                 items DESC. Each row is a cleaner with: bedrooms,
+                 apartments, items, avg items/bedroom, last completed. */}
+              {viewMode === 'cleaner' && (
+                report.byCleaner.length === 0 ? (
+                  <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
+                    No cleaners completed items in this range.
+                  </div>
+                ) : (
+                  <div className="rounded-2xl bg-white border border-stone-200 overflow-hidden">
+                    <div className="grid grid-cols-12 px-4 py-2 bg-stone-50 border-b border-stone-200 text-[10px] uppercase tracking-wider font-mono text-stone-500">
+                      <div className="col-span-4">Cleaner</div>
+                      <div className="col-span-2 text-right">Items</div>
+                      <div className="col-span-2 text-right">Bedrooms</div>
+                      <div className="col-span-2 text-right">Apartments</div>
+                      <div className="col-span-2 text-right">Avg / bedroom</div>
+                    </div>
+                    {report.byCleaner.map(c => (
+                      <div key={c.id} className="grid grid-cols-12 px-4 py-3 border-b border-stone-100 last:border-b-0 items-center">
+                        <div className="col-span-4 min-w-0">
+                          <div className="text-sm text-stone-900 truncate">{c.name}</div>
+                          {c.lastCompletedAt && (
+                            <div className="text-[10px] font-mono text-stone-500 mt-0.5">
+                              Last: {fmtDate(c.lastCompletedAt)}
+                            </div>
+                          )}
+                        </div>
+                        <div className="col-span-2 text-right text-sm font-mono text-stone-900 font-bold">{c.items}</div>
+                        <div className="col-span-2 text-right text-sm font-mono text-stone-700">{c.bedrooms}</div>
+                        <div className="col-span-2 text-right text-sm font-mono text-stone-700">{c.apartments}</div>
+                        <div className="col-span-2 text-right text-sm font-mono text-stone-500">{c.avgItemsPerBedroom}</div>
+                      </div>
+                    ))}
+                  </div>
+                )
+              )}
+              {/* By bedroom — original hierarchical view */}
+              {viewMode === 'bedroom' && report.byBedroom.map((u, ui) => (
                 <React.Fragment key={ui}>
                   {u.parties.map((p, pi) => (
                     <div key={`${ui}-${pi}`} className="rounded-2xl bg-white border border-stone-200 p-4">
@@ -15531,12 +15676,153 @@ function AssignedVsCleanedView({ employee, onBack, onOpenBedroomHistory }) {
   );
 }
 
+// TranslationOverridesModal — owner-facing admin view for managing
+// Spanish label overrides cleaners have saved per property. Groups
+// overrides by property; each row shows English fallback → override
+// label + a Revert button. Owner can clean up bad edits centrally
+// instead of asking each cleaner to undo their own.
+function TranslationOverridesModal({ employee, onClose }) {
+  const [rows, setRows] = useState([]);
+  const [loaded, setLoaded] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [filter, setFilter] = useState('');
+
+  const load = async () => {
+    setLoaded(false);
+    // Pull every override + the property name + who edited it. We
+    // don't restrict by property here — owner sees all their data.
+    const { data } = await supabase.from('item_label_overrides')
+      .select(`
+        id, property_id, template_item_key, locale, label, edited_at,
+        property:customers(id, name),
+        editor:employees!edited_by(id, name)
+      `)
+      .order('edited_at', { ascending: false });
+    setRows(data || []);
+    setLoaded(true);
+  };
+  useEffect(() => { load(); }, []);
+
+  const revert = async (row) => {
+    if (!confirm(`Revert "${row.label}" back to the default Spanish label?`)) return;
+    setBusy(true);
+    const { error } = await supabase.from('item_label_overrides').delete().eq('id', row.id);
+    setBusy(false);
+    if (error) { alert('Could not revert: ' + error.message); return; }
+    setRows(prev => prev.filter(r => r.id !== row.id));
+  };
+
+  // Derive default Spanish label (from the static dictionary) so the
+  // owner can see what we'd fall back to after a revert.
+  const dictionaryLabelFor = (key) => PICKER_ES?.[key] || null;
+  // Friendly English fallback for context
+  const englishFor = (key) => {
+    if (!key) return '';
+    return key.replace(/^[a-z_]+:/, '').replace(/_/g, ' ').replace(/^./, c => c.toUpperCase());
+  };
+
+  // Group rows by property for tidier display
+  const grouped = (() => {
+    const m = new Map();
+    const q = filter.trim().toLowerCase();
+    rows.filter(r => {
+      if (!q) return true;
+      return (
+        r.label?.toLowerCase().includes(q) ||
+        r.template_item_key?.toLowerCase().includes(q) ||
+        r.property?.name?.toLowerCase().includes(q) ||
+        r.editor?.name?.toLowerCase().includes(q)
+      );
+    }).forEach(r => {
+      const key = r.property?.id || '_none';
+      if (!m.has(key)) m.set(key, { name: r.property?.name || 'Unknown property', rows: [] });
+      m.get(key).rows.push(r);
+    });
+    return Array.from(m.values()).sort((a, b) => a.name.localeCompare(b.name));
+  })();
+
+  return (
+    <div onClick={onClose}
+      className="fixed inset-0 bg-stone-900/70 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
+      <div onClick={(e) => e.stopPropagation()}
+        className="bg-stone-50 w-full sm:max-w-2xl sm:rounded-3xl rounded-t-3xl flex flex-col max-h-[90vh]">
+        <div className="p-5 border-b border-stone-200 flex items-start justify-between gap-2">
+          <div className="flex-1 min-w-0">
+            <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">Admin</div>
+            <div className="font-serif text-xl text-stone-900">Spanish label overrides</div>
+            <div className="text-xs text-stone-500 mt-0.5">
+              Per-property item labels cleaners have edited from the default Spanish translation.
+            </div>
+          </div>
+          <button onClick={onClose} className="p-2 rounded-full hover:bg-stone-100 flex-shrink-0">
+            <X size={20} className="text-stone-600" />
+          </button>
+        </div>
+        <div className="px-5 pt-3">
+          <input type="text" value={filter} onChange={(e) => setFilter(e.target.value)}
+            placeholder="Filter by property, item, or editor…"
+            className="w-full px-3 py-2 rounded-lg border border-stone-300 text-sm" />
+        </div>
+        <div className="flex-1 overflow-y-auto p-5 space-y-4">
+          {!loaded ? (
+            <div className="text-center py-12 text-stone-400 text-sm">Loading…</div>
+          ) : grouped.length === 0 ? (
+            <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
+              {rows.length === 0 ? 'No label overrides yet.' : 'Nothing matches that filter.'}
+            </div>
+          ) : (
+            grouped.map((g, gi) => (
+              <div key={gi} className="rounded-2xl bg-white border border-stone-200 overflow-hidden">
+                <div className="px-4 py-2.5 bg-stone-50 border-b border-stone-200 flex items-center gap-2">
+                  <Building2 size={14} className="text-stone-500" />
+                  <span className="font-serif text-base text-stone-900">{g.name}</span>
+                  <span className="text-[10px] font-mono text-stone-500">({g.rows.length})</span>
+                </div>
+                <div className="divide-y divide-stone-100">
+                  {g.rows.map(r => {
+                    const defLabel = dictionaryLabelFor(r.template_item_key);
+                    const enLabel = englishFor(r.template_item_key);
+                    return (
+                      <div key={r.id} className="px-4 py-3 flex items-start gap-3">
+                        <div className="flex-1 min-w-0">
+                          <div className="text-[10px] font-mono text-stone-500 mb-0.5 truncate">{r.template_item_key}</div>
+                          <div className="text-sm text-stone-900 truncate">
+                            <span className="text-stone-500">{enLabel}</span>
+                            <span className="text-stone-300 mx-1.5">→</span>
+                            <span className="font-medium">{r.label}</span>
+                          </div>
+                          <div className="text-[10px] font-mono text-stone-400 mt-0.5 truncate">
+                            {r.editor?.name || 'someone'} · {fmtDate(r.edited_at)}
+                            {defLabel && defLabel !== r.label && (
+                              <span> · Default: <span className="text-stone-600">{defLabel}</span></span>
+                            )}
+                          </div>
+                        </div>
+                        <button onClick={() => revert(r)} disabled={busy}
+                          className="text-[10px] uppercase tracking-wider font-mono px-2 py-1 rounded-full bg-stone-100 hover:bg-red-100 hover:text-red-800 text-stone-700 flex items-center gap-1 disabled:opacity-50 flex-shrink-0">
+                          <Delete size={11} /> Revert
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenAssignedVsCleaned, onOpenMessages, onLogoClick }) {
   const today = new Date();
   const [viewMonth, setViewMonth] = useState(new Date(today.getFullYear(), today.getMonth(), 1));
   const [activity, setActivity] = useState({});
   const [loaded, setLoaded] = useState(false);
   const [inboxCounts, setInboxCounts] = useState({ pendingAssignments: 0, pendingRechecks: 0, newPhotos: 0 });
+  // Owner-only modal for managing Spanish label overrides across properties.
+  const [showOverrides, setShowOverrides] = useState(false);
 
   // Load inbox counts
   useEffect(() => {
@@ -15700,6 +15986,26 @@ function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenAssi
             <ChevronRight size={18} className="text-stone-400 flex-shrink-0" />
           </button>
         )}
+        {/* Owner-only — manage Spanish label overrides cleaners have
+           saved per property. Lets the owner revert mistakes
+           centrally instead of asking each cleaner to undo their own. */}
+        <button onClick={() => setShowOverrides(true)}
+          className="w-full mb-5 p-4 rounded-2xl bg-white border-2 border-stone-200 hover:border-stone-400 active:scale-98 transition-all flex items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-full bg-stone-900 text-stone-50 flex items-center justify-center">
+              <Languages size={16} />
+            </div>
+            <div className="text-left">
+              <div className="font-serif text-base text-stone-900">
+                Label overrides
+              </div>
+              <div className="text-xs text-stone-600 font-mono">
+                Manage Spanish item names cleaners have edited per property
+              </div>
+            </div>
+          </div>
+          <ChevronRight size={18} className="text-stone-400 flex-shrink-0" />
+        </button>
         <div className="text-xs uppercase tracking-widest text-stone-400 font-mono mb-3">
           Daily browser
         </div>
@@ -15787,6 +16093,11 @@ function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenAssi
           </div>
         )}
       </div>
+      {showOverrides && (
+        <TranslationOverridesModal
+          employee={employee}
+          onClose={() => setShowOverrides(false)} />
+      )}
     </div>
   );
 }
@@ -16863,7 +17174,7 @@ function DailyUnitDayDetail({ date, propertyId, unitId, unitLabel, propertyName,
                         )}
                         {b.tasks?.length > 0 && (
                           <div className="pl-5 space-y-2">
-                            {b.tasks.map(t => <TaskDetail key={t.id} task={t} compact />)}
+                            {b.tasks.map(t => <TaskDetail key={t.id} task={t} compact employee={employee} />)}
                           </div>
                         )}
                         {/* Per-block edit/delete actions */}

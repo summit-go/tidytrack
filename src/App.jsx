@@ -2361,6 +2361,12 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   const [activeTask, setActiveTask] = useState(null);
   const [photoModal, setPhotoModal] = useState(null);
   const [clockInFlow, setClockInFlow] = useState(null);
+  // Bottom-nav tab — Home / Assignments / More. Lifted to AuthedShift
+  // so it persists across PropertyHub ↔ BlockView navigation. When a
+  // workblock starts we auto-snap back to Home so the cleaner sees the
+  // workblock card (and doesn't get stuck on the Assignments list with
+  // the workblock running silently in the background).
+  const [cleanerTab, setCleanerTab] = useState('home');
   const [blockStartFlow, setBlockStartFlow] = useState(null);
   // Set when an assignment "Start" or "Go to this bedroom" is tapped from
   // somewhere outside the bedroom — we navigate the cleaner to that
@@ -2377,6 +2383,14 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   const [showMessages, setShowMessages] = useState(false);
   const [showChangePin, setShowChangePin] = useState(false);
   const [bedroomHistory, setBedroomHistory] = useState(null); // params for BedroomHistoryView
+  // Whenever an activeBlock transitions from null → set (cleaner just
+  // started a workblock), snap the bottom-nav tab back to Home so they
+  // see the workblock UI right away. Without this, if they started the
+  // block from the Assignments tab, they'd see the assignments list
+  // with the workblock running silently in the background — confusing.
+  useEffect(() => {
+    if (activeBlock) setCleanerTab('home');
+  }, [activeBlock?.id]);
   // When the cleaner taps a different bedroom while one is open, we
   // surface a 3-button modal (Stay / Pause + switch / Finish + switch)
   // instead of a native confirm. Shape: { target, fromLabel, toLabel }.
@@ -2853,6 +2867,12 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       return b;
     }));
     setActiveBlock(updated); setTasks(blockTasks || []);
+    // Resume always sends the cleaner back to the Home tab (BlockView).
+    // Without this, if they tapped Resume from the Assignments tab,
+    // they'd stay on Assignments with the block now in state — the
+    // active workblock useEffect only fires on activeBlock.id change,
+    // so a same-block reopen wouldn't trigger it.
+    setCleanerTab('home');
     setBusy(false);
   };
 
@@ -3471,13 +3491,14 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       onOpenBedroomHistory={setBedroomHistory}
       busy={busy} />);
   }
-  if (isMulti && !activeBlock) {
+  if (isMulti && (!activeBlock || cleanerTab !== 'home')) {
     return withIdleModal(<PropertyHub shift={shift} workBlocks={workBlocks} employeeName={employee.name} employee={employee}
       onSignOut={signOutWithCleanup} onClockOut={clockOut} onSwitchProperty={switchProperty}
       onStartNew={startNewBlock} onReopen={reopenBlock} onEndBlock={endBlock} onGoToBedroom={goToBedroomForTarget}
       onOpenMessages={() => setShowMessages(true)}
       onOpenChangePin={() => setShowChangePin(true)}
       onOpenBedroomHistory={setBedroomHistory}
+      cleanerTab={cleanerTab} setCleanerTab={setCleanerTab}
       busy={busy} />);
   }
   if (isMulti && activeBlock) {
@@ -3497,6 +3518,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       onOpenMessages={() => setShowMessages(true)}
       onOpenBedroomHistory={setBedroomHistory}
       onMoveBlock={moveActiveBlockTo}
+      cleanerTab={cleanerTab} setCleanerTab={setCleanerTab}
       previewMode={previewMode}
       busy={busy} />);
   }
@@ -3527,13 +3549,22 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
 // because cleaners mostly stay in one place once they've picked a
 // bedroom — the nav is for the in-between moments.
 function CleanerBottomNav({ active, onChange }) {
-  const Item = ({ id, label, Icon }) => {
+  const Item = ({ id, label, Icon, useLogo }) => {
     const isActive = active === id;
     return (
       <button onClick={() => onChange(id)}
         className={`flex-1 flex flex-col items-center gap-1 py-2 active:scale-95 transition-transform ${isActive ? 'text-stone-900' : 'text-stone-400'}`}
         aria-current={isActive ? 'page' : undefined}>
-        <Icon size={20} strokeWidth={isActive ? 2.5 : 2} />
+        {useLogo ? (
+          <img
+            src="https://bbaynvqnbkjyqhzhhypr.supabase.co/storage/v1/object/public/brand/unnamed%20(2).png"
+            alt="Home"
+            className={`h-6 w-6 object-contain transition-opacity ${isActive ? 'opacity-100' : 'opacity-50'}`}
+            style={{ filter: isActive ? 'none' : 'grayscale(60%)' }}
+          />
+        ) : (
+          <Icon size={20} strokeWidth={isActive ? 2.5 : 2} />
+        )}
         <span className={`text-[10px] font-mono uppercase tracking-wider ${isActive ? 'font-bold' : ''}`}>
           {label}
         </span>
@@ -3543,7 +3574,7 @@ function CleanerBottomNav({ active, onChange }) {
   return (
     <div className="fixed bottom-0 left-0 right-0 z-30 bg-white border-t border-stone-200 flex"
       style={{ paddingBottom: 'env(safe-area-inset-bottom, 0px)' }}>
-      <Item id="home"        label="Home"        Icon={Home} />
+      <Item id="home"        label="Home"        useLogo />
       <Item id="assignments" label="Assignments" Icon={ClipboardList} />
       <Item id="more"        label="More"        Icon={Menu} />
     </div>
@@ -3619,12 +3650,15 @@ function OthersActivityToday({ propertyId, myEmployeeId, onOpenBedroomHistory })
   );
 }
 
-function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onClockOut, onSwitchProperty, onStartNew, onReopen, onEndBlock, onGoToBedroom, onOpenMessages, onOpenChangePin, onOpenBedroomHistory, busy }) {
+function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onClockOut, onSwitchProperty, onStartNew, onReopen, onEndBlock, onGoToBedroom, onOpenMessages, onOpenChangePin, onOpenBedroomHistory, cleanerTab: cleanerTabProp, setCleanerTab: setCleanerTabProp, busy }) {
   const [showMenu, setShowMenu] = useState(false);
   const [showAssignmentForm, setShowAssignmentForm] = useState(false);
-  // Bottom nav tab — Home / Assignments / More. Default Home.
-  // Lifted to component state so switching tabs doesn't lose context.
-  const [cleanerTab, setCleanerTab] = useState('home');
+  // Bottom nav tab — Home / Assignments / More. Parent (AuthedShift)
+  // controls this when provided so the tab persists across BlockView
+  // navigation. Falls back to local state for standalone use.
+  const [cleanerTabLocal, setCleanerTabLocal] = useState('home');
+  const cleanerTab = cleanerTabProp ?? cleanerTabLocal;
+  const setCleanerTab = setCleanerTabProp ?? setCleanerTabLocal;
   // "Today's activity" toggle on Home tab — flips between MY blocks
   // and OTHER cleaners' blocks at this property today.
   const [activityFilter, setActivityFilter] = useState('mine'); // 'mine' | 'others'
@@ -4346,7 +4380,7 @@ function PreparingBlockView({ shift, pendingStart, employeeName, employee,
 function BlockView({ shift, block, tasks, activeTask, employeeName, employee, onSignOut, onFinish, onPause, onUndo,
   newTaskName, setNewTaskName, onStartTask, onStartTasksFromPicker, onStartChecklistItems, onReleaseTargets, onStopTask, onResumeTask, onAddPhoto,
   photoModal, onClosePhotoModal, onUploadPhoto, onSavePhotoNote, onOpenMessages, onOpenBedroomHistory,
-  onMoveBlock, previewMode, busy }) {
+  onMoveBlock, cleanerTab, setCleanerTab, previewMode, busy }) {
   useTick(true);
   const blockElapsed = Date.now() - new Date(block.start_time).getTime();
   const activeTaskObj = tasks.find(t => t.id === activeTask);
@@ -4583,6 +4617,15 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
             setMoveModalOpen(false);
           }}
           onClose={() => setMoveModalOpen(false)} />
+      )}
+      {/* Persistent bottom nav — lets the cleaner peek at Assignments
+         or More without finishing/pausing the workblock. The block
+         stays open in the DB; flipping tabs just hides this view.
+         Returns when they tap Home (or the persistent pill on
+         non-Home tabs). Hidden while a photo modal is open so a tap
+         doesn't bypass the modal. */}
+      {setCleanerTab && !photoModal && (
+        <CleanerBottomNav active={cleanerTab || 'home'} onChange={setCleanerTab} />
       )}
     </div>
   );

@@ -13089,6 +13089,17 @@ const toDateKey = (d) => {
 // across all properties with cleaner name + property + bedroom +
 // elapsed time. Auto-refreshes so it stays current without page
 // reloads. Empty state when no one's on the clock.
+//
+// On each load it also runs cleanup on stale sessions:
+//   - SOFT (90min inactive): set shift end_time = last_activity_at so
+//     the cleaner only gets credit for time they were actively in the
+//     app. The idle detector would have done this if the app was open
+//     — this catches cases where the cleaner closed the app entirely.
+//   - HARD (2h since start): force-close anything still open with
+//     end_time = NOW. Safety net for sessions that somehow slipped
+//     past the soft pass (no last_activity_at recorded, etc).
+const STALE_IDLE_MIN = 90;   // soft auto-clockout threshold (minutes)
+const STALE_FORCE_MIN = 120; // hard force-close threshold (minutes)
 function WhosWherePanel({ employee }) {
   const [rows, setRows] = useState([]);
   const [loaded, setLoaded] = useState(false);
@@ -13096,7 +13107,64 @@ function WhosWherePanel({ employee }) {
   // useTick so the elapsed timer updates live.
   useTick(true);
 
+  // Two-tier auto-close:
+  //   1) SOFT — shifts with last_activity_at older than 90 min get
+  //      end_time = last_activity_at. Cleaner gets credit only for
+  //      time they were actually active in the app.
+  //   2) HARD — anything still open with start_time older than 120 min
+  //      gets end_time = NOW. Catches sessions where last_activity_at
+  //      is null or somehow missed the soft pass.
+  // Work blocks: no last_activity_at column on that table, so we
+  // hard-close them at 120 min from start. A workblock open longer
+  // than 2 hours is almost certainly stale (a real bedroom clean
+  // rarely exceeds that).
+  const cleanupStale = async () => {
+    const now = Date.now();
+    const idleCutoffISO = new Date(now - STALE_IDLE_MIN * 60 * 1000).toISOString();
+    const forceCutoffISO = new Date(now - STALE_FORCE_MIN * 60 * 1000).toISOString();
+    try {
+      // 1) Soft auto-clockout — pull shifts past the idle cutoff and
+      //    set end_time per-row to their last_activity_at. We can't
+      //    do this in a single UPDATE (Supabase JS doesn't support
+      //    column-to-column updates) so we fetch then patch.
+      const { data: idleShifts } = await supabase.from('shifts')
+        .select('id, last_activity_at, start_time')
+        .is('end_time', null)
+        .not('last_activity_at', 'is', null)
+        .lt('last_activity_at', idleCutoffISO);
+      for (const s of (idleShifts || [])) {
+        const endTime = s.last_activity_at || s.start_time;
+        await supabase.from('shifts').update({ end_time: endTime }).eq('id', s.id);
+        // Also close any open work_block belonging to this shift, with
+        // the same end_time so timing stays consistent.
+        await supabase.from('work_blocks')
+          .update({ end_time: endTime })
+          .eq('shift_id', s.id)
+          .is('end_time', null);
+      }
+      // 2) Hard force close — catch-all for anything still open beyond
+      //    the 2-hour cutoff (e.g. shift with no last_activity_at, or
+      //    a work_block whose parent shift is somehow already closed).
+      await supabase.from('shifts')
+        .update({ end_time: new Date().toISOString() })
+        .is('end_time', null)
+        .lt('start_time', forceCutoffISO);
+      await supabase.from('work_blocks')
+        .update({ end_time: new Date().toISOString() })
+        .is('end_time', null)
+        .lt('start_time', forceCutoffISO);
+    } catch (e) {
+      console.warn('[whos-where] stale cleanup failed:', e);
+    }
+  };
+
   const load = async () => {
+    // Run cleanup first so the next two queries only return live rows.
+    await cleanupStale();
+    // Defensive client-side cutoff using the hard threshold — even if
+    // cleanup failed, we never show a session "active" beyond
+    // STALE_FORCE_MIN.
+    const cutoffMs = Date.now() - STALE_FORCE_MIN * 60 * 1000;
     // Open work_blocks property-wide. Pull cleaner + property +
     // unit/party labels in one shot via embeds so we don't fan out
     // queries per block.
@@ -13113,22 +13181,26 @@ function WhosWherePanel({ employee }) {
     const blockedShiftIds = new Set((blocks || []).map(b => b.shift?.id).filter(Boolean));
     const standby = (shifts || []).filter(s => !blockedShiftIds.has(s.id));
     setRows([
-      ...(blocks || []).map(b => ({
-        kind: 'block',
-        id: b.id,
-        cleanerName: b.shift?.employee?.name || '?',
-        propertyName: b.shift?.customer?.name || '',
-        unitLabel: b.unit?.label,
-        partyLabel: b.party?.label,
-        startTime: b.start_time,
-      })),
-      ...standby.map(s => ({
-        kind: 'standby',
-        id: s.id,
-        cleanerName: s.employee?.name || '?',
-        propertyName: s.customer?.name || '',
-        startTime: s.start_time,
-      })),
+      ...(blocks || [])
+        .filter(b => new Date(b.start_time).getTime() > cutoffMs)
+        .map(b => ({
+          kind: 'block',
+          id: b.id,
+          cleanerName: b.shift?.employee?.name || '?',
+          propertyName: b.shift?.customer?.name || '',
+          unitLabel: b.unit?.label,
+          partyLabel: b.party?.label,
+          startTime: b.start_time,
+        })),
+      ...standby
+        .filter(s => new Date(s.start_time).getTime() > cutoffMs)
+        .map(s => ({
+          kind: 'standby',
+          id: s.id,
+          cleanerName: s.employee?.name || '?',
+          propertyName: s.customer?.name || '',
+          startTime: s.start_time,
+        })),
     ]);
     setLoaded(true);
   };

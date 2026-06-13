@@ -2794,6 +2794,162 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     setBusy(false);
   };
 
+  // ===== Multi-cleaner workblock helpers =====
+  // joinBlock — cleaner taps "Join" on another cleaner's active
+  // workblock (from Suggested tab or Who's-here popup). Creates a
+  // work_block_participants row for THIS cleaner under their shift,
+  // then opens the BlockView with that block as activeBlock. The
+  // helper cleaner now shares the block: same items, same task list,
+  // photos attributed to whoever takes them.
+  //
+  // Cap: 4 participants per block. Includes the original starter.
+  const PARTICIPANT_CAP = 4;
+  const joinBlock = async (targetBlock) => {
+    if (!targetBlock?.id) return;
+    if (!shift?.id) { alert('Clock in first to join a workblock.'); return; }
+    if (activeBlock?.id === targetBlock.id) {
+      // Already in this block — just snap the tab back to Home
+      setCleanerTab('home');
+      return;
+    }
+    setBusy(true);
+    try {
+      // Count current participants (joined and not yet left)
+      const { data: current } = await supabase.from('work_block_participants')
+        .select('id, employee_id')
+        .eq('work_block_id', targetBlock.id)
+        .is('left_at', null);
+      const alreadyHere = (current || []).some(p => p.employee_id === employee.id);
+      if (!alreadyHere && (current || []).length >= PARTICIPANT_CAP) {
+        setBusy(false);
+        alert(`This workblock is full (${PARTICIPANT_CAP} cleaners max).`);
+        return;
+      }
+      // Create participant row (or no-op if cleaner already has one)
+      if (!alreadyHere) {
+        const { error: e1 } = await supabase.from('work_block_participants').insert({
+          work_block_id: targetBlock.id,
+          employee_id: employee.id,
+          shift_id: shift.id,
+          joined_at: new Date().toISOString(),
+        });
+        if (e1 && !e1.message?.includes('duplicate key')) {
+          setBusy(false);
+          alert('Could not join: ' + e1.message);
+          return;
+        }
+      }
+      // Pull full block details + tasks (shared task list with the
+      // original starter — anyone in the block can add tasks)
+      const { data: refreshed } = await supabase.from('work_blocks')
+        .select('*, unit:units(*), party:parties(*), tasks(*, photos(*))')
+        .eq('id', targetBlock.id).single();
+      if (refreshed) {
+        setActiveBlock(refreshed);
+        setTasks(refreshed.tasks || []);
+        setCleanerTab('home');
+      }
+    } catch (e) {
+      alert('Could not join: ' + (e.message || e));
+    }
+    setBusy(false);
+  };
+
+  // leaveBlock — current cleaner steps out of the active block but
+  // doesn't end it for others. Sets their participant row's left_at.
+  // If they're the last remaining participant, we prompt and auto-
+  // finish the block (per spec: last to leave finishes).
+  const leaveBlock = async () => {
+    if (!activeBlock || !employee?.id) return;
+    setBusy(true);
+    try {
+      // Mark this cleaner's participant row as left
+      const nowISO = new Date().toISOString();
+      await supabase.from('work_block_participants')
+        .update({ left_at: nowISO })
+        .eq('work_block_id', activeBlock.id)
+        .eq('employee_id', employee.id)
+        .is('left_at', null);
+      // Count remaining participants
+      const { data: remaining } = await supabase.from('work_block_participants')
+        .select('id')
+        .eq('work_block_id', activeBlock.id)
+        .is('left_at', null);
+      const count = (remaining || []).length;
+      if (count === 0) {
+        // Last to leave — finish the block. Warn if items still pending.
+        const { data: openTargets } = await supabase.from('assignment_targets')
+          .select('id')
+          .eq('unit_id', activeBlock.unit_id)
+          .eq('party_id', activeBlock.party_id)
+          .in('status', ['pending', 'in_progress', 'paused']);
+        const stillOpen = (openTargets || []).length;
+        const msg = stillOpen > 0
+          ? tt(`You're the last one in this bedroom. ${stillOpen} item${stillOpen === 1 ? ' is' : 's are'} still not done. Finish the workblock anyway?`)
+          : tt('All items done at this bedroom. Finish the workblock?');
+        if (!confirm(msg)) {
+          // Cleaner backed out — restore them as a participant
+          await supabase.from('work_block_participants')
+            .update({ left_at: null })
+            .eq('work_block_id', activeBlock.id)
+            .eq('employee_id', employee.id);
+          setBusy(false);
+          return;
+        }
+        // Stop active task + close the block
+        if (activeTask) await stopTask(activeTask, false);
+        await supabase.from('work_blocks').update({ end_time: nowISO }).eq('id', activeBlock.id);
+        setWorkBlocks(prev => prev.map(b => b.id === activeBlock.id ? { ...b, end_time: nowISO } : b));
+      }
+      // Either way, drop out of the active block locally
+      setActiveBlock(null); setTasks([]); setActiveTask(null);
+    } catch (e) {
+      alert('Could not leave: ' + (e.message || e));
+    }
+    setBusy(false);
+  };
+
+  // deletePhoto — soft-delete (cleaner can remove a bad / accidental
+  // photo). Only the cleaner who took it OR an owner/manager can
+  // delete; enforced both client + server side. We use deleted_at /
+  // deleted_by columns instead of hard-deleting so we keep evidence
+  // if needed later.
+  const deletePhoto = async (photoId, taskId) => {
+    if (!photoId) return;
+    const photo = (tasks || []).flatMap(t => t.photos || []).find(p => p.id === photoId);
+    if (!photo) return;
+    const canDeleteAny = employee?.role === 'owner' || employee?.role === 'manager';
+    const isMine = photo.taken_by === employee?.id;
+    if (!canDeleteAny && !isMine) {
+      alert(tt("You can only delete photos you took."));
+      return;
+    }
+    if (!confirm(tt('Delete this photo? This cannot be reversed.'))) return;
+    const { error } = await supabase.from('photos')
+      .update({ deleted_at: new Date().toISOString(), deleted_by: employee.id })
+      .eq('id', photoId);
+    if (error) { alert('Could not delete: ' + error.message); return; }
+    // Drop from local state so the photo disappears immediately
+    setTasks(prev => prev.map(t => t.id === taskId
+      ? { ...t, photos: (t.photos || []).filter(p => p.id !== photoId) }
+      : t));
+  };
+
+  // Translation helper used by handler prompts above. Resolves to a
+  // Spanish string when the cleaner's locale === 'es' and a known
+  // mapping exists; otherwise returns the original English. The full
+  // translation system + dictionary is built in the next phase (E2);
+  // this lightweight helper keeps the multi-cleaner prompts ready
+  // for that wiring without blocking shipping E1.
+  function tt(s) {
+    try {
+      const loc = (typeof window !== 'undefined' && window.__tidytrack_locale) || 'en';
+      if (loc !== 'es') return s;
+      const dict = (typeof window !== 'undefined' && window.__tidytrack_es) || {};
+      return dict[s] || s;
+    } catch { return s; }
+  }
+
   const finishBlock = async () => {
     if (!confirm(`Done in ${activeBlock.party?.label} at ${activeBlock.unit?.label}? You'll go back to the assignments.`)) return;
     setBusy(true);
@@ -3358,7 +3514,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     if (upErr) { alert('Upload failed: ' + upErr.message); return; }
     const { data: { publicUrl } } = supabase.storage.from(PHOTO_BUCKET).getPublicUrl(path);
     const { data: photo, error: pErr } = await supabase.from('photos')
-      .insert({ task_id: taskId, kind, storage_path: path, public_url: publicUrl, is_preview: previewMode }).select().single();
+      .insert({ task_id: taskId, kind, storage_path: path, public_url: publicUrl, is_preview: previewMode, taken_by: employee?.id || null }).select().single();
     if (pErr) { alert('Could not save photo: ' + pErr.message); return; }
     setTasks(prev => prev.map(t => t.id === taskId ? { ...t, photos: [...(t.photos || []), photo] } : t));
     // Return the new row so callers (PhotoModal) can attach a note to it
@@ -3551,6 +3707,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       onOpenMessages={() => setShowMessages(true)}
       onOpenChangePin={() => setShowChangePin(true)}
       onOpenBedroomHistory={setBedroomHistory}
+      onJoinBlock={joinBlock}
       cleanerTab={cleanerTab} setCleanerTab={setCleanerTab}
       busy={busy} />);
   }
@@ -3572,6 +3729,8 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       onOpenBedroomHistory={setBedroomHistory}
       onMoveBlock={moveActiveBlockTo}
       onMoveMultiple={moveMultipleWorkBlocksTo}
+      onLeaveBlock={leaveBlock}
+      onDeletePhoto={deletePhoto}
       cleanerTab={cleanerTab} setCleanerTab={setCleanerTab}
       previewMode={previewMode}
       busy={busy} />);
@@ -3589,6 +3748,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     photoModal={photoModal} onClosePhotoModal={() => setPhotoModal(null)}
     onUploadPhoto={uploadPhoto}
     onSavePhotoNote={savePhotoNote}
+    onDeletePhoto={deletePhoto}
     onOpenMessages={() => setShowMessages(true)}
     onOpenChangePin={() => setShowChangePin(true)} busy={busy} />);
 }
@@ -3601,7 +3761,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
 // with their bedroom + timer. Acts like the "Quick glance" pattern
 // elsewhere (a peek, not a full screen). Refreshes every 30s while
 // open so the cleaner doesn't see stale info.
-function WhosHerePopup({ propertyId, myEmployeeId, propertyName, onClose }) {
+function WhosHerePopup({ propertyId, myEmployeeId, propertyName, onClose, onJoinBlock }) {
   const [rows, setRows] = useState([]);
   const [loaded, setLoaded] = useState(false);
   useTick(true); // tick so timers update
@@ -3707,6 +3867,12 @@ function WhosHerePopup({ propertyId, myEmployeeId, propertyName, onClose }) {
                           <div className="text-[11px] font-mono text-stone-500 flex-shrink-0">
                             {fmtTimeShort(elapsed)}
                           </div>
+                          {onJoinBlock && (
+                            <button onClick={() => { onJoinBlock({ id: r.id }); onClose(); }}
+                              className="text-[10px] uppercase tracking-wider font-mono px-2 py-1 rounded-full bg-stone-900 hover:bg-stone-800 text-stone-50 font-bold flex items-center gap-1 active:scale-95 flex-shrink-0">
+                              <Plus size={10} /> Join
+                            </button>
+                          )}
                         </div>
                       );
                     })}
@@ -3856,7 +4022,7 @@ function OthersActivityToday({ propertyId, myEmployeeId, onOpenBedroomHistory })
   );
 }
 
-function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onClockOut, onSwitchProperty, onStartNew, onReopen, onEndBlock, onGoToBedroom, onOpenMessages, onOpenChangePin, onOpenBedroomHistory, cleanerTab: cleanerTabProp, setCleanerTab: setCleanerTabProp, busy }) {
+function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onClockOut, onSwitchProperty, onStartNew, onReopen, onEndBlock, onGoToBedroom, onOpenMessages, onOpenChangePin, onOpenBedroomHistory, onJoinBlock, cleanerTab: cleanerTabProp, setCleanerTab: setCleanerTabProp, busy }) {
   const [showMenu, setShowMenu] = useState(false);
   const [showAssignmentForm, setShowAssignmentForm] = useState(false);
   // Bottom nav tab — Home / Assignments / More. Parent (AuthedShift)
@@ -3938,6 +4104,7 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
           propertyId={shift.customer_id}
           propertyName={shift.customer?.name || 'this property'}
           myEmployeeId={employee?.id}
+          onJoinBlock={onJoinBlock}
           onClose={() => setWhosHereOpen(false)} />
       )}
       {/* Global progress bar — visible during the whole cleaner session.
@@ -4080,7 +4247,7 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
       {/* === ASSIGNMENTS TAB === */}
       {cleanerTab === 'assignments' && (
         <>
-          <AssignmentsPanel propertyId={shift.customer_id} employee={employee} onGoToBedroom={onGoToBedroom} onOpenBedroomHistory={onOpenBedroomHistory} />
+          <AssignmentsPanel propertyId={shift.customer_id} employee={employee} onGoToBedroom={onGoToBedroom} onOpenBedroomHistory={onOpenBedroomHistory} onJoinBlock={onJoinBlock} />
           {can(employee, 'upload_assignments') && (
             <div className="px-4 pt-3">
               <button onClick={() => setShowAssignmentForm(true)} disabled={busy}
@@ -4673,10 +4840,33 @@ function UndoMoveMenu({ disabled, canUndo, canMove, onUndo, onMoveBedroom, onMov
 function BlockView({ shift, block, tasks, activeTask, employeeName, employee, onSignOut, onFinish, onPause, onUndo,
   newTaskName, setNewTaskName, onStartTask, onStartTasksFromPicker, onStartChecklistItems, onReleaseTargets, onStopTask, onResumeTask, onAddPhoto,
   photoModal, onClosePhotoModal, onUploadPhoto, onSavePhotoNote, onOpenMessages, onOpenBedroomHistory,
-  onMoveBlock, onMoveMultiple, cleanerTab, setCleanerTab, previewMode, busy }) {
+  onMoveBlock, onMoveMultiple, onLeaveBlock, onDeletePhoto, cleanerTab, setCleanerTab, previewMode, busy }) {
   useTick(true);
   const blockElapsed = Date.now() - new Date(block.start_time).getTime();
   const activeTaskObj = tasks.find(t => t.id === activeTask);
+  // Multi-cleaner participants in this block. Loaded on mount and
+  // refreshed every 30s so the header chips track joins/leaves.
+  // Excludes the current cleaner (they know they're here).
+  const [participants, setParticipants] = useState([]);
+  useEffect(() => {
+    if (!block?.id) return;
+    let cancelled = false;
+    const load = async () => {
+      const { data } = await supabase.from('work_block_participants')
+        .select('id, employee_id, joined_at, left_at, employee:employees(id, name)')
+        .eq('work_block_id', block.id)
+        .is('left_at', null);
+      if (!cancelled) setParticipants(data || []);
+    };
+    load();
+    const iv = setInterval(load, 30000);
+    return () => { cancelled = true; clearInterval(iv); };
+  }, [block?.id]);
+  // Other cleaners currently in this block (not me)
+  const others = participants.filter(p => p.employee_id !== employee?.id);
+  // Total active participants (me + others) — drives the conditional
+  // "Leave block" vs "I finished in this bedroom" label.
+  const totalActive = participants.length;
   // Task input mode toggle: structured picker (default) vs freeform typing
   const [taskInputMode, setTaskInputMode] = useState('picker'); // 'picker' | 'custom'
   // "Move bedroom" modal — shown to owners/managers and in preview
@@ -4760,16 +4950,40 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-50 text-xs font-medium">
             <Home size={12} /> Property home
           </button>
-          <button onClick={onFinish} disabled={busy}
-            className="px-4 py-2 rounded-full bg-amber-700 text-stone-50 text-sm font-medium flex items-center gap-2 active:scale-95 transition-transform disabled:opacity-50">
-            <Check size={14} /> I finished in this bedroom
-          </button>
+          {totalActive > 1 && onLeaveBlock ? (
+            // Multi-cleaner mode: leave the block but keep it alive.
+            // When the last person leaves, the leaveBlock handler
+            // prompts + auto-finishes.
+            <button onClick={onLeaveBlock} disabled={busy}
+              className="px-4 py-2 rounded-full bg-stone-700 text-stone-50 text-sm font-medium flex items-center gap-2 active:scale-95 transition-transform disabled:opacity-50">
+              <LogOut size={14} /> Leave block
+            </button>
+          ) : (
+            <button onClick={onFinish} disabled={busy}
+              className="px-4 py-2 rounded-full bg-amber-700 text-stone-50 text-sm font-medium flex items-center gap-2 active:scale-95 transition-transform disabled:opacity-50">
+              <Check size={14} /> I finished in this bedroom
+            </button>
+          )}
         </div>
         <div className="text-xs uppercase tracking-widest text-stone-400 font-mono">Working on</div>
         <div className="font-serif text-2xl text-stone-50 leading-tight">
           {block.unit?.label} · <span className="italic text-amber-400">{block.party?.label}</span>
         </div>
         {block.party?.full_name && <div className="text-xs text-stone-400 mt-0.5">{block.party.full_name}</div>}
+        {/* Active participants — chips with the OTHER cleaners helping
+           in this block. The current cleaner is implicit. When solo,
+           nothing renders. */}
+        {others.length > 0 && (
+          <div className="mt-2 flex items-center gap-1.5 flex-wrap">
+            <span className="text-[10px] uppercase tracking-wider font-mono text-stone-400">With you:</span>
+            {others.map(p => (
+              <span key={p.id} className="inline-flex items-center gap-1 text-[11px] font-mono px-2 py-0.5 rounded-full bg-stone-800 text-stone-100 border border-stone-700">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+                {p.employee?.name || '?'}
+              </span>
+            ))}
+          </div>
+        )}
         {/* Consolidated "Something's wrong" menu — single button opens a
            dropdown with three escape hatches:
              1) Started by mistake   → undo the workblock entirely
@@ -4914,7 +5128,9 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
       {photoModal && (
         <PhotoModal kind={photoModal.kind}
           taskName={tasks.find(t => t.id === photoModal.taskId)?.name}
-          existing={(tasks.find(t => t.id === photoModal.taskId)?.photos || []).filter(p => p.kind === photoModal.kind)}
+          existing={(tasks.find(t => t.id === photoModal.taskId)?.photos || []).filter(p => p.kind === photoModal.kind && !p.deleted_at)}
+          employee={employee}
+          onDeletePhoto={onDeletePhoto ? (photoId) => onDeletePhoto(photoId, photoModal.taskId) : null}
           onUpload={(file) => onUploadPhoto(photoModal.taskId, photoModal.kind, file)}
           onSaveNote={onSavePhotoNote}
           onClose={onClosePhotoModal} />
@@ -5194,7 +5410,7 @@ function MoveBlockModalInline({ block, propertyId, shiftId, currentEmployeeId, m
 // =================================================================
 function SimpleShiftView({ shift, tasks, activeTask, employeeName, employee, onSignOut, onClockOut, onSwitchProperty, onAttachProperty,
   newTaskName, setNewTaskName, onStartTask, onStartTasksFromPicker, onStartChecklistItems, onReleaseTargets, onStopTask, onResumeTask, onAddPhoto,
-  photoModal, onClosePhotoModal, onUploadPhoto, onSavePhotoNote, onOpenMessages, onOpenChangePin, busy }) {
+  photoModal, onClosePhotoModal, onUploadPhoto, onSavePhotoNote, onDeletePhoto, onOpenMessages, onOpenChangePin, busy }) {
   const [showMenu, setShowMenu] = useState(false);
   const [taskInputMode, setTaskInputMode] = useState('picker'); // 'picker' | 'custom'
   useTick(true);
@@ -5332,7 +5548,9 @@ function SimpleShiftView({ shift, tasks, activeTask, employeeName, employee, onS
       {photoModal && (
         <PhotoModal kind={photoModal.kind}
           taskName={tasks.find(t => t.id === photoModal.taskId)?.name}
-          existing={(tasks.find(t => t.id === photoModal.taskId)?.photos || []).filter(p => p.kind === photoModal.kind)}
+          existing={(tasks.find(t => t.id === photoModal.taskId)?.photos || []).filter(p => p.kind === photoModal.kind && !p.deleted_at)}
+          employee={employee}
+          onDeletePhoto={onDeletePhoto ? (photoId) => onDeletePhoto(photoId, photoModal.taskId) : null}
           onUpload={(file) => onUploadPhoto(photoModal.taskId, photoModal.kind, file)}
           onSaveNote={onSavePhotoNote}
           onClose={onClosePhotoModal} />
@@ -6133,7 +6351,7 @@ function TaskCard({ task, isActive, onStop, onResume, onAddPhoto }) {
   );
 }
 
-function PhotoModal({ kind, taskName, existing, onUpload, onSaveNote, onClose }) {
+function PhotoModal({ kind, taskName, existing, onUpload, onSaveNote, onClose, employee, onDeletePhoto }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   // Track the most recently uploaded photo so we can attach an
@@ -6208,14 +6426,40 @@ function PhotoModal({ kind, taskName, existing, onUpload, onSaveNote, onClose })
         <div className="flex-1 overflow-y-auto p-5">
           {existingPhotos.length > 0 && (
             <div className="grid grid-cols-2 gap-2 mb-4">
-              {existingPhotos.map(p => (
-                <button key={p.id} type="button"
-                  onClick={() => setZoomPhoto(p)}
-                  className="block aspect-square rounded-xl overflow-hidden active:opacity-80 transition-opacity">
-                  <img src={p.public_url} alt="" loading="lazy"
-                    className="w-full h-full object-cover" />
-                </button>
-              ))}
+              {existingPhotos.map(p => {
+                const canDelete = !!onDeletePhoto && (
+                  employee?.role === 'owner' || employee?.role === 'manager' ||
+                  p.taken_by === employee?.id
+                );
+                return (
+                  <div key={p.id} className="relative">
+                    <button type="button"
+                      onClick={() => setZoomPhoto(p)}
+                      className="block aspect-square w-full rounded-xl overflow-hidden active:opacity-80 transition-opacity">
+                      <img src={p.public_url} alt="" loading="lazy"
+                        className="w-full h-full object-cover" />
+                    </button>
+                    {/* Attribution + delete overlay row. Sits at the
+                       bottom of the thumbnail. Trash only renders when
+                       the current cleaner is allowed to delete this
+                       photo (owner/manager OR the cleaner who took it). */}
+                    {(p.taken_by || canDelete) && (
+                      <div className="absolute bottom-0 left-0 right-0 px-2 py-1.5 bg-gradient-to-t from-stone-900/80 to-transparent rounded-b-xl flex items-end justify-between gap-2">
+                        <div className="text-[10px] font-mono text-stone-100 truncate">
+                          {p.taken_by === employee?.id ? 'by you' : (p.taken_by ? 'shared' : '')}
+                        </div>
+                        {canDelete && (
+                          <button type="button"
+                            onClick={(e) => { e.stopPropagation(); onDeletePhoto(p.id); }}
+                            className="p-1 rounded-full bg-stone-900/70 hover:bg-red-700 text-stone-100 hover:text-white">
+                            <Trash2 size={12} />
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           )}
           {error && (
@@ -20054,7 +20298,7 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
 
 // AssignmentsPanel — full tabbed view for the property hub.
 // Tabs: Pending | Paused | In Progress | Done
-function AssignmentsPanel({ propertyId, employee, refreshKey, onGoToBedroom, onOpenBedroomHistory }) {
+function AssignmentsPanel({ propertyId, employee, refreshKey, onGoToBedroom, onOpenBedroomHistory, onJoinBlock }) {
   const [tab, setTab] = useState('pending');
   const [counts, setCounts] = useState({ pending: 0, paused: 0, in_progress: 0, done: 0, blocked: 0, mine: 0 });
 
@@ -20153,7 +20397,8 @@ function AssignmentsPanel({ propertyId, employee, refreshKey, onGoToBedroom, onO
         // cleaner's last work block, same algorithm as the post-finish
         // NextUpModal but always available.
         <SuggestedTabContent propertyId={propertyId} employee={employee}
-          onGoToBedroom={onGoToBedroom} onOpenBedroomHistory={onOpenBedroomHistory} />
+          onGoToBedroom={onGoToBedroom} onOpenBedroomHistory={onOpenBedroomHistory}
+          onJoinBlock={onJoinBlock} />
       ) : (
         <AssignmentTabContent propertyId={propertyId} employee={employee} statusFilter={tab}
           onUpdate={loadCounts} onGoToBedroom={onGoToBedroom} onOpenBedroomHistory={onOpenBedroomHistory} />
@@ -20167,7 +20412,7 @@ function AssignmentsPanel({ propertyId, employee, refreshKey, onGoToBedroom, onO
 // and ranks suggestions: same apartment → same floor → same building →
 // other building starting on floor 3. If no anchor exists, defaults to
 // floor-3 first across the property.
-function SuggestedTabContent({ propertyId, employee, onGoToBedroom, onOpenBedroomHistory }) {
+function SuggestedTabContent({ propertyId, employee, onGoToBedroom, onOpenBedroomHistory, onJoinBlock }) {
   const [loaded, setLoaded] = useState(false);
   const [anchor, setAnchor] = useState(null);
   const [groups, setGroups] = useState({ sameApt: [], sameFloor: [], sameBuilding: [], otherBuilding: [] });
@@ -20262,7 +20507,7 @@ function SuggestedTabContent({ propertyId, employee, onGoToBedroom, onOpenBedroo
       openBlocks.forEach(b => {
         if (!b.party_id) return;
         if (!whosHereByParty.has(b.party_id)) whosHereByParty.set(b.party_id, []);
-        whosHereByParty.get(b.party_id).push({ name: b.shift.employee.name });
+        whosHereByParty.get(b.party_id).push({ name: b.shift.employee.name, workBlockId: b.id });
       });
 
       const unitMap = new Map(units.map(u => [u.id, u]));
@@ -20453,15 +20698,25 @@ function SuggestedTabContent({ propertyId, employee, onGoToBedroom, onOpenBedroo
         </div>
 
         {/* "Who's here" chip — shown when another cleaner has an open block
-           at this bedroom. Compact pill row above the title/breakdown. */}
+           at this bedroom. Compact pill row above the title/breakdown.
+           Each name gets a Join button so the helper can jump straight
+           into that workblock as a participant. */}
         {c.whosHere && c.whosHere.length > 0 && (
           <div className="mb-2 flex items-center gap-1.5 flex-wrap">
             <span className="text-[10px] uppercase tracking-wider font-mono text-amber-900 font-bold">
               ●
             </span>
             {c.whosHere.map((w, i) => (
-              <span key={i} className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-amber-100 text-amber-900 border border-amber-300 font-bold">
-                {w.name} is here
+              <span key={i} className="inline-flex items-center gap-1">
+                <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-amber-100 text-amber-900 border border-amber-300 font-bold">
+                  {w.name} is here
+                </span>
+                {onJoinBlock && w.workBlockId && (
+                  <button onClick={(e) => { e.stopPropagation(); onJoinBlock({ id: w.workBlockId }); }}
+                    className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-900 hover:bg-stone-800 text-stone-50 font-bold inline-flex items-center gap-1 active:scale-95">
+                    <Plus size={9} /> Join
+                  </button>
+                )}
               </span>
             ))}
           </div>

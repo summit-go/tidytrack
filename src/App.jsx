@@ -21704,7 +21704,7 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
             </button>
           );
         })()}
-        {isDone && (
+        {(isDone || t.status === 'blocked') && (
           <button onClick={onReopen} disabled={busy}
             className="h-9 px-3 rounded-lg border border-stone-300 hover:bg-stone-50 text-stone-700 text-xs font-medium flex items-center gap-1 disabled:opacity-50">
             <Play size={12} /> Reopen
@@ -21812,6 +21812,9 @@ function AssignmentsPanel({ propertyId, employee, refreshKey, onGoToBedroom, onO
         <button onClick={() => setTab('done')}
           className={`flex-1 min-w-fit py-2 px-2 rounded-lg text-xs font-medium transition-colors whitespace-nowrap ${tab === 'done' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
           Done{counts.done > 0 && ` (${counts.done})`}
+          {counts.blocked > 0 && (
+            <span className="ml-1 text-[10px] font-mono text-red-700">· {counts.blocked}⊘</span>
+          )}
         </button>
         {/* Mine tab — items the current cleaner personally completed today.
            Hidden if the cleaner has no completions yet so the row stays
@@ -22369,10 +22372,20 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
     // the PM marked passed on tenant recheck end up status=done with
     // recheck_passed_at populated).
     const effectiveStatus = (statusFilter === 'mine' || statusFilter === 'recheck_passed') ? 'done' : statusFilter;
-    const { data, error } = await supabase
+    // Done tab includes BOTH status='done' and status='blocked' so blocked
+    // items don't vanish from the cleaner's view. From the cleaner's
+    // perspective they're "done with it" — they hit a wall and moved on.
+    // Owner needs to see the reason to decide whether to reopen or accept.
+    const isDoneTab = statusFilter === 'done' || statusFilter === 'mine' || statusFilter === 'recheck_passed';
+    let q = supabase
       .from('assignment_targets')
-      .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, extracted_text, spanish_translation, translation_status, assignment_type, scheduled_date, sheet_type, template_set_id, bathroom_variant, general_variant, created_at), unit:units(id, label), party:parties(id, label), starter:employees!started_by(id, name), completer:employees!completed_by(id, name), assignedTo:employees!assigned_to(id, name)')
-      .eq('status', effectiveStatus);
+      .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, extracted_text, spanish_translation, translation_status, assignment_type, scheduled_date, sheet_type, template_set_id, bathroom_variant, general_variant, created_at), unit:units(id, label), party:parties(id, label), starter:employees!started_by(id, name), completer:employees!completed_by(id, name), assignedTo:employees!assigned_to(id, name)');
+    if (isDoneTab) {
+      q = q.in('status', ['done', 'blocked']);
+    } else {
+      q = q.eq('status', effectiveStatus);
+    }
+    const { data, error } = await q;
     if (error) {
       console.error('[Assignments] load error:', error);
       setLoadError(error.message);
@@ -24309,6 +24322,10 @@ function ChecklistAssignmentView({ assignment, employee, onClose, onOpenSheet, q
       if (t.status === 'blocked') return { color: 'bg-red-500', label: 'blocked' };
       return { color: 'bg-stone-300', label: 'pending' };
     };
+    // Owner / manager can take action straight from the quick glance.
+    // Cleaners just read. The setStatus handler is the same one the
+    // checklist already uses for per-item status changes.
+    const canActOnItems = employee?.role === 'owner' || employee?.role === 'manager';
     const sections = { bedroom: [], vanity: [], bathroom: [], general: [], other: [] };
     targets.forEach(t => {
       const sec = (t.template_section || 'other').toLowerCase();
@@ -24322,20 +24339,66 @@ function ChecklistAssignmentView({ assignment, employee, onClose, onOpenSheet, q
           const items = sections[secKey];
           if (!items || items.length === 0) return null;
           const doneCount = items.filter(i => i.status === 'done').length;
+          const blockedCount = items.filter(i => i.status === 'blocked').length;
           return (
             <div key={secKey} className="rounded-2xl bg-white border border-stone-200 p-3">
               <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-2">
-                {labels[secKey]} <span className="text-stone-400">({doneCount}/{items.length} done)</span>
+                {labels[secKey]} <span className="text-stone-400">({doneCount}/{items.length} done</span>
+                {blockedCount > 0 && (
+                  <span className="text-red-700"> · {blockedCount} blocked</span>
+                )}
+                <span className="text-stone-400">)</span>
               </div>
-              <div className="space-y-1">
+              <div className="space-y-1.5">
                 {items.map(t => {
                   const d = dotFor(t);
+                  const isBlocked = t.status === 'blocked';
+                  const isDone = t.status === 'done';
+                  // Blocked items get a red highlight strip on the left
+                  // and the cleaner's reason shown inline so the owner
+                  // doesn't have to navigate elsewhere to see "why".
                   return (
-                    <div key={t.id} className="flex items-center gap-2 text-sm">
-                      <span className={`w-2 h-2 rounded-full ${d.color} flex-shrink-0`} title={d.label} />
-                      <span className={t.status === 'done' ? 'text-stone-500 line-through' : 'text-stone-900'}>
-                        {labelForT(t)}
-                      </span>
+                    <div key={t.id} className={`text-sm rounded-lg ${isBlocked ? 'bg-red-50 border border-red-200 p-2' : ''}`}>
+                      <div className="flex items-center gap-2">
+                        <span className={`w-2 h-2 rounded-full ${d.color} flex-shrink-0`} title={d.label} />
+                        <span className={`flex-1 min-w-0 ${isDone ? 'text-stone-500 line-through' : 'text-stone-900'}`}>
+                          {labelForT(t)}
+                        </span>
+                        {isBlocked && (
+                          <span className="text-[9px] uppercase tracking-widest font-mono px-1.5 py-0.5 rounded-full bg-red-200 text-red-800 flex-shrink-0">
+                            Blocked
+                          </span>
+                        )}
+                      </div>
+                      {/* Show the cleaner's reason when blocked. Italic + indented
+                         so it reads as commentary on the row above. */}
+                      {isBlocked && t.status_notes && (
+                        <div className="text-xs text-red-700 italic mt-1 pl-4">
+                          "{t.status_notes}"
+                        </div>
+                      )}
+                      {/* Owner / manager-only inline actions. Reopen routes
+                         the target back to pending; Mark done forces it to
+                         done (e.g. owner accepts a blocked item as actually
+                         resolved or wants to override a stuck pending). */}
+                      {canActOnItems && (isBlocked || isDone || t.status === 'paused' || t.status === 'in_progress') && (
+                        <div className="flex items-center gap-1.5 mt-1.5 pl-4">
+                          {(isBlocked || isDone || t.status === 'paused') && (
+                            <button onClick={() => setStatus(t, 'pending')}
+                              disabled={busyId === t.id}
+                              className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-100 hover:bg-stone-200 text-stone-700 flex items-center gap-1 disabled:opacity-50">
+                              <Play size={10} /> Reopen
+                            </button>
+                          )}
+                          {!isDone && (
+                            <button onClick={() => setStatus(t, 'done')}
+                              disabled={busyId === t.id}
+                              className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-emerald-100 hover:bg-emerald-200 text-emerald-800 flex items-center gap-1 disabled:opacity-50">
+                              <Check size={10} /> Mark done
+                            </button>
+                          )}
+                        </div>
+                      )}
                     </div>
                   );
                 })}

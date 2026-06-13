@@ -3438,6 +3438,39 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     if (activeTask) await stopTask(activeTask, false);
     const ts = new Date().toISOString();
     await supabase.from('work_blocks').update({ end_time: ts }).eq('id', activeBlock.id);
+    // Auto-complete bedroom-level audit: anything in_progress at this
+    // (unit, party) gets flipped to done with completed_by = current
+    // cleaner. This is the closing half of the advancePendingTargets
+    // invariant — startTask put them in_progress, finishBlock marks
+    // them done. Solves the "took pictures, marked complete, but the
+    // assignment stays in pending" cleaner-side confusion.
+    //
+    // Limited to active assignments at this customer. PM-sourced
+    // assignments must be approved before they count.
+    try {
+      const { data: inProg } = await supabase
+        .from('assignment_targets')
+        .select('id, assignment:assignments!inner(customer_id, active, source, pm_status)')
+        .eq('unit_id', activeBlock.unit_id)
+        .eq('party_id', activeBlock.party_id)
+        .eq('status', 'in_progress');
+      const ids = (inProg || [])
+        .filter(t =>
+          t.assignment?.customer_id === shift?.customer_id &&
+          t.assignment?.active &&
+          (t.assignment?.source !== 'pm' || t.assignment?.pm_status === 'approved')
+        )
+        .map(t => t.id);
+      if (ids.length > 0) {
+        await supabase.from('assignment_targets').update({
+          status: 'done',
+          completed_at: ts,
+          completed_by: employee?.id || null,
+        }).in('id', ids);
+      }
+    } catch (e) {
+      console.warn('[finishBlock auto-complete] failed', e);
+    }
     const updated = { ...activeBlock, end_time: ts, tasks };
     setWorkBlocks(prev => prev.map(b => b.id === activeBlock.id ? updated : b));
     // Capture the bedroom we just finished so the NextUpPrompt knows
@@ -3924,6 +3957,43 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   };
 
   // Tasks
+  // When a cleaner starts working at a bedroom (via the picker, the
+  // freeform task entry, or anything that creates a task in the active
+  // work block), we want pending assignment_targets at THIS bedroom to
+  // flip to in_progress. Otherwise the audit shows them stuck at
+  // pending even after photos and work are logged, which is the
+  // exact source of cleaner confusion ("I took pictures and marked
+  // complete but it still says pending"). Limited to active
+  // assignments belonging to this property so we don't accidentally
+  // touch out-of-scope rows.
+  const advancePendingTargetsAtActiveBedroom = async () => {
+    if (!activeBlock?.unit_id || !activeBlock?.party_id || !employee?.id) return;
+    try {
+      const { data: pending } = await supabase
+        .from('assignment_targets')
+        .select('id, assignment:assignments!inner(customer_id, active, source, pm_status)')
+        .eq('unit_id', activeBlock.unit_id)
+        .eq('party_id', activeBlock.party_id)
+        .eq('status', 'pending');
+      const ids = (pending || [])
+        .filter(t =>
+          t.assignment?.customer_id === shift?.customer_id &&
+          t.assignment?.active &&
+          (t.assignment?.source !== 'pm' || t.assignment?.pm_status === 'approved')
+        )
+        .map(t => t.id);
+      if (ids.length === 0) return;
+      const nowISO = new Date().toISOString();
+      await supabase.from('assignment_targets').update({
+        status: 'in_progress',
+        started_at: nowISO,
+        started_by: employee.id,
+      }).in('id', ids);
+    } catch (e) {
+      console.warn('[advancePending] failed', e);
+    }
+  };
+
   const startTask = async (overrideName = null, category = null, subcategory = null) => {
     const nameToUse = (overrideName || newTaskName || '').trim();
     if (!nameToUse) return;
@@ -3935,6 +4005,9 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     const { data, error } = await supabase.from('tasks').insert(insert).select('*, photos(*, taken_by_employee:employees!taken_by(name))').single();
     if (error) { alert('Could not start task: ' + error.message); return; }
     setTasks(prev => [...prev, data]); setActiveTask(data.id); setNewTaskName('');
+    // Bedroom-level audit sync — runs after the task insert so the
+    // task ID exists before we update targets.
+    advancePendingTargetsAtActiveBedroom();
     return data;
   };
 
@@ -3989,6 +4062,10 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       }
     }
     setNewTaskName('');
+    // Bedroom-level audit sync — same as startTask. Fires after all
+    // tasks are inserted so the cleaner's pending targets at this
+    // bedroom now reflect work in progress.
+    advancePendingTargetsAtActiveBedroom();
   };
 
   const stopTask = async (taskId, refetch = true) => {
@@ -4600,6 +4677,122 @@ function ClosedBlockMenu({ onUndo, onMove }) {
   );
 }
 
+// ApartmentProgressList — vertical list of apartments at this property
+// with outstanding work, showing "X / Y done" plus a thin progress
+// bar. Shown on the cleaner's Home tab so they get a snapshot of
+// "what's left across all apartments" without having to drill in.
+//
+// Filtering: only apartments with at least one item not-done show up.
+// Fully-done apartments fall out of the list naturally — cleaner only
+// sees what still needs work, which is the actionable view.
+//
+// Counts BEDROOMS, not items. "Apartment 101: 1 / 3 done" reads as
+// "one bedroom is fully done, two still need work", which matches how
+// cleaners think about apartment-level progress better than item
+// counts ("8 of 24 items").
+function ApartmentProgressList({ propertyId }) {
+  const [apartments, setApartments] = useState([]);
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!propertyId) return;
+      const { data } = await supabase
+        .from('assignment_targets')
+        .select(`
+          status, unit_id, party_id,
+          unit:units(id, label),
+          assignment:assignments!inner(customer_id, active, source, pm_status)
+        `);
+      if (cancelled) return;
+      const filtered = (data || []).filter(t =>
+        t.assignment?.customer_id === propertyId &&
+        t.assignment?.active &&
+        (t.assignment?.source !== 'pm' || t.assignment?.pm_status === 'approved') &&
+        t.unit_id && t.party_id
+      );
+      // Group by apartment. For each, track unique bedroom keys and
+      // separately the bedrooms where ALL items are done. A bedroom
+      // counts as "done" only if every one of its items has status='done'.
+      const byApt = new Map();
+      // First pass: build bedroom-level rollup so we can tell which
+      // bedrooms are fully done vs partial.
+      const bedrooms = new Map(); // key = unit_id::party_id → { allDone: true, unit_id, label }
+      filtered.forEach(t => {
+        const key = `${t.unit_id}::${t.party_id}`;
+        if (!bedrooms.has(key)) bedrooms.set(key, {
+          unit_id: t.unit_id,
+          unit_label: t.unit?.label || 'Apartment',
+          allDone: true,
+        });
+        if (t.status !== 'done') bedrooms.get(key).allDone = false;
+      });
+      // Second pass: aggregate per apartment.
+      bedrooms.forEach((b) => {
+        if (!byApt.has(b.unit_id)) byApt.set(b.unit_id, {
+          unit_id: b.unit_id, label: b.unit_label, total: 0, done: 0,
+        });
+        const a = byApt.get(b.unit_id);
+        a.total += 1;
+        if (b.allDone) a.done += 1;
+      });
+      // Only show apartments with at least one incomplete bedroom.
+      const out = Array.from(byApt.values())
+        .filter(a => a.done < a.total)
+        .sort((a, b) => naturalCompare(a.label, b.label));
+      setApartments(out);
+      setLoaded(true);
+    })();
+    return () => { cancelled = true; };
+  }, [propertyId]);
+
+  if (!loaded || apartments.length === 0) return null;
+
+  return (
+    <div className="px-4 pt-6">
+      <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-3">
+        Apartment progress
+      </div>
+      <div className="space-y-2">
+        {apartments.map(a => {
+          const pct = a.total > 0 ? Math.round((a.done / a.total) * 100) : 0;
+          const isComplete = pct === 100;
+          return (
+            <div key={a.unit_id}
+              className="p-3 rounded-2xl bg-white border border-stone-200">
+              <div className="flex items-center gap-3">
+                <div className={`w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0 ${
+                  isComplete ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'
+                }`}>
+                  <Building2 size={15} />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm font-medium text-stone-900 truncate">{a.label}</div>
+                  <div className="flex items-center gap-2 mt-1">
+                    <div className="text-[11px] font-mono text-stone-600 whitespace-nowrap">
+                      <span className="text-stone-900 font-bold">{a.done}</span>
+                      <span className="text-stone-400"> / </span>
+                      <span>{a.total}</span>
+                      <span className="text-stone-500"> bedrooms done</span>
+                    </div>
+                    <div className="flex-1 h-1 bg-stone-200 rounded-full overflow-hidden">
+                      <div className={`h-full transition-all ${
+                        isComplete ? 'bg-emerald-500' : pct > 0 ? 'bg-amber-500' : 'bg-red-400'
+                      }`}
+                      style={{ width: `${pct}%` }} />
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onClockOut, onSwitchProperty, onStartNew, onReopen, onEndBlock, onGoToBedroom, onOpenMessages, onOpenChangePin, onOpenBedroomHistory, onJoinBlock, onUndoBlock, onMoveBlock, cleanerTab: cleanerTabProp, setCleanerTab: setCleanerTabProp, busy }) {
   const [showMenu, setShowMenu] = useState(false);
   const [showAssignmentForm, setShowAssignmentForm] = useState(false);
@@ -4747,6 +4940,13 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
               </div>
             </div>
           </div>
+
+          {/* Apartment progress — vertical list of apartments with
+             outstanding assignments, showing "X/Y done" so cleaners
+             can see at a glance what's left where. Only apartments
+             with at least one incomplete item are shown so the list
+             stays focused on what still needs attention. */}
+          <ApartmentProgressList propertyId={shift.customer_id} />
 
           {/* Today's activity — Mine / Others toggle */}
           <div className="px-4 pt-6">
@@ -15443,6 +15643,17 @@ function AssignedVsCleanedView({ employee, onBack, onOpenBedroomHistory }) {
       // Group by (unit, party). For each: total, doneInRange, doneAnyTime, sampleTarget for quick glance.
       const groups = new Map();
       for (const t of targets) {
+        // Date-range filter: items completed BEFORE the start of the
+        // chosen range aren't relevant to "what was left to clean as
+        // of this range". Skip them so a "today" view doesn't show
+        // items completed yesterday as already-done — they were
+        // already accounted for in a previous report. Items still
+        // pending / paused / in_progress always count (regardless of
+        // when they were created) since they're still outstanding.
+        if (t.status === 'done' && t.completed_at) {
+          const completedMs = new Date(t.completed_at).getTime();
+          if (completedMs < startMs) continue;
+        }
         const uId = t.unit?.id || '_no_unit';
         const pId = t.party?.id || '_no_party';
         const key = `${uId}::${pId}`;

@@ -6,7 +6,8 @@ import {
   Briefcase, Delete, AlertCircle, UserPlus, Building2,
   Trash2, Eye, EyeOff, LayoutDashboard, FileText, DollarSign,
   Home, Layers, User, Edit2, Copy, Printer, Calendar, HelpCircle,
-  MessageCircle, Settings, Languages, Menu, Square, Share2
+  MessageCircle, MessageSquare, Settings, Languages, Menu, Square, Share2,
+  ClipboardList, Lock
 } from 'lucide-react';
 
 // =================================================================
@@ -3519,9 +3520,114 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
 // =================================================================
 // PROPERTY HUB (multi-unit, between work blocks)
 // =================================================================
+// CleanerBottomNav — fixed 3-tab nav at the bottom of cleaner views.
+// Tabs: Home / Assignments / More. The cleaner taps to switch which
+// section of the property hub is visible. Mobile-style nav: large hit
+// targets, icon + label, current tab highlighted. We keep this minimal
+// because cleaners mostly stay in one place once they've picked a
+// bedroom — the nav is for the in-between moments.
+function CleanerBottomNav({ active, onChange }) {
+  const Item = ({ id, label, Icon }) => {
+    const isActive = active === id;
+    return (
+      <button onClick={() => onChange(id)}
+        className={`flex-1 flex flex-col items-center gap-1 py-2 active:scale-95 transition-transform ${isActive ? 'text-stone-900' : 'text-stone-400'}`}
+        aria-current={isActive ? 'page' : undefined}>
+        <Icon size={20} strokeWidth={isActive ? 2.5 : 2} />
+        <span className={`text-[10px] font-mono uppercase tracking-wider ${isActive ? 'font-bold' : ''}`}>
+          {label}
+        </span>
+      </button>
+    );
+  };
+  return (
+    <div className="fixed bottom-0 left-0 right-0 z-30 bg-white border-t border-stone-200 flex"
+      style={{ paddingBottom: 'env(safe-area-inset-bottom, 0px)' }}>
+      <Item id="home"        label="Home"        Icon={Home} />
+      <Item id="assignments" label="Assignments" Icon={ClipboardList} />
+      <Item id="more"        label="More"        Icon={Menu} />
+    </div>
+  );
+}
+
+// OthersActivityToday — shows what OTHER cleaners did at this property
+// today, used on the Home tab's "Others" toggle. Pulls all work_blocks
+// at the property, scoped to today, excluding the current cleaner's own
+// blocks. Empty state when nobody else has worked here.
+function OthersActivityToday({ propertyId, myEmployeeId, onOpenBedroomHistory }) {
+  const [blocks, setBlocks] = useState([]);
+  const [loaded, setLoaded] = useState(false);
+  useEffect(() => {
+    (async () => {
+      const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
+      const { data } = await supabase.from('work_blocks')
+        .select('id, start_time, end_time, work_notes, unit:units(id, label), party:parties(id, label), shift:shifts!inner(customer_id, employee:employees(id, name)), tasks(id, photos(id))')
+        .eq('shift.customer_id', propertyId)
+        .gte('start_time', todayStart.toISOString())
+        .order('start_time', { ascending: false });
+      const mine = myEmployeeId;
+      setBlocks((data || []).filter(b => b.shift?.employee?.id !== mine));
+      setLoaded(true);
+    })();
+  }, [propertyId, myEmployeeId]);
+  if (!loaded) return <div className="text-center py-8 text-stone-400 text-sm">Loading…</div>;
+  if (blocks.length === 0) {
+    return (
+      <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
+        No other cleaners have worked here today.
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-2">
+      {blocks.map(b => {
+        const dur = (b.end_time ? new Date(b.end_time) : new Date()) - new Date(b.start_time);
+        const photoCount = (b.tasks || []).reduce((sum, t) => sum + (t.photos?.length || 0), 0);
+        const isDone = !!b.end_time;
+        const name = b.shift?.employee?.name || 'A cleaner';
+        return (
+          <div key={b.id} className={`rounded-2xl p-4 border ${isDone ? 'bg-white border-stone-200' : 'bg-blue-50 border-blue-200'}`}>
+            <div className="flex items-start gap-2">
+              <div className={`w-2 h-2 rounded-full mt-2 flex-shrink-0 ${isDone ? 'bg-stone-300' : 'bg-blue-500 animate-pulse'}`} />
+              <div className="flex-1 min-w-0">
+                <div className="text-xs font-mono uppercase tracking-wider text-blue-700 mb-0.5">
+                  {name}{isDone ? '' : ' · working now'}
+                </div>
+                <div className="font-serif text-base text-stone-900 truncate">
+                  {b.unit?.label} · {b.party?.label}
+                </div>
+                <div className="text-xs text-stone-500 font-mono mt-0.5">
+                  {fmtClock(b.start_time)}{b.end_time && ` — ${fmtClock(b.end_time)}`} · {fmtTimeShort(dur)}
+                  {photoCount > 0 && <> · {photoCount} photos</>}
+                </div>
+                {b.work_notes && <div className="text-xs text-stone-600 mt-1 italic">"{b.work_notes}"</div>}
+                {onOpenBedroomHistory && b.unit?.id && b.party?.id && (
+                  <button onClick={() => onOpenBedroomHistory({
+                      unitId: b.unit.id, unitLabel: b.unit.label,
+                      partyId: b.party.id, partyLabel: b.party.label
+                    })}
+                    className="mt-2 inline-flex items-center gap-1 px-2 py-1 rounded-full bg-stone-200 hover:bg-stone-300 text-stone-700 text-[11px] font-mono active:scale-95">
+                    <Clock size={10} /> Bedroom history
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onClockOut, onSwitchProperty, onStartNew, onReopen, onEndBlock, onGoToBedroom, onOpenMessages, onOpenChangePin, onOpenBedroomHistory, busy }) {
   const [showMenu, setShowMenu] = useState(false);
   const [showAssignmentForm, setShowAssignmentForm] = useState(false);
+  // Bottom nav tab — Home / Assignments / More. Default Home.
+  // Lifted to component state so switching tabs doesn't lose context.
+  const [cleanerTab, setCleanerTab] = useState('home');
+  // "Today's activity" toggle on Home tab — flips between MY blocks
+  // and OTHER cleaners' blocks at this property today.
+  const [activityFilter, setActivityFilter] = useState('mine'); // 'mine' | 'others'
   // Block IDs the cleaner has tapped "Pause" on. Banner is hidden for
   // these. Component-local so the banner reappears on next mount or
   // refresh — that's intentional: pausing is a soft dismiss, not a
@@ -3537,6 +3643,46 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
       onCancel={() => setShowAssignmentForm(false)}
       onSaved={() => setShowAssignmentForm(false)} />;
   }
+
+  // Persistent "open work block" pill — rendered once at the top of the
+  // body and visible across every tab so the cleaner never loses sight
+  // of an active workblock when they navigate between Home / Assignments
+  // / More. Shows Resume / Pause (soft dismiss) / End block.
+  const openBlock = workBlocks.find(b => !b.end_time && !dismissedBannerIds.has(b.id));
+  const persistentPill = openBlock ? (
+    <div className="mx-4 mt-4 p-4 rounded-2xl bg-amber-100 border-2 border-amber-500 shadow-sm">
+      <div className="flex items-center gap-3 mb-3">
+        <div className="w-10 h-10 rounded-full bg-amber-500 text-white flex items-center justify-center flex-shrink-0">
+          <Play size={18} />
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="text-[10px] uppercase tracking-wider font-mono text-amber-700">Open work block</div>
+          <div className="text-base font-serif text-amber-900 truncate">
+            {openBlock.unit?.label || ''} · {openBlock.party?.label || 'a bedroom'}
+          </div>
+          <div className="text-[11px] font-mono text-amber-700">
+            Started {fmtClock(openBlock.start_time)}
+          </div>
+        </div>
+      </div>
+      <div className="grid grid-cols-3 gap-2">
+        <button onClick={() => onReopen(openBlock)} disabled={busy}
+          className="py-2.5 rounded-xl bg-amber-700 hover:bg-amber-800 text-white text-sm font-bold flex items-center justify-center gap-1.5 active:scale-95 disabled:opacity-50">
+          <Play size={14} /> Resume
+        </button>
+        <button onClick={() => setDismissedBannerIds(prev => {
+            const next = new Set(prev); next.add(openBlock.id); return next;
+          })} disabled={busy}
+          className="py-2.5 rounded-xl bg-white border-2 border-amber-300 text-amber-900 text-sm font-bold flex items-center justify-center gap-1.5 active:scale-95 disabled:opacity-50">
+          <Pause size={14} /> Pause
+        </button>
+        <button onClick={() => onEndBlock(openBlock)} disabled={busy}
+          className="py-2.5 rounded-xl bg-stone-900 hover:bg-stone-800 text-white text-sm font-bold flex items-center justify-center gap-1.5 active:scale-95 disabled:opacity-50">
+          <Check size={14} /> End
+        </button>
+      </div>
+    </div>
+  ) : null;
 
   return (
     <div className="min-h-screen bg-stone-50 pb-24">
@@ -3565,10 +3711,6 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
               className="px-4 py-2.5 rounded-full bg-amber-700 text-stone-50 text-sm font-medium flex items-center gap-2 active:scale-95 transition-transform disabled:opacity-50">
               <LogOut size={14} /> Clock out
             </button>
-            <button onClick={() => setShowMenu(true)} disabled={busy}
-              className="px-3 py-1.5 rounded-full bg-stone-700 hover:bg-stone-600 text-stone-50 text-xs font-medium flex items-center gap-1.5 disabled:opacity-50">
-              <Menu size={12} /> More
-            </button>
           </div>
         </div>
         <div className="flex items-center gap-1.5 text-xs text-amber-400 font-mono">
@@ -3584,140 +3726,165 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
         </div>
       </div>
 
-      {/* Active work resume banner — only shows when there's an open
-         work block (no end_time) for THIS shift AND the user hasn't
-         tapped Pause on it this session. Three actions:
-           Resume      → navigate back into the block
-           Pause       → soft-dismiss the banner for this session;
-                         the block stays open in the DB
-           End block   → close the block (set end_time); confirms
-                         before doing anything destructive */}
-      {(() => {
-        const openBlock = workBlocks.find(b => !b.end_time && !dismissedBannerIds.has(b.id));
-        if (!openBlock) return null;
-        const partyLabel = openBlock.party?.label || 'a bedroom';
-        const unitLabel = openBlock.unit?.label || '';
-        return (
-          <div className="mx-4 mt-4 p-4 rounded-2xl bg-amber-100 border-2 border-amber-500 shadow-sm">
-            <div className="flex items-center gap-3 mb-3">
-              <div className="w-10 h-10 rounded-full bg-amber-500 text-white flex items-center justify-center flex-shrink-0">
-                <Play size={18} />
+      {/* Persistent workblock pill — rendered once, visible on every
+         tab. Cleaner can navigate freely between tabs without losing
+         their active workblock context. */}
+      {persistentPill}
+
+      {/* === HOME TAB === */}
+      {cleanerTab === 'home' && (
+        <>
+          {/* Today's stats card — quick summary of what the cleaner
+             has accomplished so far this shift. Always on Home. */}
+          <div className="mx-4 mt-4 p-4 rounded-2xl bg-white border border-stone-200">
+            <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2">Today so far</div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <div className="text-3xl font-mono font-light text-stone-900">{workBlocks.filter(b => b.end_time).length}</div>
+                <div className="text-xs text-stone-500">apartments cleaned</div>
               </div>
-              <div className="flex-1 min-w-0">
-                <div className="text-[10px] uppercase tracking-wider font-mono text-amber-700">Open work block</div>
-                <div className="text-base font-serif text-amber-900 truncate">
-                  {unitLabel} · {partyLabel}
-                </div>
-                <div className="text-[11px] font-mono text-amber-700">
-                  Started {fmtClock(openBlock.start_time)}
-                </div>
+              <div>
+                <div className="text-3xl font-mono font-light text-stone-900">{fmtTimeShort(elapsed)}</div>
+                <div className="text-xs text-stone-500">on the clock</div>
               </div>
             </div>
-            <div className="grid grid-cols-3 gap-2">
-              <button onClick={() => onReopen(openBlock)} disabled={busy}
-                className="py-2.5 rounded-xl bg-amber-700 hover:bg-amber-800 text-white text-sm font-bold flex items-center justify-center gap-1.5 active:scale-95 disabled:opacity-50">
-                <Play size={14} /> Resume
-              </button>
-              <button
-                onClick={() => setDismissedBannerIds(prev => {
-                  const next = new Set(prev);
-                  next.add(openBlock.id);
-                  return next;
-                })}
-                disabled={busy}
-                className="py-2.5 rounded-xl bg-stone-200 hover:bg-stone-300 text-stone-800 text-sm font-bold flex items-center justify-center gap-1.5 active:scale-95 disabled:opacity-50">
-                <Pause size={14} /> Pause
-              </button>
-              <button onClick={() => onEndBlock && onEndBlock(openBlock)} disabled={busy}
-                className="py-2.5 rounded-xl bg-red-100 hover:bg-red-200 text-red-700 border border-red-300 text-sm font-bold flex items-center justify-center gap-1.5 active:scale-95 disabled:opacity-50">
-                <Square size={14} /> End block
-              </button>
-            </div>
           </div>
-        );
-      })()}
 
-      <AssignmentsPanel propertyId={shift.customer_id} employee={employee} onGoToBedroom={onGoToBedroom} onOpenBedroomHistory={onOpenBedroomHistory} />
-
-      {can(employee, 'upload_assignments') && (
-        <div className="px-4 pt-3">
-          <button onClick={() => setShowAssignmentForm(true)} disabled={busy}
-            className="w-full py-3 rounded-2xl bg-white border-2 border-amber-300 hover:border-amber-500 text-amber-900 text-sm font-medium flex items-center justify-center gap-2 active:scale-98 transition-transform disabled:opacity-50">
-            <Plus size={16} /> Upload an assignment
-          </button>
-        </div>
-      )}
-
-      <div className="px-4 pt-6">
-        <div className="mt-2">
-          <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-3">
-            Today's work blocks ({workBlocks.length})
-          </div>
-          {workBlocks.length === 0 ? (
-            <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
-              No work yet. Tap a bedroom in the assignments above to begin.
+          {/* Today's activity — Mine / Others toggle */}
+          <div className="px-4 pt-6">
+            <div className="flex items-center justify-between mb-3">
+              <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">
+                Today's activity
+              </div>
+              <div className="inline-flex bg-stone-100 rounded-full p-0.5">
+                <button onClick={() => setActivityFilter('mine')}
+                  className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${activityFilter === 'mine' ? 'bg-stone-900 text-stone-50' : 'text-stone-600'}`}>
+                  Mine
+                </button>
+                <button onClick={() => setActivityFilter('others')}
+                  className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${activityFilter === 'others' ? 'bg-stone-900 text-stone-50' : 'text-stone-600'}`}>
+                  Others
+                </button>
+              </div>
             </div>
-          ) : (
-            <div className="space-y-2">
-              {workBlocks.map(b => {
-                const dur = (b.end_time ? new Date(b.end_time) : new Date()) - new Date(b.start_time);
-                const photoCount = (b.tasks || []).reduce((sum, t) => sum + (t.photos?.length || 0), 0);
-                const isDone = !!b.end_time;
-                return (
-                  <div key={b.id} className={`rounded-2xl p-4 border ${isDone ? 'bg-white border-stone-200' : 'bg-amber-50 border-amber-200'}`}>
-                    <div className="flex items-start justify-between mb-2">
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2 mb-0.5 flex-wrap">
-                          {isDone && <Check size={14} className="text-emerald-600 flex-shrink-0" />}
-                          <span className="font-serif text-lg text-stone-900 truncate">
-                            {b.unit?.label} · {b.party?.label}
-                          </span>
-                        </div>
-                        <div className="text-xs text-stone-500 font-mono">
-                          {fmtClock(b.start_time)}{b.end_time && ` — ${fmtClock(b.end_time)}`} · {fmtTimeShort(dur)}
-                          {(b.tasks?.length > 0 || photoCount > 0) && (
-                            <span> · {b.tasks?.length || 0} tasks{photoCount > 0 && `, ${photoCount} photos`}</span>
+            {activityFilter === 'mine' ? (
+              workBlocks.length === 0 ? (
+                <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
+                  No work yet. Tap Assignments below to pick a bedroom.
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {workBlocks.map(b => {
+                    const dur = (b.end_time ? new Date(b.end_time) : new Date()) - new Date(b.start_time);
+                    const photoCount = (b.tasks || []).reduce((sum, t) => sum + (t.photos?.length || 0), 0);
+                    const isDone = !!b.end_time;
+                    return (
+                      <div key={b.id} className={`rounded-2xl p-4 border ${isDone ? 'bg-white border-stone-200' : 'bg-amber-50 border-amber-200'}`}>
+                        <div className="flex items-start justify-between mb-2">
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2 mb-0.5 flex-wrap">
+                              {isDone && <Check size={14} className="text-emerald-600 flex-shrink-0" />}
+                              <span className="font-serif text-lg text-stone-900 truncate">
+                                {b.unit?.label} · {b.party?.label}
+                              </span>
+                            </div>
+                            <div className="text-xs text-stone-500 font-mono">
+                              {fmtClock(b.start_time)}{b.end_time && ` — ${fmtClock(b.end_time)}`} · {fmtTimeShort(dur)}
+                              {(b.tasks?.length > 0 || photoCount > 0) && (
+                                <span> · {b.tasks?.length || 0} tasks{photoCount > 0 && `, ${photoCount} photos`}</span>
+                              )}
+                            </div>
+                            {b.work_notes && <div className="text-xs text-stone-600 mt-1 italic">"{b.work_notes}"</div>}
+                            {onOpenBedroomHistory && b.unit?.id && b.party?.id && (
+                              <button onClick={(e) => { e.stopPropagation(); onOpenBedroomHistory({
+                                  unitId: b.unit.id, unitLabel: b.unit.label,
+                                  partyId: b.party.id, partyLabel: b.party.label
+                                }); }}
+                                className="mt-2 inline-flex items-center gap-1 px-2 py-1 rounded-full bg-stone-200 hover:bg-stone-300 text-stone-700 text-[11px] font-mono active:scale-95">
+                                <Clock size={10} /> Bedroom history
+                              </button>
+                            )}
+                          </div>
+                          {isDone && (
+                            <button onClick={() => onReopen(b)} disabled={busy}
+                              className="ml-2 px-3 py-1.5 rounded-full bg-stone-100 text-stone-700 text-xs font-medium flex items-center gap-1 active:scale-95 disabled:opacity-50">
+                              <Play size={11} /> Resume
+                            </button>
                           )}
                         </div>
-                        {b.work_notes && <div className="text-xs text-stone-600 mt-1 italic">"{b.work_notes}"</div>}
-                        {onOpenBedroomHistory && b.unit?.id && b.party?.id && (
-                          <button onClick={(e) => { e.stopPropagation(); onOpenBedroomHistory({
-                              unitId: b.unit.id, unitLabel: b.unit.label,
-                              partyId: b.party.id, partyLabel: b.party.label
-                            }); }}
-                            className="mt-2 inline-flex items-center gap-1 px-2 py-1 rounded-full bg-stone-200 hover:bg-stone-300 text-stone-700 text-[11px] font-mono active:scale-95">
-                            <Clock size={10} /> Bedroom history
-                          </button>
-                        )}
                       </div>
-                      {isDone && (
-                        <button onClick={() => onReopen(b)} disabled={busy}
-                          className="ml-2 px-3 py-1.5 rounded-full bg-stone-100 text-stone-700 text-xs font-medium flex items-center gap-1 active:scale-95 disabled:opacity-50">
-                          <Play size={11} /> Resume
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
+                    );
+                  })}
+                </div>
+              )
+            ) : (
+              <OthersActivityToday propertyId={shift.customer_id} myEmployeeId={employee.id} onOpenBedroomHistory={onOpenBedroomHistory} />
+            )}
+          </div>
+        </>
+      )}
+
+      {/* === ASSIGNMENTS TAB === */}
+      {cleanerTab === 'assignments' && (
+        <>
+          <AssignmentsPanel propertyId={shift.customer_id} employee={employee} onGoToBedroom={onGoToBedroom} onOpenBedroomHistory={onOpenBedroomHistory} />
+          {can(employee, 'upload_assignments') && (
+            <div className="px-4 pt-3">
+              <button onClick={() => setShowAssignmentForm(true)} disabled={busy}
+                className="w-full py-3 rounded-2xl bg-white border-2 border-amber-300 hover:border-amber-500 text-amber-900 text-sm font-medium flex items-center justify-center gap-2 active:scale-98 transition-transform disabled:opacity-50">
+                <Plus size={16} /> Upload an assignment
+              </button>
             </div>
           )}
-        </div>
-      </div>
-      {showMenu && (
-        <CleanerMenuSheet
-          employee={employee}
-          shift={shift}
-          onClose={() => setShowMenu(false)}
-          onSwitchProperty={() => { setShowMenu(false); onSwitchProperty && onSwitchProperty(); }}
-          onChangePin={onOpenChangePin ? () => { setShowMenu(false); onOpenChangePin(); } : null}
-          onOpenMessages={onOpenMessages ? () => { setShowMenu(false); onOpenMessages(); } : null}
-          onSignOut={() => { setShowMenu(false); onSignOut && onSignOut(); }}
-        />
+        </>
       )}
+
+      {/* === MORE TAB === */}
+      {cleanerTab === 'more' && (
+        <div className="px-4 pt-4 space-y-2">
+          <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2">Account &amp; settings</div>
+          {onSwitchProperty && (
+            <button onClick={onSwitchProperty}
+              className="w-full px-4 py-3.5 rounded-2xl bg-white border border-stone-200 hover:border-stone-400 text-left flex items-center gap-3 active:scale-98">
+              <Building2 size={18} className="text-stone-700" />
+              <div className="flex-1">
+                <div className="text-sm font-medium text-stone-900">Switch property</div>
+                <div className="text-xs text-stone-500">Move to a different property today</div>
+              </div>
+              <ChevronRight size={16} className="text-stone-400" />
+            </button>
+          )}
+          {onOpenChangePin && (
+            <button onClick={onOpenChangePin}
+              className="w-full px-4 py-3.5 rounded-2xl bg-white border border-stone-200 hover:border-stone-400 text-left flex items-center gap-3 active:scale-98">
+              <Lock size={18} className="text-stone-700" />
+              <div className="flex-1">
+                <div className="text-sm font-medium text-stone-900">Change PIN</div>
+                <div className="text-xs text-stone-500">Update your sign-in code</div>
+              </div>
+              <ChevronRight size={16} className="text-stone-400" />
+            </button>
+          )}
+          <button onClick={onSignOut}
+            className="w-full px-4 py-3.5 rounded-2xl bg-white border border-red-200 hover:border-red-400 text-left flex items-center gap-3 active:scale-98">
+            <LogOut size={18} className="text-red-700" />
+            <div className="flex-1">
+              <div className="text-sm font-medium text-red-700">Sign out</div>
+              <div className="text-xs text-stone-500">End your session — does NOT clock you out</div>
+            </div>
+          </button>
+          <div className="pt-4 text-center text-[10px] text-stone-400 font-mono">
+            Signed in as {employeeName} · {employee?.role}
+          </div>
+        </div>
+      )}
+
+      {/* Bottom nav — fixed at the bottom of the viewport. */}
+      <CleanerBottomNav active={cleanerTab} onChange={setCleanerTab} />
     </div>
   );
 }
+
 
 // =================================================================
 // CLEANER MENU SHEET — slide-up panel from the "More" button in the

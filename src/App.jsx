@@ -7,7 +7,7 @@ import {
   Trash2, Eye, EyeOff, LayoutDashboard, FileText, DollarSign,
   Home, Layers, User, Edit2, Copy, Printer, Calendar, HelpCircle,
   MessageCircle, MessageSquare, Settings, Languages, Menu, Square, Share2,
-  ClipboardList, Lock, Circle
+  ClipboardList, Lock, Circle, MoreVertical
 } from 'lucide-react';
 
 // =================================================================
@@ -2712,7 +2712,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       if (activeShift.customer?.property_type === 'multi_unit') {
         const { data: blocks } = await supabase
           .from('work_blocks')
-          .select('*, unit:units(*), party:parties(*), tasks(*, photos(*))')
+          .select('*, unit:units(*), party:parties(*), tasks(*, photos(*, taken_by_employee:employees!taken_by(name)))')
           .eq('shift_id', activeShift.id)
           .order('start_time', { ascending: true });
         setWorkBlocks(blocks || []);
@@ -2725,7 +2725,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
         }
       } else {
         const { data: ts } = await supabase
-          .from('tasks').select('*, photos(*)')
+          .from('tasks').select('*, photos(*, taken_by_employee:employees!taken_by(name))')
           .eq('shift_id', activeShift.id)
           .is('work_block_id', null)
           .order('start_time');
@@ -3020,7 +3020,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
         work_notes: workNotes || null,
         is_preview: previewMode,
       })
-      .select('*, unit:units(*), party:parties(*), tasks(*, photos(*))').single();
+      .select('*, unit:units(*), party:parties(*), tasks(*, photos(*, taken_by_employee:employees!taken_by(name)))').single();
     setBusy(false);
     if (error) { alert('Could not start work block: ' + error.message); return; }
     setWorkBlocks(prev => {
@@ -3042,6 +3042,79 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   // to pending, then delete the work_block row itself. Cleaner lands
   // back at PropertyHub with no record this ever happened. Owners can
   // undo anyone's block; non-owners can only undo their own.
+  // undoClosedBlock — owner/cleaner deletes a CLOSED workblock from
+  // the "Today's work blocks" list. Unlike the active-block undo
+  // (which only handles status='in_progress'), this also reverts items
+  // the cleaner COMPLETED during the block since the work is being
+  // wiped from history. Cleaner can only undo their own; owners/
+  // managers can undo anyone's.
+  const undoClosedBlock = async (block) => {
+    if (!block?.id) return;
+    const canUndoAnyone = employee?.role === 'owner' || employee?.role === 'manager';
+    const isMine = block.shift_id === shift?.id;
+    if (!canUndoAnyone && !isMine) {
+      alert(tt("You can only undo work blocks you started yourself."));
+      return;
+    }
+    const taskCount = (block.tasks || []).length;
+    const photoCount = (block.tasks || []).reduce((sum, t) => sum + ((t.photos || []).filter(p => !p.deleted_at).length || 0), 0);
+    const detail = [
+      taskCount > 0 && `${taskCount} task${taskCount === 1 ? '' : 's'}`,
+      photoCount > 0 && `${photoCount} photo${photoCount === 1 ? '' : 's'}`,
+    ].filter(Boolean).join(' · ');
+    const msg = tt(
+      `Undo this finished workblock at ${block.unit?.label} · ${block.party?.label}? ${detail ? `${detail} will be deleted. ` : ''}Items marked done during this block will go back to pending. This cannot be reversed.`
+    );
+    if (!confirm(msg)) return;
+    setBusy(true);
+    try {
+      // Revert in_progress + done items that this cleaner advanced
+      // during the block's time window. We can't precisely tell
+      // which items were touched in THIS block vs others, so we use
+      // a conservative scope: items at this bedroom where the
+      // started_by OR completed_by matches the block's shift's
+      // employee. Owners/managers undoing someone else's block
+      // revert based on the shift owner's id.
+      const targetCleanerId = block.shift?.employee?.id;
+      if (targetCleanerId && block.unit_id && block.party_id) {
+        // Reset items started by this cleaner that are still in flight
+        await supabase.from('assignment_targets')
+          .update({ status: 'pending', started_at: null, started_by: null, completed_at: null, completed_by: null })
+          .eq('unit_id', block.unit_id)
+          .eq('party_id', block.party_id)
+          .or(`started_by.eq.${targetCleanerId},completed_by.eq.${targetCleanerId}`)
+          .gte('started_at', block.start_time)
+          .lte('started_at', block.end_time || new Date().toISOString());
+      }
+      // Delete tasks belonging to this block (FK cascades photos +
+      // participants will cascade from work_block FK).
+      await supabase.from('tasks').delete().eq('work_block_id', block.id);
+      // Delete the block itself.
+      await supabase.from('work_blocks').delete().eq('id', block.id);
+      // Drop from local state.
+      setWorkBlocks(prev => prev.filter(b => b.id !== block.id));
+    } catch (e) {
+      alert('Could not undo: ' + (e.message || e));
+    }
+    setBusy(false);
+  };
+
+  // moveClosedBlock — opens the existing move modal but targeting a
+  // specific (non-active) block from the list. Reuses the
+  // moveMultipleWorkBlocksTo handler under the hood since it accepts
+  // any block ids.
+  const [closedMoveTarget, setClosedMoveTarget] = useState(null);
+  const moveClosedBlock = (block) => {
+    if (!block?.id) return;
+    const canMoveAnyone = employee?.role === 'owner' || employee?.role === 'manager';
+    const isMine = block.shift_id === shift?.id;
+    if (!canMoveAnyone && !isMine) {
+      alert(tt("You can only move work blocks you started yourself."));
+      return;
+    }
+    setClosedMoveTarget(block);
+  };
+
   const undoBlock = async () => {
     if (!activeBlock) return;
     const canUndoAnyone = employee?.role === 'owner' || employee?.role === 'manager';
@@ -3130,7 +3203,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       // Pull full block details + tasks (shared task list with the
       // original starter — anyone in the block can add tasks)
       const { data: refreshed } = await supabase.from('work_blocks')
-        .select('*, unit:units(*), party:parties(*), tasks(*, photos(*))')
+        .select('*, unit:units(*), party:parties(*), tasks(*, photos(*, taken_by_employee:employees!taken_by(name)))')
         .eq('id', targetBlock.id).single();
       if (refreshed) {
         setActiveBlock(refreshed);
@@ -3301,7 +3374,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       console.warn('[reopenBlock] could not pre-close open blocks', e);
     }
     await supabase.from('work_blocks').update({ end_time: null }).eq('id', block.id);
-    const { data: blockTasks } = await supabase.from('tasks').select('*, photos(*)')
+    const { data: blockTasks } = await supabase.from('tasks').select('*, photos(*, taken_by_employee:employees!taken_by(name))')
       .eq('work_block_id', block.id).order('start_time');
     const updated = { ...block, end_time: null, tasks: blockTasks || [] };
     setWorkBlocks(prev => prev.map(b => {
@@ -3383,7 +3456,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     // Refresh activeBlock with the new unit/party labels so the header
     // updates immediately. Fetch the joined row so we have nested labels.
     const { data: refreshed } = await supabase.from('work_blocks')
-      .select('*, unit:units(*), party:parties(*), tasks(*, photos(*))')
+      .select('*, unit:units(*), party:parties(*), tasks(*, photos(*, taken_by_employee:employees!taken_by(name)))')
       .eq('id', activeBlock.id).single();
     if (refreshed) {
       setActiveBlock(refreshed);
@@ -3428,7 +3501,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       // re-fetch it so the BlockView header updates. Same for workBlocks
       // list (we re-fetch all from the shift).
       const { data: allBlocks } = await supabase.from('work_blocks')
-        .select('*, unit:units(*), party:parties(*), tasks(*, photos(*))')
+        .select('*, unit:units(*), party:parties(*), tasks(*, photos(*, taken_by_employee:employees!taken_by(name)))')
         .eq('shift_id', shift.id)
         .order('start_time');
       setWorkBlocks(allBlocks || []);
@@ -3486,7 +3559,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     };
     if (activeBlock) ins.work_block_id = activeBlock.id;
     const { data: row, error } = await supabase.from('tasks')
-      .insert(ins).select('*, photos(*)').single();
+      .insert(ins).select('*, photos(*, taken_by_employee:employees!taken_by(name))').single();
     if (error) {
       alert('Could not start task: ' + error.message);
       return;
@@ -3657,7 +3730,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
         bill_rate_at_work: shift.customer?.bill_rate_hourly || null,
         is_preview: previewMode,
       })
-      .select('*, unit:units(*), party:parties(*), tasks(*, photos(*))').single();
+      .select('*, unit:units(*), party:parties(*), tasks(*, photos(*, taken_by_employee:employees!taken_by(name)))').single();
     setBusy(false);
     if (error) { alert('Could not start work block: ' + error.message); return; }
     setWorkBlocks(prev => {
@@ -3722,7 +3795,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     if (activeBlock) insert.work_block_id = activeBlock.id;
     if (category) insert.category = category;
     if (subcategory) insert.subcategory = subcategory;
-    const { data, error } = await supabase.from('tasks').insert(insert).select('*, photos(*)').single();
+    const { data, error } = await supabase.from('tasks').insert(insert).select('*, photos(*, taken_by_employee:employees!taken_by(name))').single();
     if (error) { alert('Could not start task: ' + error.message); return; }
     setTasks(prev => [...prev, data]); setActiveTask(data.id); setNewTaskName('');
     return data;
@@ -3746,7 +3819,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     };
     if (activeBlock) firstInsert.work_block_id = activeBlock.id;
     const { data: firstRow, error: firstErr } = await supabase.from('tasks')
-      .insert(firstInsert).select('*, photos(*)').single();
+      .insert(firstInsert).select('*, photos(*, taken_by_employee:employees!taken_by(name))').single();
     if (firstErr) { alert('Could not start task: ' + firstErr.message); return; }
     setTasks(prev => [...prev, firstRow]);
     setActiveTask(firstRow.id);
@@ -3771,7 +3844,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
         end_time:   new Date(now.getTime() + (i + 1) * 1000 + 100).toISOString(),
       }));
       const { data: queued, error: qErr } = await supabase.from('tasks')
-        .insert(queueRows).select('*, photos(*)');
+        .insert(queueRows).select('*, photos(*, taken_by_employee:employees!taken_by(name))');
       if (qErr) {
         console.warn('[startTasksFromPicker] could not queue extras:', qErr);
       } else if (queued) {
@@ -3833,6 +3906,26 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     <>
       {children}
       {showIdleWarning && <IdleWarningModal onStillActive={dismissIdleWarning} />}
+      {/* Move a closed work block to a different bedroom from the
+         PropertyHub list. Mounted at AuthedShift level so the modal
+         survives view switches. */}
+      {closedMoveTarget && (
+        <MoveBlockModalInline
+          block={closedMoveTarget}
+          propertyId={shift?.customer_id}
+          shiftId={shift?.id}
+          currentEmployeeId={employee?.id}
+          mode="bedroom"
+          onSave={async (newUnit, newParty, resetIds) => {
+            await moveMultipleWorkBlocksTo([closedMoveTarget.id], newUnit, newParty, resetIds);
+            setClosedMoveTarget(null);
+          }}
+          onSaveMulti={async (blockIds, newUnit, newParty, resetIds) => {
+            await moveMultipleWorkBlocksTo(blockIds, newUnit, newParty, resetIds);
+            setClosedMoveTarget(null);
+          }}
+          onClose={() => setClosedMoveTarget(null)} />
+      )}
       {showChangePin && (
         <ChangePinModal
           employee={employee}
@@ -3996,6 +4089,8 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       onOpenChangePin={() => setShowChangePin(true)}
       onOpenBedroomHistory={setBedroomHistory}
       onJoinBlock={joinBlock}
+      onUndoBlock={undoClosedBlock}
+      onMoveBlock={moveClosedBlock}
       cleanerTab={cleanerTab} setCleanerTab={setCleanerTab}
       busy={busy} />);
   }
@@ -4310,7 +4405,65 @@ function OthersActivityToday({ propertyId, myEmployeeId, onOpenBedroomHistory })
   );
 }
 
-function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onClockOut, onSwitchProperty, onStartNew, onReopen, onEndBlock, onGoToBedroom, onOpenMessages, onOpenChangePin, onOpenBedroomHistory, onJoinBlock, cleanerTab: cleanerTabProp, setCleanerTab: setCleanerTabProp, busy }) {
+// ClosedBlockMenu — small kebab popover next to the Resume button on
+// each finished work block in PropertyHub's "Today's work blocks"
+// list. Lets the cleaner/owner undo or move a finished block from the
+// list without going back into BlockView first. Click outside to close.
+function ClosedBlockMenu({ onUndo, onMove }) {
+  const [open, setOpen] = useState(false);
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e) => {
+      let el = e.target;
+      while (el) {
+        if (el.dataset && el.dataset.closedBlockMenu === 'root') return;
+        el = el.parentElement;
+      }
+      setOpen(false);
+    };
+    window.addEventListener('mousedown', handler);
+    window.addEventListener('touchstart', handler);
+    return () => {
+      window.removeEventListener('mousedown', handler);
+      window.removeEventListener('touchstart', handler);
+    };
+  }, [open]);
+  return (
+    <div className="relative" data-closed-block-menu="root">
+      <button onClick={() => setOpen(o => !o)}
+        className="p-1.5 rounded-full hover:bg-stone-200 text-stone-600"
+        title="More">
+        <MoreVertical size={14} />
+      </button>
+      {open && (
+        <div className="absolute z-40 top-full right-0 mt-1 w-56 bg-stone-50 rounded-2xl shadow-xl border border-stone-200 overflow-hidden">
+          {onUndo && (
+            <button onClick={() => { setOpen(false); onUndo(); }}
+              className="w-full text-left px-3 py-2.5 hover:bg-stone-100 border-b border-stone-100 flex items-start gap-2.5">
+              <Delete size={14} className="text-red-700 flex-shrink-0 mt-0.5" />
+              <div className="min-w-0">
+                <div className="text-sm font-medium text-stone-900">Undo this workblock</div>
+                <div className="text-[11px] text-stone-500 mt-0.5">Delete the block and revert items to pending.</div>
+              </div>
+            </button>
+          )}
+          {onMove && (
+            <button onClick={() => { setOpen(false); onMove(); }}
+              className="w-full text-left px-3 py-2.5 hover:bg-stone-100 flex items-start gap-2.5">
+              <Edit2 size={14} className="text-amber-700 flex-shrink-0 mt-0.5" />
+              <div className="min-w-0">
+                <div className="text-sm font-medium text-stone-900">Move to a different bedroom</div>
+                <div className="text-[11px] text-stone-500 mt-0.5">Reassigns the time + photos to a new bedroom.</div>
+              </div>
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onClockOut, onSwitchProperty, onStartNew, onReopen, onEndBlock, onGoToBedroom, onOpenMessages, onOpenChangePin, onOpenBedroomHistory, onJoinBlock, onUndoBlock, onMoveBlock, cleanerTab: cleanerTabProp, setCleanerTab: setCleanerTabProp, busy }) {
   const [showMenu, setShowMenu] = useState(false);
   const [showAssignmentForm, setShowAssignmentForm] = useState(false);
   // Bottom nav tab — Home / Assignments / More. Parent (AuthedShift)
@@ -4514,10 +4667,19 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
                             )}
                           </div>
                           {isDone && (
-                            <button onClick={() => onReopen(b)} disabled={busy}
-                              className="ml-2 px-3 py-1.5 rounded-full bg-stone-100 text-stone-700 text-xs font-medium flex items-center gap-1 active:scale-95 disabled:opacity-50">
-                              <Play size={11} /> Resume
-                            </button>
+                            <div className="ml-2 flex items-center gap-1">
+                              <button onClick={() => onReopen(b)} disabled={busy}
+                                className="px-3 py-1.5 rounded-full bg-stone-100 text-stone-700 text-xs font-medium flex items-center gap-1 active:scale-95 disabled:opacity-50">
+                                <Play size={11} /> Resume
+                              </button>
+                              {(onUndoBlock || onMoveBlock) && (
+                                <ClosedBlockMenu
+                                  block={b}
+                                  onUndo={onUndoBlock ? () => onUndoBlock(b) : null}
+                                  onMove={onMoveBlock ? () => onMoveBlock(b) : null}
+                                />
+                              )}
+                            </div>
                           )}
                         </div>
                       </div>
@@ -4688,7 +4850,7 @@ function OtherCleanersActivity({ block, myEmployeeId }) {
       // Fetch all work_blocks at this bedroom started today, with their tasks/photos and the cleaner who did them
       const { data: blocks } = await supabase
         .from('work_blocks')
-        .select('id, start_time, end_time, shift:shifts!inner(id, employee:employees!inner(id, name)), tasks(*, photos(*))')
+        .select('id, start_time, end_time, shift:shifts!inner(id, employee:employees!inner(id, name)), tasks(*, photos(*, taken_by_employee:employees!taken_by(name)))')
         .eq('unit_id', block.unit_id)
         .eq('party_id', block.party_id)
         .gte('start_time', startIso)
@@ -6734,7 +6896,11 @@ function PhotoModal({ kind, taskName, existing, onUpload, onSaveNote, onClose, e
                     {(p.taken_by || canDelete) && (
                       <div className="absolute bottom-0 left-0 right-0 px-2 py-1.5 bg-gradient-to-t from-stone-900/80 to-transparent rounded-b-xl flex items-end justify-between gap-2">
                         <div className="text-[10px] font-mono text-stone-100 truncate">
-                          {p.taken_by === employee?.id ? 'by you' : (p.taken_by ? 'shared' : '')}
+                          {p.taken_by === employee?.id
+                            ? 'by you'
+                            : (p.taken_by_employee?.name
+                                ? `by ${p.taken_by_employee.name}`
+                                : (p.taken_by ? 'shared' : ''))}
                         </div>
                         {canDelete && (
                           <button type="button"
@@ -7783,12 +7949,12 @@ function ShiftDetail({ shiftId, viewerRole, viewerEmployee, onBack }) {
     if (s?.customer?.property_type === 'multi_unit') {
       const { data: wbs } = await supabase
         .from('work_blocks')
-        .select('*, unit:units(label), party:parties(label,full_name), tasks(*, photos(*))')
+        .select('*, unit:units(label), party:parties(label,full_name), tasks(*, photos(*, taken_by_employee:employees!taken_by(name)))')
         .eq('shift_id', shiftId).order('start_time');
       setWorkBlocks(wbs || []);
     } else {
       const { data: ts } = await supabase
-        .from('tasks').select('*, photos(*)')
+        .from('tasks').select('*, photos(*, taken_by_employee:employees!taken_by(name))')
         .eq('shift_id', shiftId).is('work_block_id', null)
         .order('start_time');
       setTasks(ts || []);
@@ -14065,7 +14231,7 @@ function PortalUnitDay({ property, unitId, date, portalUser, onBack }) {
       setUnit(u);
       const { data: bs } = await supabase
         .from('work_blocks')
-        .select('*, party:parties(label,full_name), shift:shifts!inner(customer_id), tasks(*, photos(*))')
+        .select('*, party:parties(label,full_name), shift:shifts!inner(customer_id), tasks(*, photos(*, taken_by_employee:employees!taken_by(name)))')
         .eq('unit_id', unitId)
         .eq('is_preview', false)
         .gte('start_time', dayStart).lte('start_time', dayEnd)
@@ -14076,7 +14242,7 @@ function PortalUnitDay({ property, unitId, date, portalUser, onBack }) {
       // Simple property: pull tasks for shifts on this date
       const { data: shifts } = await supabase
         .from('shifts')
-        .select('*, tasks(*, photos(*))')
+        .select('*, tasks(*, photos(*, taken_by_employee:employees!taken_by(name)))')
         .eq('customer_id', property.id)
         .eq('is_preview', false)
         .gte('start_time', dayStart).lte('start_time', dayEnd)
@@ -15587,7 +15753,7 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit }) {
     // Exclude preview-mode shifts (owner using "Preview as cleaner").
     const { data: shifts } = await supabase
       .from('shifts')
-      .select('id, start_time, end_time, customer_id, idle_seconds, employee:employees(id,name), customer:customers(id,name,property_type,bill_rate_hourly), work_blocks(id, start_time, end_time, bill_rate_at_work, unit:units(id, label), party:parties(id, label, full_name), tasks(*, photos(*)))')
+      .select('id, start_time, end_time, customer_id, idle_seconds, employee:employees(id,name), customer:customers(id,name,property_type,bill_rate_hourly), work_blocks(id, start_time, end_time, bill_rate_at_work, unit:units(id, label), party:parties(id, label, full_name), tasks(*, photos(*, taken_by_employee:employees!taken_by(name))))')
       .gte('start_time', dayStart)
       .lte('start_time', dayEnd)
       .eq('is_preview', false)
@@ -16084,9 +16250,16 @@ function BedroomHistoryView({ propertyId, propertyName, unitId, unitLabel, party
       since.setHours(0, 0, 0, 0);
       const sinceISO = since.toISOString();
 
-      // Fetch work blocks at this bedroom in the window
+      // Fetch work blocks at this bedroom in the window. We pull the
+      // shift owner (the cleaner who started the block) PLUS the
+      // multi-cleaner participants table so a shared block lists every
+      // helper, not just whoever opened it first.
       let blocksQ = supabase.from('work_blocks')
-        .select('*, shift:shifts!inner(id, customer_id, employee:employees(id, name)), tasks(*, photos(*))')
+        .select(`
+          *, shift:shifts!inner(id, customer_id, employee:employees(id, name)),
+          tasks(*, photos(*, taken_by_employee:employees!taken_by(name))),
+          participants:work_block_participants(id, joined_at, left_at, employee:employees(id, name))
+        `)
         .eq('unit_id', unitId)
         .eq('party_id', partyId)
         .order('start_time', { ascending: false });
@@ -16305,13 +16478,35 @@ function BedroomHistoryView({ propertyId, propertyName, unitId, unitLabel, party
                   <div className="space-y-3 mb-3">
                     {day.blocks.map(b => {
                       const dur = (b.end_time ? new Date(b.end_time) : new Date()) - new Date(b.start_time);
-                      const cleaner = b.shift?.employee?.name || 'Cleaner';
+                      // Build the list of cleaners on this block:
+                      // start with the shift owner, then merge in
+                      // every participant (deduped by id). Single-
+                      // cleaner blocks render as before.
+                      const cleanerSet = new Map();
+                      if (b.shift?.employee?.id) cleanerSet.set(b.shift.employee.id, b.shift.employee.name || 'Cleaner');
+                      (b.participants || []).forEach(p => {
+                        if (p.employee?.id && !cleanerSet.has(p.employee.id)) {
+                          cleanerSet.set(p.employee.id, p.employee.name || 'Cleaner');
+                        }
+                      });
+                      const cleaners = Array.from(cleanerSet.values());
+                      const cleaner = cleaners.length === 0 ? 'Cleaner'
+                        : cleaners.length === 1 ? cleaners[0]
+                        : cleaners.join(' + ');
+                      const isMultiCleaner = cleaners.length > 1;
                       return (
                         <div key={b.id} className="p-3 rounded-xl bg-white border border-stone-200">
                           <div className="flex items-start justify-between gap-2 mb-2 flex-wrap">
                             <div className="flex items-center gap-2 min-w-0">
-                              <User size={13} className="text-stone-400 flex-shrink-0" />
-                              <span className="font-medium text-sm text-stone-900 truncate">{cleaner}</span>
+                              {isMultiCleaner
+                                ? <Users size={13} className="text-amber-600 flex-shrink-0" />
+                                : <User size={13} className="text-stone-400 flex-shrink-0" />}
+                              <span className={`font-medium text-sm truncate ${isMultiCleaner ? 'text-amber-900' : 'text-stone-900'}`}>{cleaner}</span>
+                              {isMultiCleaner && (
+                                <span className="text-[9px] uppercase tracking-wider font-mono px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-800 border border-amber-300 font-bold">
+                                  Team
+                                </span>
+                              )}
                             </div>
                             <div className="text-xs font-mono text-stone-500">
                               {fmtClock(b.start_time)}{b.end_time && ` — ${fmtClock(b.end_time)}`} · {fmtTimeShort(dur)}
@@ -16374,7 +16569,7 @@ function DailyUnitDayDetail({ date, propertyId, unitId, unitLabel, propertyName,
     const dayEnd   = `${date}T23:59:59`;
     const { data } = await supabase
       .from('work_blocks')
-      .select('*, party:parties(label, full_name), shift:shifts!inner(id, customer_id, start_time, end_time, employee:employees(id,name), bill_rate_at_work, customer:customers(bill_rate_hourly, name)), tasks(*, photos(*))')
+      .select('*, party:parties(label, full_name), shift:shifts!inner(id, customer_id, start_time, end_time, employee:employees(id,name), bill_rate_at_work, customer:customers(bill_rate_hourly, name)), tasks(*, photos(*, taken_by_employee:employees!taken_by(name)))')
       .eq('unit_id', unitId)
       .gte('start_time', dayStart)
       .lte('start_time', dayEnd)

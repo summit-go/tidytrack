@@ -3569,18 +3569,26 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     setNewTaskName('');
   };
 
-  // "I bit off more than I could chew" — cleaner taps the X on an
-  // item in the Active tab and wants it back in the Pending pool so
-  // a coworker (or future-self) can grab it without finishing the
-  // current workblock. Flips status → pending and clears the
-  // started_at / started_by stamps so the next person picks it up
-  // cleanly. Does NOT touch the related task; that task may still
-  // be active with other items in it.
+  // Cleaner taps the X on an in-progress item — "I started this but
+  // need to step away". Previously this dropped the item back to
+  // 'pending' and wiped started_by/started_at, which silently erased
+  // evidence of in-flight work (the bedroom would show 0% done in
+  // audits even though photos existed).
+  //
+  // New behavior: route to 'paused' so the work is preserved in audit.
+  // started_by/started_at are kept so we know who paused it and when;
+  // any other cleaner can then resume from the Paused bucket. Pending
+  // is reserved for items that have NEVER been touched.
+  //
+  // Items that were never started (still 'pending') are left alone —
+  // there's nothing to release.
   const releaseTargetsFromWorkblock = async (targets) => {
     if (!targets || targets.length === 0) return;
-    const ids = targets.map(t => t.id);
+    const releasable = targets.filter(t => t.status === 'in_progress' || t.status === 'paused');
+    if (releasable.length === 0) return;
+    const ids = releasable.map(t => t.id);
     const { error } = await supabase.from('assignment_targets')
-      .update({ status: 'pending', started_at: null, started_by: null })
+      .update({ status: 'paused' })
       .in('id', ids);
     if (error) {
       alert('Could not release: ' + error.message);
@@ -15393,56 +15401,60 @@ function AssignedVsCleanedView({ employee, onBack, onOpenBedroomHistory }) {
                             const StatusIcon = s.Icon;
                             const pct = g.total > 0 ? Math.round((g.doneAnyTime / g.total) * 100) : 0;
                             return (
-                              <div key={g.key} className="rounded-xl bg-white border border-stone-200 p-3">
+                              <div key={g.key} className="rounded-xl bg-white border border-stone-200 px-3 py-2.5">
                                 <div className="flex items-center gap-3">
-                                  <div className={`w-10 h-10 rounded-full ${s.bg} ${s.color} flex items-center justify-center flex-shrink-0`}>
-                                    <StatusIcon size={18} strokeWidth={2.5} />
+                                  <div className={`w-8 h-8 rounded-full ${s.bg} ${s.color} flex items-center justify-center flex-shrink-0`}>
+                                    <StatusIcon size={15} strokeWidth={2.5} />
                                   </div>
                                   <div className="flex-1 min-w-0">
-                                    <div className="font-serif text-base text-stone-900 truncate">
-                                      {g.unitLabel} · <span className="italic text-amber-700">{g.partyLabel}</span>
+                                    <div className="text-sm text-stone-900 truncate flex items-center gap-1.5">
+                                      <span className="font-medium">{g.unitLabel}</span>
+                                      <span className="text-stone-400">·</span>
+                                      <span className="italic text-amber-700">{g.partyLabel}</span>
                                       {g.assignmentType && (
                                         <AssignmentTypeChip type={g.assignmentType} />
                                       )}
                                     </div>
-                                    <div className="flex items-center gap-3 mt-1">
-                                      <div className="text-xs text-stone-600 font-mono">
+                                    <div className="flex items-center gap-2 mt-1">
+                                      <div className="text-[11px] text-stone-600 font-mono whitespace-nowrap">
                                         <span className="text-stone-900 font-bold">{g.doneAnyTime}</span>
                                         <span className="text-stone-400"> / </span>
                                         <span>{g.total}</span>
-                                        <span className="text-stone-400"> done</span>
                                       </div>
-                                      <div className="flex-1 h-1.5 bg-stone-200 rounded-full overflow-hidden max-w-[120px]">
+                                      <div className="flex-1 h-1 bg-stone-200 rounded-full overflow-hidden">
                                         <div className={`h-full transition-all ${pct >= 100 ? 'bg-emerald-500' : pct > 0 ? 'bg-amber-500' : 'bg-red-400'}`}
                                           style={{ width: `${pct}%` }} />
                                       </div>
-                                      <div className="text-[10px] font-mono text-stone-500">
-                                        {pct}%
-                                      </div>
+                                      <div className="text-[10px] font-mono text-stone-500 whitespace-nowrap">{pct}%</div>
                                     </div>
-                                    {g.doneInRange > 0 && g.doneInRange !== g.doneAnyTime && (
-                                      <div className="text-[10px] font-mono text-stone-500 mt-0.5">
-                                        {g.doneInRange} done within range · {g.doneAnyTime - g.doneInRange} done outside range
-                                      </div>
+                                  </div>
+                                  {/* Inline action buttons — icon-only to save vertical
+                                     space. Quick glance + History live on the right
+                                     side of the row instead of a second line. */}
+                                  <div className="flex items-center gap-0.5 flex-shrink-0">
+                                    <button onClick={() => setOpened(g.sampleTarget)}
+                                      className="p-1.5 rounded-full hover:bg-stone-100 text-stone-500 hover:text-stone-900"
+                                      title="Quick glance">
+                                      <Eye size={14} />
+                                    </button>
+                                    {onOpenBedroomHistory && g.unitId && g.partyId && (
+                                      <button onClick={() => onOpenBedroomHistory({
+                                        propertyId: selectedPropertyId,
+                                        unitId: g.unitId, unitLabel: g.unitLabel,
+                                        partyId: g.partyId, partyLabel: g.partyLabel,
+                                      })}
+                                        className="p-1.5 rounded-full hover:bg-stone-100 text-stone-500 hover:text-stone-900"
+                                        title="History">
+                                        <Clock size={14} />
+                                      </button>
                                     )}
                                   </div>
                                 </div>
-                                <div className="flex items-center gap-1.5 mt-2 justify-end">
-                                  <button onClick={() => setOpened(g.sampleTarget)}
-                                    className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-100 hover:bg-stone-200 text-stone-700 flex items-center gap-1">
-                                    <Eye size={10} /> Quick glance
-                                  </button>
-                                  {onOpenBedroomHistory && g.unitId && g.partyId && (
-                                    <button onClick={() => onOpenBedroomHistory({
-                                      propertyId: selectedPropertyId,
-                                      unitId: g.unitId, unitLabel: g.unitLabel,
-                                      partyId: g.partyId, partyLabel: g.partyLabel,
-                                    })}
-                                      className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-100 hover:bg-stone-200 text-stone-700 flex items-center gap-1">
-                                      <Clock size={10} /> History
-                                    </button>
-                                  )}
-                                </div>
+                                {g.doneInRange > 0 && g.doneInRange !== g.doneAnyTime && (
+                                  <div className="text-[10px] font-mono text-stone-500 mt-1 pl-11">
+                                    {g.doneInRange} done within range · {g.doneAnyTime - g.doneInRange} outside
+                                  </div>
+                                )}
                               </div>
                             );
                           })}

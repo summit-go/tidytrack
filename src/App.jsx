@@ -1846,6 +1846,31 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
       const sub = subId ? cat.subcategories.find(s => s.id === subId) : null;
       const autoName = sub ? sub.label : cat.label;
       const finalName = customTrimmed || autoName;
+      // BUG FIX (#7): when the cleaner picks a section (e.g., Bedroom)
+      // and taps Start without picking individual items, the legacy
+      // simple path created a freeform task but never advanced any
+      // assignment_targets. The owner then saw the assignment stuck on
+      // "Pending" even though the cleaner was actively working and
+      // uploading photos. Now: if we're in checklist mode AND there are
+      // open items at this bedroom matching the picked section, flip
+      // them all to in_progress in the same go. The combined task name
+      // still uses the section label (autoName) so the cleaner's UI
+      // doesn't change.
+      if (checklistMode && onStartChecklistItems && category && category !== 'general') {
+        const sectionMatches = checklistTargets.filter(t =>
+          (t.template_section || '').toLowerCase() === category &&
+          (t.status === 'pending' || t.status === 'paused')
+        );
+        if (sectionMatches.length > 0) {
+          await onStartChecklistItems({
+            targets: sectionMatches,
+            name: finalName,
+            category,
+          });
+          reset();
+          return;
+        }
+      }
       await onStartOne(finalName, category, subId || null);
       reset();
       return;
@@ -2088,9 +2113,27 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
                   } else {
                     setCategory(c.id);
                     setSelectedSubs(new Set());
-                    // Keep selectedTargetIds — cleaner may have picked
-                    // items in another section already. The Start
-                    // button will work across sections.
+                    // Auto-tick every open checklist item in this
+                    // section EXCEPT for General — cleaners typically
+                    // clean the whole Bedroom / Vanity / Bathroom in
+                    // one block but pick specific items in General
+                    // (kitchen vs. living-room vs. vents etc.). The
+                    // cleaner can still uncheck items they're not
+                    // doing. Items in OTHER sections that the cleaner
+                    // had picked manually are preserved.
+                    if (c.id !== 'general' && checklistMode) {
+                      const inSection = checklistTargets.filter(t =>
+                        (t.template_section || '').toLowerCase() === c.id &&
+                        (t.status === 'pending' || t.status === 'paused')
+                      );
+                      if (inSection.length > 0) {
+                        setSelectedTargetIds(prev => {
+                          const next = new Set(prev);
+                          inSection.forEach(t => next.add(t.id));
+                          return next;
+                        });
+                      }
+                    }
                   }
                 }}
                   className={`py-3 px-2 rounded-xl border-2 font-medium text-sm transition-all flex flex-col items-center gap-0.5 ${

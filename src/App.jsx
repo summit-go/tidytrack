@@ -14,7 +14,7 @@ import {
 // 🔧 PASTE YOUR SUPABASE KEYS HERE
 // =================================================================
 const SUPABASE_URL = "https://bbaynvqnbkjyqhzhhypr.supabase.co/";
-const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJiYXludnFuYmtqeXFoemhoeXByIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc0NzQ2MTMsImV4cCI6MjA5MzA1MDYxM30.ZXUoHFj_IwMe6rX8RxK8Dj4kAB9AS7X9xZAhQ84wDEk";
+const SUPABASE_URL = "https://bbaynvqnbkjyqhzhhypr.supabase.co/";
 
 // =================================================================
 // 🌍 GOOGLE TRANSLATE API KEY (optional — for the Translate button)
@@ -3120,13 +3120,24 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     const canUndoAnyone = employee?.role === 'owner' || employee?.role === 'manager';
     const isMine = activeBlock.shift_id === shift?.id;
     if (!canUndoAnyone && !isMine) {
-      alert("You can only undo a work block you started yourself.");
+      alert(tt("You can only undo a work block you started yourself."));
       return;
     }
     const taskCount = (tasks || []).length;
-    const msg = taskCount > 0
-      ? `Undo this work block? ${taskCount} task${taskCount === 1 ? '' : 's'} you logged here will be deleted, and any items you marked in-progress will go back to pending. This cannot be reversed.`
-      : `Undo this work block? Any items you marked in-progress at this bedroom will go back to pending. This cannot be reversed.`;
+    // Count non-deleted photos so the cleaner sees what'll be wiped.
+    // FK cascade on tasks.delete drops photos too, so this is real loss.
+    const photoCount = (tasks || []).reduce(
+      (sum, t) => sum + (t.photos || []).filter(p => !p.deleted_at).length,
+      0
+    );
+    const parts = [];
+    if (taskCount > 0) parts.push(`${taskCount} task${taskCount === 1 ? '' : 's'}`);
+    if (photoCount > 0) parts.push(`${photoCount} photo${photoCount === 1 ? '' : 's'}`);
+    const detail = parts.length > 0 ? `${parts.join(' · ')} will be deleted. ` : '';
+    const heavy = photoCount > 0;
+    const msg = tt(
+      `${heavy ? '\u26A0 ' : ''}Undo this work block? ${detail}Any items you marked in-progress will go back to pending. This cannot be reversed.`
+    );
     if (!confirm(msg)) return;
     setBusy(true);
     try {
@@ -3760,11 +3771,17 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   const cancelPendingStart = () => setPendingStart(null);
 
   // Send-back-to-pending: cleaner navigated here but realized it's
-  // the wrong bedroom (or changed their mind). Resets any of THEIR
-  // OWN in_progress/paused targets at this bedroom to pending so the
-  // queue looks fresh again. Only touches targets they personally
-  // started — coworkers' work is never disturbed. Then cancels the
-  // pending start so they go back to the property hub.
+  // the wrong bedroom (or changed their mind). Previously reset any
+  // of THEIR OWN in_progress/paused targets at this bedroom to
+  // 'pending' + wiped started_by/started_at — which silently erased
+  // evidence of work in flight (the same bug class as the release-X
+  // path we fixed earlier). Now those items move to 'paused' with
+  // started_by/started_at preserved so the audit stays honest and
+  // any other cleaner can resume.
+  //
+  // The function name still reads "send back to pending" because
+  // the user-visible flow is the same (cleaner backs out, queue
+  // looks fresh); only the internal status routing changed.
   const sendBackToPendingFromPrepare = async () => {
     if (!pendingStart || !employee?.id) {
       setPendingStart(null);
@@ -3773,7 +3790,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     try {
       const { data: mine } = await supabase
         .from('assignment_targets')
-        .select('id, assignment:assignments!inner(customer_id, active)')
+        .select('id, status, assignment:assignments!inner(customer_id, active)')
         .eq('unit_id', pendingStart.unitId)
         .eq('party_id', pendingStart.partyId)
         .in('status', ['in_progress', 'paused'])
@@ -3781,12 +3798,14 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       const eligible = (mine || []).filter(t =>
         t.assignment?.customer_id === shift?.customer_id && t.assignment?.active
       );
-      if (eligible.length > 0) {
+      // Route in_progress → paused. Items already paused stay paused
+      // (no-op). started_by/started_at are PRESERVED so the audit
+      // trail still says who and when.
+      const toPause = eligible.filter(t => t.status === 'in_progress');
+      if (toPause.length > 0) {
         await supabase.from('assignment_targets').update({
-          status: 'pending',
-          started_at: null,
-          started_by: null,
-        }).in('id', eligible.map(t => t.id));
+          status: 'paused',
+        }).in('id', toPause.map(t => t.id));
       }
     } catch (e) {
       console.warn('[sendBackToPending] failed', e);

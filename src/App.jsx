@@ -4266,20 +4266,9 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
       )}
 
       {activeTaskObj && (
-        <div className="mx-4 mt-4">
-          <div className="flex items-center gap-2 mb-2">
-            <span className="w-2 h-2 rounded-full bg-amber-700 animate-pulse" />
-            <span className="text-xs uppercase tracking-wider text-amber-800 font-mono">Active task</span>
-          </div>
-          {/* Full TaskCard at the top — gives the cleaner the Before /
-             After / Damage photo buttons right where they need them
-             without scrolling down to the Tasks list. The same task
-             below is filtered out so it doesn't render twice. */}
-          <TaskCard task={activeTaskObj} isActive={true}
-            onStop={() => onStopTask(activeTaskObj.id)}
-            onResume={() => onResumeTask(activeTaskObj.id)}
-            onAddPhoto={(kind) => onAddPhoto(activeTaskObj.id, kind)} />
-        </div>
+        <ActiveWorkblockCard task={activeTaskObj}
+          onStop={() => onStopTask(activeTaskObj.id)}
+          onAddPhoto={(kind) => onAddPhoto(activeTaskObj.id, kind)} />
       )}
 
       <OtherCleanersActivity block={block} myEmployeeId={employee.id} />
@@ -4592,20 +4581,9 @@ function SimpleShiftView({ shift, tasks, activeTask, employeeName, employee, onS
       )}
 
       {activeTaskObj && (
-        <div className="mx-4 mt-4">
-          <div className="flex items-center gap-2 mb-2">
-            <span className="w-2 h-2 rounded-full bg-amber-700 animate-pulse" />
-            <span className="text-xs uppercase tracking-wider text-amber-800 font-mono">Active task</span>
-          </div>
-          {/* Full TaskCard at the top — gives the cleaner the Before /
-             After / Damage photo buttons right where they need them
-             without scrolling down to the Tasks list. The same task
-             below is filtered out so it doesn't render twice. */}
-          <TaskCard task={activeTaskObj} isActive={true}
-            onStop={() => onStopTask(activeTaskObj.id)}
-            onResume={() => onResumeTask(activeTaskObj.id)}
-            onAddPhoto={(kind) => onAddPhoto(activeTaskObj.id, kind)} />
-        </div>
+        <ActiveWorkblockCard task={activeTaskObj}
+          onStop={() => onStopTask(activeTaskObj.id)}
+          onAddPhoto={(kind) => onAddPhoto(activeTaskObj.id, kind)} />
       )}
 
       <div className="mx-4 mt-4">
@@ -5322,6 +5300,73 @@ function PartyPicker({ property, unit, onPick, onBack, busy }) {
 // =================================================================
 // Task Card / Photo Modal / Image compress / Header
 // =================================================================
+// ActiveWorkblockCard — the compact "what you're working on" card shown
+// at the top of BlockView / SimpleShiftView. Replaces the heavy TaskCard
+// at that position. Doesn't bullet-list items (the long " + " joined
+// names looked overwhelming with 16+ items). Instead shows: section
+// label, item count, timer, photo buttons row, Done.
+function ActiveWorkblockCard({ task, onStop, onAddPhoto }) {
+  useTick(true);
+  const elapsed = Date.now() - new Date(task.start_time).getTime();
+  const photos = task.photos || [];
+  const before = photos.filter(p => p.kind === 'before');
+  const after  = photos.filter(p => p.kind === 'after');
+  const damage = photos.filter(p => p.kind === 'damage');
+  // Headline = the section label (Bedroom / Bathroom / etc.) when the
+  // task has a category, else the freeform task name. If multi-item we
+  // append the count rather than spelling out every item.
+  const parts = splitTaskName(task.name);
+  const categoryLabel = task.category
+    ? taskCategoryShortLabel(task.category, task.subcategory)
+    : null;
+  // What goes above the timer: prefer the category label so the cleaner
+  // sees "Bathroom" instead of a 200-character " + " joined string.
+  // Falls back to the task name when there's no category.
+  const headline = categoryLabel || (parts.length > 0 ? parts[0] : task.name);
+  const itemCount = parts.length;
+  return (
+    <div className="mx-4 mt-4 p-4 rounded-2xl bg-amber-50 border-2 border-amber-300"
+      style={{ touchAction: 'manipulation' }}>
+      <div className="flex items-center gap-2 mb-2">
+        <span className="w-2 h-2 rounded-full bg-amber-700 animate-pulse" />
+        <span className="text-xs uppercase tracking-wider text-amber-800 font-mono">Active workblock</span>
+      </div>
+      <div className="flex items-start justify-between gap-3 mb-3">
+        <div className="flex-1 min-w-0">
+          <div className="font-serif text-2xl text-stone-900 leading-tight">{headline}</div>
+          <div className="text-xs text-stone-600 font-mono mt-1">
+            {fmtTime(elapsed)}
+            {itemCount > 1 && <> · {itemCount} items</>}
+            {damage.length > 0 && <span className="ml-2 text-red-700 font-bold">⚠ {damage.length} damage</span>}
+          </div>
+        </div>
+        <button onClick={onStop}
+          style={{ touchAction: 'manipulation' }}
+          className="px-4 py-2.5 rounded-full bg-stone-900 text-stone-50 text-sm font-medium flex items-center gap-1 active:scale-95 transition-transform">
+          <Pause size={14} /> Done
+        </button>
+      </div>
+      <div className="grid grid-cols-3 gap-2">
+        <button onClick={() => onAddPhoto('before')}
+          style={{ touchAction: 'manipulation' }}
+          className="px-2 py-3 rounded-xl bg-white hover:bg-amber-100 border border-amber-200 text-stone-700 text-xs font-medium flex items-center justify-center gap-1.5 active:scale-95 transition-transform">
+          <Camera size={13} /> Before {before.length > 0 && <span className="text-amber-700 font-mono">({before.length})</span>}
+        </button>
+        <button onClick={() => onAddPhoto('after')}
+          style={{ touchAction: 'manipulation' }}
+          className="px-2 py-3 rounded-xl bg-white hover:bg-amber-100 border border-amber-200 text-stone-700 text-xs font-medium flex items-center justify-center gap-1.5 active:scale-95 transition-transform">
+          <Camera size={13} /> After {after.length > 0 && <span className="text-amber-700 font-mono">({after.length})</span>}
+        </button>
+        <button onClick={() => onAddPhoto('damage')}
+          style={{ touchAction: 'manipulation' }}
+          className="px-2 py-3 rounded-xl bg-red-50 hover:bg-red-100 border border-red-200 text-red-700 text-xs font-medium flex items-center justify-center gap-1.5 active:scale-95 transition-transform">
+          <Camera size={13} /> Damage {damage.length > 0 && <span className="font-mono">({damage.length})</span>}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function TaskCard({ task, isActive, onStop, onResume, onAddPhoto }) {
   useTick(isActive);
   const elapsed = task.end_time

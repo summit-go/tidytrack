@@ -4868,17 +4868,23 @@ function OtherCleanersActivity({ block, myEmployeeId }) {
       const activeNow = all.filter(b => !b.end_time);
       const pastBlocks = all.filter(b => b.end_time);
 
-      // Flatten photos from all OTHER blocks, with attribution
+      // Flatten photos from all OTHER blocks, with attribution. We
+      // prefer the actual photographer's name (taken_by_employee from
+      // the photos join) over the shift owner so multi-cleaner blocks
+      // attribute photos correctly. Falls back to the shift owner for
+      // legacy photos that don't have taken_by populated.
       const photos = [];
       all.forEach(b => {
-        const cleanerName = b.shift?.employee?.name || 'A cleaner';
-        const cleanerId = b.shift?.employee?.id;
+        const blockOwnerName = b.shift?.employee?.name || 'A cleaner';
+        const blockOwnerId = b.shift?.employee?.id;
         (b.tasks || []).forEach(t => {
-          (t.photos || []).forEach(p => {
+          (t.photos || []).filter(p => !p.deleted_at).forEach(p => {
+            const photoTakerName = p.taken_by_employee?.name || blockOwnerName;
+            const photoTakerId = p.taken_by || blockOwnerId;
             photos.push({
               ...p,
-              cleanerName,
-              cleanerId,
+              cleanerName: photoTakerName,
+              cleanerId: photoTakerId,
               taskName: t.name,
             });
           });
@@ -8856,6 +8862,18 @@ function PhotoZoomViewer({ photos, initialUrl, onClose, onResolveCurrent }) {
         {idx + 1} / {photos.length}
       </div>
       <img loading="lazy" src={photo.public_url} alt="" className="max-w-full max-h-[80vh] rounded-xl" />
+      {/* Photo attribution + capture time. Resolves from the joined
+         taken_by_employee (set by the multi-cleaner work). Falls back
+         to the cleanerName field that BedroomHistoryView enriches
+         (shift owner) for legacy / pre-multi-cleaner photos. */}
+      {(photo.taken_by_employee?.name || photo.cleanerName) && (
+        <div className="mt-3 max-w-md w-full px-4 py-2 rounded-xl bg-stone-800/70 text-stone-100 text-xs font-mono flex items-center justify-between gap-3">
+          <span className="truncate">by {photo.taken_by_employee?.name || photo.cleanerName}</span>
+          {photo.created_at && (
+            <span className="text-stone-400 flex-shrink-0">{fmtDate(photo.created_at)}</span>
+          )}
+        </div>
+      )}
       {/* Show the cleaner's note when one is attached — useful for
          damage photos where the note explains what's broken. */}
       {photo.notes && photo.notes.trim() && (
@@ -14765,6 +14783,14 @@ function PortalPhotoSection({ label, photos, highlight, description, onResolve, 
                 className={`relative aspect-square w-full rounded-lg overflow-hidden ${isDamage ? 'ring-2 ring-red-400' : ''} ${isSelected ? 'ring-4 ring-stone-900' : ''}`}>
                 <img loading="lazy" src={p.public_url} alt="" className="w-full h-full object-cover" />
                 {kindBadge(p)}
+                {/* Cleaner attribution — show who took the photo when
+                   we have the join. Tiny pill above the bedroom label
+                   so owners can spot who's responsible. */}
+                {p.taken_by_employee?.name && (
+                  <span className="absolute top-0.5 left-0.5 right-0.5 px-1 py-0.5 rounded bg-stone-900/70 text-white text-[8px] font-mono truncate">
+                    {p.taken_by_employee.name}
+                  </span>
+                )}
                 {p.partyLabel && (
                   <span className="absolute bottom-0.5 left-0.5 right-0.5 px-1 py-0.5 rounded bg-black/70 text-white text-[8px] font-mono truncate">
                     {p.partyLabel}
@@ -16266,10 +16292,14 @@ function BedroomHistoryView({ propertyId, propertyName, unitId, unitLabel, party
       // shift owner (the cleaner who started the block) PLUS the
       // multi-cleaner participants table so a shared block lists every
       // helper, not just whoever opened it first.
+      //
+      // Photos include both active AND soft-deleted ones so the
+      // history can surface deletion audit. We resolve names for both
+      // the taker AND deleter via two FK aliases.
       let blocksQ = supabase.from('work_blocks')
         .select(`
           *, shift:shifts!inner(id, customer_id, employee:employees(id, name)),
-          tasks(*, photos(*, taken_by_employee:employees!taken_by(name))),
+          tasks(*, photos(*, taken_by_employee:employees!taken_by(name), deleted_by_employee:employees!deleted_by(name))),
           participants:work_block_participants(id, joined_at, left_at, employee:employees(id, name))
         `)
         .eq('unit_id', unitId)
@@ -16313,10 +16343,24 @@ function BedroomHistoryView({ propertyId, propertyName, unitId, unitLabel, party
         day.blocks.push(b);
         const dur = (b.end_time ? new Date(b.end_time) : new Date()) - new Date(b.start_time);
         day.totalMs += dur;
-        // Flatten photos
+        // Flatten photos — split active vs deleted. Active photos go
+        // into the visible strip; deleted ones go into a separate
+        // audit list rendered for owners/managers only. Photo taker
+        // preferred from join, falls back to shift owner for legacy.
         (b.tasks || []).forEach(t => {
           (t.photos || []).forEach(p => {
-            day.photos.push({ ...p, taskName: t.name, cleanerName: b.shift?.employee?.name || 'Cleaner' });
+            const takerName = p.taken_by_employee?.name || b.shift?.employee?.name || 'Cleaner';
+            if (p.deleted_at) {
+              day.deletedPhotos = day.deletedPhotos || [];
+              day.deletedPhotos.push({
+                ...p,
+                taskName: t.name,
+                cleanerName: takerName,
+                deletedByName: p.deleted_by_employee?.name || 'someone',
+              });
+            } else {
+              day.photos.push({ ...p, taskName: t.name, cleanerName: takerName });
+            }
           });
         });
       });
@@ -16550,6 +16594,33 @@ function BedroomHistoryView({ propertyId, propertyName, unitId, unitLabel, party
 
                 {day.photos.length > 0 && (
                   <DayPhotoTabs photos={day.photos} isStaff={isStaff} />
+                )}
+                {/* Deleted photos audit — visible to owner/manager only.
+                   Shows who deleted what and when so accountability is
+                   preserved even after the photo is hidden from view. */}
+                {isStaff && day.deletedPhotos && day.deletedPhotos.length > 0 && (
+                  <div className="mt-3 p-3 rounded-xl bg-stone-100 border border-stone-200">
+                    <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-2 flex items-center gap-1.5">
+                      <Trash2 size={10} /> Deleted photos ({day.deletedPhotos.length})
+                    </div>
+                    <div className="space-y-1">
+                      {day.deletedPhotos.map(p => (
+                        <div key={p.id} className="text-[11px] font-mono text-stone-600 flex items-baseline gap-2">
+                          <span className="text-stone-400">·</span>
+                          <span>
+                            <span className="text-stone-900">{p.deletedByName}</span>
+                            <span className="text-stone-500"> deleted </span>
+                            <span className="text-stone-700">{p.kind || 'a photo'}</span>
+                            <span className="text-stone-500"> by </span>
+                            <span className="text-stone-900">{p.cleanerName}</span>
+                          </span>
+                          <span className="text-stone-400 flex-shrink-0">
+                            {p.deleted_at && fmtClock(p.deleted_at)}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
                 )}
               </div>
             ))}

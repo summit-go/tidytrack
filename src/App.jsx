@@ -14356,6 +14356,38 @@ function AssignedVsCleanedView({ employee, onBack, onOpenBedroomHistory }) {
   const [loaded, setLoaded] = useState(false);
   const [busy, setBusy] = useState(false);
   const [opened, setOpened] = useState(null); // assignment_target for Quick glance
+  // Sub-filters — chips that appear AFTER the initial date+property
+  // filters have populated rows. Multi-select; empty = "all".
+  //   filterBuildings — which building prefixes (B1, B7…) to show
+  //   filterStatuses  — 'done' | 'partial' | 'not_started'
+  // Collapsed buildings are tracked separately so the user can hide
+  // ones they don't care about.
+  const [filterBuildings, setFilterBuildings] = useState(new Set());
+  const [filterStatuses, setFilterStatuses] = useState(new Set());
+  const [collapsedBuildings, setCollapsedBuildings] = useState(new Set());
+  // Reset all sub-state when the data set changes so the chips don't
+  // reference values that no longer exist.
+  useEffect(() => {
+    setFilterBuildings(new Set());
+    setFilterStatuses(new Set());
+    setCollapsedBuildings(new Set());
+  }, [selectedPropertyId, start, end]);
+
+  // Building prefix extracted from a unit label. "B1-101" → "B1",
+  // "B7-326" → "B7". If there's no dash we fall back to the whole
+  // label (which is rare).
+  const buildingFromLabel = (unitLabel) => {
+    if (!unitLabel) return '—';
+    const idx = unitLabel.indexOf('-');
+    return idx > 0 ? unitLabel.slice(0, idx) : unitLabel;
+  };
+  // Status bucket for a row (matches the top summary chips).
+  const statusOfRow = (r) => {
+    if (r.total === 0) return null;
+    if (r.doneAnyTime === 0) return 'not_started';
+    if (r.doneAnyTime >= r.total) return 'done';
+    return 'partial';
+  };
 
   useEffect(() => { (async () => {
     const { data } = await supabase.from('customers').select('id, name')
@@ -14502,95 +14534,220 @@ function AssignedVsCleanedView({ employee, onBack, onOpenBedroomHistory }) {
             No active assignments at this property.
           </div>
         ) : (
+          (() => {
+            // Compute available chips + filtered rows + grouped data here
+            // so we can use the results downstream without re-deriving.
+            const availableBuildings = (() => {
+              const set = new Set();
+              rows.forEach(r => set.add(buildingFromLabel(r.unitLabel)));
+              return Array.from(set).sort(naturalCompare);
+            })();
+            const presentStatuses = (() => {
+              const set = new Set();
+              rows.forEach(r => { const s = statusOfRow(r); if (s) set.add(s); });
+              return ['done', 'partial', 'not_started'].filter(s => set.has(s));
+            })();
+            const filteredRows = rows.filter(r => {
+              if (filterBuildings.size > 0 && !filterBuildings.has(buildingFromLabel(r.unitLabel))) return false;
+              if (filterStatuses.size > 0) {
+                const s = statusOfRow(r);
+                if (!s || !filterStatuses.has(s)) return false;
+              }
+              return true;
+            });
+            const grouped = (() => {
+              const m = new Map();
+              filteredRows.forEach(r => {
+                const b = buildingFromLabel(r.unitLabel);
+                if (!m.has(b)) m.set(b, []);
+                m.get(b).push(r);
+              });
+              return Array.from(m.entries()).sort((a, b) => naturalCompare(a[0], b[0]));
+            })();
+            const toggleSetVal = (setter) => (val) => setter(prev => {
+              const next = new Set(prev);
+              if (next.has(val)) next.delete(val); else next.add(val);
+              return next;
+            });
+            const toggleBuilding = toggleSetVal(setFilterBuildings);
+            const toggleStatus   = toggleSetVal(setFilterStatuses);
+            const toggleCollapsed = toggleSetVal(setCollapsedBuildings);
+            const statusLabels = { done: 'Fully done', partial: 'Partial', not_started: 'Not started' };
+            const statusColors = {
+              done: 'bg-emerald-100 text-emerald-800 border-emerald-300',
+              partial: 'bg-amber-100 text-amber-800 border-amber-300',
+              not_started: 'bg-red-100 text-red-800 border-red-300',
+            };
+            return (
           <>
-            {/* Top-level summary */}
+            {/* Sub-filters — appear only after the initial query has
+               populated rows. Buildings + statuses derived from the
+               actual data so chips never reference values that don't
+               exist. Multi-select; empty = "show all". */}
+            {(availableBuildings.length > 1 || presentStatuses.length > 1) && (
+              <div className="rounded-2xl bg-white border border-stone-200 p-4 mb-3">
+                {availableBuildings.length > 1 && (
+                  <div className="mb-2">
+                    <div className="text-[10px] uppercase tracking-wider text-stone-500 font-mono mb-1.5">
+                      Buildings {filterBuildings.size === 0 && <span className="text-stone-400">(showing all)</span>}
+                    </div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {availableBuildings.map(b => {
+                        const active = filterBuildings.has(b);
+                        return (
+                          <button key={b} onClick={() => toggleBuilding(b)}
+                            className={`px-2.5 py-1 rounded-full text-xs font-medium border-2 transition-colors ${active ? 'bg-stone-900 border-stone-900 text-stone-50' : 'bg-white border-stone-200 text-stone-700 hover:border-stone-400'}`}>
+                            {b}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+                {presentStatuses.length > 1 && (
+                  <div>
+                    <div className="text-[10px] uppercase tracking-wider text-stone-500 font-mono mb-1.5">
+                      Status {filterStatuses.size === 0 && <span className="text-stone-400">(showing all)</span>}
+                    </div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {presentStatuses.map(s => {
+                        const active = filterStatuses.has(s);
+                        return (
+                          <button key={s} onClick={() => toggleStatus(s)}
+                            className={`px-2.5 py-1 rounded-full text-xs font-medium border-2 transition-colors ${active ? statusColors[s] : 'bg-white border-stone-200 text-stone-600 hover:border-stone-400'}`}>
+                            {statusLabels[s]}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Top-level summary — reflects FILTERED rows so the
+               numbers match what's actually visible below. */}
             <div className="rounded-2xl bg-white border border-stone-200 p-4 mb-3">
               <div className="grid grid-cols-3 gap-2 text-center">
                 <div>
                   <div className="text-2xl font-mono font-light text-emerald-700">
-                    {rows.filter(r => r.doneAnyTime >= r.total && r.total > 0).length}
+                    {filteredRows.filter(r => r.doneAnyTime >= r.total && r.total > 0).length}
                   </div>
                   <div className="text-[10px] uppercase tracking-wider text-stone-500 font-mono mt-0.5">Fully done</div>
                 </div>
                 <div>
                   <div className="text-2xl font-mono font-light text-amber-700">
-                    {rows.filter(r => r.doneAnyTime > 0 && r.doneAnyTime < r.total).length}
+                    {filteredRows.filter(r => r.doneAnyTime > 0 && r.doneAnyTime < r.total).length}
                   </div>
                   <div className="text-[10px] uppercase tracking-wider text-stone-500 font-mono mt-0.5">Partial</div>
                 </div>
                 <div>
                   <div className="text-2xl font-mono font-light text-red-700">
-                    {rows.filter(r => r.doneAnyTime === 0 && r.total > 0).length}
+                    {filteredRows.filter(r => r.doneAnyTime === 0 && r.total > 0).length}
                   </div>
                   <div className="text-[10px] uppercase tracking-wider text-stone-500 font-mono mt-0.5">Not started</div>
                 </div>
               </div>
             </div>
 
-            <div className="space-y-2">
-              {rows.map(g => {
-                const s = statusFor(g);
-                const StatusIcon = s.Icon;
-                const pct = g.total > 0 ? Math.round((g.doneAnyTime / g.total) * 100) : 0;
-                return (
-                  <div key={g.key} className="rounded-2xl bg-white border border-stone-200 p-3">
-                    <div className="flex items-center gap-3">
-                      {/* Status icon — quick scan */}
-                      <div className={`w-10 h-10 rounded-full ${s.bg} ${s.color} flex items-center justify-center flex-shrink-0`}>
-                        <StatusIcon size={18} strokeWidth={2.5} />
-                      </div>
-                      {/* Bedroom label + counts */}
-                      <div className="flex-1 min-w-0">
-                        <div className="font-serif text-base text-stone-900 truncate">
-                          {g.unitLabel} · <span className="italic text-amber-700">{g.partyLabel}</span>
-                          {g.assignmentType && (
-                            <AssignmentTypeChip type={g.assignmentType} />
-                          )}
-                        </div>
-                        <div className="flex items-center gap-3 mt-1">
-                          <div className="text-xs text-stone-600 font-mono">
-                            <span className="text-stone-900 font-bold">{g.doneAnyTime}</span>
-                            <span className="text-stone-400"> / </span>
-                            <span>{g.total}</span>
-                            <span className="text-stone-400"> done</span>
-                          </div>
-                          {/* Progress bar */}
-                          <div className="flex-1 h-1.5 bg-stone-200 rounded-full overflow-hidden max-w-[120px]">
-                            <div className={`h-full transition-all ${pct >= 100 ? 'bg-emerald-500' : pct > 0 ? 'bg-amber-500' : 'bg-red-400'}`}
-                              style={{ width: `${pct}%` }} />
-                          </div>
-                          <div className="text-[10px] font-mono text-stone-500">
-                            {pct}%
-                          </div>
-                        </div>
-                        {g.doneInRange > 0 && g.doneInRange !== g.doneAnyTime && (
+            {filteredRows.length === 0 ? (
+              <div className="text-center py-10 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
+                Nothing matches those filters.
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {grouped.map(([buildingName, buildingRows]) => {
+                  const isCollapsed = collapsedBuildings.has(buildingName);
+                  // Per-building totals so the header doubles as a summary
+                  const bDone = buildingRows.filter(r => r.doneAnyTime >= r.total && r.total > 0).length;
+                  const bPartial = buildingRows.filter(r => r.doneAnyTime > 0 && r.doneAnyTime < r.total).length;
+                  const bNotStarted = buildingRows.filter(r => r.doneAnyTime === 0 && r.total > 0).length;
+                  return (
+                    <div key={buildingName} className="rounded-2xl bg-white border border-stone-200 overflow-hidden">
+                      <button onClick={() => toggleCollapsed(buildingName)}
+                        className="w-full px-4 py-3 flex items-center gap-3 hover:bg-stone-50 transition-colors">
+                        <div className="text-left flex-1 min-w-0">
+                          <div className="font-serif text-base text-stone-900">{buildingName}</div>
                           <div className="text-[10px] font-mono text-stone-500 mt-0.5">
-                            {g.doneInRange} done within range · {g.doneAnyTime - g.doneInRange} done outside range
+                            {buildingRows.length} bedroom{buildingRows.length === 1 ? '' : 's'}
+                            {bDone > 0 && <span className="text-emerald-700"> · {bDone} done</span>}
+                            {bPartial > 0 && <span className="text-amber-700"> · {bPartial} partial</span>}
+                            {bNotStarted > 0 && <span className="text-red-700"> · {bNotStarted} not started</span>}
                           </div>
-                        )}
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-1.5 mt-2 justify-end">
-                      <button onClick={() => setOpened(g.sampleTarget)}
-                        className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-100 hover:bg-stone-200 text-stone-700 flex items-center gap-1">
-                        <Eye size={10} /> Quick glance
+                        </div>
+                        <ChevronRight size={16}
+                          className={`text-stone-400 flex-shrink-0 transition-transform ${isCollapsed ? '' : 'rotate-90'}`} />
                       </button>
-                      {onOpenBedroomHistory && g.unitId && g.partyId && (
-                        <button onClick={() => onOpenBedroomHistory({
-                          propertyId: selectedPropertyId,
-                          unitId: g.unitId, unitLabel: g.unitLabel,
-                          partyId: g.partyId, partyLabel: g.partyLabel,
-                        })}
-                          className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-100 hover:bg-stone-200 text-stone-700 flex items-center gap-1">
-                          <Clock size={10} /> History
-                        </button>
+                      {!isCollapsed && (
+                        <div className="border-t border-stone-100 p-3 space-y-2 bg-stone-50">
+                          {buildingRows.map(g => {
+                            const s = statusFor(g);
+                            const StatusIcon = s.Icon;
+                            const pct = g.total > 0 ? Math.round((g.doneAnyTime / g.total) * 100) : 0;
+                            return (
+                              <div key={g.key} className="rounded-xl bg-white border border-stone-200 p-3">
+                                <div className="flex items-center gap-3">
+                                  <div className={`w-10 h-10 rounded-full ${s.bg} ${s.color} flex items-center justify-center flex-shrink-0`}>
+                                    <StatusIcon size={18} strokeWidth={2.5} />
+                                  </div>
+                                  <div className="flex-1 min-w-0">
+                                    <div className="font-serif text-base text-stone-900 truncate">
+                                      {g.unitLabel} · <span className="italic text-amber-700">{g.partyLabel}</span>
+                                      {g.assignmentType && (
+                                        <AssignmentTypeChip type={g.assignmentType} />
+                                      )}
+                                    </div>
+                                    <div className="flex items-center gap-3 mt-1">
+                                      <div className="text-xs text-stone-600 font-mono">
+                                        <span className="text-stone-900 font-bold">{g.doneAnyTime}</span>
+                                        <span className="text-stone-400"> / </span>
+                                        <span>{g.total}</span>
+                                        <span className="text-stone-400"> done</span>
+                                      </div>
+                                      <div className="flex-1 h-1.5 bg-stone-200 rounded-full overflow-hidden max-w-[120px]">
+                                        <div className={`h-full transition-all ${pct >= 100 ? 'bg-emerald-500' : pct > 0 ? 'bg-amber-500' : 'bg-red-400'}`}
+                                          style={{ width: `${pct}%` }} />
+                                      </div>
+                                      <div className="text-[10px] font-mono text-stone-500">
+                                        {pct}%
+                                      </div>
+                                    </div>
+                                    {g.doneInRange > 0 && g.doneInRange !== g.doneAnyTime && (
+                                      <div className="text-[10px] font-mono text-stone-500 mt-0.5">
+                                        {g.doneInRange} done within range · {g.doneAnyTime - g.doneInRange} done outside range
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+                                <div className="flex items-center gap-1.5 mt-2 justify-end">
+                                  <button onClick={() => setOpened(g.sampleTarget)}
+                                    className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-100 hover:bg-stone-200 text-stone-700 flex items-center gap-1">
+                                    <Eye size={10} /> Quick glance
+                                  </button>
+                                  {onOpenBedroomHistory && g.unitId && g.partyId && (
+                                    <button onClick={() => onOpenBedroomHistory({
+                                      propertyId: selectedPropertyId,
+                                      unitId: g.unitId, unitLabel: g.unitLabel,
+                                      partyId: g.partyId, partyLabel: g.partyLabel,
+                                    })}
+                                      className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-100 hover:bg-stone-200 text-stone-700 flex items-center gap-1">
+                                      <Clock size={10} /> History
+                                    </button>
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
                       )}
                     </div>
-                  </div>
-                );
-              })}
-            </div>
+                  );
+                })}
+              </div>
+            )}
           </>
+            );
+          })()
         )}
       </div>
 

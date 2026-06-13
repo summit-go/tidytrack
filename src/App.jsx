@@ -10,7 +10,7 @@ import {
 } from 'lucide-react';
 
 // =================================================================
-// 🔧 PASTE YOUR SUPABASE KEYhttps://github.com/summit-go/tidytrack/edit/main/src/App.jsxS HERE
+// 🔧 PASTE YOUR SUPABASE KEYS HERE
 // =================================================================
 const SUPABASE_URL = "https://bbaynvqnbkjyqhzhhypr.supabase.co/";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJiYXludnFuYmtqeXFoemhoeXByIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc0NzQ2MTMsImV4cCI6MjA5MzA1MDYxM30.ZXUoHFj_IwMe6rX8RxK8Dj4kAB9AS7X9xZAhQ84wDEk";
@@ -2733,6 +2733,52 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     // assignment at the bedroom flipped to in_progress on entry.
   };
 
+  // Undo a work block started by mistake. Cleaner taps "Started by
+  // mistake?" → confirm → we delete every task in the block, revert
+  // any assignment_targets the cleaner advanced to in_progress back
+  // to pending, then delete the work_block row itself. Cleaner lands
+  // back at PropertyHub with no record this ever happened. Owners can
+  // undo anyone's block; non-owners can only undo their own.
+  const undoBlock = async () => {
+    if (!activeBlock) return;
+    const canUndoAnyone = employee?.role === 'owner' || employee?.role === 'manager';
+    const isMine = activeBlock.shift_id === shift?.id;
+    if (!canUndoAnyone && !isMine) {
+      alert("You can only undo a work block you started yourself.");
+      return;
+    }
+    const taskCount = (tasks || []).length;
+    const msg = taskCount > 0
+      ? `Undo this work block? ${taskCount} task${taskCount === 1 ? '' : 's'} you logged here will be deleted, and any items you marked in-progress will go back to pending. This cannot be reversed.`
+      : `Undo this work block? Any items you marked in-progress at this bedroom will go back to pending. This cannot be reversed.`;
+    if (!confirm(msg)) return;
+    setBusy(true);
+    try {
+      // 1) Revert assignment_targets the cleaner advanced during this
+      //    block. Scope to (unit_id, party_id, started_by=employee.id,
+      //    status='in_progress'). Reset status to pending and clear
+      //    the started_at / started_by stamps.
+      if (employee?.id && activeBlock.unit_id && activeBlock.party_id) {
+        await supabase.from('assignment_targets')
+          .update({ status: 'pending', started_at: null, started_by: null })
+          .eq('unit_id', activeBlock.unit_id)
+          .eq('party_id', activeBlock.party_id)
+          .eq('started_by', employee.id)
+          .eq('status', 'in_progress');
+      }
+      // 2) Delete tasks belonging to this block (cascades photos via FK).
+      await supabase.from('tasks').delete().eq('work_block_id', activeBlock.id);
+      // 3) Delete the work_block itself.
+      await supabase.from('work_blocks').delete().eq('id', activeBlock.id);
+      // 4) Reset local state — drop from list, clear active.
+      setWorkBlocks(prev => prev.filter(b => b.id !== activeBlock.id));
+      setActiveBlock(null); setTasks([]); setActiveTask(null);
+    } catch (e) {
+      alert('Could not undo: ' + (e.message || e));
+    }
+    setBusy(false);
+  };
+
   const finishBlock = async () => {
     if (!confirm(`Done in ${activeBlock.party?.label} at ${activeBlock.unit?.label}? You'll go back to the assignments.`)) return;
     setBusy(true);
@@ -3437,6 +3483,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     return withIdleModal(<BlockView shift={shift} block={activeBlock} tasks={tasks} activeTask={activeTask}
       employeeName={employee.name} employee={employee} onSignOut={signOutWithCleanup} onFinish={finishBlock}
       onPause={() => setActiveBlock(null)}
+      onUndo={undoBlock}
       newTaskName={newTaskName} setNewTaskName={setNewTaskName}
       onStartTask={startTask} onStartTasksFromPicker={startTasksFromPicker}
       onStartChecklistItems={startTasksFromChecklistItems}
@@ -4129,7 +4176,7 @@ function PreparingBlockView({ shift, pendingStart, employeeName, employee,
   );
 }
 
-function BlockView({ shift, block, tasks, activeTask, employeeName, employee, onSignOut, onFinish, onPause,
+function BlockView({ shift, block, tasks, activeTask, employeeName, employee, onSignOut, onFinish, onPause, onUndo,
   newTaskName, setNewTaskName, onStartTask, onStartTasksFromPicker, onStartChecklistItems, onReleaseTargets, onStopTask, onResumeTask, onAddPhoto,
   photoModal, onClosePhotoModal, onUploadPhoto, onSavePhotoNote, onOpenMessages, onOpenBedroomHistory,
   onMoveBlock, previewMode, busy }) {
@@ -4210,6 +4257,16 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
           {block.unit?.label} · <span className="italic text-amber-400">{block.party?.label}</span>
         </div>
         {block.party?.full_name && <div className="text-xs text-stone-400 mt-0.5">{block.party.full_name}</div>}
+        {/* Undo — for when a cleaner started this workblock at the
+           wrong bedroom or by accident. Small text link so it doesn't
+           compete with Finish, but discoverable. Owners can undo any
+           block; cleaners can only undo their own (enforced in handler). */}
+        {onUndo && (
+          <button onClick={onUndo} disabled={busy}
+            className="mt-2 text-[11px] font-mono text-stone-400 hover:text-stone-200 underline underline-offset-2 disabled:opacity-50">
+            Started by mistake? Undo this workblock
+          </button>
+        )}
         {/* Context chips for this bedroom — priority + cleaning types
            pulled from the open assignments here. Shown right under
            the title so the cleaner sees urgency at a glance. */}
@@ -13027,6 +13084,134 @@ const toDateKey = (d) => {
   return `${yr}-${mo}-${dy}`;
 };
 
+// WhosWherePanel — owner-facing "who's working right now" widget shown
+// on the owner home (DailyCalendar). Lists every active work block
+// across all properties with cleaner name + property + bedroom +
+// elapsed time. Auto-refreshes so it stays current without page
+// reloads. Empty state when no one's on the clock.
+function WhosWherePanel({ employee }) {
+  const [rows, setRows] = useState([]);
+  const [loaded, setLoaded] = useState(false);
+  const [collapsed, setCollapsed] = useState(false);
+  // useTick so the elapsed timer updates live.
+  useTick(true);
+
+  const load = async () => {
+    // Open work_blocks property-wide. Pull cleaner + property +
+    // unit/party labels in one shot via embeds so we don't fan out
+    // queries per block.
+    const { data: blocks } = await supabase.from('work_blocks')
+      .select('id, start_time, unit_id, party_id, unit:units(label), party:parties(label), shift:shifts!inner(id, customer_id, employee:employees(id, name), customer:customers(id, name))')
+      .is('end_time', null)
+      .order('start_time', { ascending: true });
+    // Also pull cleaners who are clocked in but not yet at a bedroom
+    // (active shift, no open work_block). Helpful for the owner to
+    // see "Maria is at the property but hasn't started a bedroom yet."
+    const { data: shifts } = await supabase.from('shifts')
+      .select('id, start_time, customer_id, employee:employees(id, name), customer:customers(id, name)')
+      .is('end_time', null);
+    const blockedShiftIds = new Set((blocks || []).map(b => b.shift?.id).filter(Boolean));
+    const standby = (shifts || []).filter(s => !blockedShiftIds.has(s.id));
+    setRows([
+      ...(blocks || []).map(b => ({
+        kind: 'block',
+        id: b.id,
+        cleanerName: b.shift?.employee?.name || '?',
+        propertyName: b.shift?.customer?.name || '',
+        unitLabel: b.unit?.label,
+        partyLabel: b.party?.label,
+        startTime: b.start_time,
+      })),
+      ...standby.map(s => ({
+        kind: 'standby',
+        id: s.id,
+        cleanerName: s.employee?.name || '?',
+        propertyName: s.customer?.name || '',
+        startTime: s.start_time,
+      })),
+    ]);
+    setLoaded(true);
+  };
+  useEffect(() => {
+    load();
+    const iv = setInterval(load, 30000); // refresh every 30s
+    return () => clearInterval(iv);
+  }, []);
+
+  if (!loaded) return null;
+  const activeCount = rows.filter(r => r.kind === 'block').length;
+  const standbyCount = rows.filter(r => r.kind === 'standby').length;
+  return (
+    <div className="mb-5 rounded-2xl bg-white border border-stone-200 overflow-hidden">
+      <button onClick={() => setCollapsed(c => !c)}
+        className="w-full px-4 py-3 flex items-center gap-3 hover:bg-stone-50 transition-colors">
+        <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse flex-shrink-0" />
+        <div className="text-left flex-1 min-w-0">
+          <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500">
+            Who's working right now
+          </div>
+          <div className="text-sm text-stone-900 font-medium">
+            {activeCount > 0 ? (
+              <>{activeCount} {activeCount === 1 ? 'cleaner' : 'cleaners'} in bedrooms</>
+            ) : (
+              <span className="text-stone-500">No one on the clock</span>
+            )}
+            {standbyCount > 0 && (
+              <span className="text-stone-500"> · {standbyCount} on standby</span>
+            )}
+          </div>
+        </div>
+        <ChevronRight size={16} className={`text-stone-400 flex-shrink-0 transition-transform ${collapsed ? '' : 'rotate-90'}`} />
+      </button>
+      {!collapsed && rows.length > 0 && (
+        <div className="border-t border-stone-100 divide-y divide-stone-100">
+          {rows.map(r => {
+            const elapsed = Date.now() - new Date(r.startTime).getTime();
+            return (
+              <div key={`${r.kind}:${r.id}`} className="px-4 py-2.5 flex items-center gap-3">
+                <div className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${r.kind === 'block' ? 'bg-emerald-500' : 'bg-stone-400'}`} />
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm text-stone-900">
+                    <span className="font-bold">{r.cleanerName}</span>
+                    {r.kind === 'block' ? (
+                      <>
+                        <span className="text-stone-400"> · </span>
+                        <span className="text-stone-700">{r.propertyName}</span>
+                        {r.unitLabel && (
+                          <>
+                            <span className="text-stone-400"> · </span>
+                            <span className="font-mono text-xs text-stone-700">{r.unitLabel}</span>
+                          </>
+                        )}
+                        {r.partyLabel && (
+                          <>
+                            <span className="text-stone-400"> · </span>
+                            <span className="italic text-amber-700">{r.partyLabel}</span>
+                          </>
+                        )}
+                      </>
+                    ) : (
+                      <>
+                        <span className="text-stone-400"> · </span>
+                        <span className="text-stone-700">{r.propertyName}</span>
+                        <span className="text-stone-400"> · </span>
+                        <span className="text-stone-500 text-xs">on standby</span>
+                      </>
+                    )}
+                  </div>
+                </div>
+                <div className="text-[11px] font-mono text-stone-500 flex-shrink-0">
+                  {fmtTimeShort(elapsed)}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenMessages, onLogoClick }) {
   const today = new Date();
   const [viewMonth, setViewMonth] = useState(new Date(today.getFullYear(), today.getMonth(), 1));
@@ -13160,6 +13345,11 @@ function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenMess
             <ChevronRight size={18} className="text-stone-400 flex-shrink-0" />
           </button>
         )}
+        {/* Live "who's working right now" widget — auto-refreshes; one
+           card per active work_block across all properties. Owner sees
+           cleaner name, property, bedroom, elapsed time. Empty state
+           appears when no one is on the clock. */}
+        <WhosWherePanel employee={employee} />
         <div className="text-xs uppercase tracking-widest text-stone-400 font-mono mb-3">
           Daily browser
         </div>
@@ -18286,27 +18476,37 @@ function AssignmentsPanel({ propertyId, employee, refreshKey, onGoToBedroom, onO
   const loadCounts = async () => {
     const { data } = await supabase
       .from('assignment_targets')
-      .select('status, completed_by, completed_at, assignment:assignments!inner(customer_id, active, source, pm_status)');
-    // Same visibility rule as the body view: skip unapproved PM
-    // assignments (they're in the owner-approval queue, not the
-    // cleaner's pending pool). Without this filter the badge said
-    // "Pending (112)" while the list was empty — confusing.
+      .select('status, completed_by, completed_at, unit_id, party_id, assignment:assignments!inner(customer_id, active, source, pm_status)');
     const filtered = (data || []).filter(t =>
       t.assignment?.customer_id === propertyId &&
       t.assignment?.active &&
       (t.assignment?.source !== 'pm' || t.assignment?.pm_status === 'approved')
     );
-    const c = { pending: 0, paused: 0, in_progress: 0, done: 0, blocked: 0, mine: 0 };
-    // "Mine" = items I completed today at this property
+    // Count UNIQUE bedrooms (unit_id+party_id pair) per status, not
+    // individual items. The badges now read "how many BEDROOMS have
+    // work in this status" rather than "how many items" — which is
+    // what an owner actually cares about ("3 bedrooms still pending"
+    // is more useful than "98 items pending"). A bedroom with mixed
+    // statuses (some pending, some in_progress) counts in BOTH buckets
+    // intentionally — that bedroom needs attention in both states.
+    const bedKey = (t) => `${t.unit_id || ''}::${t.party_id || ''}`;
+    const sets = { pending: new Set(), paused: new Set(), in_progress: new Set(), done: new Set(), blocked: new Set(), mine: new Set() };
     const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
     filtered.forEach(t => {
-      c[t.status] = (c[t.status] || 0) + 1;
+      if (sets[t.status]) sets[t.status].add(bedKey(t));
       if (t.completed_by && employee?.id && t.completed_by === employee.id && t.completed_at) {
         const ca = new Date(t.completed_at);
-        if (ca >= todayStart) c.mine = (c.mine || 0) + 1;
+        if (ca >= todayStart) sets.mine.add(bedKey(t));
       }
     });
-    setCounts(c);
+    setCounts({
+      pending: sets.pending.size,
+      paused: sets.paused.size,
+      in_progress: sets.in_progress.size,
+      done: sets.done.size,
+      blocked: sets.blocked.size,
+      mine: sets.mine.size,
+    });
   };
   useEffect(() => { loadCounts(); }, [propertyId, refreshKey]);
 
@@ -22698,6 +22898,12 @@ function InboxView({ employee, onBack }) {
   const [reviewAssignment, setReviewAssignment] = useState(null);
   const [reviewPhoto, setReviewPhoto] = useState(null);
   const [togglingAssignmentId, setTogglingAssignmentId] = useState(null);
+  // Queue review mode — when on, the inbox auto-opens the first pending
+  // assignment as a review modal. After approve / send-back, we
+  // immediately advance to the next pending one. When the queue empties
+  // we show an "all caught up" prompt + the owner confirms to leave.
+  const [queueMode, setQueueMode] = useState(false);
+  const [queueDone, setQueueDone] = useState(false);
 
   // Flip priority on every target of an assignment from the inbox row.
   // Sweep mode: if ANY target is priority, turn all off; otherwise turn
@@ -22762,6 +22968,19 @@ function InboxView({ employee, onBack }) {
   };
   useEffect(() => { load(); }, []);
   useAssignmentSync(load, 'inbox-sync');
+
+  // When in queue mode and no modal open, pick the next pending
+  // assignment to review. When the list drains, flip to "done" so the
+  // owner sees the all-caught-up screen instead of looping.
+  useEffect(() => {
+    if (!queueMode || reviewAssignment) return;
+    if (!loaded) return;
+    if (pendingAssignments.length > 0) {
+      setReviewAssignment(pendingAssignments[0]);
+    } else {
+      setQueueDone(true);
+    }
+  }, [queueMode, reviewAssignment, pendingAssignments, loaded]);
 
   const markPhotoSeen = async (photo) => {
     await supabase.from('pm_photos').update({
@@ -22829,7 +23048,16 @@ function InboxView({ employee, onBack }) {
               No assignments waiting for review.
             </div>
           ) : (
-            <div className="space-y-2">
+            <>
+              {/* Queue mode CTA — owner taps once, then walks through
+                 every pending review one at a time. Approve / send back
+                 → auto-advances. When the queue empties we show a
+                 confirmation before leaving the queue screen. */}
+              <button onClick={() => { setQueueDone(false); setQueueMode(true); }}
+                className="w-full mb-3 py-3.5 rounded-2xl bg-stone-900 hover:bg-stone-800 text-stone-50 font-medium text-sm flex items-center justify-center gap-2 active:scale-98">
+                <Play size={14} /> Review all {pendingAssignments.length} in queue
+              </button>
+              <div className="space-y-2">
               {pendingAssignments.map(a => {
                 const anyPriority = (a.targets || []).some(t => t.priority);
                 const isToggling = togglingAssignmentId === a.id;
@@ -22883,6 +23111,7 @@ function InboxView({ employee, onBack }) {
                 );
               })}
             </div>
+            </>
           )
         ) : tab === 'photos' ? (
           newPhotos.length === 0 ? (
@@ -23015,8 +23244,38 @@ function InboxView({ employee, onBack }) {
 
       {reviewAssignment && (
         <ReviewAssignmentModal assignment={reviewAssignment} employee={employee}
-          onDone={() => { setReviewAssignment(null); load(); }}
-          onClose={() => setReviewAssignment(null)} />
+          onDone={() => {
+            // In queue mode we just clear reviewAssignment — the
+            // useEffect above will pick the next pending one from the
+            // freshly-loaded list. Out of queue mode we just close.
+            setReviewAssignment(null);
+            load();
+          }}
+          onClose={() => {
+            // Closing the modal mid-queue also exits queue mode (the
+            // owner chose to stop). They can re-enter from the button.
+            if (queueMode) setQueueMode(false);
+            setReviewAssignment(null);
+          }} />
+      )}
+      {/* "All caught up" overlay — shown when the queue empties.
+         Owner taps to confirm and exits queue mode. */}
+      {queueDone && (
+        <div className="fixed inset-0 bg-stone-900/80 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
+          <div className="bg-stone-50 w-full sm:max-w-md sm:rounded-3xl rounded-t-3xl p-6 text-center">
+            <div className="w-16 h-16 rounded-full bg-emerald-100 text-emerald-700 flex items-center justify-center mx-auto mb-3">
+              <Check size={32} />
+            </div>
+            <div className="font-serif text-2xl text-stone-900 mb-1">All caught up</div>
+            <div className="text-sm text-stone-600 mb-5">
+              No more PM submissions waiting for your review.
+            </div>
+            <button onClick={() => { setQueueDone(false); setQueueMode(false); }}
+              className="w-full py-3 rounded-2xl bg-stone-900 text-stone-50 font-medium">
+              Got it
+            </button>
+          </div>
+        </div>
       )}
       {reviewPhoto && (
         <div className="fixed inset-0 bg-stone-900/95 z-50 flex flex-col">

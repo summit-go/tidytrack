@@ -13289,7 +13289,7 @@ function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenMess
   const [viewMonth, setViewMonth] = useState(new Date(today.getFullYear(), today.getMonth(), 1));
   const [activity, setActivity] = useState({});
   const [loaded, setLoaded] = useState(false);
-  const [inboxCounts, setInboxCounts] = useState({ pendingAssignments: 0, newPhotos: 0 });
+  const [inboxCounts, setInboxCounts] = useState({ pendingAssignments: 0, pendingRechecks: 0, newPhotos: 0 });
 
   // Load inbox counts
   useEffect(() => {
@@ -13297,13 +13297,20 @@ function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenMess
       const { count: pAssign } = await supabase.from('assignments')
         .select('id', { count: 'exact', head: true })
         .eq('source', 'pm').eq('pm_status', 'pending');
+      const { count: pRechecks } = await supabase.from('recheck_requests')
+        .select('id', { count: 'exact', head: true })
+        .eq('pm_status', 'pending');
       const { count: pPhotos } = await supabase.from('pm_photos')
         .select('id', { count: 'exact', head: true })
         .eq('status', 'new');
-      setInboxCounts({ pendingAssignments: pAssign || 0, newPhotos: pPhotos || 0 });
+      setInboxCounts({
+        pendingAssignments: pAssign || 0,
+        pendingRechecks: pRechecks || 0,
+        newPhotos: pPhotos || 0,
+      });
     })();
   }, []);
-  const inboxTotal = inboxCounts.pendingAssignments + inboxCounts.newPhotos;
+  const inboxTotal = inboxCounts.pendingAssignments + inboxCounts.pendingRechecks + inboxCounts.newPhotos;
 
   useEffect(() => {
     let cancelled = false;
@@ -13407,9 +13414,11 @@ function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenMess
                   Inbox — needs review
                 </div>
                 <div className="text-xs text-stone-600 font-mono">
-                  {inboxCounts.pendingAssignments > 0 && `${inboxCounts.pendingAssignments} ${inboxCounts.pendingAssignments === 1 ? 'assignment' : 'assignments'}`}
-                  {inboxCounts.pendingAssignments > 0 && inboxCounts.newPhotos > 0 && ' · '}
-                  {inboxCounts.newPhotos > 0 && `${inboxCounts.newPhotos} ${inboxCounts.newPhotos === 1 ? 'photo' : 'photos'}`}
+                  {[
+                    inboxCounts.pendingAssignments > 0 && `${inboxCounts.pendingAssignments} ${inboxCounts.pendingAssignments === 1 ? 'assignment' : 'assignments'}`,
+                    inboxCounts.pendingRechecks > 0 && `${inboxCounts.pendingRechecks} ${inboxCounts.pendingRechecks === 1 ? 'recheck' : 'rechecks'}`,
+                    inboxCounts.newPhotos > 0 && `${inboxCounts.newPhotos} ${inboxCounts.newPhotos === 1 ? 'photo' : 'photos'}`,
+                  ].filter(Boolean).join(' · ')}
                   {' from property managers'}
                 </div>
               </div>
@@ -22824,10 +22833,190 @@ function PortalAssignmentForm({ property, assignment, portalKind, onCancel, onSa
 }
 
 // PM-side detail/view of one of their assignments
+// RecheckRequestModal — PM uses this on an APPROVED assignment to
+// tell the owner "the tenant cleaned items X, Y, Z themselves on
+// recheck; you don't need to clean those anymore." Lists the open
+// items (status != done AND not already recheck-passed); PM ticks
+// which ones now pass. Submits a recheck_request that the owner
+// approves from their Inbox, which then marks those items done +
+// recheck_passed so cleaners stop seeing them.
+function RecheckRequestModal({ assignment, property, onClose, onSaved }) {
+  const [targets, setTargets] = useState([]);
+  const [selected, setSelected] = useState(new Set());
+  const [notes, setNotes] = useState('');
+  const [loaded, setLoaded] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    (async () => {
+      // Load open targets (not done, not already recheck-passed).
+      // These are the ones the PM can choose to pass on recheck.
+      const { data } = await supabase.from('assignment_targets')
+        .select('id, status, template_section, template_item_key, status_notes, unit:units(label), party:parties(label), recheck_passed_at')
+        .eq('assignment_id', assignment.id)
+        .neq('status', 'done')
+        .is('recheck_passed_at', null);
+      setTargets(data || []);
+      setLoaded(true);
+    })();
+  }, [assignment.id]);
+
+  const labelForTarget = (t) => {
+    if (t.status_notes && t.template_item_key?.startsWith?.('requested:')) return t.status_notes;
+    const key = t.template_item_key || '';
+    if (!key) return 'Item';
+    return key.replace(/^[a-z]+:/, '').replace(/_/g, ' ').replace(/^./, c => c.toUpperCase());
+  };
+
+  // Group by bedroom so the PM scans by location instead of a flat list
+  const grouped = (() => {
+    const m = new Map();
+    targets.forEach(t => {
+      const k = `${t.unit?.label || ''}::${t.party?.label || ''}`;
+      if (!m.has(k)) m.set(k, { unitLabel: t.unit?.label || '', partyLabel: t.party?.label || '', items: [] });
+      m.get(k).items.push(t);
+    });
+    return Array.from(m.values());
+  })();
+
+  const toggle = (id) => {
+    setSelected(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const submit = async () => {
+    if (selected.size === 0) { setError('Pick at least one item the tenant passed.'); return; }
+    setError(''); setBusy(true);
+    try {
+      // 1) Find the portal_user id from the URL/session — passed in
+      //    via assignment for this build we'll read from the property
+      //    metadata. Simpler: leave created_by null; the owner inbox
+      //    will still show the assignment + property which is enough
+      //    attribution for now.
+      const { data: req, error: e1 } = await supabase.from('recheck_requests').insert({
+        assignment_id: assignment.id,
+        pm_status: 'pending',
+        notes: notes.trim() || null,
+      }).select('id').single();
+      if (e1) throw e1;
+      // 2) Insert the item rows
+      const itemRows = Array.from(selected).map(tid => ({
+        recheck_request_id: req.id,
+        assignment_target_id: tid,
+      }));
+      const { error: e2 } = await supabase.from('recheck_request_items').insert(itemRows);
+      if (e2) throw e2;
+      onSaved();
+    } catch (e) {
+      setError(e.message || String(e));
+    }
+    setBusy(false);
+  };
+
+  return (
+    <div className="fixed inset-0 bg-stone-900/80 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
+      <div className="bg-stone-50 w-full sm:max-w-lg sm:rounded-3xl rounded-t-3xl flex flex-col max-h-[90vh]">
+        <div className="flex items-center justify-between p-5 border-b border-stone-200">
+          <div className="min-w-0 flex-1">
+            <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">Recheck request</div>
+            <div className="font-serif text-xl text-stone-900 truncate">{assignment.title}</div>
+          </div>
+          <button onClick={onClose} className="p-2 rounded-full hover:bg-stone-100 flex-shrink-0">
+            <X size={20} className="text-stone-600" />
+          </button>
+        </div>
+        <div className="flex-1 overflow-y-auto p-5">
+          <div className="text-sm text-stone-700 mb-4">
+            Tick every item the tenant passed on recheck. The owner will approve, then those items leave the cleaning team's workflow.
+          </div>
+          {!loaded ? (
+            <div className="text-center py-12 text-stone-400 text-sm">Loading items…</div>
+          ) : targets.length === 0 ? (
+            <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
+              No open items to pass on recheck.
+            </div>
+          ) : (
+            <div className="space-y-4">
+              {grouped.map((g, idx) => (
+                <div key={idx}>
+                  <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-1.5">
+                    {g.unitLabel}{g.partyLabel && ` · ${g.partyLabel}`} <span className="text-stone-400">({g.items.length})</span>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+                    {g.items.map(t => {
+                      const checked = selected.has(t.id);
+                      return (
+                        <button key={t.id} type="button" onClick={() => toggle(t.id)}
+                          className={`flex items-start gap-2 px-3 py-2.5 rounded-xl border-2 text-left ${checked ? 'border-emerald-500 bg-emerald-50' : 'border-stone-200 bg-white hover:border-stone-400'}`}>
+                          <div className={`mt-0.5 w-4 h-4 rounded border-2 flex-shrink-0 flex items-center justify-center ${checked ? 'border-emerald-600 bg-emerald-600' : 'border-stone-300'}`}>
+                            {checked && <Check size={11} className="text-white" />}
+                          </div>
+                          <span className="text-sm text-stone-900">{labelForTarget(t)}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))}
+              <div className="mt-3">
+                <label className="text-xs uppercase tracking-wider font-mono text-stone-500 block mb-1">Notes (optional)</label>
+                <textarea value={notes} onChange={(e) => setNotes(e.target.value)}
+                  rows={2} placeholder="Anything the owner should know about this recheck…"
+                  className="w-full px-3 py-2 rounded-xl border border-stone-300 bg-white text-stone-900 text-sm focus:outline-none focus:border-stone-900" />
+              </div>
+            </div>
+          )}
+        </div>
+        {targets.length > 0 && (
+          <div className="p-5 border-t border-stone-200 space-y-2">
+            {error && (
+              <div className="p-2 rounded-lg bg-red-50 border border-red-200 text-red-700 text-xs flex items-start gap-2">
+                <AlertCircle size={14} className="flex-shrink-0 mt-0.5" /> {error}
+              </div>
+            )}
+            <div className="text-xs text-stone-600 text-center">
+              {selected.size} item{selected.size === 1 ? '' : 's'} selected
+            </div>
+            <button onClick={submit} disabled={busy || selected.size === 0}
+              className="w-full py-3 rounded-2xl bg-stone-900 text-stone-50 font-medium disabled:opacity-50">
+              {busy ? 'Submitting…' : `Submit recheck request${selected.size > 0 ? ` (${selected.size})` : ''}`}
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function PortalAssignmentDetail({ property, assignment, onBack, onEdit }) {
   const [busy, setBusy] = useState(false);
   const canEdit = assignment.pm_status === 'draft' || assignment.pm_status === 'rejected';
   const canDelete = canEdit;
+  // Recheck modal — only relevant when the assignment is APPROVED
+  // (visible to cleaners) and has at least one item not yet passed.
+  // PM uses this to tell us "the tenant did this part themselves, you
+  // don't need to clean it anymore."
+  const [recheckOpen, setRecheckOpen] = useState(false);
+  const [pendingRecheck, setPendingRecheck] = useState(null); // existing pending request, if any
+
+  // Pull existing pending recheck request for this assignment so we
+  // can show "you already submitted a recheck — waiting for owner".
+  useEffect(() => {
+    if (assignment.pm_status !== 'approved') return;
+    (async () => {
+      const { data } = await supabase.from('recheck_requests')
+        .select('id, created_at, pm_status, items:recheck_request_items(id)')
+        .eq('assignment_id', assignment.id)
+        .eq('pm_status', 'pending')
+        .limit(1).maybeSingle();
+      setPendingRecheck(data || null);
+    })();
+  }, [assignment.id, assignment.pm_status]);
 
   const submit = async () => {
     setBusy(true);
@@ -22947,10 +23136,224 @@ function PortalAssignmentDetail({ property, assignment, onBack, onEdit }) {
             This assignment is locked while waiting for the owner to review. You'll be able to edit again if changes are requested.
           </div>
         ) : (
-          <div className="p-4 rounded-2xl bg-emerald-50 border border-emerald-200 text-sm text-stone-700">
-            This assignment is active and visible to the cleaning team. It can't be edited from here.
+          // Approved (active) — PM can now submit a recheck if the
+          // tenant fixed some items themselves between the original
+          // submission and the cleaner arriving.
+          <div className="space-y-3">
+            <div className="p-4 rounded-2xl bg-emerald-50 border border-emerald-200 text-sm text-stone-700">
+              This assignment is active and visible to the cleaning team. It can't be edited from here.
+            </div>
+            {pendingRecheck ? (
+              <div className="p-4 rounded-2xl bg-amber-50 border border-amber-200">
+                <div className="text-xs uppercase tracking-wider font-mono text-amber-800 mb-1">Recheck pending review</div>
+                <div className="text-sm text-stone-700">
+                  You submitted a recheck request with {pendingRecheck.items?.length || 0} item{(pendingRecheck.items?.length || 0) === 1 ? '' : 's'}. The owner will approve or reject it.
+                </div>
+              </div>
+            ) : (
+              <button onClick={() => setRecheckOpen(true)} disabled={busy}
+                className="w-full py-3 rounded-2xl bg-stone-100 border border-stone-300 text-stone-800 text-sm font-medium flex items-center justify-center gap-2 disabled:opacity-50 hover:bg-stone-200">
+                <Check size={14} /> Request recheck — tenant passed some items
+              </button>
+            )}
           </div>
         )}
+      </div>
+
+      {recheckOpen && (
+        <RecheckRequestModal
+          assignment={assignment}
+          property={property}
+          onClose={() => setRecheckOpen(false)}
+          onSaved={() => {
+            setRecheckOpen(false);
+            // Reload the pending banner state
+            (async () => {
+              const { data } = await supabase.from('recheck_requests')
+                .select('id, created_at, pm_status, items:recheck_request_items(id)')
+                .eq('assignment_id', assignment.id)
+                .eq('pm_status', 'pending')
+                .limit(1).maybeSingle();
+              setPendingRecheck(data || null);
+            })();
+          }} />
+      )}
+    </div>
+  );
+}
+
+// ReviewRecheckModal — owner approves or rejects a PM recheck
+// request. Approving marks every listed item done + recheck_passed,
+// which removes them from the cleaning team's workflow. Rejecting
+// leaves the items where they are (still pending for cleaners).
+function ReviewRecheckModal({ recheck, employee, onDone, onClose }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [rejecting, setRejecting] = useState(false);
+  const [rejectionReason, setRejectionReason] = useState('');
+
+  const items = recheck.items || [];
+
+  const approve = async () => {
+    setBusy(true); setError('');
+    try {
+      const nowISO = new Date().toISOString();
+      const targetIds = items.map(i => i.target?.id).filter(Boolean);
+      // 1) Mark every listed target as done + recheck_passed.
+      //    completed_by stays null (no cleaner did this work) — the
+      //    recheck_passed_at column distinguishes from a normal close.
+      if (targetIds.length > 0) {
+        const { error: e1 } = await supabase.from('assignment_targets')
+          .update({
+            status: 'done',
+            completed_at: nowISO,
+            recheck_passed_at: nowISO,
+            recheck_passed_by: recheck.created_by || null,
+          })
+          .in('id', targetIds);
+        if (e1) throw e1;
+      }
+      // 2) Stamp the recheck request as approved
+      const { error: e2 } = await supabase.from('recheck_requests')
+        .update({
+          pm_status: 'approved',
+          approved_by: employee.id,
+          approved_at: nowISO,
+        }).eq('id', recheck.id);
+      if (e2) throw e2;
+      onDone();
+    } catch (e) {
+      setError(e.message || String(e));
+    }
+    setBusy(false);
+  };
+
+  const reject = async () => {
+    if (!rejectionReason.trim()) {
+      setError('Please give a reason so the PM knows what to change.');
+      return;
+    }
+    setBusy(true); setError('');
+    try {
+      const nowISO = new Date().toISOString();
+      const { error: e1 } = await supabase.from('recheck_requests')
+        .update({
+          pm_status: 'rejected',
+          rejected_by: employee.id,
+          rejected_at: nowISO,
+          rejection_reason: rejectionReason.trim(),
+        }).eq('id', recheck.id);
+      if (e1) throw e1;
+      onDone();
+    } catch (e) {
+      setError(e.message || String(e));
+    }
+    setBusy(false);
+  };
+
+  // Group items by bedroom for display
+  const grouped = (() => {
+    const m = new Map();
+    items.forEach(i => {
+      const t = i.target;
+      if (!t) return;
+      const k = `${t.unit?.label || ''}::${t.party?.label || ''}`;
+      if (!m.has(k)) m.set(k, { unitLabel: t.unit?.label || '', partyLabel: t.party?.label || '', list: [] });
+      m.get(k).list.push(t);
+    });
+    return Array.from(m.values());
+  })();
+
+  const labelForTarget = (t) => {
+    if (t.status_notes && t.template_item_key?.startsWith?.('requested:')) return t.status_notes;
+    const key = t.template_item_key || '';
+    if (!key) return 'Item';
+    return key.replace(/^[a-z]+:/, '').replace(/_/g, ' ').replace(/^./, c => c.toUpperCase());
+  };
+
+  return (
+    <div className="fixed inset-0 bg-stone-900/80 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
+      <div className="bg-stone-50 w-full sm:max-w-lg sm:rounded-3xl rounded-t-3xl flex flex-col max-h-[90vh]">
+        <div className="flex items-center justify-between p-5 border-b border-stone-200">
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2 mb-0.5">
+              <span className="text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-purple-100 text-purple-700 font-mono">RECHECK</span>
+              <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">Review request</div>
+            </div>
+            <div className="font-serif text-xl text-stone-900 truncate">{recheck.assignment?.title}</div>
+            <div className="text-xs text-stone-500 font-mono mt-0.5">{recheck.assignment?.property?.name}</div>
+          </div>
+          <button onClick={onClose} className="p-2 rounded-full hover:bg-stone-100 flex-shrink-0">
+            <X size={20} className="text-stone-600" />
+          </button>
+        </div>
+        <div className="flex-1 overflow-y-auto p-5">
+          <div className="text-sm text-stone-700 mb-4">
+            The PM is asking you to confirm the tenant passed the following items on recheck. Approving removes them from the cleaning team's workflow.
+          </div>
+          {recheck.notes && (
+            <div className="p-3 rounded-xl bg-stone-100 text-sm text-stone-700 mb-4 whitespace-pre-wrap">
+              <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1">PM notes</div>
+              {recheck.notes}
+            </div>
+          )}
+          {grouped.length === 0 ? (
+            <div className="text-center py-8 text-stone-400 text-sm">No items in this request.</div>
+          ) : (
+            <div className="space-y-3">
+              {grouped.map((g, idx) => (
+                <div key={idx} className="rounded-2xl bg-white border-2 border-emerald-200 p-3">
+                  <div className="text-xs uppercase tracking-wider font-mono text-emerald-700 mb-2">
+                    {g.unitLabel}{g.partyLabel && ` · ${g.partyLabel}`} <span className="text-stone-400">({g.list.length})</span>
+                  </div>
+                  <ul className="space-y-1">
+                    {g.list.map(t => (
+                      <li key={t.id} className="flex items-start gap-2 text-sm">
+                        <Check size={14} className="text-emerald-600 flex-shrink-0 mt-0.5" />
+                        <span>{labelForTarget(t)}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+        <div className="p-5 border-t border-stone-200 space-y-2">
+          {error && (
+            <div className="p-2 rounded-lg bg-red-50 border border-red-200 text-red-700 text-xs flex items-start gap-2">
+              <AlertCircle size={14} className="flex-shrink-0 mt-0.5" /> {error}
+            </div>
+          )}
+          {rejecting ? (
+            <>
+              <textarea value={rejectionReason} onChange={(e) => setRejectionReason(e.target.value)}
+                rows={2} placeholder="Reason — e.g. 'tenant didn't actually clean, the photo shows dust'"
+                className="w-full px-3 py-2 rounded-xl border border-stone-300 bg-white text-stone-900 text-sm focus:outline-none focus:border-stone-900" />
+              <div className="flex gap-2">
+                <button onClick={() => setRejecting(false)} disabled={busy}
+                  className="flex-1 py-3 rounded-2xl bg-stone-100 text-stone-700 font-medium text-sm">
+                  Back
+                </button>
+                <button onClick={reject} disabled={busy}
+                  className="flex-1 py-3 rounded-2xl bg-red-600 text-white font-medium text-sm disabled:opacity-50">
+                  {busy ? 'Sending…' : 'Send back to PM'}
+                </button>
+              </div>
+            </>
+          ) : (
+            <div className="flex gap-2">
+              <button onClick={() => setRejecting(true)} disabled={busy}
+                className="flex-1 py-3 rounded-2xl border-2 border-red-200 text-red-700 font-medium text-sm flex items-center justify-center gap-1.5">
+                <X size={14} /> Send back
+              </button>
+              <button onClick={approve} disabled={busy}
+                className="flex-1 py-3 rounded-2xl bg-emerald-600 text-white font-medium text-sm disabled:opacity-50 flex items-center justify-center gap-1.5">
+                <Check size={14} /> {busy ? 'Approving…' : `Approve (${items.length})`}
+              </button>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -22964,6 +23367,8 @@ function InboxView({ employee, onBack }) {
   const [tab, setTab] = useState('assignments');
   const [pendingAssignments, setPendingAssignments] = useState([]);
   const [reviewedAssignments, setReviewedAssignments] = useState([]);
+  const [pendingRechecks, setPendingRechecks] = useState([]); // PM recheck requests waiting for owner
+  const [reviewRecheck, setReviewRecheck] = useState(null);   // currently-open recheck in review modal
   const [newPhotos, setNewPhotos] = useState([]);
   const [reviewedPhotos, setReviewedPhotos] = useState([]);
   const [loaded, setLoaded] = useState(false);
@@ -23012,6 +23417,22 @@ function InboxView({ employee, onBack }) {
       .eq('source', 'pm').eq('pm_status', 'pending')
       .order('created_at', { ascending: false });
     setPendingAssignments(aData || []);
+
+    // Pending recheck requests — PM submissions saying "tenant passed
+    // these items on recheck, don't need cleaning anymore". Pull the
+    // item rows + assignment context for the review modal.
+    const { data: rcData } = await supabase.from('recheck_requests')
+      .select(`
+        id, assignment_id, created_at, pm_status, notes,
+        assignment:assignments(id, title, customer_id, property:customers(id, name, property_type)),
+        items:recheck_request_items(
+          id,
+          target:assignment_targets(id, status, template_section, template_item_key, status_notes, unit:units(label), party:parties(label))
+        )
+      `)
+      .eq('pm_status', 'pending')
+      .order('created_at', { ascending: false });
+    setPendingRechecks(rcData || []);
 
     // Already-reviewed PM assignments (approved or rejected) — for the "Reviewed" tab
     const { data: rData } = await supabase.from('assignments')
@@ -23115,20 +23536,61 @@ function InboxView({ employee, onBack }) {
         </div>
 
         {!loaded ? <Splash text="Loading…" /> : tab === 'assignments' ? (
-          pendingAssignments.length === 0 ? (
+          (pendingAssignments.length === 0 && pendingRechecks.length === 0) ? (
             <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
               No assignments waiting for review.
             </div>
           ) : (
             <>
+              {/* Pending recheck requests from PMs — these are
+                 "tenant passed items X, Y, Z" submissions. Approve
+                 marks those items done + recheck_passed_at so the
+                 cleaning team stops seeing them. Shown above new
+                 assignment submissions so they're easy to spot. */}
+              {pendingRechecks.length > 0 && (
+                <div className="mb-4">
+                  <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-2">
+                    Recheck requests ({pendingRechecks.length})
+                  </div>
+                  <div className="space-y-2">
+                    {pendingRechecks.map(rc => (
+                      <div key={rc.id} onClick={() => setReviewRecheck(rc)}
+                        tabIndex={0}
+                        role="button"
+                        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setReviewRecheck(rc); } }}
+                        className="w-full text-left p-4 rounded-2xl bg-white border-2 border-purple-200 hover:border-purple-500 transition-colors cursor-pointer">
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2 mb-1 flex-wrap">
+                              <span className="text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-purple-100 text-purple-700 font-mono">RECHECK</span>
+                              <span className="font-serif text-base text-stone-900 truncate">{rc.assignment?.title || 'Recheck request'}</span>
+                            </div>
+                            <div className="text-xs text-stone-600 font-mono mt-0.5">
+                              {rc.assignment?.property?.name}
+                              {' · '}{rc.items?.length || 0} {(rc.items?.length || 0) === 1 ? 'item' : 'items'} the PM says passed
+                            </div>
+                            <div className="text-xs text-stone-400 font-mono mt-1">
+                              Submitted {fmtDate(rc.created_at)}
+                            </div>
+                          </div>
+                          <ChevronRight size={16} className="text-stone-400 flex-shrink-0" />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {/* Queue mode CTA — owner taps once, then walks through
                  every pending review one at a time. Approve / send back
                  → auto-advances. When the queue empties we show a
                  confirmation before leaving the queue screen. */}
+              {pendingAssignments.length > 0 && (
               <button onClick={() => { setQueueDone(false); setQueueMode(true); }}
                 className="w-full mb-3 py-3.5 rounded-2xl bg-stone-900 hover:bg-stone-800 text-stone-50 font-medium text-sm flex items-center justify-center gap-2 active:scale-98">
                 <Play size={14} /> Review all {pendingAssignments.length} in queue
               </button>
+              )}
               <div className="space-y-2">
               {pendingAssignments.map(a => {
                 const anyPriority = (a.targets || []).some(t => t.priority);
@@ -23329,6 +23791,11 @@ function InboxView({ employee, onBack }) {
             if (queueMode) setQueueMode(false);
             setReviewAssignment(null);
           }} />
+      )}
+      {reviewRecheck && (
+        <ReviewRecheckModal recheck={reviewRecheck} employee={employee}
+          onDone={() => { setReviewRecheck(null); load(); }}
+          onClose={() => setReviewRecheck(null)} />
       )}
       {/* "All caught up" overlay — shown when the queue empties.
          Owner taps to confirm and exits queue mode. */}

@@ -182,8 +182,35 @@ function saveTranslationCache(cache) {
 
 function TranslationProvider({ children }) {
   const [locale, setLocaleState] = useState(() => {
-    try { return localStorage.getItem('tidytrack_locale') || 'en'; } catch { return 'en'; }
+    try {
+      // Saved preference wins; otherwise sniff the device. We accept
+      // 'es' / 'es-MX' / 'es-ES' / etc. as Spanish.
+      const saved = localStorage.getItem('tidytrack_locale');
+      if (saved) return saved;
+      const nav = (typeof navigator !== 'undefined' && navigator.language) || 'en';
+      if (nav.toLowerCase().startsWith('es')) return 'es';
+      return 'en';
+    } catch { return 'en'; }
   });
+
+  // Expose locale globally so non-React helpers (tt() in AuthedShift)
+  // can read the current language without prop drilling. The Spanish
+  // micro-dictionary is populated below so the multi-cleaner prompts
+  // ("All items done?", "Delete this photo?") translate.
+  useEffect(() => {
+    try {
+      window.__tidytrack_locale = locale;
+      window.__tidytrack_es = {
+        // Multi-cleaner prompts (from leaveBlock + deletePhoto)
+        'All items done at this bedroom. Finish the workblock?':
+          'Todos los elementos están listos en este dormitorio. ¿Terminar el workblock?',
+        'Delete this photo? This cannot be reversed.':
+          '¿Eliminar esta foto? No se puede deshacer.',
+        'You can only delete photos you took.':
+          'Solo puedes eliminar fotos que tú tomaste.',
+      };
+    } catch {}
+  }, [locale]);
 
   const setLocale = (newLocale) => {
     try { localStorage.setItem('tidytrack_locale', newLocale); } catch {}
@@ -840,6 +867,11 @@ function StaffApp() {
     return <SignIn onSignIn={async (employee) => {
       // Remember they chose staff (in case localStorage was cleared)
       try { localStorage.setItem('tt_role_choice', 'staff'); } catch {}
+      // Apply per-employee language pref before any UI mounts so the
+      // cleaner sees the right locale immediately on this device.
+      if (employee?.locale) {
+        try { localStorage.setItem('tidytrack_locale', employee.locale); } catch {}
+      }
       await sessionStore.set({ employeeId: employee.id });
       setSession({ employee });
     }} />;
@@ -1666,6 +1698,147 @@ function BedBathPicker({ bedrooms, bathrooms, onChange }) {
 //   defaultName, setDefaultName: shared freeform name state (for the
 //                                 existing "type your own name" flow)
 // =================================================================
+// =================================================================
+// PICKER TRANSLATIONS (Spanish)
+//
+// Static dictionary mapping template_item_key → ES label. Used by
+// labelForTarget when the cleaner's locale is 'es'. Keys mirror the
+// shape the DB produces ("bedroom:mirror", "general:living_room",
+// etc.); the label after the colon is normalized in labelForTarget
+// before lookup. Items missing here fall back to humanized English
+// which the Google Translate layer (when configured) further
+// translates — but the static dictionary avoids API lag for the
+// common picker labels.
+//
+// Cleaners can override any of these per-property via the
+// item_label_overrides table; the lookup order is:
+//   override(property, key, locale) > dictionary(key) > English
+// =================================================================
+const PICKER_ES = {
+  // Sections
+  '__section_bedroom':  'Dormitorio',
+  '__section_bathroom': 'Baño',
+  '__section_vanity':   'Tocador',
+  '__section_general':  'General',
+  // General subgroup labels (group letters)
+  '__general_group_a': 'Sala / Patio / Calentador',
+  '__general_group_b': 'Refri / Microondas / Pasillo',
+  '__general_group_c': 'Ventilas / Estufa / Horno / Lavavajillas',
+  '__general_group_d': 'Cocina',
+  // General subcategory items
+  'general:living_room':  'Sala',
+  'general:patio':        'Patio',
+  'general:water_heater': 'Calentador de agua',
+  'general:hallways':     'Pasillo',
+  'general:refrigerator': 'Refrigerador',
+  'general:freezer':      'Congelador',
+  'general:microwave':    'Microondas',
+  'general:breezeway':    'Pasillo exterior',
+  'general:vents':        'Ventilas',
+  'general:stove':        'Estufa',
+  'general:oven':         'Horno',
+  'general:dishwasher':   'Lavavajillas',
+  'general:kitchen':      'Cocina',
+  // Common Bedroom items (best-effort — extend as the team adds more)
+  'bedroom:bed':           'Cama',
+  'bedroom:nightstand':    'Mesa de noche',
+  'bedroom:dresser':       'Cómoda',
+  'bedroom:mirror':        'Espejo',
+  'bedroom:closet':        'Clóset',
+  'bedroom:windows':       'Ventanas',
+  'bedroom:blinds':        'Persianas',
+  'bedroom:floor':         'Piso',
+  'bedroom:baseboards':    'Zócalos',
+  'bedroom:fan':           'Ventilador',
+  'bedroom:light_fixture': 'Lámpara',
+  'bedroom:outlets':       'Tomacorrientes',
+  'bedroom:doors':         'Puertas',
+  'bedroom:walls':         'Paredes',
+  // Common Bathroom items
+  'bathroom:toilet':       'Inodoro',
+  'bathroom:shower':       'Ducha',
+  'bathroom:tub':          'Tina',
+  'bathroom:sink':         'Lavabo',
+  'bathroom:mirror':       'Espejo',
+  'bathroom:floor':        'Piso',
+  'bathroom:walls':        'Paredes',
+  'bathroom:vent':         'Ventila',
+  'bathroom:cabinets':     'Gabinetes',
+  // Common Vanity items
+  'vanity:counter':        'Mesón',
+  'vanity:sink':           'Lavabo',
+  'vanity:faucet':         'Grifo',
+  'vanity:mirror':         'Espejo',
+  'vanity:cabinets':       'Gabinetes',
+  'vanity:floor':          'Piso',
+  // Common request keys
+  'requested:extra_item':  'Tarea adicional',
+};
+
+// Hook: load + manage per-property label overrides for the current
+// locale. Returns:
+//   overrides       — Map<template_item_key, label>
+//   saveOverride    — (key, label) => Promise. Upserts the row.
+//   removeOverride  — (key) => Promise. Deletes (revert to default).
+//   reload          — refetch from DB.
+// Pass propertyId='' or locale='en' to no-op (no overrides apply).
+function useItemLabelOverrides(propertyId, locale, employee) {
+  const [overrides, setOverrides] = useState(new Map());
+  const reload = useCallback(async () => {
+    if (!propertyId || !locale || locale === 'en') {
+      setOverrides(new Map());
+      return;
+    }
+    const { data } = await supabase.from('item_label_overrides')
+      .select('template_item_key, label')
+      .eq('property_id', propertyId)
+      .eq('locale', locale);
+    const m = new Map();
+    (data || []).forEach(r => m.set(r.template_item_key, r.label));
+    setOverrides(m);
+  }, [propertyId, locale]);
+  useEffect(() => { reload(); }, [reload]);
+
+  const saveOverride = async (key, label) => {
+    const trimmed = (label || '').trim();
+    if (!key || !trimmed) return;
+    if (!propertyId || !locale || locale === 'en') return;
+    // Upsert — onConflict (property_id, template_item_key, locale)
+    const { error } = await supabase.from('item_label_overrides')
+      .upsert({
+        property_id: propertyId,
+        template_item_key: key,
+        locale,
+        label: trimmed,
+        edited_by: employee?.id || null,
+        edited_at: new Date().toISOString(),
+      }, { onConflict: 'property_id,template_item_key,locale' });
+    if (error) { alert('Could not save label: ' + error.message); return; }
+    setOverrides(prev => { const next = new Map(prev); next.set(key, trimmed); return next; });
+  };
+
+  const removeOverride = async (key) => {
+    if (!propertyId || !locale) return;
+    const { error } = await supabase.from('item_label_overrides')
+      .delete()
+      .eq('property_id', propertyId)
+      .eq('template_item_key', key)
+      .eq('locale', locale);
+    if (error) { alert('Could not revert: ' + error.message); return; }
+    setOverrides(prev => { const next = new Map(prev); next.delete(key); return next; });
+  };
+
+  return { overrides, saveOverride, removeOverride, reload };
+}
+
+// Resolve a label for an item key in the current locale.
+// Lookup order: override > dictionary > humanized English fallback.
+function resolveItemLabel(key, locale, overrides, englishFallback) {
+  if (overrides && overrides.has(key)) return overrides.get(key);
+  if (locale === 'es' && PICKER_ES[key]) return PICKER_ES[key];
+  return englishFallback;
+}
+
 function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDefaultName,
   // NEW: bedroom context. When provided, the picker becomes
   // checklist-aware: it loads active assignment_targets at this
@@ -1698,6 +1871,10 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
   // checklist items. They tap items + Start to flip them to
   // in_progress. Reset when category changes.
   const [selectedTargetIds, setSelectedTargetIds] = useState(new Set());
+  // editingLabel — drives the per-property label override editor.
+  // Set to { key, current, hasOverride } when the cleaner taps the
+  // pencil; cleared when the editor closes.
+  const [editingLabel, setEditingLabel] = useState(null);
   // Top-level tab inside the picker. 'not_started' is the default —
   // it's the "I want to start cleaning X" flow. 'active' shows
   // what's already in progress at this bedroom so the cleaner can
@@ -1733,14 +1910,22 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
   // else is on it without needing to refresh manually.
   useAssignmentSync(loadChecklistTargets, 'task-picker');
 
+  const { locale } = useLocale();
+  // Per-property label overrides (cleaner-edited Spanish labels).
+  // Only loaded when locale != 'en'. Saving an override mutates the
+  // map locally so the UI updates immediately.
+  const { overrides, saveOverride, removeOverride } = useItemLabelOverrides(customerId, locale, employee);
+
   // Friendly label for a target — uses status_notes (custom request
   // text) when present, else the template_item_key in a humanized
-  // form. Keeps the picker readable without needing the full
-  // template_items join (cleaners don't care about the key column).
+  // form. When locale=es, prefers per-property override > static
+  // dictionary > English. Keeps the picker readable without needing
+  // the full template_items join (cleaners don't care about the key).
   const labelForTarget = (t) => {
     if (t.status_notes && t.template_item_key?.startsWith?.('requested:')) return t.status_notes;
     const key = t.template_item_key || '';
-    return key.replace(/^[a-z]+:/, '').replace(/_/g, ' ').replace(/^./, c => c.toUpperCase());
+    const englishFallback = key.replace(/^[a-z]+:/, '').replace(/_/g, ' ').replace(/^./, c => c.toUpperCase());
+    return resolveItemLabel(key, locale, overrides, englishFallback);
   };
 
   // The assigned general_variant(s) for this bedroom — pulled from
@@ -2220,21 +2405,37 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
                   <div className="grid grid-cols-2 gap-1.5">
                     {group.items.map(t => {
                       const checked = selectedTargetIds.has(t.id);
+                      const itemKey = t.template_item_key || '';
+                      // Only show edit pencil for translated items in
+                      // checklist mode — cleaners can fix bad Spanish
+                      // labels. Requests (custom items) skipped since
+                      // their label is already the cleaner's own text.
+                      const canEditLabel = locale === 'es' && itemKey && !itemKey.startsWith('requested:');
                       return (
-                        <button key={t.id} type="button" onClick={() => toggleTarget(t.id)}
-                          className={`flex items-start gap-2 px-3 py-2.5 rounded-xl border-2 text-left transition-all ${checked ? 'border-amber-600 bg-amber-50' : 'border-stone-200 bg-white hover:border-stone-400'}`}>
-                          <div className={`mt-0.5 w-4 h-4 rounded border-2 flex-shrink-0 flex items-center justify-center ${checked ? 'border-amber-600 bg-amber-600' : 'border-stone-300'}`}>
-                            {checked && <Check size={11} className="text-white" />}
-                          </div>
-                          <div className="flex-1 min-w-0">
-                            <div className="text-sm text-stone-900">{labelForTarget(t)}</div>
-                            {t.priority && (
-                              <span className="inline-block mt-0.5 text-[9px] uppercase tracking-wider font-mono px-1.5 py-0.5 rounded-full bg-red-50 border border-red-200 text-red-700 font-bold">
-                                Priority
-                              </span>
-                            )}
-                          </div>
-                        </button>
+                        <div key={t.id} className={`flex items-start gap-1 rounded-xl border-2 transition-all ${checked ? 'border-amber-600 bg-amber-50' : 'border-stone-200 bg-white hover:border-stone-400'}`}>
+                          <button type="button" onClick={() => toggleTarget(t.id)}
+                            className="flex items-start gap-2 px-3 py-2.5 text-left flex-1 min-w-0">
+                            <div className={`mt-0.5 w-4 h-4 rounded border-2 flex-shrink-0 flex items-center justify-center ${checked ? 'border-amber-600 bg-amber-600' : 'border-stone-300'}`}>
+                              {checked && <Check size={11} className="text-white" />}
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <div className="text-sm text-stone-900">{labelForTarget(t)}</div>
+                              {t.priority && (
+                                <span className="inline-block mt-0.5 text-[9px] uppercase tracking-wider font-mono px-1.5 py-0.5 rounded-full bg-red-50 border border-red-200 text-red-700 font-bold">
+                                  Priority
+                                </span>
+                              )}
+                            </div>
+                          </button>
+                          {canEditLabel && (
+                            <button type="button"
+                              onClick={(e) => { e.stopPropagation(); setEditingLabel({ key: itemKey, current: labelForTarget(t), hasOverride: overrides.has(itemKey) }); }}
+                              className="p-2 text-stone-400 hover:text-amber-700 flex-shrink-0"
+                              title="Editar nombre">
+                              <Edit2 size={12} />
+                            </button>
+                          )}
+                        </div>
                       );
                     })}
                   </div>
@@ -2343,6 +2544,93 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
             Clear
           </button>
         )}
+      </div>
+      {editingLabel && (
+        <EditItemLabelModal
+          itemKey={editingLabel.key}
+          current={editingLabel.current}
+          hasOverride={editingLabel.hasOverride}
+          locale={locale}
+          onSave={async (newLabel) => {
+            await saveOverride(editingLabel.key, newLabel);
+            setEditingLabel(null);
+          }}
+          onRevert={async () => {
+            await removeOverride(editingLabel.key);
+            setEditingLabel(null);
+          }}
+          onClose={() => setEditingLabel(null)} />
+      )}
+    </div>
+  );
+}
+
+// EditItemLabelModal — small modal cleaners use to fix a bad/cut-off
+// translated item name. Per-property override; saving applies the new
+// label to anyone working at this property in this locale. A "Revert"
+// option appears if an override is already in place. Backdrop-click
+// closes (matches the rest of the quick-view modals).
+function EditItemLabelModal({ itemKey, current, hasOverride, locale, onSave, onRevert, onClose }) {
+  const [val, setVal] = useState(current || '');
+  const [busy, setBusy] = useState(false);
+  const isES = locale === 'es';
+  const t = (en, es) => isES ? es : en;
+  return (
+    <div onClick={onClose}
+      className="fixed inset-0 bg-stone-900/70 z-[60] flex items-end sm:items-center justify-center p-0 sm:p-4">
+      <div onClick={(e) => e.stopPropagation()}
+        className="bg-stone-50 w-full sm:max-w-md sm:rounded-3xl rounded-t-3xl flex flex-col">
+        <div className="p-5 border-b border-stone-200 flex items-start justify-between gap-2">
+          <div className="flex-1 min-w-0">
+            <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">
+              {t('Fix label', 'Arreglar nombre')}
+            </div>
+            <div className="font-serif text-lg text-stone-900 mt-0.5">
+              {t('Edit this item\u2019s name', 'Editar el nombre de este elemento')}
+            </div>
+          </div>
+          <button onClick={onClose} className="p-2 rounded-full hover:bg-stone-100 flex-shrink-0">
+            <X size={20} className="text-stone-600" />
+          </button>
+        </div>
+        <div className="p-5 space-y-4">
+          <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-900">
+            {t(
+              'This change applies to everyone cleaning at this property in Spanish.',
+              'Este cambio aplica para todos los que limpian en esta propiedad en español.'
+            )}
+          </div>
+          <div>
+            <label className="text-[10px] uppercase tracking-wider text-stone-500 font-mono mb-1.5 block">
+              {t('New name', 'Nuevo nombre')}
+            </label>
+            <input type="text" value={val} onChange={(e) => setVal(e.target.value)}
+              autoFocus
+              className="w-full px-3 py-2.5 rounded-xl border border-stone-300 text-sm" />
+            <div className="text-[10px] font-mono text-stone-500 mt-1.5">
+              {t('Item key', 'Clave')}: <span className="text-stone-700">{itemKey}</span>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 pt-2">
+            <button onClick={onClose} disabled={busy}
+              className="flex-1 py-2.5 rounded-xl border border-stone-300 text-stone-700 font-medium text-sm">
+              {t('Cancel', 'Cancelar')}
+            </button>
+            {hasOverride && (
+              <button onClick={async () => { setBusy(true); await onRevert(); setBusy(false); }} disabled={busy}
+                className="px-4 py-2.5 rounded-xl bg-stone-100 text-stone-700 font-medium text-sm">
+                {t('Revert', 'Restablecer')}
+              </button>
+            )}
+            <button onClick={async () => {
+              if (!val.trim() || val.trim() === current) return onClose();
+              setBusy(true); await onSave(val.trim()); setBusy(false);
+            }} disabled={busy || !val.trim()}
+              className="flex-1 py-2.5 rounded-xl bg-amber-700 text-white font-medium text-sm disabled:opacity-50">
+              {t('Save', 'Guardar')}
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -6718,7 +7006,17 @@ function Header({ name, onSignOut, role, employee, onOpenMessages, onLogoClick, 
            configured. */}
         {translateConfigured && (
           <button
-            onClick={() => setLocale(locale === 'es' ? 'en' : 'es')}
+            onClick={async () => {
+              const next = locale === 'es' ? 'en' : 'es';
+              setLocale(next);
+              // Persist to employees.locale so the choice follows
+              // the cleaner across devices. Non-fatal on failure.
+              if (employee?.id) {
+                try {
+                  await supabase.from('employees').update({ locale: next }).eq('id', employee.id);
+                } catch (e) { console.warn('[locale] save failed', e); }
+              }
+            }}
             className="relative p-2 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-50 flex items-center gap-1"
             title={locale === 'es' ? 'Switch to English' : 'Cambiar a Español'}>
             <Languages size={16} />

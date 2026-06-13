@@ -10572,8 +10572,8 @@ function CleaningsReportView({ employee, onSignOut, onOpenMessages, onLogoClick,
       let q = supabase.from('assignment_targets')
         .select(`
           id, status, completed_at, template_section, template_item_key, status_notes,
-          unit:units(id, label, sort_key),
-          party:parties(id, label, sort_key),
+          unit:units(id, label),
+          party:parties(id, label),
           assignment:assignments!inner(id, title, assignment_type, customer_id, property:customers(id, name))
         `)
         .gte('completed_at', startISO)
@@ -10587,6 +10587,27 @@ function CleaningsReportView({ employee, onSignOut, onOpenMessages, onLogoClick,
         (!selectedPropertyId || t.assignment?.customer_id === selectedPropertyId) &&
         (selectedTypes.size === 0 || selectedTypes.has(t.assignment?.assignment_type))
       );
+      // Natural-sort comparator so "B1-101" sorts before "B1-102"
+      // before "B2-101". Plain string sort would put "B10-..." before
+      // "B2-..." which isn't what an owner expects.
+      const natCmp = (a, b) => {
+        const re = /(\d+)|(\D+)/g;
+        const pa = String(a || '').toLowerCase().match(re) || [];
+        const pb = String(b || '').toLowerCase().match(re) || [];
+        for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+          const x = pa[i], y = pb[i];
+          if (x === undefined) return -1;
+          if (y === undefined) return 1;
+          const xn = /^\d+$/.test(x), yn = /^\d+$/.test(y);
+          if (xn && yn) {
+            const d = parseInt(x, 10) - parseInt(y, 10);
+            if (d !== 0) return d;
+          } else if (x !== y) {
+            return x < y ? -1 : 1;
+          }
+        }
+        return 0;
+      };
       // Group by unit → party → section. For "general", further group by
       // its sub-group label (4 sub-groups A-D). Items are kept in order.
       const generalSubFor = (itemKey) => {
@@ -10602,19 +10623,17 @@ function CleaningsReportView({ employee, onSignOut, onOpenMessages, onLogoClick,
         const k = t.template_item_key || '';
         return k.replace(/^[a-z_]+:/, '').replace(/_/g, ' ').replace(/^./, c => c.toUpperCase()) || 'Item';
       };
-      const units = new Map(); // unitId -> { unitLabel, sort, parties: Map(partyId -> { label, sort, sections: {bedroom:[], bathroom:[], vanity:[], generalGroups: Map(groupKey -> { label, items: [] }) }, assignmentType, assignmentTitle, propertyName }) }
+      const units = new Map();
       for (const t of targets) {
         const uId = t.unit?.id || '_no_unit';
         if (!units.has(uId)) units.set(uId, {
           unitLabel: t.unit?.label || 'Unit',
-          sort: t.unit?.sort_key ?? Number.MAX_SAFE_INTEGER,
           parties: new Map(),
         });
         const u = units.get(uId);
         const pId = t.party?.id || '_no_party';
         if (!u.parties.has(pId)) u.parties.set(pId, {
           partyLabel: t.party?.label || 'Bedroom',
-          sort: t.party?.sort_key ?? Number.MAX_SAFE_INTEGER,
           assignmentType: t.assignment?.assignment_type,
           assignmentTitle: t.assignment?.title,
           propertyName: t.assignment?.property?.name,
@@ -10630,19 +10649,17 @@ function CleaningsReportView({ employee, onSignOut, onOpenMessages, onLogoClick,
         } else if (section === 'bedroom' || section === 'bathroom' || section === 'vanity') {
           p.sections[section].push(labelForItem(t));
         } else {
-          // Unknown section — bucket under General with original label
           const key = '_misc';
           if (!p.generalGroups.has(key)) p.generalGroups.set(key, { label: 'Other', items: [] });
           p.generalGroups.get(key).items.push(labelForItem(t));
         }
       }
-      // Convert maps to arrays sorted by sort_key/label
       const out = Array.from(units.values())
-        .sort((a, b) => (a.sort - b.sort) || a.unitLabel.localeCompare(b.unitLabel))
+        .sort((a, b) => natCmp(a.unitLabel, b.unitLabel))
         .map(u => ({
           unitLabel: u.unitLabel,
           parties: Array.from(u.parties.values())
-            .sort((a, b) => (a.sort - b.sort) || a.partyLabel.localeCompare(b.partyLabel))
+            .sort((a, b) => natCmp(a.partyLabel, b.partyLabel))
             .map(p => ({
               ...p,
               generalGroups: Array.from(p.generalGroups.values())

@@ -7966,6 +7966,10 @@ function PortalUserForm({ employee, user, allProperties, onCancel, onSaved }) {
   const [phone, setPhone] = useState(user?.phone || '');
   const [notes, setNotes] = useState(user?.notes || '');
   const [active, setActive] = useState(user?.active !== false);
+  // Per-PM permission: when ON, the PM can use the legacy file-upload
+  // assignment flow. Default OFF — we steer PMs toward the new
+  // structured checklist wizard.
+  const [allowLegacyUploads, setAllowLegacyUploads] = useState(!!user?.allow_legacy_uploads);
   const [assignedPropIds, setAssignedPropIds] = useState(
     new Set((user?.properties || []).map(p => p.id))
   );
@@ -8016,6 +8020,7 @@ function PortalUserForm({ employee, user, allProperties, onCancel, onSaved }) {
         phone: phone.trim() || null,
         notes: notes.trim() || null,
         active,
+        allow_legacy_uploads: allowLegacyUploads,
         created_by: employee.id,
       }).select().single();
       if (e) {
@@ -8032,6 +8037,7 @@ function PortalUserForm({ employee, user, allProperties, onCancel, onSaved }) {
         phone: phone.trim() || null,
         notes: notes.trim() || null,
         active,
+        allow_legacy_uploads: allowLegacyUploads,
       }).eq('id', user.id);
       if (e) {
         setBusy(false);
@@ -8158,6 +8164,23 @@ function PortalUserForm({ employee, user, allProperties, onCancel, onSaved }) {
             <div className="text-xs text-stone-500">Inactive users can't sign in. Their data is preserved.</div>
           </div>
         </label>
+
+        {/* Legacy upload permission — owner toggles per-PM. We default to
+           OFF so PMs use the new structured checklist wizard. Owners can
+           flip this on per PM if they specifically need the older
+           file/photo upload path. */}
+        {kind !== 'tenant' && (
+          <label className="flex items-center gap-3 p-3 rounded-xl bg-stone-50">
+            <input type="checkbox" checked={allowLegacyUploads}
+              onChange={(e) => setAllowLegacyUploads(e.target.checked)} />
+            <div>
+              <div className="text-sm font-medium text-stone-900">Allow legacy file uploads</div>
+              <div className="text-xs text-stone-500">
+                When off (default), this user only sees the new checklist wizard and the legacy file-upload button is greyed out. Turn this on only if this PM specifically needs the old file/photo workflow.
+              </div>
+            </div>
+          </label>
+        )}
 
         {error && (
           <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-red-700 text-sm flex items-start gap-2">
@@ -11857,7 +11880,7 @@ function PortalHome({ property, portalKind, portalUser, hasMultipleProperties, o
         <PortalPhotoUploadTab property={property} portalKind={portalKind} />
       )}
       {tab === 'assignments' && (
-        <PortalAssignmentsTab property={property} portalKind={portalKind} />
+        <PortalAssignmentsTab property={property} portalKind={portalKind} portalUser={portalUser} />
       )}
 
       {showWelcome && (
@@ -15380,10 +15403,15 @@ function SheetQuickViewModal({ file, url, onClose }) {
   );
 }
 
-function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
+function ChecklistAssignmentWizard({ property, employee, actorKind = null, portalUser = null, onCancel, onSaved }) {
   // 6 steps total. The wizard is short enough that an accidental
   // refresh just starts over — no state persistence here.
   const [step, setStep] = useState(0);
+  // When invoked from the PM portal, every created assignment is
+  // marked source='pm' + pm_status='pending' so it flows through the
+  // owner-approval queue. When invoked from staff (no actorKind),
+  // assignments take effect immediately.
+  const isPmActor = actorKind === 'pm' || actorKind === 'pm_staff';
 
   // === Step 1: pick the apartment(s) + upload mode ===
   // We no longer keep a single "selectedUnit" — the new tree shows
@@ -16091,6 +16119,14 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
           template_set_id: templateSet?.id || null,
           bathroom_variant: c.bathroomVariant || null,
           general_variant: c.generalVariant || null,
+          // PM-sourced assignments need owner approval before they
+          // become visible to cleaners. Staff-sourced (no actorKind)
+          // skip this step and take effect immediately.
+          ...(isPmActor ? {
+            source: 'pm',
+            pm_status: 'pending',
+            actor_kind: actorKind,
+          } : {}),
         };
         const assignmentInsert = JSON.parse(JSON.stringify(SAFE_COLS));
         if (typeof console !== 'undefined') {
@@ -16100,7 +16136,7 @@ function ChecklistAssignmentWizard({ property, employee, onCancel, onSaved }) {
           .insert(assignmentInsert)
           // Explicit column list — never bare .select() — so PostgREST
           // doesn't try to resolve columns that aren't in our payload.
-          .select('id, customer_id, title, file_url, file_kind, file_path, assignment_type, active, sheet_type, template_set_id, bathroom_variant, general_variant, uploaded_by, created_at')
+          .select('id, customer_id, title, file_url, file_kind, file_path, assignment_type, active, sheet_type, template_set_id, bathroom_variant, general_variant, uploaded_by, source, pm_status, actor_kind, created_at')
           .single();
         if (aErr) {
           if (typeof console !== 'undefined') {
@@ -21695,11 +21731,17 @@ function PortalPhotoUploadTab({ property, portalKind }) {
 // Property manager creates/edits/submits assignment drafts; once
 // approved they become read-only.
 // =================================================================
-function PortalAssignmentsTab({ property, portalKind }) {
+function PortalAssignmentsTab({ property, portalKind, portalUser }) {
   const [assignments, setAssignments] = useState([]);
   const [loaded, setLoaded] = useState(false);
+  // Added 'wizard' kind so the PM can open the new ChecklistAssignmentWizard.
+  // Legacy upload (PortalAssignmentForm) still reachable via the greyed-out
+  // button below — but only if the owner explicitly turned the permission
+  // on for this PM (portalUser.allow_legacy_uploads).
   const [view, setView] = useState({ kind: 'list' });
   const [search, setSearch] = useState('');
+
+  const allowLegacy = !!portalUser?.allow_legacy_uploads;
 
   const load = async () => {
     const { data } = await supabase.from('assignments')
@@ -21712,6 +21754,14 @@ function PortalAssignmentsTab({ property, portalKind }) {
   };
   useEffect(() => { load(); }, [property.id]);
 
+  if (view.kind === 'wizard') {
+    return <ChecklistAssignmentWizard property={property}
+      employee={null}                          /* no staff employee in PM context */
+      actorKind={portalKind || 'pm'}
+      portalUser={portalUser}
+      onCancel={() => setView({ kind: 'list' })}
+      onSaved={() => { setView({ kind: 'list' }); load(); }} />;
+  }
   if (view.kind === 'new') {
     return <PortalAssignmentForm property={property} portalKind={portalKind}
       onCancel={() => setView({ kind: 'list' })}
@@ -21763,9 +21813,31 @@ function PortalAssignmentsTab({ property, portalKind }) {
         </p>
       </div>
 
-      <button onClick={() => setView({ kind: 'new' })}
+      {/* Primary upload — the new checklist wizard. This is the
+         recommended path for every PM. Maps the assignment to specific
+         bedroom items with structured templates instead of a free-form
+         file upload. */}
+      <button onClick={() => setView({ kind: 'wizard' })}
         className="w-full py-4 rounded-2xl bg-stone-900 text-stone-50 font-medium flex items-center justify-center gap-2">
         <Plus size={18} /> New assignment
+      </button>
+
+      {/* Legacy upload — greyed out by default. Owner can re-enable it
+         per-PM via portalUser.allow_legacy_uploads. We always show the
+         button so PMs see this exists but understand it's gated behind
+         owner permission. */}
+      <button onClick={() => allowLegacy && setView({ kind: 'new' })}
+        disabled={!allowLegacy}
+        title={allowLegacy
+          ? 'Upload a file or photo as the source for an assignment (legacy flow).'
+          : 'Disabled by the owner. Ask them to enable legacy uploads for your account if you need this option.'}
+        className={`w-full py-2.5 rounded-xl text-xs font-medium flex items-center justify-center gap-1.5 border ${allowLegacy
+          ? 'bg-stone-50 border-stone-300 text-stone-700 hover:bg-stone-100'
+          : 'bg-stone-100 border-stone-200 text-stone-400 cursor-not-allowed'}`}>
+        <FileText size={12} />
+        {allowLegacy
+          ? 'Legacy file upload'
+          : 'Legacy file upload (disabled by owner)'}
       </button>
 
       {/* Search — filters across title, unit, bedroom, notes. PMs don't

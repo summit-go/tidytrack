@@ -10,7 +10,7 @@ import {
 } from 'lucide-react';
 
 // =================================================================
-// 🔧 PASTE YOUR SUPABASE KEYS HERE
+// 🔧 PASTE YOUR SUPABASE KEYhttps://github.com/summit-go/tidytrack/edit/main/src/App.jsxS HERE
 // =================================================================
 const SUPABASE_URL = "https://bbaynvqnbkjyqhzhhypr.supabase.co/";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJiYXludnFuYmtqeXFoemhoeXByIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc0NzQ2MTMsImV4cCI6MjA5MzA1MDYxM30.ZXUoHFj_IwMe6rX8RxK8Dj4kAB9AS7X9xZAhQ84wDEk";

@@ -877,10 +877,120 @@ function StaffApp() {
     }} />;
   }
   const signOut = async () => { await sessionStore.clear(); setSession(null); };
+  // Beta testers (is_beta_tester=true) get a sticky top toggle bar
+  // letting them swap between BETA / EMPLOYEE / PM views. The flag is
+  // set via SQL on a dedicated test-harness employee row — your real
+  // owner account stays untouched.
+  if (session.employee.is_beta_tester) {
+    return <BetaShell employee={session.employee} onSignOut={signOut} />;
+  }
   if (session.employee.role === 'manager' || session.employee.role === 'owner') {
     return <ManagerShell employee={session.employee} onSignOut={signOut} />;
   }
   return <EmployeeApp employee={session.employee} onSignOut={signOut} />;
+}
+
+// =================================================================
+// BETA SHELL — wraps the appropriate inner shell (ManagerShell /
+// EmployeeApp / PortalShell-stub) based on the current view. Only
+// rendered for employees with is_beta_tester=true.
+//
+// View state is persisted to localStorage so a reload keeps you in
+// whichever view you were last in. Window global is mirrored so any
+// component anywhere in the tree can check the active view without
+// needing context plumbing (matches the locale pattern).
+// =================================================================
+const BETA_VIEW_LS_KEY = 'tidytrack_beta_view';
+function readBetaView() {
+  try {
+    const v = localStorage.getItem(BETA_VIEW_LS_KEY);
+    if (v === 'beta' || v === 'employee' || v === 'pm') return v;
+  } catch {}
+  return 'beta';
+}
+function writeBetaView(v) {
+  try { localStorage.setItem(BETA_VIEW_LS_KEY, v); } catch {}
+  if (typeof window !== 'undefined') window.__tidytrack_beta_view = v;
+}
+// Gate helper used by features that want to render only inside the
+// BETA view of a beta-tester account. Closed for everyone else even
+// if they somehow set the window global manually.
+function isBetaFeaturesEnabled(employee) {
+  if (!employee?.is_beta_tester) return false;
+  const v = (typeof window !== 'undefined' && window.__tidytrack_beta_view) || 'beta';
+  return v === 'beta';
+}
+
+function BetaShell({ employee, onSignOut }) {
+  const [view, setView] = useState(readBetaView());
+  // Mirror to window global so deep components can read without prop drilling
+  useEffect(() => { writeBetaView(view); }, [view]);
+  // On mount, set the global once (in case something reads it before
+  // the effect runs in StrictMode dev double-render).
+  useEffect(() => {
+    if (typeof window !== 'undefined') window.__tidytrack_beta_view = view;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const VIEWS = [
+    { id: 'beta',     label: 'BETA',     desc: 'Admin + new features' },
+    { id: 'employee', label: 'EMPLOYEE', desc: 'What cleaners see' },
+    { id: 'pm',       label: 'PM',       desc: 'What property managers see' },
+  ];
+  const banner = (
+    <div className="fixed top-0 inset-x-0 z-50 bg-stone-900 text-stone-50 px-2 py-1.5 flex items-center gap-1 shadow-lg">
+      <span className="text-[9px] uppercase tracking-widest font-mono text-amber-400 px-1.5 flex-shrink-0">
+        Beta
+      </span>
+      <div className="flex-1 flex items-center gap-1 overflow-x-auto">
+        {VIEWS.map(v => (
+          <button key={v.id} onClick={() => setView(v.id)}
+            className={`text-[10px] font-mono uppercase tracking-wider px-2.5 py-1 rounded-full whitespace-nowrap transition-colors ${
+              view === v.id
+                ? 'bg-amber-500 text-stone-900 font-bold'
+                : 'bg-stone-800 text-stone-400 hover:text-stone-100'
+            }`}>
+            {v.label}
+          </button>
+        ))}
+      </div>
+      <button onClick={onSignOut}
+        className="text-[10px] font-mono uppercase tracking-wider px-2 py-1 rounded-full text-stone-400 hover:text-stone-100 flex-shrink-0">
+        Sign out
+      </button>
+    </div>
+  );
+  // Each branch keeps its own state (mount/unmount on switch).
+  // That's intentional — a fresh EMPLOYEE view from BETA shows a clean
+  // cleaner experience, not a half-finished one.
+  let inner;
+  if (view === 'beta') {
+    inner = <ManagerShell employee={employee} onSignOut={onSignOut} />;
+  } else if (view === 'employee') {
+    inner = <EmployeeApp employee={employee} onSignOut={onSignOut} />;
+  } else {
+    // PM view — implemented in the next turn. Synthetic portalUser
+    // injection requires PortalShell refactor we haven't done yet.
+    inner = (
+      <div className="min-h-screen bg-stone-50 pt-12 flex items-center justify-center">
+        <div className="max-w-md mx-auto p-8 text-center">
+          <div className="text-xs uppercase tracking-widest text-stone-500 font-mono mb-3">Coming soon</div>
+          <div className="font-serif text-2xl text-stone-900 mb-2">PM view</div>
+          <div className="text-sm text-stone-600">
+            PM impersonation needs PortalShell adapter work. Shipping in a follow-up turn.
+            For now, use BETA or EMPLOYEE.
+          </div>
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div>
+      {banner}
+      {/* Push the inner shell down so the banner doesn't overlap.
+         The banner is ~32px tall; pt-9 (36px) gives a tiny buffer. */}
+      <div className="pt-9">{inner}</div>
+    </div>
+  );
 }
 
 function Splash({ text }) {
@@ -15676,6 +15786,188 @@ function AssignedVsCleanedView({ employee, onBack, onOpenBedroomHistory }) {
   );
 }
 
+// =================================================================
+// BETA: ActivityTimelineView — full-screen view that pulls today's
+// events from multiple tables and renders them in reverse-chrono
+// order. Gated behind isBetaFeaturesEnabled; the entry button on
+// DailyCalendar is conditionally rendered.
+//
+// Event sources:
+//   - shifts.start_time / end_time  → clock in / out
+//   - work_blocks.start_time / end_time → block started / finished
+//   - photos.created_at (kind=damage) → damage flagged
+//   - recheck_requests.created_at → PM requested recheck
+//
+// Day boundary defaults to TODAY in the viewer's local timezone.
+// Could expand to a date picker later, but the point of the timeline
+// is "what happened today" so we keep it simple for v1.
+// =================================================================
+function ActivityTimelineView({ employee, onClose }) {
+  const [events, setEvents] = useState([]);
+  const [loaded, setLoaded] = useState(false);
+  // Use today's local start/end as ISO strings for the queries.
+  const dayBounds = (() => {
+    const start = new Date(); start.setHours(0, 0, 0, 0);
+    const end = new Date(); end.setHours(23, 59, 59, 999);
+    return { startISO: start.toISOString(), endISO: end.toISOString() };
+  })();
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const { startISO, endISO } = dayBounds;
+      // Pull everything in parallel. Each event source maps to a
+      // normalized { ts, kind, title, body, actor } shape for rendering.
+      const [shiftsR, blocksR, photosR, rechecksR] = await Promise.all([
+        supabase.from('shifts')
+          .select('id, start_time, end_time, employee:employees(id, name), customer:customers(id, name)')
+          .gte('start_time', startISO).lte('start_time', endISO)
+          .eq('is_preview', false),
+        supabase.from('work_blocks')
+          .select('id, start_time, end_time, unit:units(label), party:parties(label), shift:shifts(employee:employees(id, name), customer:customers(id, name))')
+          .gte('start_time', startISO).lte('start_time', endISO),
+        supabase.from('photos')
+          .select('id, created_at, kind, taken_by_employee:employees!taken_by(id, name), task:tasks(work_block:work_blocks(unit:units(label), party:parties(label), shift:shifts(customer:customers(name))))')
+          .eq('kind', 'damage')
+          .gte('created_at', startISO).lte('created_at', endISO)
+          .is('deleted_at', null),
+        supabase.from('recheck_requests')
+          .select('id, created_at, status, target:assignment_targets(unit:units(label), party:parties(label), assignment:assignments(property:customers(name)))')
+          .gte('created_at', startISO).lte('created_at', endISO),
+      ]);
+      if (cancelled) return;
+      const all = [];
+      // Shifts: clock in + clock out
+      (shiftsR.data || []).forEach(s => {
+        all.push({
+          ts: s.start_time, kind: 'shift_start',
+          actor: s.employee?.name || '?',
+          title: `${s.employee?.name || 'A cleaner'} clocked in`,
+          body: s.customer?.name || '',
+        });
+        if (s.end_time) {
+          all.push({
+            ts: s.end_time, kind: 'shift_end',
+            actor: s.employee?.name || '?',
+            title: `${s.employee?.name || 'A cleaner'} clocked out`,
+            body: s.customer?.name || '',
+          });
+        }
+      });
+      // Work blocks: started + finished
+      (blocksR.data || []).forEach(b => {
+        const cleaner = b.shift?.employee?.name || '?';
+        const where = `${b.unit?.label || ''} · ${b.party?.label || ''}`;
+        all.push({
+          ts: b.start_time, kind: 'block_start',
+          actor: cleaner,
+          title: `${cleaner} started cleaning ${where}`,
+          body: b.shift?.customer?.name || '',
+        });
+        if (b.end_time) {
+          all.push({
+            ts: b.end_time, kind: 'block_end',
+            actor: cleaner,
+            title: `${cleaner} finished ${where}`,
+            body: b.shift?.customer?.name || '',
+          });
+        }
+      });
+      // Damage photos
+      (photosR.data || []).forEach(p => {
+        const cleaner = p.taken_by_employee?.name || 'A cleaner';
+        const where = `${p.task?.work_block?.unit?.label || ''} · ${p.task?.work_block?.party?.label || ''}`;
+        all.push({
+          ts: p.created_at, kind: 'damage',
+          actor: cleaner,
+          title: `⚠ ${cleaner} flagged damage at ${where}`,
+          body: p.task?.work_block?.shift?.customer?.name || '',
+        });
+      });
+      // Recheck requests
+      (rechecksR.data || []).forEach(r => {
+        const where = `${r.target?.unit?.label || ''} · ${r.target?.party?.label || ''}`;
+        all.push({
+          ts: r.created_at, kind: 'recheck',
+          actor: 'PM',
+          title: `PM requested recheck at ${where}`,
+          body: r.target?.assignment?.property?.name || '',
+        });
+      });
+      // Sort reverse-chronological so most recent is on top
+      all.sort((a, b) => new Date(b.ts) - new Date(a.ts));
+      setEvents(all);
+      setLoaded(true);
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const iconFor = (kind) => {
+    switch (kind) {
+      case 'shift_start':  return { Icon: Play,   color: 'bg-emerald-100 text-emerald-700' };
+      case 'shift_end':    return { Icon: Pause,  color: 'bg-stone-100 text-stone-600' };
+      case 'block_start':  return { Icon: Camera, color: 'bg-blue-100 text-blue-700' };
+      case 'block_end':    return { Icon: Check,  color: 'bg-emerald-100 text-emerald-700' };
+      case 'damage':       return { Icon: ImageIcon, color: 'bg-red-100 text-red-700' };
+      case 'recheck':      return { Icon: Eye,    color: 'bg-amber-100 text-amber-700' };
+      default:             return { Icon: Clock,  color: 'bg-stone-100 text-stone-500' };
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-40 bg-stone-50 overflow-y-auto">
+      <div className="flex items-center gap-3 px-5 py-4 border-b border-stone-200 bg-white sticky top-0 z-10">
+        <button onClick={onClose} className="p-2 -ml-2 rounded-full hover:bg-stone-100">
+          <ArrowLeft size={20} className="text-stone-700" />
+        </button>
+        <div className="flex-1 min-w-0">
+          <div className="text-xs uppercase tracking-wider text-stone-500 font-mono flex items-center gap-2">
+            Beta · Today
+            <span className="text-[8px] uppercase tracking-widest font-mono px-1.5 py-0.5 rounded-full bg-amber-200 text-amber-800">Beta</span>
+          </div>
+          <h1 className="font-serif text-2xl text-stone-900">Activity timeline</h1>
+        </div>
+      </div>
+      <div className="max-w-2xl mx-auto px-5 py-6">
+        {!loaded ? (
+          <div className="text-center py-12 text-stone-400 text-sm">Loading…</div>
+        ) : events.length === 0 ? (
+          <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
+            No activity yet today.
+          </div>
+        ) : (
+          <div className="relative">
+            {/* Vertical timeline rule */}
+            <div className="absolute left-4 top-2 bottom-2 w-px bg-stone-200" />
+            <div className="space-y-2">
+              {events.map((e, i) => {
+                const { Icon, color } = iconFor(e.kind);
+                return (
+                  <div key={i} className="relative flex items-start gap-3 pl-1">
+                    <div className={`relative z-10 w-8 h-8 rounded-full ${color} flex items-center justify-center flex-shrink-0 ring-4 ring-stone-50`}>
+                      <Icon size={14} />
+                    </div>
+                    <div className="flex-1 min-w-0 pt-1 pb-3">
+                      <div className="text-sm text-stone-900">{e.title}</div>
+                      {e.body && (
+                        <div className="text-[11px] text-stone-500 font-mono mt-0.5 truncate">{e.body}</div>
+                      )}
+                      <div className="text-[10px] font-mono text-stone-400 mt-0.5">
+                        {fmtClock(e.ts)}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // TranslationOverridesModal — owner-facing admin view for managing
 // Spanish label overrides cleaners have saved per property. Groups
 // overrides by property; each row shows English fallback → override
@@ -15823,6 +16115,10 @@ function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenAssi
   const [inboxCounts, setInboxCounts] = useState({ pendingAssignments: 0, pendingRechecks: 0, newPhotos: 0 });
   // Owner-only modal for managing Spanish label overrides across properties.
   const [showOverrides, setShowOverrides] = useState(false);
+  // Beta-gated demo view. Only mounts when isBetaFeaturesEnabled
+  // returns true (beta tester logged in + currently in BETA view).
+  const [showActivityTimeline, setShowActivityTimeline] = useState(false);
+  const betaEnabled = isBetaFeaturesEnabled(employee);
 
   // Load inbox counts
   useEffect(() => {
@@ -15986,6 +16282,30 @@ function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenAssi
             <ChevronRight size={18} className="text-stone-400 flex-shrink-0" />
           </button>
         )}
+        {/* BETA-gated — Activity Timeline. Renders only when the
+           logged-in employee is a beta tester AND currently in BETA
+           view. Amber accent so beta features are visually distinct
+           from production ones. */}
+        {betaEnabled && (
+          <button onClick={() => setShowActivityTimeline(true)}
+            className="w-full mb-5 p-4 rounded-2xl bg-amber-50 border-2 border-amber-300 hover:border-amber-500 active:scale-98 transition-all flex items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 rounded-full bg-amber-600 text-stone-50 flex items-center justify-center">
+                <Clock size={16} />
+              </div>
+              <div className="text-left">
+                <div className="font-serif text-base text-stone-900 flex items-center gap-2">
+                  Activity timeline
+                  <span className="text-[8px] uppercase tracking-widest font-mono px-1.5 py-0.5 rounded-full bg-amber-200 text-amber-800">Beta</span>
+                </div>
+                <div className="text-xs text-stone-600 font-mono">
+                  Today's events in chronological order
+                </div>
+              </div>
+            </div>
+            <ChevronRight size={18} className="text-amber-700 flex-shrink-0" />
+          </button>
+        )}
         {/* Owner-only — manage Spanish label overrides cleaners have
            saved per property. Lets the owner revert mistakes
            centrally instead of asking each cleaner to undo their own. */}
@@ -16097,6 +16417,11 @@ function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenAssi
         <TranslationOverridesModal
           employee={employee}
           onClose={() => setShowOverrides(false)} />
+      )}
+      {showActivityTimeline && (
+        <ActivityTimelineView
+          employee={employee}
+          onClose={() => setShowActivityTimeline(false)} />
       )}
     </div>
   );

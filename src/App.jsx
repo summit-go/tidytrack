@@ -2110,29 +2110,30 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
                   // category is a single value.
                   if (category === c.id) {
                     setCategory(null);
+                    // Closing a section: clear picks. The cleaner is
+                    // backing out, so we shouldn't keep selections from
+                    // a section that's no longer visible.
+                    setSelectedTargetIds(new Set());
                   } else {
                     setCategory(c.id);
                     setSelectedSubs(new Set());
-                    // Auto-tick every open checklist item in this
-                    // section EXCEPT for General — cleaners typically
-                    // clean the whole Bedroom / Vanity / Bathroom in
-                    // one block but pick specific items in General
-                    // (kitchen vs. living-room vs. vents etc.). The
-                    // cleaner can still uncheck items they're not
-                    // doing. Items in OTHER sections that the cleaner
-                    // had picked manually are preserved.
+                    // Opening a NEW section: clear any picks from a
+                    // previously-open section first. Section selection
+                    // is mutually exclusive — opening Bedroom doesn't
+                    // also keep Bathroom items ticked. Without this,
+                    // tapping Bedroom and then Bathroom would start
+                    // BOTH sections on the next Start (the bug).
                     if (c.id !== 'general' && checklistMode) {
+                      // Then auto-tick every open item in THIS section.
+                      // General stays manual (cleaners pick specific
+                      // subsections there).
                       const inSection = checklistTargets.filter(t =>
                         (t.template_section || '').toLowerCase() === c.id &&
                         (t.status === 'pending' || t.status === 'paused')
                       );
-                      if (inSection.length > 0) {
-                        setSelectedTargetIds(prev => {
-                          const next = new Set(prev);
-                          inSection.forEach(t => next.add(t.id));
-                          return next;
-                        });
-                      }
+                      setSelectedTargetIds(new Set(inSection.map(t => t.id)));
+                    } else {
+                      setSelectedTargetIds(new Set());
                     }
                   }
                 }}
@@ -4265,15 +4266,19 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
       )}
 
       {activeTaskObj && (
-        <div className="mx-4 mt-4 p-4 rounded-2xl bg-amber-50 border-2 border-amber-200">
+        <div className="mx-4 mt-4">
           <div className="flex items-center gap-2 mb-2">
             <span className="w-2 h-2 rounded-full bg-amber-700 animate-pulse" />
-            <span className="text-xs uppercase tracking-wider text-amber-800 font-mono">In progress</span>
+            <span className="text-xs uppercase tracking-wider text-amber-800 font-mono">Active task</span>
           </div>
-          <div className="font-serif text-2xl text-stone-900 mb-2">{activeTaskObj.name}</div>
-          <div className="text-stone-600 font-mono text-sm">
-            {fmtTime(Date.now() - new Date(activeTaskObj.start_time).getTime())}
-          </div>
+          {/* Full TaskCard at the top — gives the cleaner the Before /
+             After / Damage photo buttons right where they need them
+             without scrolling down to the Tasks list. The same task
+             below is filtered out so it doesn't render twice. */}
+          <TaskCard task={activeTaskObj} isActive={true}
+            onStop={() => onStopTask(activeTaskObj.id)}
+            onResume={() => onResumeTask(activeTaskObj.id)}
+            onAddPhoto={(kind) => onAddPhoto(activeTaskObj.id, kind)} />
         </div>
       )}
 
@@ -4332,8 +4337,14 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
           </div>
         ) : (
           <div className="space-y-3">
-            {tasks.map(t => (
-              <TaskCard key={t.id} task={t} isActive={activeTask === t.id}
+            {tasks
+              // Active task is already rendered at the top of the
+              // screen with its photo buttons — skip it here so the
+              // cleaner doesn't see it twice. The list below shows
+              // paused / done tasks only.
+              .filter(t => t.id !== activeTask)
+              .map(t => (
+              <TaskCard key={t.id} task={t} isActive={false}
                 onStop={() => onStopTask(t.id)} onResume={() => onResumeTask(t.id)}
                 onAddPhoto={(kind) => onAddPhoto(t.id, kind)} />
             ))}
@@ -4581,15 +4592,19 @@ function SimpleShiftView({ shift, tasks, activeTask, employeeName, employee, onS
       )}
 
       {activeTaskObj && (
-        <div className="mx-4 mt-4 p-4 rounded-2xl bg-amber-50 border-2 border-amber-200">
+        <div className="mx-4 mt-4">
           <div className="flex items-center gap-2 mb-2">
             <span className="w-2 h-2 rounded-full bg-amber-700 animate-pulse" />
-            <span className="text-xs uppercase tracking-wider text-amber-800 font-mono">In progress</span>
+            <span className="text-xs uppercase tracking-wider text-amber-800 font-mono">Active task</span>
           </div>
-          <div className="font-serif text-2xl text-stone-900 mb-2">{activeTaskObj.name}</div>
-          <div className="text-stone-600 font-mono text-sm">
-            {fmtTime(Date.now() - new Date(activeTaskObj.start_time).getTime())}
-          </div>
+          {/* Full TaskCard at the top — gives the cleaner the Before /
+             After / Damage photo buttons right where they need them
+             without scrolling down to the Tasks list. The same task
+             below is filtered out so it doesn't render twice. */}
+          <TaskCard task={activeTaskObj} isActive={true}
+            onStop={() => onStopTask(activeTaskObj.id)}
+            onResume={() => onResumeTask(activeTaskObj.id)}
+            onAddPhoto={(kind) => onAddPhoto(activeTaskObj.id, kind)} />
         </div>
       )}
 
@@ -4643,8 +4658,14 @@ function SimpleShiftView({ shift, tasks, activeTask, employeeName, employee, onS
           </div>
         ) : (
           <div className="space-y-3">
-            {tasks.map(t => (
-              <TaskCard key={t.id} task={t} isActive={activeTask === t.id}
+            {tasks
+              // Active task is already rendered at the top of the
+              // screen with its photo buttons — skip it here so the
+              // cleaner doesn't see it twice. The list below shows
+              // paused / done tasks only.
+              .filter(t => t.id !== activeTask)
+              .map(t => (
+              <TaskCard key={t.id} task={t} isActive={false}
                 onStop={() => onStopTask(t.id)} onResume={() => onResumeTask(t.id)}
                 onAddPhoto={(kind) => onAddPhoto(t.id, kind)} />
             ))}
@@ -18220,8 +18241,16 @@ function AssignmentsPanel({ propertyId, employee, refreshKey, onGoToBedroom, onO
   const loadCounts = async () => {
     const { data } = await supabase
       .from('assignment_targets')
-      .select('status, completed_by, completed_at, assignment:assignments!inner(customer_id, active)');
-    const filtered = (data || []).filter(t => t.assignment?.customer_id === propertyId && t.assignment?.active);
+      .select('status, completed_by, completed_at, assignment:assignments!inner(customer_id, active, source, pm_status)');
+    // Same visibility rule as the body view: skip unapproved PM
+    // assignments (they're in the owner-approval queue, not the
+    // cleaner's pending pool). Without this filter the badge said
+    // "Pending (112)" while the list was empty — confusing.
+    const filtered = (data || []).filter(t =>
+      t.assignment?.customer_id === propertyId &&
+      t.assignment?.active &&
+      (t.assignment?.source !== 'pm' || t.assignment?.pm_status === 'approved')
+    );
     const c = { pending: 0, paused: 0, in_progress: 0, done: 0, blocked: 0, mine: 0 };
     // "Mine" = items I completed today at this property
     const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);

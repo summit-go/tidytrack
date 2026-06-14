@@ -502,6 +502,14 @@ function useAssignmentSync(load, channelKey = 'asgn-sync') {
       // The debounced load coalesces back-to-back events into one fetch.
       .on('postgres_changes', { event: '*', schema: 'public', table: 'work_blocks' }, debouncedLoad)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'work_block_participants' }, debouncedLoad)
+      // Tasks and photos changing inside an existing workblock should
+      // also propagate — that's how a viewer of OtherWorkblocksHere
+      // sees "Troy added a photo" or "Troy started cleaning the tub"
+      // without manual refresh. Without these, the bullet list of
+      // tasks in another cleaner's workblock card sat stale until
+      // the user pulled-to-refresh.
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'tasks' }, debouncedLoad)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'photos' }, debouncedLoad)
       .subscribe();
 
     const onFocus = () => debouncedLoad();
@@ -5554,7 +5562,7 @@ function OtherWorkblocksHere({ unitId, partyId, currentBlockId, currentEmployeeI
   const load = async () => {
     if (!unitId || !partyId) return;
     const { data } = await supabase.from('work_blocks')
-      .select('id, start_time, main_section, shift:shifts!inner(customer_id, employee:employees(id, name)), tasks(id, end_time, category, subcategory, photos(id))')
+      .select('id, start_time, main_section, shift:shifts!inner(customer_id, employee:employees(id, name)), tasks(id, name, category, subcategory, end_time, photos(id))')
       .eq('unit_id', unitId).eq('party_id', partyId)
       .is('end_time', null);
     const filtered = (data || []).filter(b =>
@@ -5574,9 +5582,9 @@ function OtherWorkblocksHere({ unitId, partyId, currentBlockId, currentEmployeeI
     <div className="space-y-2">
       {blocks.map(b => {
         const elapsed = Date.now() - new Date(b.start_time).getTime();
-        // Section label: prefer main_section, fall back to the dominant
-        // task category, then nothing. "Working" was confusing because
-        // it didn't tell the viewer what section they'd be joining.
+        // Section label: prefer main_section, fall back to dominant
+        // task category. Without this, B can't tell what they'd be
+        // joining (bedroom? bathroom? vanity? general?).
         let sectionLabel = b.main_section ? cap(b.main_section) : null;
         if (!sectionLabel && b.tasks?.length > 0) {
           const counts = {};
@@ -5584,59 +5592,22 @@ function OtherWorkblocksHere({ unitId, partyId, currentBlockId, currentEmployeeI
           const dom = Object.keys(counts).sort((a, c) => counts[c] - counts[a])[0];
           if (dom) sectionLabel = cap(dom);
         }
-        // All unique sections being cleaned in this workblock (so if A
-        // started "Bedroom" but then added vanity items, B sees both).
-        const sectionSet = new Set();
-        (b.tasks || []).forEach(t => { if (t.category) sectionSet.add(t.category); });
-        const sections = Array.from(sectionSet);
-        // Subcategory chips — granular detail of what's being cleaned.
-        // Dedupe by subcategory string. If a task has no subcategory,
-        // skip it (the section chip above already covers it).
-        const subSeen = new Set();
-        const subChips = [];
-        (b.tasks || []).forEach(t => {
-          if (!t.subcategory) return;
-          const key = t.subcategory.toLowerCase();
-          if (subSeen.has(key)) return;
-          subSeen.add(key);
-          subChips.push(t.subcategory);
-        });
         const cleanerName = b.shift?.employee?.name || 'Another cleaner';
-        const taskCount = (b.tasks || []).length;
         const photoCount = (b.tasks || []).reduce((sum, t) => sum + (t.photos?.length || 0), 0);
         return (
           <div key={b.id} className="rounded-2xl border-2 border-amber-300 bg-amber-50 p-4">
-            <div className="flex items-start justify-between gap-3 mb-2">
+            {/* Header: "[Name] here" + section, with Join button on right */}
+            <div className="flex items-start justify-between gap-3 mb-3">
               <div className="flex-1 min-w-0">
                 <div className="text-[10px] uppercase tracking-wider text-amber-900 font-mono font-bold mb-1 flex items-center gap-1.5">
                   <span className="w-2 h-2 rounded-full bg-amber-600 animate-pulse" />
-                  Cleaner here
+                  {cleanerName} here
                 </div>
                 {sectionLabel && (
                   <div className="font-serif text-lg text-stone-900 leading-tight">
                     {sectionLabel}
                   </div>
                 )}
-                <div className="text-xs text-stone-600 mt-0.5">
-                  <span className="font-medium">{cleanerName}</span>
-                  <span className="text-stone-400 mx-1">·</span>
-                  <span className="font-mono">{fmtTimeShort(elapsed)}</span>
-                  {taskCount > 0 && (
-                    <>
-                      <span className="text-stone-400 mx-1">·</span>
-                      <span className="font-mono">{taskCount} task{taskCount === 1 ? '' : 's'}</span>
-                    </>
-                  )}
-                  {photoCount > 0 && (
-                    <>
-                      <span className="text-stone-400 mx-1">·</span>
-                      <span className="font-mono">{photoCount} photo{photoCount === 1 ? '' : 's'}</span>
-                    </>
-                  )}
-                </div>
-                <div className="text-[10px] text-stone-500 font-mono mt-1">
-                  started {new Date(b.start_time).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}
-                </div>
               </div>
               {onJoin && (
                 <button onClick={() => onJoin({ id: b.id })}
@@ -5645,30 +5616,34 @@ function OtherWorkblocksHere({ unitId, partyId, currentBlockId, currentEmployeeI
                 </button>
               )}
             </div>
-            {/* Section chips — the 4 mains being worked. Multiple appear
-               when the workblock spans sections (e.g. A picked bedroom
-               items first then added vanity items). */}
-            {sections.length > 1 && (
-              <div className="flex flex-wrap gap-1 mt-2">
-                {sections.map(s => (
-                  <span key={s} className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-amber-200 text-amber-900 border border-amber-400 font-bold">
-                    {cap(s)}
-                  </span>
+            {/* Bullet list of task names — what's being / has been
+               cleaned in this workblock. Read-only: NO checkboxes,
+               NO click handlers, the viewer can't mark items off
+               since they're not in this workblock yet. */}
+            {b.tasks && b.tasks.length > 0 && (
+              <ul className="space-y-1 text-sm text-stone-800 mb-3">
+                {b.tasks.map(t => (
+                  <li key={t.id} className="leading-snug flex items-start gap-2">
+                    <span className="text-amber-700 mt-1.5 flex-shrink-0">•</span>
+                    <span className="flex-1 min-w-0">
+                      {t.name || t.subcategory || t.category || 'Task'}
+                    </span>
+                  </li>
                 ))}
-              </div>
+              </ul>
             )}
-            {/* Subcategory chips — granular detail of what's being
-               cleaned. Multi-row flex-wrap so the chips fit nicely no
-               matter how many. */}
-            {subChips.length > 0 && (
-              <div className="flex flex-wrap gap-1 mt-2">
-                {subChips.map((c, i) => (
-                  <span key={i} className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-white border border-amber-300 text-stone-700">
-                    {c}
-                  </span>
-                ))}
-              </div>
-            )}
+            {/* Footer: start time + elapsed + photo count */}
+            <div className="text-[11px] font-mono text-stone-500 pt-2 border-t border-amber-200">
+              started {new Date(b.start_time).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}
+              <span className="text-stone-400 mx-1">·</span>
+              {fmtTimeShort(elapsed)}
+              {photoCount > 0 && (
+                <>
+                  <span className="text-stone-400 mx-1">·</span>
+                  {photoCount} photo{photoCount === 1 ? '' : 's'}
+                </>
+              )}
+            </div>
           </div>
         );
       })}

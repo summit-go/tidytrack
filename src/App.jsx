@@ -2210,6 +2210,47 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
         .filter(Boolean))).map(v => v.toLowerCase())
     : [];
 
+  // Separate query for variants — fetches the assignment's
+  // bathroom_variant + general_variant directly so the picker still
+  // knows which variant is assigned even when all targets at this
+  // bedroom are done (which empties checklistTargets above). Without
+  // this, completing every item would cause the General picker to
+  // fall back to showing all 4 groups since the variant info vanished
+  // along with the targets.
+  const [persistedVariants, setPersistedVariants] = useState({ bathroom: null, general: null, templateSetId: null });
+  useEffect(() => {
+    if (!checklistMode || !customerId || !unitId || !partyId) {
+      setPersistedVariants({ bathroom: null, general: null, templateSetId: null }); return;
+    }
+    let cancelled = false;
+    (async () => {
+      // Look at ANY assignment_target at this bedroom (including done)
+      // so we have a stable view of the assignment's variants.
+      const { data } = await supabase.from('assignment_targets')
+        .select('assignment:assignments!inner(template_set_id, bathroom_variant, general_variant, active, customer_id)')
+        .eq('unit_id', unitId).eq('party_id', partyId)
+        .limit(50); // arbitrary cap — we just need any matching row
+      if (cancelled) return;
+      let bv = null, gv = null, tsi = null;
+      (data || []).forEach(t => {
+        const a = t.assignment;
+        if (!a || a.customer_id !== customerId || !a.active) return;
+        if (!bv && a.bathroom_variant) bv = a.bathroom_variant.toLowerCase();
+        if (!gv && a.general_variant) gv = a.general_variant.toLowerCase();
+        if (!tsi && a.template_set_id) tsi = a.template_set_id;
+      });
+      setPersistedVariants({ bathroom: bv, general: gv, templateSetId: tsi });
+    })();
+    return () => { cancelled = true; };
+  }, [checklistMode, customerId, unitId, partyId]);
+
+  // Resolved variants — prefer the live derived values (from open
+  // targets), fall back to the persisted ones (queried independently)
+  // so the General gating works even when everything's done.
+  const resolvedGeneralVariants = assignedGeneralVariants.length > 0
+    ? assignedGeneralVariants
+    : (persistedVariants.general ? [persistedVariants.general] : []);
+
   const reset = () => {
     setCategory(null);
     setSelectedSubs(new Set());
@@ -2653,9 +2694,9 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
       {requestModalSection && (
         <RequestItemsModal
           section={requestModalSection}
-          templateSetId={checklistTargets[0]?.assignment?.template_set_id || null}
-          bathroomVariant={checklistTargets[0]?.assignment?.bathroom_variant || null}
-          generalVariant={checklistTargets[0]?.assignment?.general_variant || null}
+          templateSetId={checklistTargets[0]?.assignment?.template_set_id || persistedVariants.templateSetId || null}
+          bathroomVariant={checklistTargets[0]?.assignment?.bathroom_variant || persistedVariants.bathroom || null}
+          generalVariant={checklistTargets[0]?.assignment?.general_variant || persistedVariants.general || null}
           onClose={() => setRequestModalSection(null)}
           onSubmit={async (itemKeys) => {
             if (!itemKeys || itemKeys.length === 0) return;
@@ -2755,11 +2796,25 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
               </span>
             </div>
             <div className="space-y-2">
-              {Array.from(byAssignment.values()).map(group => (
+              {Array.from(byAssignment.values()).map(group => {
+                // Human-readable label for the general variant — so
+                // the cleaner sees "Kitchen" or "LR / Patio / Water
+                // Heater" instead of just "variant D". Previously
+                // they'd see "Sink" with no idea WHICH sink (kitchen,
+                // vanity, etc.). The subheader now resolves this.
+                const generalVariantLabel = {
+                  a: 'LR / Patio / Water Heater',
+                  b: 'Fridge / Microwave / Breezeway',
+                  c: 'Vents / Stove / Oven / Dishwasher',
+                  d: 'Kitchen',
+                };
+                const variantKey = (group.assignment.general_variant || '').toLowerCase();
+                const variantHumanLabel = generalVariantLabel[variantKey] || null;
+                return (
                 <div key={group.assignment.id}>
-                  {showSubheaders && byAssignment.size > 1 && (
-                    <div className="text-[10px] uppercase tracking-wider font-mono text-emerald-700 mb-1 px-1">
-                      variant {(group.assignment.general_variant || '?').toUpperCase()}
+                  {showSubheaders && variantHumanLabel && (
+                    <div className="text-[11px] uppercase tracking-wider font-mono text-emerald-800 font-bold mb-1.5 px-1">
+                      {variantHumanLabel}
                     </div>
                   )}
                   <div className="grid grid-cols-2 gap-1.5">
@@ -2826,7 +2881,8 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
                     })}
                   </div>
                 </div>
-              ))}
+              );
+              })}
             </div>
           </div>
         );
@@ -2839,7 +2895,7 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
          clean list, not the emerald panel + a redundant variant
          picker below it. Also hidden in the Active tab — that tab is
          for status review, not starting new work. */}
-      {(!checklistMode || checklistTargets.length === 0 || pickerTab === 'not_started') && isGeneral && cat.subcategories && !(checklistMode && checklistTargets.some(t => (t.template_section || '').toLowerCase() === 'general')) && !(checklistMode && checklistTargets.length > 0 && assignedGeneralVariants.length === 0) && (
+      {(!checklistMode || checklistTargets.length === 0 || pickerTab === 'not_started') && isGeneral && cat.subcategories && !(checklistMode && checklistTargets.some(t => (t.template_section || '').toLowerCase() === 'general')) && !(checklistMode && resolvedGeneralVariants.length === 0) && (
         <div>
           <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">
             Pick one or more areas {selectedSubs.size > 1 && <span className="normal-case text-amber-700">· creates 1 combined task</span>}
@@ -2858,8 +2914,8 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
               // at least one general_variant on file. If no variants
               // are loaded (legacy assignment, or no assignments at
               // all) we fall back to showing everything.
-              if (checklistMode && assignedGeneralVariants.length > 0
-                  && !assignedGeneralVariants.includes(groupKey)) {
+              if (checklistMode && resolvedGeneralVariants.length > 0
+                  && !resolvedGeneralVariants.includes(groupKey)) {
                 return null;
               }
               const groupItems = cat.subcategories.filter(s => s.group === groupKey);
@@ -6016,16 +6072,11 @@ function PreparingBlockView({ shift, pendingStart, employeeName, employee,
       </div>
 
       <div className="px-5 pt-6">
-        {/* Other cleaners already at this bedroom — surfaced BEFORE the
-           Start cleaning button so the cleaner can choose to Join the
-           existing workblock instead of starting their own. Each card
-           shows the cleaner's name, the section they're working, how
-           long they've been at it, and a Join button. */}
-        <div className="mb-4">
-          <OtherWorkblocksHere unitId={pendingStart.unitId} partyId={pendingStart.partyId}
-            currentBlockId={null} currentEmployeeId={employee?.id}
-            onJoin={onJoinBlock} />
-        </div>
+        {/* OtherWorkblocksHere removed from this view per user request —
+           the Join card should only show inside the cleaner's active
+           workblock (BlockView), not on the "ready to start" screen.
+           The Items step in the progress bar is for picking what
+           you'll clean, not for jumping into someone else's session. */}
 
         <div className="p-4 rounded-2xl bg-amber-50 border-2 border-amber-300 mb-4">
           <div className="text-xs text-stone-700 leading-relaxed">
@@ -20268,21 +20319,66 @@ function ChecklistAssignmentWizard({ property, employee, actorKind = null, porta
   // bring items back. Section pass is independent of whole-bedroom pass.
   const toggleSectionPass = (partyId, sectionKey) => {
     setConfig(prev => {
-      const current = prev[partyId] || { mode: 'configure', checked: {}, passedSections: {} };
+      const current = prev[partyId] || { mode: 'configure', checked: {}, passedSections: {}, failedSections: {} };
       const passedSections = { ...(current.passedSections || {}) };
+      const failedSections = { ...(current.failedSections || {}) };
       const willPass = !passedSections[sectionKey];
       if (willPass) {
         passedSections[sectionKey] = true;
+        delete failedSections[sectionKey]; // mutually exclusive with fail-all
         // Also un-check all items in that section so a passed section
         // never contributes targets at submit time.
         const cleared = { ...(current.checked || {}) };
         Object.keys(cleared).forEach(k => {
           if (k.startsWith(`${sectionKey}:`)) delete cleared[k];
         });
-        return { ...prev, [partyId]: { ...current, passedSections, checked: cleared } };
+        return { ...prev, [partyId]: { ...current, passedSections, failedSections, checked: cleared } };
       } else {
         delete passedSections[sectionKey];
         return { ...prev, [partyId]: { ...current, passedSections } };
+      }
+    });
+  };
+
+  // Section-level FAIL ALL — the mirror of toggleSectionPass.
+  // The cleaner failed every item in this section, so we auto-check
+  // them all. Like Pass, this is mutually exclusive with Pass and
+  // also with the whole-bedroom Pass mode (since fail-all sets up
+  // work that contradicts "no work").
+  const toggleSectionFail = (partyId, sectionKey) => {
+    setConfig(prev => {
+      const current = prev[partyId] || { mode: 'configure', checked: {}, passedSections: {}, failedSections: {} };
+      const failedSections = { ...(current.failedSections || {}) };
+      const passedSections = { ...(current.passedSections || {}) };
+      const willFail = !failedSections[sectionKey];
+      if (willFail) {
+        failedSections[sectionKey] = true;
+        delete passedSections[sectionKey]; // mutually exclusive with pass-all
+        // Auto-check every item in this section for the currently
+        // selected variant. If no variant is picked yet for the
+        // section, no items get checked (the uploader needs to pick
+        // a variant first — the section tab will continue to flag).
+        const variantKey = sectionKey === 'bathroom' ? current.bathroomVariant
+          : sectionKey === 'general' ? current.generalVariant
+          : 'default';
+        const variant = variantKey ? variantBySectionKey(sectionKey, variantKey) : null;
+        const variantItems = variant ? itemsForVariant(variant.id) : [];
+        const checked = { ...(current.checked || {}) };
+        variantItems.forEach(it => {
+          checked[`${sectionKey}:${it.item_key}`] = true;
+        });
+        return { ...prev, [partyId]: { ...current, passedSections, failedSections, checked } };
+      } else {
+        delete failedSections[sectionKey];
+        // Un-check the items that fail-all auto-checked. We can't
+        // distinguish auto-checked from manually-checked, so we clear
+        // everything in this section — the uploader can re-check
+        // anything they wanted manually.
+        const checked = { ...(current.checked || {}) };
+        Object.keys(checked).forEach(k => {
+          if (k.startsWith(`${sectionKey}:`)) delete checked[k];
+        });
+        return { ...prev, [partyId]: { ...current, failedSections, checked } };
       }
     });
   };
@@ -20333,11 +20429,17 @@ function ChecklistAssignmentWizard({ property, employee, actorKind = null, porta
     if (c.mode === 'pass') return [true, true, true, true];
     const checked = c.checked || {};
     const passed = c.passedSections || {};
+    const failed = c.failedSections || {};
     const sectionDone = (key, variantNeeded, variantValue) => {
+      // Variant REQUIRED for bathroom and general even when passed
+      // or failed — the cleaner's responsibility for which general
+      // area (Kitchen, LR, Fridge, Vents) needs to be captured so
+      // the cleaner can request items from that variant later.
+      if (variantNeeded && !variantValue) return false;
       if (passed[key]) return true;
+      if (failed[key]) return true;
       const hasItems = Object.keys(checked).some(k => k.startsWith(`${key}:`));
       if (!hasItems) return false;
-      if (variantNeeded && !variantValue) return false;
       return true;
     };
     return [
@@ -21167,6 +21269,7 @@ function ChecklistAssignmentWizard({ property, employee, actorKind = null, porta
     ];
 
     const passedSecs = c.passedSections || {};
+    const failedSecs = c.failedSections || {};
     const checked = c.checked || {};
 
     // Count for tabs: items checked in this section
@@ -21248,6 +21351,7 @@ function ChecklistAssignmentWizard({ property, employee, actorKind = null, porta
           {sections.map((s, idx) => {
             const cnt = sectionCount(s.key);
             const isPassed = !!passedSecs[s.key];
+            const isFailed = !!(failedSecs || {})[s.key];
             const isActive = activeSection === s.key;
             const sectionDoneFlags = sectionsForBedroomComplete(partyId);
             const isIncomplete = !sectionDoneFlags[idx];
@@ -21256,15 +21360,22 @@ function ChecklistAssignmentWizard({ property, employee, actorKind = null, porta
               <button key={s.key} onClick={() => setActiveSection(s.key)}
                 className={`relative flex-1 min-w-fit py-2 px-3 rounded-lg text-xs font-medium whitespace-nowrap transition-colors ${
                   isActive
-                    ? (isPassed ? 'bg-emerald-100 text-emerald-900 font-bold shadow-sm' : 'bg-white text-stone-900 font-bold shadow-sm')
-                    : (isPassed ? 'text-emerald-700' : 'text-stone-600')
+                    ? (isPassed ? 'bg-emerald-100 text-emerald-900 font-bold shadow-sm'
+                       : isFailed ? 'bg-red-100 text-red-900 font-bold shadow-sm'
+                       : 'bg-white text-stone-900 font-bold shadow-sm')
+                    : (isPassed ? 'text-emerald-700'
+                       : isFailed ? 'text-red-700'
+                       : 'text-stone-600')
                 }`}>
                 {showError && (
                   <span className="absolute top-1 right-1 w-2 h-2 rounded-full bg-red-500" title="Needs an action" />
                 )}
                 <div>{s.label}</div>
                 <div className="text-[9px] font-mono opacity-70">
-                  {isPassed ? 'passed' : cnt > 0 ? `${cnt} items` : (showError ? 'needs action' : ' ')}
+                  {isPassed ? 'passed'
+                   : isFailed ? 'failed all'
+                   : cnt > 0 ? `${cnt} items`
+                   : (showError ? 'needs action' : ' ')}
                 </div>
               </button>
             );
@@ -21281,9 +21392,10 @@ function ChecklistAssignmentWizard({ property, employee, actorKind = null, porta
   // bedroom. For Bathroom and General, the variant picker shows above
   // the checklist; for Bedroom and Vanity, the checklist is universal.
   const renderSectionContent = (partyId, sectionKey, sections, bathroomNum) => {
-    const c = config[partyId] || { checked: {}, passedSections: {} };
+    const c = config[partyId] || { checked: {}, passedSections: {}, failedSections: {} };
     const checked = c.checked || {};
     const passed = !!(c.passedSections || {})[sectionKey];
+    const failed = !!(c.failedSections || {})[sectionKey];
     const section = sections.find(s => s.key === sectionKey);
 
     // Pick variant — bathroom and general need one before items render.
@@ -21295,28 +21407,54 @@ function ChecklistAssignmentWizard({ property, employee, actorKind = null, porta
 
     return (
       <div className="space-y-3">
-        {/* "Pass this section" toggle — independent of bedroom-level Pass.
-           When passed, items are grayed out and excluded from submit. */}
-        <button onClick={() => toggleSectionPass(partyId, sectionKey)}
-          className={`w-full p-3 rounded-xl border-2 text-sm font-medium flex items-center justify-between transition-colors ${
-            passed
-              ? 'bg-emerald-50 border-emerald-500 text-emerald-900'
-              : 'bg-white border-stone-200 hover:border-stone-400 text-stone-700'
-          }`}>
-          <div className="flex items-center gap-2">
-            <div className={`w-5 h-5 rounded border-2 flex items-center justify-center ${passed ? 'bg-emerald-600 border-emerald-600 text-white' : 'border-stone-300'}`}>
-              {passed && <Check size={12} />}
-            </div>
-            <span>{passed ? `${section?.label} passed — no items` : `Pass entire ${section?.label.toLowerCase()} section`}</span>
+        {/* Per-section Pass All / Fail All toggle row — mirrors the
+           bedroom-level Pass/Fail row but scoped to this section. The
+           cleaner can mark a section fully passed (no work) or fully
+           failed (every item checked). Both are mutually exclusive.
+           Tapping the active one again clears it. */}
+        <div className="flex gap-2">
+          <button onClick={() => toggleSectionPass(partyId, sectionKey)}
+            className={`flex-1 py-2.5 rounded-xl border-2 text-sm font-bold flex items-center justify-center gap-1.5 transition-colors ${
+              passed
+                ? 'bg-emerald-600 border-emerald-700 text-white shadow-inner'
+                : 'border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-emerald-800'
+            }`}>
+            <Check size={14} /> {passed ? `Passed all ${section?.label || ''}` : `Pass all ${section?.label || ''}`}
+          </button>
+          <button onClick={() => toggleSectionFail(partyId, sectionKey)}
+            className={`flex-1 py-2.5 rounded-xl border-2 text-sm font-bold flex items-center justify-center gap-1.5 transition-colors ${
+              failed
+                ? 'bg-red-600 border-red-700 text-white shadow-inner'
+                : 'border-red-300 bg-red-50 hover:bg-red-100 text-red-800'
+            }`}>
+            <AlertCircle size={14} /> {failed ? `Failed all ${section?.label || ''}` : `Fail all ${section?.label || ''}`}
+          </button>
+        </div>
+        {passed && (
+          <div className="text-[11px] font-mono text-emerald-700 -mt-1 px-1">
+            Nothing to clean in {section?.label?.toLowerCase()} — tap again to clear.
           </div>
-          {passed && <span className="text-[10px] font-mono">Tap to un-pass</span>}
-        </button>
+        )}
+        {failed && (
+          <div className="text-[11px] font-mono text-red-700 -mt-1 px-1">
+            Every {section?.label?.toLowerCase()} item is checked. Tap again to clear.
+          </div>
+        )}
 
-        {/* Variant picker for bathroom and general sections */}
-        {sectionKey === 'bathroom' && !passed && (
+        {/* Variant picker for bathroom and general sections.
+           IMPORTANT: still shown even when the section is passed or
+           failed — the cleaner's responsibility for which general
+           area (Kitchen, LR, Fridge, Vents) was theirs is metadata
+           that matters separately from whether there was work. The
+           Request modal later needs this variant to know what items
+           the cleaner *could* request, even if nothing was assigned. */}
+        {sectionKey === 'bathroom' && (
           <div className="p-3 rounded-xl bg-stone-50 border border-stone-200">
             <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-2">
               Bathroom responsibility{bathroomNum ? ` (this is Bathroom ${bathroomNum})` : ''}
+              {!c.bathroomVariant && (
+                <span className="ml-2 normal-case text-red-700 font-bold">· pick one</span>
+              )}
             </div>
             <div className="flex gap-2">
               {variantsBySection('bathroom').map(v => (
@@ -21329,7 +21467,7 @@ function ChecklistAssignmentWizard({ property, employee, actorKind = null, porta
             </div>
           </div>
         )}
-        {sectionKey === 'general' && !passed && (() => {
+        {sectionKey === 'general' && (() => {
           // Variants already taken by OTHER bedrooms in the same
           // apartment. Each bedroom gets a UNIQUE General variant
           // (LR=A, Fridge=B, Vents=C, Kitchen=D) so we surface the

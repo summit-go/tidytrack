@@ -3936,7 +3936,22 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   // Confirm the pending start: actually create the work_block now and
   // open it as active. Called by the Start button on the PropertyHub
   // pending banner.
+  // When the cleaner taps Start on the pending-start banner, route
+  // them through the SectionPicker instead of creating the workblock
+  // directly. Without this, the pending-start flow bypassed section
+  // selection entirely — workblocks ended up with main_section=null
+  // and other cleaners couldn't see the section the first cleaner
+  // claimed (the Bedroom row of their picker would just say "No one
+  // here" because nothing matched the section key).
   const confirmPendingStart = async () => {
+    if (!pendingStart) return;
+    const unit = { id: pendingStart.unitId, label: pendingStart.unitLabel };
+    const party = { id: pendingStart.partyId, label: pendingStart.partyLabel };
+    setPendingStart(null);
+    setBlockStartFlow({ step: 'section', unit, party });
+  };
+
+  const _confirmPendingStart_LEGACY_UNUSED = async () => {
     if (!pendingStart) return;
     setBusy(true);
     // Safety: close any other open block under this shift before opening
@@ -22175,21 +22190,31 @@ function AssignmentsPanel({ propertyId, employee, refreshKey, onGoToBedroom, onO
       t.assignment?.active &&
       (t.assignment?.source !== 'pm' || t.assignment?.pm_status === 'approved')
     );
-    // Count UNIQUE bedrooms (unit_id+party_id pair) per status, not
-    // individual items. The badges now read "how many BEDROOMS have
-    // work in this status" rather than "how many items" — which is
-    // what an owner actually cares about ("3 bedrooms still pending"
-    // is more useful than "98 items pending"). A bedroom with mixed
-    // statuses (some pending, some in_progress) counts in BOTH buckets
-    // intentionally — that bedroom needs attention in both states.
+    // Count UNIQUE bedrooms per status. Each bedroom gets bucketed
+    // ONCE based on its DOMINANT status (in_progress > paused > blocked
+    // > pending > done). This is the counterpart to the dominant-status
+    // logic in load() — both need to agree or the badge says "1 in
+    // progress" while the tab is empty (or vice versa). Previously the
+    // counter put a mixed-status bedroom in multiple buckets, which
+    // is what made the same card appear in both Pending and In
+    // progress tabs simultaneously.
     const bedKey = (t) => `${t.unit_id || ''}::${t.party_id || ''}`;
+    const statusesByBed = new Map();
+    filtered.forEach(t => {
+      const k = bedKey(t);
+      if (!statusesByBed.has(k)) statusesByBed.set(k, new Set());
+      statusesByBed.get(k).add(t.status);
+    });
+    const dominantOrder = ['in_progress', 'paused', 'blocked', 'pending', 'done'];
     const sets = { pending: new Set(), paused: new Set(), in_progress: new Set(), done: new Set(), blocked: new Set(), mine: new Set(), recheck_passed: new Set() };
+    statusesByBed.forEach((statusSet, k) => {
+      const dom = dominantOrder.find(s => statusSet.has(s)) || 'pending';
+      if (sets[dom]) sets[dom].add(k);
+    });
+    // "Mine" still depends on which items the viewing cleaner finished
+    // today — it's a derived view, so we walk the items separately.
     const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
     filtered.forEach(t => {
-      if (sets[t.status]) sets[t.status].add(bedKey(t));
-      // Recheck-passed bedrooms — anywhere the PM marked items passed
-      // on tenant recheck and the owner approved. Bedroom shows up
-      // here AND in 'done' (since items technically end up done).
       if (t.recheck_passed_at) sets.recheck_passed.add(bedKey(t));
       if (t.completed_by && employee?.id && t.completed_by === employee.id && t.completed_at) {
         const ca = new Date(t.completed_at);
@@ -22832,39 +22857,62 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
 
   const load = async () => {
     setLoadError(null);
-    // Mine = items I personally completed today at this property.
-    // We query for status='done' from the DB and filter further in
-    // memory below so the schema doesn't need a special path.
-    // Recheck-passed is also a derived view over status='done' (items
-    // the PM marked passed on tenant recheck end up status=done with
-    // recheck_passed_at populated).
-    const effectiveStatus = (statusFilter === 'mine' || statusFilter === 'recheck_passed') ? 'done' : statusFilter;
-    // Done tab includes BOTH status='done' and status='blocked' so blocked
-    // items don't vanish from the cleaner's view. From the cleaner's
-    // perspective they're "done with it" — they hit a wall and moved on.
-    // Owner needs to see the reason to decide whether to reopen or accept.
-    const isDoneTab = statusFilter === 'done' || statusFilter === 'mine' || statusFilter === 'recheck_passed';
-    let q = supabase
+    // "Mine" and "recheck_passed" are derived from status='done' with
+    // extra clientside filtering. We treat them as Done-tab variants
+    // for the dominant-status logic below.
+    const isMineOrRecheck = statusFilter === 'mine' || statusFilter === 'recheck_passed';
+    const isDoneTab = statusFilter === 'done' || isMineOrRecheck;
+    // Load EVERY relevant target at this property in one query — not
+    // just items whose status matches the current tab. We need the
+    // full per-bedroom status mix to compute the dominant status and
+    // place each bedroom card in exactly ONE tab. This is the fix for
+    // "card shows up in both Pending and In progress" — that bug was
+    // a direct symptom of the previous per-item-status query.
+    const { data, error } = await supabase
       .from('assignment_targets')
       .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, extracted_text, spanish_translation, translation_status, assignment_type, scheduled_date, sheet_type, template_set_id, bathroom_variant, general_variant, created_at), unit:units(id, label), party:parties(id, label), starter:employees!started_by(id, name), completer:employees!completed_by(id, name), assignedTo:employees!assigned_to(id, name)');
-    if (isDoneTab) {
-      q = q.in('status', ['done', 'blocked']);
-    } else {
-      q = q.eq('status', effectiveStatus);
-    }
-    const { data, error } = await q;
     if (error) {
       console.error('[Assignments] load error:', error);
       setLoadError(error.message);
       setTargets([]); setLoaded(true);
       return;
     }
-    // Hide non-approved PM assignments from cleaners
-    let filtered = (data || []).filter(t =>
+    // Customer / active / PM-approval filter — same as before. Items
+    // not visible to cleaners get dropped here.
+    let allRelevant = (data || []).filter(t =>
       t.assignment?.customer_id === propertyId &&
       t.assignment?.active &&
       (t.assignment?.source !== 'pm' || t.assignment?.pm_status === 'approved')
     );
+
+    // Compute dominant status per assignment (bedroom-level group keyed
+    // by unit_id + party_id). Priority order: in_progress wins over
+    // paused, which wins over blocked, then pending, then done.
+    // This determines which tab the assignment appears in.
+    const bedKey = (t) => `${t.unit_id || ''}::${t.party_id || ''}`;
+    const dominantOrder = ['in_progress', 'paused', 'blocked', 'pending', 'done'];
+    const statusesByBed = new Map();
+    allRelevant.forEach(t => {
+      const k = bedKey(t);
+      if (!statusesByBed.has(k)) statusesByBed.set(k, new Set());
+      statusesByBed.get(k).add(t.status);
+    });
+    const dominantByBed = new Map();
+    statusesByBed.forEach((statusSet, k) => {
+      const winner = dominantOrder.find(s => statusSet.has(s)) || 'pending';
+      dominantByBed.set(k, winner);
+    });
+
+    // Filter to bedrooms whose dominant status matches the current tab.
+    // For "mine" / "recheck_passed" / Done we still keep everything
+    // status=done since those are derived views — extra clientside
+    // narrowing happens below.
+    let filtered;
+    if (isDoneTab) {
+      filtered = allRelevant.filter(t => t.status === 'done' || t.status === 'blocked');
+    } else {
+      filtered = allRelevant.filter(t => dominantByBed.get(bedKey(t)) === statusFilter);
+    }
     // "Mine" view: only items I personally completed today
     if (statusFilter === 'mine') {
       const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
@@ -22873,9 +22921,6 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
         && t.completed_at && new Date(t.completed_at) >= todayStart
       );
     }
-    // Passed recheck view: items where the PM said the tenant passed
-    // on recheck and the owner approved. recheck_passed_at is set on
-    // those, distinguishing them from items the cleaner finished.
     if (statusFilter === 'recheck_passed') {
       filtered = filtered.filter(t => t.recheck_passed_at);
     }
@@ -23505,6 +23550,13 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                           </div>
                           {/* === BULK ACTION BUTTONS ===
                              Start = navigate to bedroom (no status flip).
+                             Pause = flip in_progress items to paused so the
+                                     cleaner can step away and return without
+                                     losing the timer/credit. Visible on In
+                                     progress tab only — Pending has nothing
+                                     to pause, Done/Blocked are terminal.
+                             Resume = flip paused items back to in_progress.
+                                      Visible on Paused tab.
                              Mark complete = bulk mark all to done (with confirm).
                              Blocked = bulk mark all blocked (note via modal on first
                                        target as proxy; we apply the same note to all).
@@ -23518,6 +23570,31 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                               <button onClick={() => startAndGo(firstTarget)} disabled={busy}
                                 className="h-9 px-3 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-medium flex items-center gap-1 disabled:opacity-50">
                                 <Play size={12} /> Start
+                              </button>
+                            )}
+                            {/* Pause: only visible when there's actually
+                               something running at this bedroom. The bulk
+                               filter picks the in_progress items and
+                               flips them to paused, preserving started_by /
+                               started_at so the audit trail stays honest. */}
+                            {newItems.some(t => t.status === 'in_progress') && (
+                              <button onClick={() => {
+                                const running = newItems.filter(t => t.status === 'in_progress');
+                                bulkUpdateStatus(running, 'paused');
+                              }} disabled={busy}
+                                className="h-9 px-3 rounded-lg border border-blue-300 hover:bg-blue-50 text-blue-700 text-xs font-medium flex items-center gap-1 disabled:opacity-50">
+                                <Pause size={12} /> Pause
+                              </button>
+                            )}
+                            {/* Resume: pulls paused items back to in_progress
+                               so the cleaner picks up where they left off. */}
+                            {newItems.some(t => t.status === 'paused') && (
+                              <button onClick={() => {
+                                const paused = newItems.filter(t => t.status === 'paused');
+                                bulkUpdateStatus(paused, 'in_progress');
+                              }} disabled={busy}
+                                className="h-9 px-3 rounded-lg border border-amber-300 hover:bg-amber-50 text-amber-700 text-xs font-medium flex items-center gap-1 disabled:opacity-50">
+                                <Play size={12} /> Resume
                               </button>
                             )}
                             {canBulkComplete && (

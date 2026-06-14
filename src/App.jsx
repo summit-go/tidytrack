@@ -2005,6 +2005,13 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
   // what's already in progress at this bedroom so the cleaner can
   // see the work-in-flight without leaving the picker.
   const [pickerTab, setPickerTab] = useState('not_started'); // 'active' | 'not_started'
+  // Request modal — opens when the cleaner taps the small "Request"
+  // button on a section card. Currently a placeholder; the full
+  // flow (show possible items, checkbox, submit, banner on card,
+  // workblock creation) is being designed iteratively with the
+  // user. Value is the section id ('bedroom'|'bathroom'|'vanity'|
+  // 'general') or null when closed.
+  const [requestModalSection, setRequestModalSection] = useState(null);
   // Active variant from the assigned checklist assignments at this
   // bedroom. Used to filter the General groups. Bathroom variant
   // follows the same rule but the legacy picker doesn't split
@@ -2204,29 +2211,12 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
 
   return (
     <div className="space-y-3">
-      {/* TABS — only show when checklist mode is on AND there's at
-         least one assigned item at this bedroom. Otherwise it's just
-         the legacy picker behavior with no tabs. Active tab counts
-         in_progress + paused + blocked (anything underway or
-         interrupted). Not-started counts pending only. */}
-      {checklistMode && checklistTargets.length > 0 && (() => {
-        const activeCount = checklistTargets.filter(t =>
-          t.status === 'in_progress' || t.status === 'paused' || t.status === 'blocked'
-        ).length;
-        const pendingCount = checklistTargets.filter(t => t.status === 'pending').length;
-        return (
-          <div className="flex gap-1 p-1 bg-stone-100 rounded-full">
-            <button type="button" onClick={() => setPickerTab('active')}
-              className={`flex-1 py-2 px-3 rounded-full text-xs font-medium transition-colors ${pickerTab === 'active' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-600'}`}>
-              Active {activeCount > 0 && <span className="ml-0.5 text-amber-700">({activeCount})</span>}
-            </button>
-            <button type="button" onClick={() => setPickerTab('not_started')}
-              className={`flex-1 py-2 px-3 rounded-full text-xs font-medium transition-colors ${pickerTab === 'not_started' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-600'}`}>
-              Not started {pendingCount > 0 && <span className="ml-0.5 text-amber-700">({pendingCount})</span>}
-            </button>
-          </div>
-        );
-      })()}
+      {/* Tabs (Active / Not started) removed — user feedback was that
+         they created confusion without adding value. The 4-section
+         picker below already shows per-section progress and items in
+         active workblocks are surfaced on the Active workblock card
+         above the picker. pickerTab still defaults to 'not_started'
+         so the existing conditional renders below still work. */}
 
       {/* ACTIVE TAB — shows one "workblock" per section that has
          in-progress / paused / blocked items. Each workblock is
@@ -2414,7 +2404,8 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
               const isOpen = category === c.id;
               const isEmpty = inChecklist && s.total === 0;
               return (
-                <button key={c.id} type="button" onClick={() => {
+                <div key={c.id} className="relative">
+                  <button type="button" onClick={() => {
                   // Toggle: tapping the open section closes it; tapping
                   // a closed one opens it (closing whatever was open).
                   // The accordion is single-open by construction since
@@ -2448,23 +2439,110 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
                     }
                   }
                 }}
-                  className={`py-3 px-2 rounded-xl border-2 font-medium text-sm transition-all flex flex-col items-center gap-0.5 ${
+                  className={`w-full py-3 px-2 rounded-xl border-2 font-medium text-sm transition-all flex flex-col items-center gap-1 ${
                     isOpen ? 'border-stone-900 bg-stone-900 text-stone-50' :
                     isEmpty ? 'border-stone-100 bg-stone-50 text-stone-400' :
                     'border-stone-200 bg-white text-stone-700 hover:border-stone-400'
                   }`}>
                   <span>{c.label}</span>
-                  {inChecklist && (
-                    <span className={`text-[10px] font-mono ${isOpen ? 'text-stone-300' : isEmpty ? 'text-stone-400' : 'text-amber-700'}`}>
-                      ({s.busy}/{s.total})
-                    </span>
-                  )}
-                </button>
+                  {/* Status chip below the section name. Replaces the
+                     bare "(busy/total)" count from before. Reads:
+                       - "Not assigned" when this section has 0 items
+                         in the assignment (i.e. don't need to clean)
+                       - "Started" when any item is in_progress
+                       - "Not started" otherwise.
+                     Count goes inline next to the chip so the cleaner
+                     can still see X/Y at a glance. */}
+                  {inChecklist && (() => {
+                    let chipText, chipColor;
+                    if (s.total === 0) {
+                      chipText = 'Not assigned';
+                      chipColor = isOpen ? 'bg-stone-700 text-stone-300' : 'bg-stone-100 text-stone-500 border border-stone-200';
+                    } else if (s.busy > 0) {
+                      chipText = 'Started';
+                      chipColor = isOpen ? 'bg-amber-200 text-amber-900' : 'bg-amber-100 text-amber-800 border border-amber-300';
+                    } else {
+                      chipText = 'Not started';
+                      chipColor = isOpen ? 'bg-stone-700 text-stone-200' : 'bg-stone-100 text-stone-600 border border-stone-200';
+                    }
+                    return (
+                      <span className={`text-[9px] uppercase tracking-wider font-mono font-bold px-2 py-0.5 rounded-full ${chipColor}`}>
+                        {chipText}
+                        {s.total > 0 && <span className="ml-1 opacity-75">{s.busy}/{s.total}</span>}
+                      </span>
+                    );
+                  })()}
+                  </button>
+                  {/* Request button — top-right corner of each section
+                     card. Opens a modal where the cleaner can pick
+                     items not currently on the sheet and request the
+                     property manager add them. Stays out of the main
+                     button click target via stopPropagation + an
+                     absolute position outside the inner button. */}
+                  <button type="button" onClick={(e) => {
+                    e.stopPropagation();
+                    setRequestModalSection(c.id);
+                  }}
+                    className={`absolute top-1 right-1 text-[9px] uppercase tracking-wider font-mono px-1.5 py-0.5 rounded-md transition-colors ${isOpen ? 'text-stone-400 hover:text-stone-200 hover:bg-stone-800' : 'text-stone-400 hover:text-stone-600 hover:bg-stone-100'}`}>
+                    Request
+                  </button>
+                </div>
               );
             });
           })()}
         </div>
       </div>
+      )}
+
+      {/* Request modal — placeholder pending the full data-model
+         design. User wants this to show all assignment-tied items for
+         the section as checkboxes, let the cleaner pick what should
+         be added to the assignment, send the request, AND auto-open a
+         workblock for the picked items. For now this is a stub so the
+         button has somewhere to land while we iterate on the spec. */}
+      {requestModalSection && (
+        <div className="fixed inset-0 bg-stone-900/70 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4"
+          onClick={() => setRequestModalSection(null)}>
+          <div className="bg-stone-50 w-full sm:max-w-md sm:rounded-3xl rounded-t-3xl flex flex-col max-h-[90vh]"
+            onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between p-5 border-b border-stone-200">
+              <div>
+                <div className="font-serif text-xl text-stone-900">
+                  Request items in {requestModalSection.charAt(0).toUpperCase() + requestModalSection.slice(1)}
+                </div>
+                <div className="text-xs text-stone-500 font-mono mt-0.5">
+                  Pick items to request
+                </div>
+              </div>
+              <button onClick={() => setRequestModalSection(null)}
+                className="p-2 rounded-full hover:bg-stone-100">
+                <X size={20} className="text-stone-600" />
+              </button>
+            </div>
+            <div className="p-5 flex-1 overflow-y-auto">
+              <div className="rounded-2xl bg-amber-50 border border-amber-200 p-4 text-sm text-stone-700">
+                <div className="font-bold text-stone-900 mb-2">Coming next turn</div>
+                <p className="leading-relaxed">
+                  This modal will show items in the {requestModalSection} section that
+                  could be added to the assignment, with checkboxes so you can
+                  select what needs cleaning. Hitting Request will mark the
+                  card as requested and open a workblock for the picked items.
+                </p>
+                <p className="leading-relaxed mt-2 text-xs text-stone-600">
+                  Need to nail down which item list to show (template subcategories?
+                  all possible items from previous assignments?) before I can wire
+                  this up properly.
+                </p>
+              </div>
+            </div>
+            <div className="p-5 border-t border-stone-200">
+              <button onClick={() => setRequestModalSection(null)}
+                className="w-full py-3 rounded-xl bg-stone-200 hover:bg-stone-300 text-stone-700 text-sm font-medium">
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Dropdown panel for the open section (checklist mode only).
@@ -5982,18 +6060,16 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-50 text-xs font-medium">
             <Home size={12} /> Property home
           </button>
-          {totalActive > 1 && onLeaveBlock ? (
+          {totalActive > 1 && onLeaveBlock && (
             // Multi-cleaner mode: leave the block but keep it alive.
             // When the last person leaves, the leaveBlock handler
-            // prompts + auto-finishes.
+            // prompts + auto-finishes. Solo cleaners get the bigger
+            // "I'm done here" button further down the page instead
+            // of a top-right header button — user wanted it lower
+            // and more obvious.
             <button onClick={onLeaveBlock} disabled={busy}
               className="px-4 py-2 rounded-full bg-stone-700 text-stone-50 text-sm font-medium flex items-center gap-2 active:scale-95 transition-transform disabled:opacity-50">
               <LogOut size={14} /> Leave block
-            </button>
-          ) : (
-            <button onClick={onFinish} disabled={busy}
-              className="px-4 py-2 rounded-full bg-amber-700 text-stone-50 text-sm font-medium flex items-center gap-2 active:scale-95 transition-transform disabled:opacity-50">
-              <Check size={14} /> I finished in this bedroom
             </button>
           )}
         </div>
@@ -6100,8 +6176,11 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
           onAddPhoto={(kind) => onAddPhoto(activeTaskObj.id, kind)} />
       )}
 
-      <OtherCleanersActivity block={block} myEmployeeId={employee.id} />
-      <OtherCleanersTasksPanel block={block} />
+      {/* Blue OtherCleanersActivity card removed — it was redundant
+         with the amber OtherWorkblocksHere card above (both showed
+         "X is here right now"). OtherCleanersTasksPanel moved to the
+         very bottom of this view so it doesn't interfere with the
+         cleaning workflow. */}
 
       <div className="mx-4 mt-4">
         <div className="flex items-center justify-between mb-2">
@@ -6197,6 +6276,28 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
           } : null}
           onClose={() => setMoveModalOpen(false)} />
       )}
+      {/* "I'm done here" — moved out of the dark header per user
+         feedback ("bring it lower so it's more obvious"). Sits at the
+         natural endpoint of the cleaning workflow: after the cleaner
+         has worked through their tasks, the next thing they see is
+         this big button. Only renders in solo mode; multi-cleaner
+         mode keeps the smaller "Leave block" button in the header
+         since the workblock lifecycle is shared. */}
+      {!(totalActive > 1 && onLeaveBlock) && (
+        <div className="mx-4 mt-6 mb-4">
+          <button onClick={onFinish} disabled={busy}
+            className="w-full py-4 rounded-2xl bg-amber-700 hover:bg-amber-800 text-stone-50 text-base font-bold flex items-center justify-center gap-2 active:scale-98 transition-transform disabled:opacity-50">
+            <Check size={18} /> I'm done here
+          </button>
+        </div>
+      )}
+
+      {/* Tasks others did today — moved to the very bottom so it
+         doesn't interfere with the cleaner's workflow. Shows when
+         another cleaner has logged work at this bedroom earlier
+         today. */}
+      <OtherCleanersTasksPanel block={block} />
+
       {/* Persistent bottom nav — lets the cleaner peek at Assignments
          or More without finishing/pausing the workblock. The block
          stays open in the DB; flipping tabs just hides this view.
@@ -22373,6 +22474,12 @@ function AssignmentsPanel({ propertyId, employee, refreshKey, onGoToBedroom, onO
     });
   };
   useEffect(() => { loadCounts(); }, [propertyId, refreshKey]);
+  // Tab badges need to refresh on every DB change too, not just on
+  // propertyId / refreshKey. Without this hook the counts went stale
+  // the moment a cleaner started a workblock — the card itself moved
+  // to In progress (because load() re-ran on the same sync) but the
+  // badges still read the old numbers until you tabbed away and back.
+  useAssignmentSync(loadCounts, 'asgn-panel-counts');
 
   return (
     <div className="px-2 sm:px-4 mt-4">
@@ -23739,13 +23846,38 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                               </button>
                             )}
                             {canBulkComplete && (
-                              <button onClick={() => {
-                                if (confirm(`Mark all ${newItems.length} items at ${bedLabel} complete?`)) {
-                                  bulkUpdateStatus(newItems, 'done');
+                              <button onClick={async () => {
+                                if (!confirm(`Mark all ${newItems.length} items at ${bedLabel} complete?`)) return;
+                                await bulkUpdateStatus(newItems, 'done');
+                                // Also close any open workblock this cleaner
+                                // owns at this bedroom. Saying "everything
+                                // is done" with a workblock still ticking
+                                // was contradictory and forced the cleaner
+                                // to remember to close it manually.
+                                if (employee?.id) {
+                                  const unitId = newItems[0]?.unit_id;
+                                  const partyId = newItems[0]?.party_id;
+                                  if (unitId && partyId) {
+                                    try {
+                                      const { data: openBlocks } = await supabase.from('work_blocks')
+                                        .select('id, shift:shifts!inner(employee_id)')
+                                        .eq('unit_id', unitId).eq('party_id', partyId)
+                                        .is('end_time', null);
+                                      const myOpen = (openBlocks || []).filter(b => b.shift?.employee_id === employee.id);
+                                      if (myOpen.length > 0) {
+                                        const ts = new Date().toISOString();
+                                        await supabase.from('work_blocks')
+                                          .update({ end_time: ts })
+                                          .in('id', myOpen.map(b => b.id));
+                                      }
+                                    } catch (e) {
+                                      console.warn('[Finished all tasks] could not close own workblock', e);
+                                    }
+                                  }
                                 }
                               }} disabled={busy}
                                 className="h-9 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-medium flex items-center gap-1 disabled:opacity-50">
-                                <Check size={12} /> Mark complete
+                                <Check size={12} /> Finished all tasks
                               </button>
                             )}
                             {!allDone && (

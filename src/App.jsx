@@ -3111,29 +3111,13 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     }
   };
 
-  // After bedroom is picked: navigate to section step. The actual
-  // workblock creation (with the chosen main_section) happens in
-  // onPickBlockSection below — separating "which bedroom" from "which
-  // section" so the cleaner explicitly picks one of the four main
-  // sections (bedroom/vanity/bathroom/general) at this point.
-  // workNotes is no longer collected at the bedroom-picker step; the
-  // section picker collects it instead.
-  const onPickBlockParty = (party, _workNotes) => {
-    setBlockStartFlow(prev => ({ step: 'section', unit: prev?.unit, party }));
-  };
-
-  // Section step → create the workblock scoped to (bedroom, main_section).
-  // Mirrors the prior onPickBlockParty behavior but now records
-  // main_section on the work_block row, which is the foundation for
-  // parallel cleaners working different sections of the same bedroom.
-  const onPickBlockSection = async ({ section, workNotes }) => {
+  const onPickBlockParty = async (party, workNotes) => {
     setBusy(true);
-    const { unit, party } = blockStartFlow || {};
-    if (!unit || !party) { setBusy(false); return; }
-    // Defensive: still only one open workblock per shift at a time —
-    // a single cleaner can only physically be in one section at once.
-    // Closes any other open block belonging to THIS shift before
-    // creating the new one.
+    const { unit } = blockStartFlow;
+    // Defensive safety: only one open work block per shift. If another open
+    // block exists (could happen across devices / stale state), close it
+    // first so the new one's start time is correct and we never end up
+    // double-clocked.
     try {
       const { data: openBlocks } = await supabase.from('work_blocks')
         .select('id').eq('shift_id', shift.id).is('end_time', null);
@@ -3144,12 +3128,11 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
           .in('id', openBlocks.map(b => b.id));
       }
     } catch (e) {
-      console.warn('[onPickBlockSection] could not pre-close open blocks', e);
+      console.warn('[onPickBlockParty] could not pre-close open blocks', e);
     }
     const { data, error } = await supabase.from('work_blocks')
       .insert({
         shift_id: shift.id, unit_id: unit.id, party_id: party.id,
-        main_section: section,
         bill_rate_at_work: shift.customer?.bill_rate_hourly || null,
         work_notes: workNotes || null,
         is_preview: previewMode,
@@ -3165,15 +3148,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     setActiveBlock(data); setTasks(data.tasks || []); setBlockStartFlow(null);
   };
 
-  // When the section picker shows "[Name] is here" and the cleaner taps
-  // Join, route through the existing joinBlock helper so the participant
-  // row gets created correctly + the cleaner lands in the shared block.
-  const onJoinBlockFromSection = async (workBlockId) => {
-    setBlockStartFlow(null);
-    if (joinBlock) await joinBlock({ id: workBlockId });
-  };
-
-  const onPickBlockParty_LEGACY_UNUSED = async (party, workNotes) => {
+  const _DEPRECATED_onPickBlockParty_LEGACY_UNUSED = async (party, workNotes) => {
     setBusy(true);
     const { unit } = blockStartFlow;
     // Defensive safety: only one open work block per shift. If another open
@@ -3936,22 +3911,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   // Confirm the pending start: actually create the work_block now and
   // open it as active. Called by the Start button on the PropertyHub
   // pending banner.
-  // When the cleaner taps Start on the pending-start banner, route
-  // them through the SectionPicker instead of creating the workblock
-  // directly. Without this, the pending-start flow bypassed section
-  // selection entirely — workblocks ended up with main_section=null
-  // and other cleaners couldn't see the section the first cleaner
-  // claimed (the Bedroom row of their picker would just say "No one
-  // here" because nothing matched the section key).
   const confirmPendingStart = async () => {
-    if (!pendingStart) return;
-    const unit = { id: pendingStart.unitId, label: pendingStart.unitLabel };
-    const party = { id: pendingStart.partyId, label: pendingStart.partyLabel };
-    setPendingStart(null);
-    setBlockStartFlow({ step: 'section', unit, party });
-  };
-
-  const _confirmPendingStart_LEGACY_UNUSED = async () => {
     if (!pendingStart) return;
     setBusy(true);
     // Safety: close any other open block under this shift before opening
@@ -4078,6 +4038,29 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     }
   };
 
+  // Stamp main_section on the active workblock based on the dominant
+  // task category. Called after task creation. The workblock's section
+  // is derived from the first cleaning the cleaner does — if they pick
+  // Bedroom items first, that's the workblock's section. Other cleaners
+  // then see "Cleaner A · Bedroom is here" with a Join button instead
+  // of a section-less workblock. Only stamps when main_section is null
+  // so later cross-section work in the same block doesn't keep flipping
+  // the label.
+  const stampMainSectionFromCategories = async (categories) => {
+    if (!activeBlock || activeBlock.main_section) return;
+    const valid = (categories || []).filter(c => c && ['bedroom', 'vanity', 'bathroom', 'general'].includes(c));
+    if (valid.length === 0) return;
+    const counts = {};
+    valid.forEach(c => { counts[c] = (counts[c] || 0) + 1; });
+    const dominant = Object.keys(counts).sort((a, b) => counts[b] - counts[a])[0];
+    if (!dominant) return;
+    const { error } = await supabase.from('work_blocks')
+      .update({ main_section: dominant }).eq('id', activeBlock.id);
+    if (error) { console.warn('[stampMainSection] failed', error); return; }
+    setActiveBlock(prev => prev ? { ...prev, main_section: dominant } : prev);
+    setWorkBlocks(prev => prev.map(b => b.id === activeBlock.id ? { ...b, main_section: dominant } : b));
+  };
+
   const startTask = async (overrideName = null, category = null, subcategory = null) => {
     const nameToUse = (overrideName || newTaskName || '').trim();
     if (!nameToUse) return;
@@ -4092,6 +4075,9 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     // Bedroom-level audit sync — runs after the task insert so the
     // task ID exists before we update targets.
     advancePendingTargetsAtActiveBedroom();
+    // Stamp the workblock's section so other cleaners can see what
+    // section A is working on (e.g. "Cleaner A · Bedroom is here").
+    stampMainSectionFromCategories([category]);
     return data;
   };
 
@@ -4150,6 +4136,9 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     // tasks are inserted so the cleaner's pending targets at this
     // bedroom now reflect work in progress.
     advancePendingTargetsAtActiveBedroom();
+    // Stamp the workblock's section from the dominant category in
+    // this batch of tasks so other cleaners can see what's claimed.
+    stampMainSectionFromCategories(taskInputs.map(t => t.category));
   };
 
   const stopTask = async (taskId, refetch = true) => {
@@ -4331,14 +4320,6 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     return withIdleModal(<PartyPicker property={shift.customer} unit={blockStartFlow.unit}
       onPick={onPickBlockParty} onBack={() => setBlockStartFlow({ step: 'unit' })} busy={busy} />);
   }
-  if (shift && blockStartFlow?.step === 'section') {
-    return withIdleModal(<SectionPicker property={shift.customer}
-      unit={blockStartFlow.unit} party={blockStartFlow.party}
-      onStart={onPickBlockSection}
-      onJoin={onJoinBlockFromSection}
-      onBack={() => setBlockStartFlow({ step: 'party', unit: blockStartFlow.unit })}
-      busy={busy} />);
-  }
 
   if (!shift) {
     return withIdleModal(
@@ -4385,6 +4366,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       onSendBackToPending={sendBackToPendingFromPrepare}
       onOpenMessages={() => setShowMessages(true)}
       onOpenBedroomHistory={setBedroomHistory}
+      onJoinBlock={joinBlock}
       busy={busy} />);
   }
   if (isMulti && (!activeBlock || cleanerTab !== 'home')) {
@@ -4419,6 +4401,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       onMoveBlock={moveActiveBlockTo}
       onMoveMultiple={moveMultipleWorkBlocksTo}
       onLeaveBlock={leaveBlock}
+      onJoinBlock={joinBlock}
       onDeletePhoto={deletePhoto}
       cleanerTab={cleanerTab} setCleanerTab={setCleanerTab}
       previewMode={previewMode}
@@ -5535,6 +5518,93 @@ function OtherCleanersTasksPanel({ block }) {
 }
 
 // =================================================================
+// OtherWorkblocksHere — panel showing OTHER cleaners' open workblocks
+// at the same bedroom. Reusable card with Join buttons so a second
+// cleaner can either drop into an existing workblock as a participant
+// or keep working their own (or start their own from the picker).
+//
+// Refreshes via realtime sync — opens/closes elsewhere propagate here
+// within a second or two.
+// =================================================================
+function OtherWorkblocksHere({ unitId, partyId, currentBlockId, currentEmployeeId, onJoin }) {
+  const [blocks, setBlocks] = useState([]);
+  useTick(true); // tick so the elapsed-time labels update each second
+  const load = async () => {
+    if (!unitId || !partyId) return;
+    const { data } = await supabase.from('work_blocks')
+      .select('id, start_time, main_section, shift:shifts!inner(customer_id, employee:employees(id, name)), tasks(id, end_time, photos(id))')
+      .eq('unit_id', unitId).eq('party_id', partyId)
+      .is('end_time', null);
+    const filtered = (data || []).filter(b =>
+      b.id !== currentBlockId && // exclude the viewer's own active block
+      b.shift?.employee?.id !== currentEmployeeId // exclude any block owned by the viewer
+    );
+    setBlocks(filtered);
+  };
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, [unitId, partyId, currentBlockId]);
+  useAssignmentSync(load, 'other-workblocks-here');
+
+  if (blocks.length === 0) return null;
+
+  return (
+    <div className="space-y-2">
+      {blocks.map(b => {
+        const elapsed = Date.now() - new Date(b.start_time).getTime();
+        const sectionLabel = b.main_section
+          ? b.main_section.charAt(0).toUpperCase() + b.main_section.slice(1)
+          : 'Working';
+        const cleanerName = b.shift?.employee?.name || 'Another cleaner';
+        // Item-level progress: count of tasks + photos the OTHER cleaner
+        // has logged so the viewer sees what's been done already.
+        const taskCount = (b.tasks || []).length;
+        const photoCount = (b.tasks || []).reduce((sum, t) => sum + (t.photos?.length || 0), 0);
+        return (
+          <div key={b.id} className="rounded-2xl border-2 border-amber-300 bg-amber-50 p-4">
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex-1 min-w-0">
+                <div className="text-[10px] uppercase tracking-wider text-amber-900 font-mono font-bold mb-1 flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-amber-600 animate-pulse" />
+                  Cleaner here
+                </div>
+                <div className="font-serif text-lg text-stone-900 leading-tight">
+                  {sectionLabel}
+                </div>
+                <div className="text-xs text-stone-600 mt-0.5">
+                  <span className="font-medium">{cleanerName}</span>
+                  <span className="text-stone-400 mx-1">·</span>
+                  <span className="font-mono">{fmtTimeShort(elapsed)}</span>
+                  {taskCount > 0 && (
+                    <>
+                      <span className="text-stone-400 mx-1">·</span>
+                      <span className="font-mono">{taskCount} task{taskCount === 1 ? '' : 's'}</span>
+                    </>
+                  )}
+                  {photoCount > 0 && (
+                    <>
+                      <span className="text-stone-400 mx-1">·</span>
+                      <span className="font-mono">{photoCount} photo{photoCount === 1 ? '' : 's'}</span>
+                    </>
+                  )}
+                </div>
+                <div className="text-[10px] text-stone-500 font-mono mt-1">
+                  started {new Date(b.start_time).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}
+                </div>
+              </div>
+              {onJoin && (
+                <button onClick={() => onJoin(b.id)}
+                  className="px-4 py-2.5 rounded-xl bg-stone-900 hover:bg-stone-800 text-stone-50 text-sm font-bold flex items-center gap-1.5 active:scale-95 flex-shrink-0">
+                  <Plus size={14} /> Join this workblock
+                </button>
+              )}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// =================================================================
 // PREPARING BLOCK VIEW — shown after the cleaner taps Start (or Go to
 // this bedroom) on an assignment but BEFORE the work_block is created.
 // Looks like the bedroom view they're heading into, with the unit and
@@ -5548,7 +5618,7 @@ function OtherCleanersTasksPanel({ block }) {
 // would tangle the logic. Cleaner to have a dedicated screen.
 // =================================================================
 function PreparingBlockView({ shift, pendingStart, employeeName, employee,
-  onSignOut, onCancel, onStart, onSendBackToPending, onOpenMessages, onOpenBedroomHistory, busy }) {
+  onSignOut, onCancel, onStart, onSendBackToPending, onOpenMessages, onOpenBedroomHistory, onJoinBlock, busy }) {
   const handleLogoClick = () => onCancel();
 
   // Load priority + cleaning types for this bedroom's open assignments
@@ -5638,6 +5708,17 @@ function PreparingBlockView({ shift, pendingStart, employeeName, employee,
       </div>
 
       <div className="px-5 pt-6">
+        {/* Other cleaners already at this bedroom — surfaced BEFORE the
+           Start cleaning button so the cleaner can choose to Join the
+           existing workblock instead of starting their own. Each card
+           shows the cleaner's name, the section they're working, how
+           long they've been at it, and a Join button. */}
+        <div className="mb-4">
+          <OtherWorkblocksHere unitId={pendingStart.unitId} partyId={pendingStart.partyId}
+            currentBlockId={null} currentEmployeeId={employee?.id}
+            onJoin={onJoinBlock} />
+        </div>
+
         <div className="p-4 rounded-2xl bg-amber-50 border-2 border-amber-300 mb-4">
           <div className="text-xs text-stone-700 leading-relaxed">
             You're heading to <strong>{pendingStart.unitLabel} · {pendingStart.partyLabel}</strong>.
@@ -5744,7 +5825,7 @@ function UndoMoveMenu({ disabled, canUndo, canMove, onUndo, onMoveBedroom, onMov
 function BlockView({ shift, block, tasks, activeTask, employeeName, employee, onSignOut, onFinish, onPause, onUndo,
   newTaskName, setNewTaskName, onStartTask, onStartTasksFromPicker, onStartChecklistItems, onReleaseTargets, onStopTask, onResumeTask, onAddPhoto,
   photoModal, onClosePhotoModal, onUploadPhoto, onSavePhotoNote, onOpenMessages, onOpenBedroomHistory,
-  onMoveBlock, onMoveMultiple, onLeaveBlock, onDeletePhoto, cleanerTab, setCleanerTab, previewMode, busy }) {
+  onMoveBlock, onMoveMultiple, onLeaveBlock, onJoinBlock, onDeletePhoto, cleanerTab, setCleanerTab, previewMode, busy }) {
   useTick(true);
   const blockElapsed = Date.now() - new Date(block.start_time).getTime();
   const activeTaskObj = tasks.find(t => t.id === activeTask);
@@ -5950,6 +6031,19 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
             className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-stone-200 hover:bg-stone-300 text-stone-700 text-xs font-mono active:scale-95">
             <Clock size={12} /> View this bedroom's history
           </button>
+        </div>
+      )}
+
+      {/* Other cleaners' workblocks at THIS bedroom. Shows when another
+         cleaner is working a different section here — Cleaner B sees
+         a card with Cleaner A's name, section, elapsed time, task /
+         photo count, and a Join button so they can drop in to help.
+         Hidden when no one else is here. */}
+      {block.unit?.id && block.party?.id && (
+        <div className="mx-4 mt-3">
+          <OtherWorkblocksHere unitId={block.unit.id} partyId={block.party.id}
+            currentBlockId={block.id} currentEmployeeId={employee?.id}
+            onJoin={onJoinBlock} />
         </div>
       )}
 

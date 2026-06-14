@@ -2706,14 +2706,21 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
          fall through to the custom-name + variant subgrid below. */}
       {checklistMode && checklistTargets.length > 0 && pickerTab === 'not_started' && category && (() => {
         const sectionLabels = { bedroom: 'Bedroom', vanity: 'Vanity', bathroom: 'Bathroom', general: 'General' };
+        // Show ALL non-done/non-blocked items so the cleaner sees both
+        // what they've already picked AND what's still available. The
+        // pending ones are interactive (checkboxes); the in_progress
+        // and paused ones are read-only and visually grayed out. This
+        // gives the cleaner a holistic view of the section at a glance
+        // rather than hiding what they've already started.
         const items = checklistTargets.filter(t =>
           (t.template_section || '').toLowerCase() === category &&
-          t.status === 'pending'
+          (t.status === 'pending' || t.status === 'in_progress' || t.status === 'paused')
         );
+        const pendingCount = items.filter(t => t.status === 'pending').length;
         if (items.length === 0) {
-          // Only show "all started" copy when there's at least one
-          // non-pending item — otherwise legacy bedrooms with 0 in
-          // this section would see a misleading "all started" note.
+          // Only show "all done/started" copy when there's at least
+          // one done item — otherwise legacy bedrooms with 0 in this
+          // section would see a misleading note.
           const allItems = checklistTargets.filter(t =>
             (t.template_section || '').toLowerCase() === category
           );
@@ -2722,10 +2729,7 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
             <div className="rounded-2xl bg-emerald-50 border-2 border-emerald-200 p-3 text-center">
               <Check size={18} className="inline text-emerald-700 mb-1" />
               <div className="text-xs text-emerald-800 font-medium">
-                Every {sectionLabels[category]} item is started or done.
-              </div>
-              <div className="text-[10px] text-emerald-700 mt-1">
-                Active items live in the <span className="font-medium">Active</span> tab.
+                Every {sectionLabels[category]} item is done.
               </div>
             </div>
           );
@@ -2747,7 +2751,7 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
                 {sectionLabels[category]} — pick what you'll start
               </span>
               <span className="text-[10px] font-mono text-emerald-700">
-                {items.length} left
+                {pendingCount} left
               </span>
             </div>
             <div className="space-y-2">
@@ -2762,20 +2766,46 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
                     {group.items.map(t => {
                       const checked = selectedTargetIds.has(t.id);
                       const itemKey = t.template_item_key || '';
+                      // Started/paused items are read-only chrome —
+                      // visible so the cleaner sees the full picture
+                      // of the section, but not interactive (they're
+                      // already underway).
+                      const isStarted = t.status === 'in_progress' || t.status === 'paused';
                       // Only show edit pencil for translated items in
                       // checklist mode — cleaners can fix bad Spanish
                       // labels. Requests (custom items) skipped since
                       // their label is already the cleaner's own text.
                       const canEditLabel = locale === 'es' && itemKey && !itemKey.startsWith('requested:');
                       return (
-                        <div key={t.id} className={`flex items-start gap-1 rounded-xl border-2 transition-all ${checked ? 'border-amber-600 bg-amber-50' : 'border-stone-200 bg-white hover:border-stone-400'}`}>
-                          <button type="button" onClick={() => toggleTarget(t.id)}
-                            className="flex items-start gap-2 px-3 py-2.5 text-left flex-1 min-w-0">
-                            <div className={`mt-0.5 w-4 h-4 rounded border-2 flex-shrink-0 flex items-center justify-center ${checked ? 'border-amber-600 bg-amber-600' : 'border-stone-300'}`}>
-                              {checked && <Check size={11} className="text-white" />}
+                        <div key={t.id} className={`flex items-start gap-1 rounded-xl border-2 transition-all ${
+                          isStarted
+                            ? 'border-stone-200 bg-stone-100 opacity-60'
+                            : checked
+                              ? 'border-amber-600 bg-amber-50'
+                              : 'border-stone-200 bg-white hover:border-stone-400'
+                        }`}>
+                          <button type="button"
+                            onClick={() => !isStarted && toggleTarget(t.id)}
+                            disabled={isStarted}
+                            className="flex items-start gap-2 px-3 py-2.5 text-left flex-1 min-w-0 disabled:cursor-not-allowed">
+                            <div className={`mt-0.5 w-4 h-4 rounded border-2 flex-shrink-0 flex items-center justify-center ${
+                              isStarted
+                                ? 'border-stone-400 bg-stone-300'
+                                : checked
+                                  ? 'border-amber-600 bg-amber-600'
+                                  : 'border-stone-300'
+                            }`}>
+                              {(checked || isStarted) && <Check size={11} className="text-white" />}
                             </div>
                             <div className="flex-1 min-w-0">
-                              <div className="text-sm text-stone-900">{labelForTarget(t)}</div>
+                              <div className={`text-sm ${isStarted ? 'text-stone-500 line-through decoration-stone-400' : 'text-stone-900'}`}>
+                                {labelForTarget(t)}
+                              </div>
+                              {isStarted && (
+                                <span className="inline-block mt-0.5 text-[9px] uppercase tracking-wider font-mono px-1.5 py-0.5 rounded-full bg-amber-100 border border-amber-300 text-amber-800 font-bold">
+                                  {t.status === 'paused' ? 'Paused' : 'Started'}
+                                </span>
+                              )}
                               {t.priority && (
                                 <span className="inline-block mt-0.5 text-[9px] uppercase tracking-wider font-mono px-1.5 py-0.5 rounded-full bg-red-50 border border-red-200 text-red-700 font-bold">
                                   Priority
@@ -7687,6 +7717,20 @@ function ActiveWorkblockCard({ task, onStop, onAddPhoto }) {
             {itemCount > 1 && <> · {itemCount} items</>}
             {damage.length > 0 && <span className="ml-2 text-red-700 font-bold">⚠ {damage.length} damage</span>}
           </div>
+          {/* Subsection chips — what's actually being worked in this
+             block. Previously the count said "4 items" but you had
+             to expand a task card below to see WHICH 4. Now the
+             items render right under the timer line as a flex-wrap
+             of small chips. */}
+          {parts.length > 1 && (
+            <div className="flex flex-wrap gap-1 mt-2">
+              {parts.map((p, i) => (
+                <span key={i} className="text-[10px] uppercase tracking-wider font-mono px-1.5 py-0.5 rounded-full bg-white border border-amber-300 text-stone-700">
+                  {p}
+                </span>
+              ))}
+            </div>
+          )}
         </div>
         <button onClick={onStop}
           style={{ touchAction: 'manipulation' }}
@@ -19073,7 +19117,7 @@ function AssignmentList({ property, employee, onBack, onNew, onNewChecklist, onO
                           return unitKeys.map(renderUnitKey);
                         }
                         return floorKeys.map(fk => {
-                          const floorKey = `${b.key}::${fk}`;
+                          const floorKey = `${buildingKey}::${fk}`;
                           const floorOpen = !collapsedFloors[floorKey];
                           return (
                             <div key={fk}>

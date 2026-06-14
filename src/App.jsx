@@ -1964,6 +1964,146 @@ function resolveItemLabel(key, locale, overrides, englishFallback) {
   return englishFallback;
 }
 
+// =================================================================
+// REQUEST ITEMS MODAL — opens when the cleaner taps "Request" on a
+// section card. Lists items from the template that match the
+// assigned variant (so a bedroom assigned bathroom_variant 'tub'
+// only sees tub items, not toilet items). Cleaner checkboxes what
+// they want and submits — request goes to owner for approval.
+// =================================================================
+function RequestItemsModal({ section, templateSetId, bathroomVariant, generalVariant, onClose, onSubmit }) {
+  const [items, setItems] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [selected, setSelected] = useState(new Set());
+  const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    const load = async () => {
+      setLoading(true);
+      if (!templateSetId) {
+        setItems([]); setLoading(false); return;
+      }
+      // Step 1: load all variants for this template_set scoped to
+      // the section the cleaner is requesting in.
+      const { data: variants } = await supabase.from('section_template_variants')
+        .select('id, section, variant_key')
+        .eq('set_id', templateSetId)
+        .eq('section', section);
+      // Step 2: filter to just the variant assigned for this section
+      // at this bedroom. Bathroom uses bathroom_variant (e.g. 'tub'
+      // vs 'toilet'); General uses general_variant (a/b/c/d); Bedroom
+      // and Vanity don't have multi-variants in the current schema.
+      let pickedVariants = variants || [];
+      if (section === 'bathroom' && bathroomVariant) {
+        pickedVariants = pickedVariants.filter(v => v.variant_key === bathroomVariant.toLowerCase());
+      } else if (section === 'general' && generalVariant) {
+        pickedVariants = pickedVariants.filter(v => v.variant_key === generalVariant.toLowerCase());
+      }
+      if (pickedVariants.length === 0) {
+        setItems([]); setLoading(false); return;
+      }
+      // Step 3: load template items for the picked variant(s).
+      const { data: tItems } = await supabase.from('section_template_items')
+        .select('id, item_key, variant_id, sort_order')
+        .in('variant_id', pickedVariants.map(v => v.id))
+        .order('sort_order', { ascending: true });
+      setItems(tItems || []);
+      setLoading(false);
+    };
+    load();
+  }, [section, templateSetId, bathroomVariant, generalVariant]);
+
+  const toggle = (id) => {
+    setSelected(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+
+  const sectionLabel = section ? section.charAt(0).toUpperCase() + section.slice(1) : '';
+  // Humanize the item_key for display. Keys look like 'bedroom:beds'
+  // or 'general:living_room'. Strip the section prefix and snake_case.
+  const humanize = (key) => (key || '')
+    .replace(/^[a-z]+:/, '')
+    .replace(/_/g, ' ')
+    .replace(/^./, c => c.toUpperCase());
+
+  const handleSubmit = async () => {
+    if (selected.size === 0 || submitting) return;
+    setSubmitting(true);
+    const picked = items.filter(i => selected.has(i.id));
+    await onSubmit(picked.map(i => i.item_key));
+    setSubmitting(false);
+  };
+
+  return (
+    <div className="fixed inset-0 bg-stone-900/70 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4"
+      onClick={onClose}>
+      <div className="bg-stone-50 w-full sm:max-w-md sm:rounded-3xl rounded-t-3xl flex flex-col max-h-[90vh]"
+        onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between p-5 border-b border-stone-200">
+          <div className="min-w-0 flex-1">
+            <div className="font-serif text-xl text-stone-900">
+              Request items in {sectionLabel}
+            </div>
+            <div className="text-xs text-stone-500 font-mono mt-0.5">
+              Pick what needs cleaning that's not on the sheet
+            </div>
+          </div>
+          <button onClick={onClose}
+            className="p-2 rounded-full hover:bg-stone-100 flex-shrink-0">
+            <X size={20} className="text-stone-600" />
+          </button>
+        </div>
+        <div className="p-5 flex-1 overflow-y-auto">
+          {loading && (
+            <div className="text-center text-sm text-stone-500 py-8">
+              Loading items…
+            </div>
+          )}
+          {!loading && items.length === 0 && (
+            <div className="rounded-2xl bg-stone-100 border border-stone-200 p-4 text-sm text-stone-600 leading-relaxed">
+              No template items found for this section's assigned variant.
+              {section === 'bathroom' && !bathroomVariant && ' (Bathroom variant not set on assignment.)'}
+              {section === 'general' && !generalVariant && ' (General variant not set on assignment.)'}
+            </div>
+          )}
+          {!loading && items.length > 0 && (
+            <div className="space-y-1.5">
+              {items.map(item => {
+                const checked = selected.has(item.id);
+                return (
+                  <button key={item.id} type="button" onClick={() => toggle(item.id)}
+                    className={`w-full flex items-center gap-3 px-3 py-3 rounded-xl border-2 text-left transition-all ${checked ? 'border-amber-600 bg-amber-50' : 'border-stone-200 bg-white hover:border-stone-400'}`}>
+                    <div className={`w-5 h-5 rounded border-2 flex-shrink-0 flex items-center justify-center ${checked ? 'border-amber-600 bg-amber-600' : 'border-stone-300'}`}>
+                      {checked && <Check size={13} className="text-white" />}
+                    </div>
+                    <span className="text-sm text-stone-900">
+                      {humanize(item.item_key)}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+        <div className="p-5 border-t border-stone-200 space-y-2">
+          <button onClick={handleSubmit}
+            disabled={selected.size === 0 || submitting || loading}
+            className="w-full py-3 rounded-xl bg-stone-900 hover:bg-stone-800 text-stone-50 text-sm font-bold disabled:opacity-40 disabled:cursor-not-allowed">
+            {submitting ? 'Submitting…' : `Request ${selected.size} item${selected.size === 1 ? '' : 's'}`}
+          </button>
+          <button onClick={onClose}
+            className="w-full py-2 rounded-xl text-stone-600 text-sm font-medium">
+            Cancel
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDefaultName,
   // NEW: bedroom context. When provided, the picker becomes
   // checklist-aware: it loads active assignment_targets at this
@@ -2383,23 +2523,25 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
           {(() => {
             // Per-section counts. total = pending+in_progress (work
             // that exists at this bedroom for this section), busy =
-            // in_progress (currently being worked). Display as X/N
-            // so the cleaner sees "8/9" — 8 in progress out of 9.
+            // in_progress (currently being worked). hasRequested = at
+            // least one requested-by target exists in this section, so
+            // the section card can show a "Requested" badge.
             const stats = {
-              bedroom:  { busy: 0, total: 0 },
-              vanity:   { busy: 0, total: 0 },
-              bathroom: { busy: 0, total: 0 },
-              general:  { busy: 0, total: 0 },
+              bedroom:  { busy: 0, total: 0, hasRequested: false },
+              vanity:   { busy: 0, total: 0, hasRequested: false },
+              bathroom: { busy: 0, total: 0, hasRequested: false },
+              general:  { busy: 0, total: 0, hasRequested: false },
             };
             checklistTargets.forEach(t => {
               const sec = (t.template_section || '').toLowerCase();
               if (!(sec in stats)) return;
+              if (t.requested_by) stats[sec].hasRequested = true;
               if (t.status === 'done') return;
               stats[sec].total += 1;
               if (t.status === 'in_progress') stats[sec].busy += 1;
             });
             return TASK_CATEGORIES.map(c => {
-              const s = stats[c.id] || { busy: 0, total: 0 };
+              const s = stats[c.id] || { busy: 0, total: 0, hasRequested: false };
               const inChecklist = checklistMode && checklistTargets.length > 0;
               const isOpen = category === c.id;
               const isEmpty = inChecklist && s.total === 0;
@@ -2474,17 +2616,23 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
                   })()}
                   </button>
                   {/* Request button — top-right corner of each section
-                     card. Opens a modal where the cleaner can pick
-                     items not currently on the sheet and request the
-                     property manager add them. Stays out of the main
-                     button click target via stopPropagation + an
-                     absolute position outside the inner button. */}
+                     card. Two visual modes:
+                       - When the cleaner already has pending requests
+                         in this section, render as an amber "Requested"
+                         badge so they see at a glance that something
+                         is in the queue.
+                       - Otherwise render as the minimal "Request" link.
+                     Tapping either reopens the modal. */}
                   <button type="button" onClick={(e) => {
                     e.stopPropagation();
                     setRequestModalSection(c.id);
                   }}
-                    className={`absolute top-1 right-1 text-[9px] uppercase tracking-wider font-mono px-1.5 py-0.5 rounded-md transition-colors ${isOpen ? 'text-stone-400 hover:text-stone-200 hover:bg-stone-800' : 'text-stone-400 hover:text-stone-600 hover:bg-stone-100'}`}>
-                    Request
+                    className={`absolute top-1 right-1 text-[9px] uppercase tracking-wider font-mono px-1.5 py-0.5 rounded-md transition-colors font-bold ${
+                      s.hasRequested
+                        ? (isOpen ? 'bg-amber-200 text-amber-900' : 'bg-amber-100 text-amber-800 border border-amber-300 hover:bg-amber-200')
+                        : (isOpen ? 'text-stone-400 hover:text-stone-200 hover:bg-stone-800' : 'text-stone-400 hover:text-stone-600 hover:bg-stone-100')
+                    }`}>
+                    {s.hasRequested ? 'Requested' : 'Request'}
                   </button>
                 </div>
               );
@@ -2494,55 +2642,60 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
       </div>
       )}
 
-      {/* Request modal — placeholder pending the full data-model
-         design. User wants this to show all assignment-tied items for
-         the section as checkboxes, let the cleaner pick what should
-         be added to the assignment, send the request, AND auto-open a
-         workblock for the picked items. For now this is a stub so the
-         button has somewhere to land while we iterate on the spec. */}
+      {/* Request modal — opens when the cleaner taps Request on a
+         section card. Lists template items for the section, filtered
+         by the assigned variant (so a bedroom assigned bathroom_variant
+         'tub' only sees tub-line items, not toilet items). Submit
+         creates a pending request assignment for the owner to approve;
+         once approved, the items become regular assignment_targets and
+         the workblock auto-opens with them. Submit handler is stubbed
+         pending the request-data-model wire-up. */}
       {requestModalSection && (
-        <div className="fixed inset-0 bg-stone-900/70 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4"
-          onClick={() => setRequestModalSection(null)}>
-          <div className="bg-stone-50 w-full sm:max-w-md sm:rounded-3xl rounded-t-3xl flex flex-col max-h-[90vh]"
-            onClick={(e) => e.stopPropagation()}>
-            <div className="flex items-center justify-between p-5 border-b border-stone-200">
-              <div>
-                <div className="font-serif text-xl text-stone-900">
-                  Request items in {requestModalSection.charAt(0).toUpperCase() + requestModalSection.slice(1)}
-                </div>
-                <div className="text-xs text-stone-500 font-mono mt-0.5">
-                  Pick items to request
-                </div>
-              </div>
-              <button onClick={() => setRequestModalSection(null)}
-                className="p-2 rounded-full hover:bg-stone-100">
-                <X size={20} className="text-stone-600" />
-              </button>
-            </div>
-            <div className="p-5 flex-1 overflow-y-auto">
-              <div className="rounded-2xl bg-amber-50 border border-amber-200 p-4 text-sm text-stone-700">
-                <div className="font-bold text-stone-900 mb-2">Coming next turn</div>
-                <p className="leading-relaxed">
-                  This modal will show items in the {requestModalSection} section that
-                  could be added to the assignment, with checkboxes so you can
-                  select what needs cleaning. Hitting Request will mark the
-                  card as requested and open a workblock for the picked items.
-                </p>
-                <p className="leading-relaxed mt-2 text-xs text-stone-600">
-                  Need to nail down which item list to show (template subcategories?
-                  all possible items from previous assignments?) before I can wire
-                  this up properly.
-                </p>
-              </div>
-            </div>
-            <div className="p-5 border-t border-stone-200">
-              <button onClick={() => setRequestModalSection(null)}
-                className="w-full py-3 rounded-xl bg-stone-200 hover:bg-stone-300 text-stone-700 text-sm font-medium">
-                Close
-              </button>
-            </div>
-          </div>
-        </div>
+        <RequestItemsModal
+          section={requestModalSection}
+          templateSetId={checklistTargets[0]?.assignment?.template_set_id || null}
+          bathroomVariant={checklistTargets[0]?.assignment?.bathroom_variant || null}
+          generalVariant={checklistTargets[0]?.assignment?.general_variant || null}
+          onClose={() => setRequestModalSection(null)}
+          onSubmit={async (itemKeys) => {
+            if (!itemKeys || itemKeys.length === 0) return;
+            // Attach the requested items to an existing assignment at
+            // this bedroom — picks the first checklist target's
+            // assignment as the host. They're all at the same bedroom
+            // so any assignment_id works for grouping; the owner sees
+            // them on the same row when reviewing.
+            const hostAssignmentId = checklistTargets[0]?.assignment?.id;
+            if (!hostAssignmentId) {
+              alert("Cannot request items — no existing assignment found at this bedroom.");
+              return;
+            }
+            const nowISO = new Date().toISOString();
+            const rows = itemKeys.map(key => ({
+              assignment_id: hostAssignmentId,
+              unit_id: unitId,
+              party_id: partyId,
+              status: 'pending',
+              template_section: requestModalSection,
+              template_item_key: key,
+              // Flags identifying this as a cleaner request rather than
+              // a template-seeded target. The owner-side approval flow
+              // (next turn) filters by requested_by to find pending
+              // requests; the picker shows a "Requested" badge for the
+              // same reason.
+              requested_by: employee?.id || null,
+              requested_at: nowISO,
+            }));
+            const { error } = await supabase.from('assignment_targets').insert(rows);
+            if (error) {
+              alert("Could not submit request: " + error.message);
+              return;
+            }
+            setRequestModalSection(null);
+            // realtime sync will reload checklistTargets so the new
+            // items appear in the picker as pending. Cleaner picks +
+            // starts them via the normal flow.
+          }}
+        />
       )}
 
       {/* Dropdown panel for the open section (checklist mode only).
@@ -2656,7 +2809,7 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
          clean list, not the emerald panel + a redundant variant
          picker below it. Also hidden in the Active tab — that tab is
          for status review, not starting new work. */}
-      {(!checklistMode || checklistTargets.length === 0 || pickerTab === 'not_started') && isGeneral && cat.subcategories && !(checklistMode && checklistTargets.some(t => (t.template_section || '').toLowerCase() === 'general')) && (
+      {(!checklistMode || checklistTargets.length === 0 || pickerTab === 'not_started') && isGeneral && cat.subcategories && !(checklistMode && checklistTargets.some(t => (t.template_section || '').toLowerCase() === 'general')) && !(checklistMode && checklistTargets.length > 0 && assignedGeneralVariants.length === 0) && (
         <div>
           <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">
             Pick one or more areas {selectedSubs.size > 1 && <span className="normal-case text-amber-700">· creates 1 combined task</span>}
@@ -20194,16 +20347,17 @@ function ChecklistAssignmentWizard({ property, employee, actorKind = null, porta
         if (!cc || cc.mode === 'pass') return;
         const party = parties.find(p => p.id === pid);
         if (!party) return;
-        // Only require a variant when there's at least one general
-        // item checked. If the cleaner explicitly un-checked all
-        // General items, the variant doesn't matter (no general row
-        // gets created).
-        const hasGeneralChecks = Object.keys(cc.checked || {}).some(k => k.startsWith('general:'));
-        if (hasGeneralChecks && !cc.generalVariant) {
+        // ALWAYS require a generalVariant when the bedroom isn't being
+        // skipped entirely. Even if no general items are checked, the
+        // variant tells the cleaner which general area this bedroom is
+        // responsible for — which matters for the Request flow later
+        // (cleaner notices something not on the sheet, taps Request,
+        // modal filters items by this variant). Without the variant,
+        // the cleaner has no way to know what they could request.
+        if (!cc.generalVariant) {
           missingVariants.push({ bedroomLabel: party.label || pid });
           return;
         }
-        if (!cc.generalVariant) return;
         const uid = party.unit_id;
         if (!byUnit[uid]) byUnit[uid] = {};
         if (!byUnit[uid][cc.generalVariant]) byUnit[uid][cc.generalVariant] = [];
@@ -23690,6 +23844,12 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                     let bulkCard = null;
                     if (newItems.length > 0) {
                       const anyPriority = newItems.some(t => t.priority);
+                      // Whether any item at this bedroom is a cleaner
+                      // request waiting on owner review. Drives the
+                      // amber "Requested" banner at the top of the
+                      // card so the owner sees there's something new
+                      // to approve here.
+                      const hasRequestedItems = newItems.some(t => t.requested_by);
                       const statusOrder = ['pending', 'in_progress', 'paused', 'blocked', 'done'];
                       const dominantStatus =
                         statusOrder.find(s => newItems.some(t => t.status === s)) || 'pending';
@@ -23705,6 +23865,20 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                       // useful "open one of them" affordance.
                       bulkCard = (
                         <div key={`bulk-${pid}`} className="rounded-xl border border-stone-200 bg-white p-3">
+                          {/* Cleaner request banner — shows at the very
+                             top of the card whenever a cleaner has
+                             submitted a request at this bedroom that's
+                             still pending. Drops a clear "needs review"
+                             signal in front of the owner without
+                             interrupting the rest of the card. */}
+                          {hasRequestedItems && (
+                            <div className="mb-2 flex items-center gap-1.5 px-2 py-1 rounded-md bg-amber-100 border border-amber-300">
+                              <span className="w-1.5 h-1.5 rounded-full bg-amber-600 animate-pulse" />
+                              <span className="text-[10px] uppercase tracking-wider font-mono text-amber-900 font-bold">
+                                Cleaner requested items here
+                              </span>
+                            </div>
+                          )}
                           {/* "Who's here" chips — only shows when ANOTHER
                              cleaner has an open workblock at this bedroom.
                              Each chip carries the cleaner's name + section

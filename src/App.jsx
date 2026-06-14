@@ -22268,7 +22268,8 @@ function AssignmentsPanel({ propertyId, employee, refreshKey, onGoToBedroom, onO
           onJoinBlock={onJoinBlock} />
       ) : (
         <AssignmentTabContent propertyId={propertyId} employee={employee} statusFilter={tab}
-          onUpdate={loadCounts} onGoToBedroom={onGoToBedroom} onOpenBedroomHistory={onOpenBedroomHistory} />
+          onUpdate={loadCounts} onGoToBedroom={onGoToBedroom} onOpenBedroomHistory={onOpenBedroomHistory}
+          onJoinBlock={onJoinBlock} />
       )}
     </div>
   );
@@ -22769,7 +22770,7 @@ function SuggestedTabContent({ propertyId, employee, onGoToBedroom, onOpenBedroo
   );
 }
 
-function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, onGoToBedroom, onOpenBedroomHistory }) {
+function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, onGoToBedroom, onOpenBedroomHistory, onJoinBlock }) {
   const [targets, setTargets] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [opened, setOpened] = useState(null);
@@ -22795,6 +22796,39 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
   const [bundleOpen, setBundleOpen] = useState({}); // { unitId: boolean }
 
   const [loadError, setLoadError] = useState(null);
+
+  // Open workblocks across this property — keyed by party_id so the
+  // bedroom card can show a "[Name] · section is here" chip with a
+  // Join button. Without this, a cleaner browsing Pending / In progress
+  // had no Join affordance from the bedroom card itself; they had to
+  // dive into the section picker (or use the Suggested tab). The
+  // realtime sync (useAssignmentSync) reloads this when work_blocks
+  // changes — so when another cleaner opens or closes a workblock,
+  // every viewer's bedroom cards reflect it within a second or two.
+  const [whosHereByParty, setWhosHereByParty] = useState(new Map());
+  const loadWhosHere = async () => {
+    const { data } = await supabase.from('work_blocks')
+      .select('id, party_id, main_section, shift:shifts!inner(customer_id, employee:employees(id, name))')
+      .is('end_time', null);
+    const m = new Map();
+    (data || []).forEach(b => {
+      if (b.shift?.customer_id !== propertyId) return;
+      if (!b.party_id) return;
+      // Exclude the viewing cleaner's own workblock — they don't need
+      // to "join" themselves; the active workblock pill at the top of
+      // the cleaner shell already surfaces it.
+      if (b.shift?.employee?.id === employee?.id) return;
+      if (!m.has(b.party_id)) m.set(b.party_id, []);
+      m.get(b.party_id).push({
+        name: b.shift?.employee?.name || '?',
+        workBlockId: b.id,
+        mainSection: b.main_section,
+      });
+    });
+    setWhosHereByParty(m);
+  };
+  useEffect(() => { loadWhosHere(); /* eslint-disable-next-line */ }, [propertyId]);
+  useAssignmentSync(loadWhosHere, 'asgn-tab-whoshere');
 
   const load = async () => {
     setLoadError(null);
@@ -23378,6 +23412,33 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                       // useful "open one of them" affordance.
                       bulkCard = (
                         <div key={`bulk-${pid}`} className="rounded-xl border border-stone-200 bg-white p-3">
+                          {/* "Who's here" chips — only shows when ANOTHER
+                             cleaner has an open workblock at this bedroom.
+                             Each chip carries the cleaner's name + section
+                             they're working + a Join button so the viewer
+                             can hop in without going through the picker
+                             flow. Self-chip is filtered out in loadWhosHere
+                             since "Join yourself" makes no sense. */}
+                          {(whosHereByParty.get(pid) || []).length > 0 && (
+                            <div className="mb-2 flex items-center gap-1.5 flex-wrap">
+                              <span className="text-[10px] uppercase tracking-wider font-mono text-amber-900 font-bold">
+                                ●
+                              </span>
+                              {(whosHereByParty.get(pid) || []).map((w, i) => (
+                                <span key={i} className="inline-flex items-center gap-1">
+                                  <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-amber-100 text-amber-900 border border-amber-300 font-bold">
+                                    {w.name}{w.mainSection ? ` · ${w.mainSection}` : ''} is here
+                                  </span>
+                                  {onJoinBlock && w.workBlockId && (
+                                    <button onClick={(e) => { e.stopPropagation(); onJoinBlock({ id: w.workBlockId }); }}
+                                      className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-900 hover:bg-stone-800 text-stone-50 font-bold inline-flex items-center gap-1 active:scale-95">
+                                      <Plus size={9} /> Join
+                                    </button>
+                                  )}
+                                </span>
+                              ))}
+                            </div>
+                          )}
                           {/* === HEADER: title + chips === */}
                           <div className="flex items-start justify-between gap-2 mb-2">
                             <div className="flex-1 min-w-0">
@@ -23532,29 +23593,17 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
   };
 
   const renderAssignmentList = (items) => {
-    // Only bundle on the Pending tab — other views don't need it.
+    // For non-Pending tabs we previously rendered each assignment_target
+    // as a separate AssignmentCard. That meant a bedroom with 16 items
+    // showed up as 16 cards on In progress / Paused / Blocked, which is
+    // exactly the "ton of cards" the cleaner reported. Routing every
+    // tab through renderGroupedItems collapses those rows down to ONE
+    // bedroom-level card with the bulk-action chrome — same model as
+    // Pending. We keep the priority-split below for the Pending tab
+    // only since priority callouts are most useful when planning what
+    // to do next.
     if (statusFilter !== 'pending') {
-      return (
-        <div className="space-y-2">
-          {items.map(t => (
-            <AssignmentCard key={t.id} target={t} busy={busy} propertyId={propertyId}
-              onView={() => setOpened(t)}
-              onStart={() => startAndGo(t)}
-              onPause={() => updateStatus(t, 'paused')}
-              onMoveToPending={() => updateStatus(t, 'pending')}
-              onDone={() => updateStatus(t, 'done')}
-              onReopen={() => updateStatus(t, 'pending')}
-              onBlocked={() => setStatusModal({ target: t })}
-              onReassign={() => setReassignTarget(t)}
-              onTogglePriority={togglePriority}
-              canMarkDone={can(employee, 'mark_assignments_done') || t.started_by === employee?.id}
-              canMarkDoneAlways={can(employee, 'mark_assignments_done')}
-              currentEmployeeId={employee?.id}
-                onGoToBedroom={onGoToBedroom ? () => startAndGo(t) : null}
-              onOpenBedroomHistory={onOpenBedroomHistory} />
-          ))}
-        </div>
-      );
+      return renderGroupedItems(items);
     }
 
     // PENDING TAB: split priority vs the rest, render with visual divider.

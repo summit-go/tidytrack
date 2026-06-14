@@ -3111,7 +3111,69 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     }
   };
 
-  const onPickBlockParty = async (party, workNotes) => {
+  // After bedroom is picked: navigate to section step. The actual
+  // workblock creation (with the chosen main_section) happens in
+  // onPickBlockSection below — separating "which bedroom" from "which
+  // section" so the cleaner explicitly picks one of the four main
+  // sections (bedroom/vanity/bathroom/general) at this point.
+  // workNotes is no longer collected at the bedroom-picker step; the
+  // section picker collects it instead.
+  const onPickBlockParty = (party, _workNotes) => {
+    setBlockStartFlow(prev => ({ step: 'section', unit: prev?.unit, party }));
+  };
+
+  // Section step → create the workblock scoped to (bedroom, main_section).
+  // Mirrors the prior onPickBlockParty behavior but now records
+  // main_section on the work_block row, which is the foundation for
+  // parallel cleaners working different sections of the same bedroom.
+  const onPickBlockSection = async ({ section, workNotes }) => {
+    setBusy(true);
+    const { unit, party } = blockStartFlow || {};
+    if (!unit || !party) { setBusy(false); return; }
+    // Defensive: still only one open workblock per shift at a time —
+    // a single cleaner can only physically be in one section at once.
+    // Closes any other open block belonging to THIS shift before
+    // creating the new one.
+    try {
+      const { data: openBlocks } = await supabase.from('work_blocks')
+        .select('id').eq('shift_id', shift.id).is('end_time', null);
+      if (openBlocks && openBlocks.length > 0) {
+        const ts = new Date().toISOString();
+        await supabase.from('work_blocks')
+          .update({ end_time: ts })
+          .in('id', openBlocks.map(b => b.id));
+      }
+    } catch (e) {
+      console.warn('[onPickBlockSection] could not pre-close open blocks', e);
+    }
+    const { data, error } = await supabase.from('work_blocks')
+      .insert({
+        shift_id: shift.id, unit_id: unit.id, party_id: party.id,
+        main_section: section,
+        bill_rate_at_work: shift.customer?.bill_rate_hourly || null,
+        work_notes: workNotes || null,
+        is_preview: previewMode,
+      })
+      .select('*, unit:units(*), party:parties(*), tasks(*, photos(*, taken_by_employee:employees!taken_by(name)))').single();
+    setBusy(false);
+    if (error) { alert('Could not start work block: ' + error.message); return; }
+    setWorkBlocks(prev => {
+      const ts = new Date().toISOString();
+      const closed = prev.map(b => (b.end_time ? b : { ...b, end_time: ts }));
+      return [...closed, data];
+    });
+    setActiveBlock(data); setTasks(data.tasks || []); setBlockStartFlow(null);
+  };
+
+  // When the section picker shows "[Name] is here" and the cleaner taps
+  // Join, route through the existing joinBlock helper so the participant
+  // row gets created correctly + the cleaner lands in the shared block.
+  const onJoinBlockFromSection = async (workBlockId) => {
+    setBlockStartFlow(null);
+    if (joinBlock) await joinBlock({ id: workBlockId });
+  };
+
+  const onPickBlockParty_LEGACY_UNUSED = async (party, workNotes) => {
     setBusy(true);
     const { unit } = blockStartFlow;
     // Defensive safety: only one open work block per shift. If another open
@@ -4254,6 +4316,14 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     return withIdleModal(<PartyPicker property={shift.customer} unit={blockStartFlow.unit}
       onPick={onPickBlockParty} onBack={() => setBlockStartFlow({ step: 'unit' })} busy={busy} />);
   }
+  if (shift && blockStartFlow?.step === 'section') {
+    return withIdleModal(<SectionPicker property={shift.customer}
+      unit={blockStartFlow.unit} party={blockStartFlow.party}
+      onStart={onPickBlockSection}
+      onJoin={onJoinBlockFromSection}
+      onBack={() => setBlockStartFlow({ step: 'party', unit: blockStartFlow.unit })}
+      busy={busy} />);
+  }
 
   if (!shift) {
     return withIdleModal(
@@ -4371,9 +4441,11 @@ function WhosHerePopup({ propertyId, myEmployeeId, propertyName, onClose, onJoin
   useTick(true); // tick so timers update
 
   const load = async () => {
-    // Open work_blocks for cleaners on shifts at THIS property
+    // Open work_blocks for cleaners on shifts at THIS property.
+    // main_section pulled so the popup can show which section each
+    // cleaner is working (e.g. "Maria · Bathroom").
     const { data: blocks } = await supabase.from('work_blocks')
-      .select('id, start_time, unit:units(label), party:parties(label), shift:shifts!inner(id, customer_id, employee:employees(id, name))')
+      .select('id, start_time, main_section, unit:units(label), party:parties(label), shift:shifts!inner(id, customer_id, employee:employees(id, name))')
       .is('end_time', null)
       .order('start_time', { ascending: true });
     // Also include cleaners clocked in at this property without an
@@ -4393,6 +4465,7 @@ function WhosHerePopup({ propertyId, myEmployeeId, propertyName, onClose, onJoin
         name: b.shift?.employee?.name || '?',
         unitLabel: b.unit?.label,
         partyLabel: b.party?.label,
+        mainSection: b.main_section, // 'bedroom' | 'vanity' | 'bathroom' | 'general' | null
         startTime: b.start_time,
       })),
       ...standby.map(s => ({
@@ -4465,6 +4538,11 @@ function WhosHerePopup({ propertyId, myEmployeeId, propertyName, onClose, onJoin
                                   <span className="text-stone-400"> · </span>
                                   <span className="italic text-amber-700 text-xs">{r.partyLabel}</span>
                                 </>
+                              )}
+                              {r.mainSection && (
+                                <span className="ml-1.5 text-[9px] uppercase tracking-wider font-mono px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-900 border border-amber-300 font-bold">
+                                  {r.mainSection}
+                                </span>
                               )}
                             </div>
                           </div>
@@ -6997,6 +7075,159 @@ function PartyPicker({ property, unit, onPick, onBack, busy }) {
                 </button>
               );
             })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// =================================================================
+// SectionPicker — between bedroom pick and workblock creation, the
+// cleaner chooses which of the four main cleaning sections to work:
+// Bedroom, Vanity, Bathroom, General.
+//
+// Each section button shows:
+//   - the number of items still pending in that section,
+//   - if another cleaner already has an open workblock there: a
+//     "[Name] is here" chip + Join button (instead of Start),
+//   - if no items in that section: greyed out (informational only).
+//
+// Selecting Start records the chosen section on the new work_block
+// via `main_section`. Selecting Join hops into the existing workblock
+// without creating a new one.
+//
+// Props:
+//   property, unit, party — picked in prior steps
+//   onStart({ section, workNotes }) — create new workblock with section
+//   onJoin(workBlockId) — join an existing workblock at this section
+//   onBack — go back to the bedroom picker
+//   busy — disable buttons during async
+// =================================================================
+function SectionPicker({ property, unit, party, onStart, onJoin, onBack, busy }) {
+  // Per-section state at THIS bedroom. countsBySec is built from
+  // assignment_targets (how much work in each section). openBySec is
+  // the open workblocks keyed by main_section (so we know who's
+  // already there). Both load in parallel for speed.
+  const [countsBySec, setCountsBySec] = useState({ bedroom: 0, vanity: 0, bathroom: 0, general: 0 });
+  const [openBySec, setOpenBySec] = useState({}); // section → { id, employeeName }
+  const [loaded, setLoaded] = useState(false);
+  const [notes, setNotes] = useState('');
+
+  useEffect(() => { (async () => {
+    const [targetsRes, blocksRes] = await Promise.all([
+      supabase.from('assignment_targets')
+        .select('template_section, assignment:assignments!inner(customer_id, active, source, pm_status)')
+        .eq('unit_id', unit.id)
+        .eq('party_id', party.id)
+        .not('status', 'in', '(done,blocked)'),
+      supabase.from('work_blocks')
+        .select('id, main_section, shift:shifts!inner(customer_id, employee:employees(id, name))')
+        .eq('unit_id', unit.id)
+        .eq('party_id', party.id)
+        .is('end_time', null),
+    ]);
+    const c = { bedroom: 0, vanity: 0, bathroom: 0, general: 0 };
+    (targetsRes.data || []).forEach(t => {
+      const a = t.assignment;
+      if (!a || a.active === false) return;
+      if (a.customer_id !== property.id) return;
+      if (a.source === 'pm' && a.pm_status !== 'approved') return;
+      const sec = (t.template_section || '').toLowerCase();
+      if (sec in c) c[sec] += 1;
+    });
+    const o = {};
+    (blocksRes.data || []).forEach(b => {
+      if (b.shift?.customer_id !== property.id) return;
+      const sec = b.main_section || 'bedroom'; // legacy null = treat as bedroom
+      if (!o[sec]) o[sec] = { id: b.id, employeeName: b.shift?.employee?.name || '?' };
+    });
+    setCountsBySec(c);
+    setOpenBySec(o);
+    setLoaded(true);
+  })(); }, [unit.id, party.id, property.id]);
+
+  const SECTIONS = [
+    { key: 'bedroom',  label: 'Bedroom',  desc: 'Beds, dressers, closets, mirrors' },
+    { key: 'vanity',   label: 'Vanity',   desc: 'Sinks, counters, fixtures' },
+    { key: 'bathroom', label: 'Bathroom', desc: 'Tub, toilet, shower, floor' },
+    { key: 'general',  label: 'General',  desc: 'Living room, kitchen, common areas' },
+  ];
+
+  return (
+    <div className="min-h-screen bg-stone-50 flex flex-col">
+      <div className="bg-stone-900 text-stone-50 px-5 py-4">
+        <button onClick={onBack} disabled={busy}
+          className="text-xs uppercase tracking-wider font-mono text-stone-400 hover:text-stone-200 disabled:opacity-50 mb-2 flex items-center gap-1">
+          <ChevronLeft size={14} /> Back
+        </button>
+        <div className="text-xs uppercase tracking-wider font-mono text-stone-400">{unit.label} · {party.label}</div>
+        <div className="font-serif text-xl">Which section?</div>
+        <div className="text-sm text-stone-400 mt-1">Pick what you'll work on. Other cleaners can handle the other sections in parallel.</div>
+      </div>
+      <div className="flex-1 px-5 py-4 overflow-y-auto">
+        {!loaded ? (
+          <Splash text="Loading…" />
+        ) : (
+          <div className="space-y-2">
+            {SECTIONS.map(s => {
+              const n = countsBySec[s.key] || 0;
+              const open = openBySec[s.key];
+              const isEmpty = n === 0 && !open;
+              // Three card states:
+              //   open=true  → "X is here" + Join (claimed by another cleaner)
+              //   n=0,no open → greyed out "No work here" (informational)
+              //   else        → "Start" with item count
+              return (
+                <div key={s.key}
+                  className={`w-full rounded-2xl border-2 p-4 ${isEmpty ? 'bg-stone-100 border-stone-200 opacity-60' : 'bg-white border-stone-200'}`}>
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap mb-1">
+                        <span className="font-serif text-lg text-stone-900">{s.label}</span>
+                        {n > 0 && (
+                          <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-amber-600 text-white font-bold">
+                            {n} item{n === 1 ? '' : 's'}
+                          </span>
+                        )}
+                        {open && (
+                          <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-amber-100 text-amber-900 border border-amber-300 font-bold">
+                            {open.employeeName} is here
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-xs text-stone-500">{s.desc}</div>
+                    </div>
+                    <div className="flex-shrink-0">
+                      {open ? (
+                        <button onClick={() => onJoin(open.id)} disabled={busy}
+                          className="px-4 py-2 rounded-xl bg-stone-900 hover:bg-stone-800 text-stone-50 text-sm font-bold flex items-center gap-1 active:scale-95 disabled:opacity-50">
+                          <Plus size={14} /> Join
+                        </button>
+                      ) : isEmpty ? (
+                        <span className="text-[10px] uppercase tracking-wider font-mono text-stone-500">No work here</span>
+                      ) : (
+                        <button onClick={() => onStart({ section: s.key, workNotes: notes })} disabled={busy}
+                          className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-sm font-bold active:scale-95 disabled:opacity-50">
+                          Start
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+            {/* Work notes — applies to the new workblock if the cleaner
+               chooses Start. Hidden until they tap to expand to keep the
+               screen tight by default. */}
+            <details className="mt-3">
+              <summary className="text-xs font-mono uppercase tracking-wider text-stone-500 cursor-pointer hover:text-stone-700">
+                Add notes (optional)
+              </summary>
+              <textarea value={notes} onChange={e => setNotes(e.target.value)}
+                placeholder="Anything worth noting about this session?"
+                className="mt-2 w-full px-3 py-2 rounded-xl border border-stone-300 bg-white text-sm" rows="2" />
+            </details>
           </div>
         )}
       </div>
@@ -22115,9 +22346,12 @@ function SuggestedTabContent({ propertyId, employee, onGoToBedroom, onOpenBedroo
         supabase.from('assignment_targets')
           .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, assignment_type, template_set_id, sheet_type, general_variant, bathroom_variant, created_at), unit:units(id, label), party:parties(id, label), starter:employees!started_by(name), completer:employees!completed_by(name), assignedTo:employees!assigned_to(id, name)')
           .not('status', 'in', '(done,blocked)'),
-        // Open work blocks property-wide for the "who's here" chips
+        // Open work blocks property-wide for the "who's here" chips.
+        // main_section is pulled so each chip can label which section
+        // the cleaner is working — relevant once cleaners split a
+        // bedroom across sections.
         supabase.from('work_blocks')
-          .select('id, unit_id, party_id, shift:shifts!inner(customer_id, employee:employees(id, name))')
+          .select('id, unit_id, party_id, main_section, shift:shifts!inner(customer_id, employee:employees(id, name))')
           .is('end_time', null),
       ]);
       const units = unitsRes.data || [];
@@ -22147,7 +22381,11 @@ function SuggestedTabContent({ propertyId, employee, onGoToBedroom, onOpenBedroo
       openBlocks.forEach(b => {
         if (!b.party_id) return;
         if (!whosHereByParty.has(b.party_id)) whosHereByParty.set(b.party_id, []);
-        whosHereByParty.get(b.party_id).push({ name: b.shift.employee.name, workBlockId: b.id });
+        whosHereByParty.get(b.party_id).push({
+          name: b.shift.employee.name,
+          workBlockId: b.id,
+          mainSection: b.main_section, // null for legacy blocks; UI hides badge in that case
+        });
       });
 
       const unitMap = new Map(units.map(u => [u.id, u]));
@@ -22349,7 +22587,7 @@ function SuggestedTabContent({ propertyId, employee, onGoToBedroom, onOpenBedroo
             {c.whosHere.map((w, i) => (
               <span key={i} className="inline-flex items-center gap-1">
                 <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-amber-100 text-amber-900 border border-amber-300 font-bold">
-                  {w.name} is here
+                  {w.name}{w.mainSection ? ` · ${w.mainSection}` : ''} is here
                 </span>
                 {onJoinBlock && w.workBlockId && (
                   <button onClick={(e) => { e.stopPropagation(); onJoinBlock({ id: w.workBlockId }); }}
@@ -22675,14 +22913,13 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
     })();
   }, [propertyId, targets.length]);
 
-  // Cutoff timestamp: any assignment whose parent `created_at` is at
-  // or after this moment uses the new bedroom-level UI (bulk action
-  // card with section breakdown). Assignments created BEFORE this
-  // timestamp keep the original per-item AssignmentCard rendering so
-  // the cleaners' Mon-Wed work is not disturbed.
-  // 10:30 AM MDT June 12, 2026 → 16:30 UTC (MDT is UTC-6 in June).
-  const ASSIGNMENT_CUTOFF = '2026-06-12T16:30:00Z';
-  const isPostCutoff = (t) => (t?.assignment?.created_at || '') >= ASSIGNMENT_CUTOFF;
+  // Cutoff retired: every assignment now renders as ONE bedroom-level
+  // bulk card with the section breakdown. The old per-item rendering
+  // (one card per assignment_target) caused the "16 cards for one
+  // bedroom" surprise when items spanned multiple sections. Bedroom
+  // cards now always read as one card per (apartment, bedroom),
+  // matching the cleaner's mental model of "this bedroom is one job".
+  const isPostCutoff = (_t) => true;
 
   // Bulk wrappers that act on every target at a bedroom. Optimistic
   // update + single .in() call, then re-load. Used by the new

@@ -3339,6 +3339,28 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       return;
     }
     setBusy(true);
+    // Close THIS cleaner's other open workblocks under this shift first
+    // so we don't end up with B owning a stale open block while also
+    // being a participant in A's. Mirrors the pre-close pattern in
+    // onPickBlockParty. The block's items stay in whatever status they
+    // were in (paused / in_progress) — nothing is lost.
+    try {
+      if (activeTask) await stopTask(activeTask, false);
+      const { data: myOpenBlocks } = await supabase.from('work_blocks')
+        .select('id').eq('shift_id', shift.id).is('end_time', null)
+        .neq('id', targetBlock.id);
+      if (myOpenBlocks && myOpenBlocks.length > 0) {
+        const ts = new Date().toISOString();
+        await supabase.from('work_blocks')
+          .update({ end_time: ts })
+          .in('id', myOpenBlocks.map(b => b.id));
+        setWorkBlocks(prev => prev.map(b =>
+          myOpenBlocks.some(o => o.id === b.id) ? { ...b, end_time: ts } : b
+        ));
+      }
+    } catch (e) {
+      console.warn('[joinBlock] could not pre-close own open blocks', e);
+    }
     try {
       // Count current participants (joined and not yet left)
       const { data: current } = await supabase.from('work_block_participants')
@@ -5532,7 +5554,7 @@ function OtherWorkblocksHere({ unitId, partyId, currentBlockId, currentEmployeeI
   const load = async () => {
     if (!unitId || !partyId) return;
     const { data } = await supabase.from('work_blocks')
-      .select('id, start_time, main_section, shift:shifts!inner(customer_id, employee:employees(id, name)), tasks(id, end_time, photos(id))')
+      .select('id, start_time, main_section, shift:shifts!inner(customer_id, employee:employees(id, name)), tasks(id, end_time, category, subcategory, photos(id))')
       .eq('unit_id', unitId).eq('party_id', partyId)
       .is('end_time', null);
     const filtered = (data || []).filter(b =>
@@ -5546,29 +5568,55 @@ function OtherWorkblocksHere({ unitId, partyId, currentBlockId, currentEmployeeI
 
   if (blocks.length === 0) return null;
 
+  const cap = (s) => s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
+
   return (
     <div className="space-y-2">
       {blocks.map(b => {
         const elapsed = Date.now() - new Date(b.start_time).getTime();
-        const sectionLabel = b.main_section
-          ? b.main_section.charAt(0).toUpperCase() + b.main_section.slice(1)
-          : 'Working';
+        // Section label: prefer main_section, fall back to the dominant
+        // task category, then nothing. "Working" was confusing because
+        // it didn't tell the viewer what section they'd be joining.
+        let sectionLabel = b.main_section ? cap(b.main_section) : null;
+        if (!sectionLabel && b.tasks?.length > 0) {
+          const counts = {};
+          b.tasks.forEach(t => { if (t.category) counts[t.category] = (counts[t.category] || 0) + 1; });
+          const dom = Object.keys(counts).sort((a, c) => counts[c] - counts[a])[0];
+          if (dom) sectionLabel = cap(dom);
+        }
+        // All unique sections being cleaned in this workblock (so if A
+        // started "Bedroom" but then added vanity items, B sees both).
+        const sectionSet = new Set();
+        (b.tasks || []).forEach(t => { if (t.category) sectionSet.add(t.category); });
+        const sections = Array.from(sectionSet);
+        // Subcategory chips — granular detail of what's being cleaned.
+        // Dedupe by subcategory string. If a task has no subcategory,
+        // skip it (the section chip above already covers it).
+        const subSeen = new Set();
+        const subChips = [];
+        (b.tasks || []).forEach(t => {
+          if (!t.subcategory) return;
+          const key = t.subcategory.toLowerCase();
+          if (subSeen.has(key)) return;
+          subSeen.add(key);
+          subChips.push(t.subcategory);
+        });
         const cleanerName = b.shift?.employee?.name || 'Another cleaner';
-        // Item-level progress: count of tasks + photos the OTHER cleaner
-        // has logged so the viewer sees what's been done already.
         const taskCount = (b.tasks || []).length;
         const photoCount = (b.tasks || []).reduce((sum, t) => sum + (t.photos?.length || 0), 0);
         return (
           <div key={b.id} className="rounded-2xl border-2 border-amber-300 bg-amber-50 p-4">
-            <div className="flex items-start justify-between gap-3">
+            <div className="flex items-start justify-between gap-3 mb-2">
               <div className="flex-1 min-w-0">
                 <div className="text-[10px] uppercase tracking-wider text-amber-900 font-mono font-bold mb-1 flex items-center gap-1.5">
                   <span className="w-2 h-2 rounded-full bg-amber-600 animate-pulse" />
                   Cleaner here
                 </div>
-                <div className="font-serif text-lg text-stone-900 leading-tight">
-                  {sectionLabel}
-                </div>
+                {sectionLabel && (
+                  <div className="font-serif text-lg text-stone-900 leading-tight">
+                    {sectionLabel}
+                  </div>
+                )}
                 <div className="text-xs text-stone-600 mt-0.5">
                   <span className="font-medium">{cleanerName}</span>
                   <span className="text-stone-400 mx-1">·</span>
@@ -5591,12 +5639,36 @@ function OtherWorkblocksHere({ unitId, partyId, currentBlockId, currentEmployeeI
                 </div>
               </div>
               {onJoin && (
-                <button onClick={() => onJoin(b.id)}
+                <button onClick={() => onJoin({ id: b.id })}
                   className="px-4 py-2.5 rounded-xl bg-stone-900 hover:bg-stone-800 text-stone-50 text-sm font-bold flex items-center gap-1.5 active:scale-95 flex-shrink-0">
-                  <Plus size={14} /> Join this workblock
+                  <Plus size={14} /> Join
                 </button>
               )}
             </div>
+            {/* Section chips — the 4 mains being worked. Multiple appear
+               when the workblock spans sections (e.g. A picked bedroom
+               items first then added vanity items). */}
+            {sections.length > 1 && (
+              <div className="flex flex-wrap gap-1 mt-2">
+                {sections.map(s => (
+                  <span key={s} className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-amber-200 text-amber-900 border border-amber-400 font-bold">
+                    {cap(s)}
+                  </span>
+                ))}
+              </div>
+            )}
+            {/* Subcategory chips — granular detail of what's being
+               cleaned. Multi-row flex-wrap so the chips fit nicely no
+               matter how many. */}
+            {subChips.length > 0 && (
+              <div className="flex flex-wrap gap-1 mt-2">
+                {subChips.map((c, i) => (
+                  <span key={i} className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-white border border-amber-300 text-stone-700">
+                    {c}
+                  </span>
+                ))}
+              </div>
+            )}
           </div>
         );
       })}

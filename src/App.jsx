@@ -495,6 +495,13 @@ function useAssignmentSync(load, channelKey = 'asgn-sync') {
     const channel = supabase.channel(channelKey + '-' + Math.random().toString(36).slice(2, 8))
       .on('postgres_changes', { event: '*', schema: 'public', table: 'assignment_targets' }, debouncedLoad)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'assignments' }, debouncedLoad)
+      // Also listen for workblock activity. Without these subscriptions
+      // a cleaner who has the Assignments / Suggested tab open won't
+      // see that another cleaner just started a workblock until they
+      // pull-to-refresh — which is exactly what the owner reported.
+      // The debounced load coalesces back-to-back events into one fetch.
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'work_blocks' }, debouncedLoad)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'work_block_participants' }, debouncedLoad)
       .subscribe();
 
     const onFocus = () => debouncedLoad();
@@ -2000,7 +2007,7 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
     const { data } = await supabase.from('assignment_targets')
       .select('*, assignment:assignments!inner(id, customer_id, active, source, pm_status, sheet_type, template_set_id, bathroom_variant, general_variant)')
       .eq('unit_id', unitId).eq('party_id', partyId)
-      .neq('status', 'done');
+      .not('status', 'in', '(done,blocked)');
     const open = (data || []).filter(t =>
       t.assignment?.customer_id === customerId &&
       t.assignment?.active &&
@@ -5463,7 +5470,7 @@ function PreparingBlockView({ shift, pendingStart, employeeName, employee,
       const { data } = await supabase.from('assignment_targets')
         .select('priority, assignment:assignments!inner(assignment_type, active)')
         .eq('unit_id', pendingStart.unitId).eq('party_id', pendingStart.partyId)
-        .neq('status', 'done');
+        .not('status', 'in', '(done,blocked)');
       const open = (data || []).filter(t => t.assignment?.active);
       const hasPriority = open.some(t => t.priority);
       const types = [...new Set(open.map(t => t.assignment?.assignment_type).filter(Boolean))];
@@ -5702,7 +5709,7 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
       const { data } = await supabase.from('assignment_targets')
         .select('priority, assignment:assignments!inner(assignment_type, active)')
         .eq('unit_id', block.unit_id).eq('party_id', block.party_id)
-        .neq('status', 'done');
+        .not('status', 'in', '(done,blocked)');
       const open = (data || []).filter(t => t.assignment?.active);
       const hasPriority = open.some(t => t.priority);
       const types = [...new Set(open.map(t => t.assignment?.assignment_type).filter(Boolean))];
@@ -6396,7 +6403,7 @@ function PropertyPicker({ onPick, onCancel, busy, title, subtitle, viewOnly = fa
       supabase.from('customers').select('*').eq('active', true).order('name'),
       supabase.from('assignment_targets')
         .select('unit_id, party_id, status, assignment:assignments!inner(customer_id, active)')
-        .neq('status', 'done'),
+        .not('status', 'in', '(done,blocked)'),
     ]);
     const counts = {};
     const seenBedrooms = new Set();
@@ -6737,7 +6744,7 @@ function UnitPicker({ property, onPick, onBack, busy, title = "Pick a unit" }) {
         .order('sort_order').order('label'),
       supabase.from('assignment_targets')
         .select('unit_id, party_id, status, assignment:assignments!inner(customer_id, active)')
-        .neq('status', 'done'),
+        .not('status', 'in', '(done,blocked)'),
     ]);
     // Apply natural sort client-side so '10-101' comes after '9-101'
     const sorted = (unitsRes.data || []).slice().sort((a, b) => naturalCompare(a.label, b.label));
@@ -6857,7 +6864,7 @@ function PartyPicker({ property, unit, onPick, onBack, busy }) {
       supabase.from('assignment_targets')
         .select('party_id, template_section, status, assignment:assignments!inner(customer_id, active, source, pm_status)')
         .eq('unit_id', unit.id)
-        .neq('status', 'done'),
+        .not('status', 'in', '(done,blocked)'),
     ]);
     // Build the section-by-section counts per party. Only count
     // open targets on active, customer-matched assignments (so
@@ -11889,7 +11896,7 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
       supabase.from('customers').select('*').eq('active', true).order('name'),
       supabase.from('assignment_targets')
         .select('unit_id, party_id, status, assignment:assignments!inner(customer_id, active)')
-        .neq('status', 'done'),
+        .not('status', 'in', '(done,blocked)'),
     ]);
     // Count unique (unit_id, party_id) bedrooms per customer rather
     // than raw item rows. A 4-bedroom apartment with 80 items shows
@@ -21136,7 +21143,7 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
       .from('assignment_targets')
       .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, extracted_text, spanish_translation, translation_status, template_set_id, sheet_type, bathroom_variant, general_variant, assignment_type, created_at), unit:units(id, label), party:parties(id, label), starter:employees!started_by(name), completer:employees!completed_by(name), assignedTo:employees!assigned_to(id, name)');
 
-    if (!showDone) q = q.neq('status', 'done');
+    if (!showDone) q = q.not('status', 'in', '(done,blocked)');
 
     if (unitId && partyId) {
       q = q.or(`and(unit_id.eq.${unitId},party_id.eq.${partyId}),and(unit_id.is.null,party_id.is.null)`);
@@ -22059,6 +22066,10 @@ function SuggestedTabContent({ propertyId, employee, onGoToBedroom, onOpenBedroo
   });
   const [reloadKey, setReloadKey] = useState(0);
   const reload = () => setReloadKey(k => k + 1);
+  // Realtime: pick up workblocks opening/closing and target status
+  // changes from other cleaners so the "X is here" chip + status pill
+  // appear within seconds rather than after a manual refresh.
+  useAssignmentSync(reload, 'suggested-tab');
 
   // Label parsers — same as NextUpModal
   const buildingFromLabel = (label) => {
@@ -22103,7 +22114,7 @@ function SuggestedTabContent({ propertyId, employee, onGoToBedroom, onOpenBedroo
         supabase.from('parties').select('id, label, unit_id, sort_order, active'),
         supabase.from('assignment_targets')
           .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, assignment_type, template_set_id, sheet_type, general_variant, bathroom_variant, created_at), unit:units(id, label), party:parties(id, label), starter:employees!started_by(name), completer:employees!completed_by(name), assignedTo:employees!assigned_to(id, name)')
-          .neq('status', 'done'),
+          .not('status', 'in', '(done,blocked)'),
         // Open work blocks property-wide for the "who's here" chips
         supabase.from('work_blocks')
           .select('id, unit_id, party_id, shift:shifts!inner(customer_id, employee:employees(id, name))')
@@ -23732,7 +23743,7 @@ function NextUpModal({ from, employeeId, onPick, onClose }) {
           .select('id, label, unit_id, sort_order, active'),
         supabase.from('assignment_targets')
           .select('unit_id, party_id, status, assignment:assignments!inner(customer_id, active, source, pm_status)')
-          .neq('status', 'done'),
+          .not('status', 'in', '(done,blocked)'),
         // Open work blocks at this property so we can show "who's here"
         supabase.from('work_blocks')
           .select('unit_id, party_id, shift:shifts!inner(customer_id, employee:employees(id, name))')
@@ -26571,7 +26582,7 @@ function RecheckRequestModal({ assignment, property, portalUser, onClose, onSave
       const { data } = await supabase.from('assignment_targets')
         .select('id, status, template_section, template_item_key, status_notes, unit:units(label), party:parties(label), recheck_passed_at')
         .eq('assignment_id', assignment.id)
-        .neq('status', 'done')
+        .not('status', 'in', '(done,blocked)')
         .is('recheck_passed_at', null);
       setTargets(data || []);
       setLoaded(true);

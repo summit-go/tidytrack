@@ -28557,9 +28557,21 @@ function InboxView({ employee, onBack }) {
       {reviewAssignment && (
         <ReviewAssignmentModal assignment={reviewAssignment} employee={employee}
           onDone={() => {
-            // In queue mode we just clear reviewAssignment — the
-            // useEffect above will pick the next pending one from the
-            // freshly-loaded list. Out of queue mode we just close.
+            // CRITICAL — optimistically drop the just-handled assignment
+            // from local state BEFORE clearing reviewAssignment. The
+            // queue-advance useEffect runs the moment reviewAssignment
+            // flips to null, and at that instant pendingAssignments is
+            // still the stale list including the one we just approved
+            // (load() is in flight, hasn't returned yet). Without this
+            // optimistic prune, the useEffect picks the same row at
+            // index 0 and re-opens the modal with the assignment the
+            // user thought they just finished — every other "approve"
+            // click ends up being a no-op database update on an
+            // already-approved row. End result: 48 clicks → maybe 20
+            // real approvals, the rest invisible to cleaners because
+            // they were never actually advanced through the queue.
+            const id = reviewAssignment.id;
+            setPendingAssignments(prev => prev.filter(a => a.id !== id));
             setReviewAssignment(null);
             load();
           }}

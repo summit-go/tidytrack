@@ -23,7 +23,6 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 // If empty, the Translate button is hidden.
 // =================================================================
 const GOOGLE_TRANSLATE_API_KEY = "AIzaSyD7ceHPryMzs45hWJOyFNBxtOzQOEmJcSA";
-
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 const PHOTO_BUCKET = 'task-photos';
 const ASSIGNMENT_BUCKET = 'assignments';
@@ -23593,6 +23592,18 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
     // tab. For "mine" / "recheck_passed" / Done we still keep everything
     // status=done since those are derived views — extra clientside
     // narrowing happens below.
+    // TEMP DIAGNOSTIC — assignment census. Tells us exactly where every
+    // assignment lands so we can reconcile "96 approved" vs "48 pending".
+    // Remove once counts are confirmed correct.
+    try {
+      const census = {};
+      dominantByAsgn.forEach(v => { census[v] = (census[v] || 0) + 1; });
+      console.log('[Assignments census] property=', propertyId,
+        '| distinct assignments loaded=', dominantByAsgn.size,
+        '| by dominant status=', census,
+        '| total target rows=', allRelevant.length);
+    } catch (e) { /* noop */ }
+
     let filtered;
     if (isDoneTab) {
       filtered = allRelevant.filter(t => t.status === 'done' || t.status === 'blocked');
@@ -24246,16 +24257,6 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                                   <span className="italic">{bedLabel}</span>
                                 </div>
                               )}
-                              {/* Assignment-type chip — identifies WHICH
-                                 job this card is (Cleaning check vs
-                                 Move-out check). Essential now that the
-                                 same bedroom can show multiple cards,
-                                 one per independent assignment. */}
-                              {bed.assignment?.assignment_type && (
-                                <div className="mt-1">
-                                  <AssignmentTypeChip type={bed.assignment.assignment_type} />
-                                </div>
-                              )}
                             </div>
                             <div className="flex flex-col items-end gap-1 flex-shrink-0">
                               <div className="flex items-center gap-1.5 flex-wrap justify-end">
@@ -24751,7 +24752,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                     <span className="font-serif text-base text-stone-900 font-bold">
                       {b === '—' ? 'No unit' : `Building ${b.replace(/^B/i, '')}`}
                     </span>
-                    <span className="text-xs font-mono text-stone-500">({itemsForBuilding.length})</span>
+                    <span className="text-xs font-mono text-stone-500">({countBedrooms(itemsForBuilding)})</span>
                   </div>
                   <ChevronRight size={16} className={`text-stone-500 transition-transform ${collapsed ? '' : 'rotate-90'}`} />
                 </button>
@@ -24773,7 +24774,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                                 <span className="text-sm font-bold text-stone-800 tracking-wide">
                                   {fk === '—' ? 'Other' : `Floor ${fk}`}
                                 </span>
-                                <span className="text-xs font-mono text-stone-500">({byFloor[fk].length})</span>
+                                <span className="text-xs font-mono text-stone-500">({countBedrooms(byFloor[fk])})</span>
                                 <div className="flex-1 h-px bg-stone-300" />
                               </button>
                               {floorOpen && renderAssignmentList(byFloor[fk])}

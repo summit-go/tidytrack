@@ -18935,6 +18935,24 @@ function AssignmentList({ property, employee, onBack, onNew, onNewChecklist, onO
             <div className="text-xs text-stone-500 font-mono mt-1">
               {fmtDate(a.created_at)} · {a.done}/{a.total} done{a.inProgress > 0 && `, ${a.inProgress} in progress`}
             </div>
+            {/* DIAGNOSTIC ROW — temporary. Shows the exact DB state for
+               each assignment so we can debug "approved but cleaner
+               can't see them" issues. If source/pm_status/active don't
+               match what you expect, we know the bug is in writes; if
+               they look fine but cleaner still can't see, we know the
+               bug is in the cleaner-side query or RLS. Remove once
+               the visibility issue is sorted. */}
+            <div className="text-[10px] font-mono text-stone-400 mt-0.5 flex flex-wrap gap-x-2">
+              <span>src: <span className={a.source === 'pm' ? 'text-amber-700' : 'text-stone-600'}>{a.source || '(none)'}</span></span>
+              <span>pm: <span className={
+                a.pm_status === 'approved' ? 'text-emerald-700 font-bold' :
+                a.pm_status === 'pending' ? 'text-amber-700 font-bold' :
+                a.pm_status === 'rejected' ? 'text-red-700' :
+                'text-stone-600'
+              }>{a.pm_status || '(none)'}</span></span>
+              <span>active: <span className={a.active ? 'text-emerald-700' : 'text-red-700 font-bold'}>{String(a.active)}</span></span>
+              <span>targets: {a.total}</span>
+            </div>
             {a.notes && <div className="text-xs text-stone-600 mt-1 line-clamp-1">{a.notes}</div>}
           </div>
           {!bulkMode && <ChevronRight size={14} className="text-stone-400 flex-shrink-0 mt-1" />}
@@ -19105,8 +19123,9 @@ function AssignmentList({ property, employee, onBack, onNew, onNewChecklist, onO
         {/* Awaiting approval callout — PM-portal uploads still in
            pm_status='pending' aren't visible to cleaners. Without this
            the owner saw inflated Open counts and wondered why cleaners
-           weren't seeing the work. Tap to flip to All view so they
-           can find + approve them. */}
+           weren't seeing the work. The Approve all button bulk-updates
+           every awaiting assignment in one query — sidesteps the
+           one-at-a-time queue entirely. */}
         {awaitingApproval.length > 0 && (
           <div className="mb-4 p-3 rounded-xl bg-amber-50 border-2 border-amber-300 flex items-start justify-between gap-3">
             <div className="flex-1 min-w-0">
@@ -19117,10 +19136,28 @@ function AssignmentList({ property, employee, onBack, onNew, onNewChecklist, onO
                 These were uploaded by a property manager and need your approval before cleaners can see them.
               </div>
             </div>
-            <button onClick={() => setFilter('all')}
-              className="flex-shrink-0 px-3 py-1.5 rounded-lg bg-amber-700 hover:bg-amber-800 text-white text-xs font-medium">
-              View all
-            </button>
+            <div className="flex flex-col gap-1.5 flex-shrink-0">
+              <button onClick={async () => {
+                if (!confirm(`Approve all ${awaitingApproval.length} pending assignments at this property in one go?`)) return;
+                const ids = awaitingApproval.map(a => a.id);
+                const { error: ae } = await supabase.from('assignments').update({
+                  pm_status: 'approved',
+                  approved_by: employee?.id,
+                  approved_at: new Date().toISOString(),
+                  pm_rejection_reason: null,
+                }).in('id', ids);
+                if (ae) { alert('Bulk approve failed: ' + ae.message); return; }
+                await load();
+                alert(`Approved ${ids.length} assignments. They're now visible to cleaners.`);
+              }}
+                className="px-3 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-medium">
+                Approve all ({awaitingApproval.length})
+              </button>
+              <button onClick={() => setFilter('all')}
+                className="px-3 py-1.5 rounded-lg bg-amber-700 hover:bg-amber-800 text-white text-xs font-medium">
+                View all
+              </button>
+            </div>
           </div>
         )}
 

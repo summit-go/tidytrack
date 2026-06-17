@@ -23931,6 +23931,18 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
   const visibleBuildings = buildingFilter === 'all' ? buildingKeys : buildingKeys.filter(k => k === buildingFilter);
   const toggleCollapse = (b) => setCollapsedBuildings(prev => ({ ...prev, [b]: !prev[b] }));
 
+  // Count DISTINCT bedrooms (unit_id::party_id) in a target list. The
+  // owner thinks in bedrooms, not item-rows: one move-out bedroom can
+  // carry 8 target rows but it's still ONE bedroom that needs cleaning.
+  // All the counters (building chips, "Showing X of Y") use this so the
+  // numbers match the owner-side "96 open assignments" mental model
+  // instead of showing "868 targets".
+  const countBedrooms = (list) => {
+    const s = new Set();
+    (list || []).forEach(t => s.add(`${t.unit_id || ''}::${t.party_id || ''}`));
+    return s.size;
+  };
+
   // GLOBAL PRIORITY BLOCK (Pending tab only): pull priority items out
   // of their per-building bucket and show them as one section at the
   // top. Without this, priority items get hidden inside each building
@@ -24502,7 +24514,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                 Filters{activeFilterCount > 0 ? ` (${activeFilterCount})` : ''}
               </span>
               <span className="text-[10px] font-mono text-stone-500">
-                Showing {filteredTargets.length} of {targets.length}
+                Showing {countBedrooms(filteredTargets)} of {countBedrooms(targets)}
               </span>
             </div>
             <ChevronRight size={14} className={`transition-transform ${filtersOpen ? 'rotate-90' : ''}`} />
@@ -24621,12 +24633,12 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
         <div className="flex gap-1.5 mb-3 overflow-x-auto pb-1 -mx-1 px-1">
           <button onClick={() => setBuildingFilter('all')}
             className={`px-3 py-1 rounded-full text-xs font-mono whitespace-nowrap ${buildingFilter === 'all' ? 'bg-stone-900 text-stone-50' : 'bg-stone-100 text-stone-600'}`}>
-            All ({filteredTargets.length})
+            All ({countBedrooms(filteredTargets)})
           </button>
           {buildingKeys.map(b => (
             <button key={b} onClick={() => setBuildingFilter(b)}
               className={`px-3 py-1 rounded-full text-xs font-mono whitespace-nowrap ${buildingFilter === b ? 'bg-stone-900 text-stone-50' : 'bg-stone-100 text-stone-600'}`}>
-              {b} ({buildings[b].length})
+              {b} ({countBedrooms(buildings[b])})
             </button>
           ))}
         </div>
@@ -24647,34 +24659,17 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
             <div className="flex items-center gap-2 mb-2 px-1">
               <AlertCircle size={14} className="text-red-700 flex-shrink-0" />
               <span className="text-xs uppercase tracking-wider font-mono font-bold text-red-700">
-                Priority — do these first ({globalPriorityItems.length})
+                Priority — do these first ({countBedrooms(globalPriorityItems)})
               </span>
               <div className="flex-1 h-px bg-red-200" />
             </div>
-            <div className="space-y-2">
-              {[...globalPriorityItems]
-                .sort((a, b) =>
-                  naturalCompare(a.unit?.label || '', b.unit?.label || '')
-                  || naturalCompare(a.party?.label || '', b.party?.label || '')
-                )
-                .map(t => (
-                  <AssignmentCard key={t.id} target={t} busy={busy} propertyId={propertyId}
-                    onView={() => setOpened(t)}
-                    onStart={() => startAndGo(t)}
-                    onPause={() => updateStatus(t, 'paused')}
-                    onMoveToPending={() => updateStatus(t, 'pending')}
-                    onDone={() => updateStatus(t, 'done')}
-                    onReopen={() => updateStatus(t, 'pending')}
-                    onBlocked={() => setStatusModal({ target: t })}
-                    onReassign={() => setReassignTarget(t)}
-                    onTogglePriority={togglePriority}
-              canMarkDone={can(employee, 'mark_assignments_done') || t.started_by === employee?.id}
-              canMarkDoneAlways={can(employee, 'mark_assignments_done')}
-              currentEmployeeId={employee?.id}
-                onGoToBedroom={onGoToBedroom ? () => startAndGo(t) : null}
-                    onOpenBedroomHistory={onOpenBedroomHistory} />
-                ))}
-            </div>
+            {/* Route priority items through renderGroupedItems so each
+               BEDROOM collapses to one card — not one card per target.
+               Move-out checks flag every one of their 8 items as
+               priority, which previously rendered the same bedroom 8
+               times. The count above and the cards below now both
+               reflect distinct bedrooms. */}
+            {renderGroupedItems(globalPriorityItems)}
           </div>
         )}
 

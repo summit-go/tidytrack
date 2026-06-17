@@ -18771,7 +18771,12 @@ function AssignmentList({ property, employee, onBack, onNew, onNewChecklist, onO
   const decorated = (assignments || []).map(a => {
     const targets = a.targets || [];
     const total = targets.length;
-    const done = targets.filter(t => t.status === 'done').length;
+    // Blocked counts toward "done" for the X/N done display — the
+    // cleaner can't do those items, so from a workload standpoint
+    // they're closed. The Blocked pill still appears below so the
+    // owner sees at a glance which need follow-up.
+    const done = targets.filter(t => t.status === 'done' || t.status === 'blocked').length;
+    const trulyDone = targets.filter(t => t.status === 'done').length;
     const inProgress = targets.filter(t => t.status === 'in_progress').length;
     const blocked = targets.filter(t => t.status === 'blocked').length;
     const allDone = total > 0 && done === total;
@@ -18779,7 +18784,7 @@ function AssignmentList({ property, employee, onBack, onNew, onNewChecklist, onO
     // Primary unit label: most targets share one unit, take the first non-null
     const firstUnitLabel = targets.find(t => t.unit?.label)?.unit?.label || '';
     return {
-      ...a, total, done, inProgress, blocked, allDone,
+      ...a, total, done, trulyDone, inProgress, blocked, allDone,
       hasPriority,
       firstUnitLabel,
     };
@@ -18797,8 +18802,19 @@ function AssignmentList({ property, employee, onBack, onNew, onNewChecklist, onO
     return false;
   };
 
+  // Buckets distinguishing what cleaners can see vs what's still
+  // waiting on the owner. The "Open" filter mirrors the cleaner-side
+  // visibility filter so the counts match (no more "owner sees 100
+  // open but cleaner only sees 52"). PM-pending stays surfaced via
+  // the awaitingApproval counter so the user knows what's stuck.
+  const isCleanerVisible = (a) =>
+    !a.allDone && a.active && (a.source !== 'pm' || a.pm_status === 'approved');
+  const isAwaitingApproval = (a) =>
+    a.active && a.source === 'pm' && a.pm_status === 'pending';
+  const awaitingApproval = decorated.filter(isAwaitingApproval);
+
   const visible = decorated
-    .filter(a => filter === 'open' ? (!a.allDone && a.active) : true)
+    .filter(a => filter === 'open' ? isCleanerVisible(a) : true)
     .filter(a => !priorityOnly || (a.hasPriority && !a.allDone))
     .filter(a => filterTypes.size === 0 || filterTypes.has(a.assignment_type))
     .filter(matchesSearch);
@@ -18905,6 +18921,16 @@ function AssignmentList({ property, employee, onBack, onNew, onNewChecklist, onO
               <AssignmentTypeChip type={a.assignment_type} />
               {a.allDone && <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 border border-emerald-300">Done</span>}
               {a.blocked > 0 && <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-red-100 text-red-700 border border-red-300">⚠ Blocked</span>}
+              {a.source === 'pm' && a.pm_status === 'pending' && (
+                <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 border border-amber-300 font-bold">
+                  ⚠ Awaiting approval
+                </span>
+              )}
+              {a.source === 'pm' && a.pm_status === 'rejected' && (
+                <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-red-100 text-red-700 border border-red-300">
+                  Rejected
+                </span>
+              )}
             </div>
             <div className="text-xs text-stone-500 font-mono mt-1">
               {fmtDate(a.created_at)} · {a.done}/{a.total} done{a.inProgress > 0 && `, ${a.inProgress} in progress`}
@@ -19068,13 +19094,35 @@ function AssignmentList({ property, employee, onBack, onNew, onNewChecklist, onO
         <div className="flex gap-2 mb-4">
           <button onClick={() => setFilter('open')}
             className={`px-4 py-2 rounded-full text-sm font-medium ${filter === 'open' ? 'bg-stone-900 text-stone-50' : 'bg-stone-100 text-stone-600'}`}>
-            Open ({decorated.filter(a => !a.allDone && a.active).length})
+            Open ({decorated.filter(isCleanerVisible).length})
           </button>
           <button onClick={() => setFilter('all')}
             className={`px-4 py-2 rounded-full text-sm font-medium ${filter === 'all' ? 'bg-stone-900 text-stone-50' : 'bg-stone-100 text-stone-600'}`}>
             All ({decorated.length})
           </button>
         </div>
+
+        {/* Awaiting approval callout — PM-portal uploads still in
+           pm_status='pending' aren't visible to cleaners. Without this
+           the owner saw inflated Open counts and wondered why cleaners
+           weren't seeing the work. Tap to flip to All view so they
+           can find + approve them. */}
+        {awaitingApproval.length > 0 && (
+          <div className="mb-4 p-3 rounded-xl bg-amber-50 border-2 border-amber-300 flex items-start justify-between gap-3">
+            <div className="flex-1 min-w-0">
+              <div className="text-xs uppercase tracking-wider font-mono font-bold text-amber-900 mb-0.5">
+                ⚠ {awaitingApproval.length} awaiting your approval
+              </div>
+              <div className="text-xs text-stone-700">
+                These were uploaded by a property manager and need your approval before cleaners can see them.
+              </div>
+            </div>
+            <button onClick={() => setFilter('all')}
+              className="flex-shrink-0 px-3 py-1.5 rounded-lg bg-amber-700 hover:bg-amber-800 text-white text-xs font-medium">
+              View all
+            </button>
+          </div>
+        )}
 
         {!loaded ? <Splash text="Loading…" /> : visible.length === 0 ? (
           <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
@@ -23839,7 +23887,14 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
   // filter still applies so filtering to "Building 1" only shows B1's
   // priority at the top.
   const globalPriorityItems = statusFilter === 'pending'
-    ? visibleBuildings.flatMap(b => buildings[b]).filter(t => t.priority)
+    ? visibleBuildings.flatMap(b => buildings[b])
+        // "Do these first" should only include items still needing
+        // attention — done and blocked items have no first-do-this
+        // urgency and were appearing in the section because the load
+        // includes ALL targets at bedrooms whose dominant status is
+        // pending (which is intentional for the bulk card view, but
+        // wrong here).
+        .filter(t => t.priority && t.status !== 'done' && t.status !== 'blocked')
     : [];
 
   // For Done tab: bucket by age using local-date math.
@@ -24313,7 +24368,9 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
     }
 
     // PENDING TAB: split priority vs the rest, render with visual divider.
-    const priorityItems = items.filter(t => t.priority);
+    // Done / blocked excluded from priority since they've already been
+    // resolved — "do these first" implies work still to do.
+    const priorityItems = items.filter(t => t.priority && t.status !== 'done' && t.status !== 'blocked');
     const normalItems = items.filter(t => !t.priority);
 
     return (

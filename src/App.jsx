@@ -23,6 +23,7 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 // If empty, the Translate button is hidden.
 // =================================================================
 const GOOGLE_TRANSLATE_API_KEY = "AIzaSyD7ceHPryMzs45hWJOyFNBxtOzQOEmJcSA";
+
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 const PHOTO_BUCKET = 'task-photos';
 const ASSIGNMENT_BUCKET = 'assignments';
@@ -5134,16 +5135,25 @@ function ApartmentProgressList({ propertyId, workBlocks }) {
     let cancelled = false;
     (async () => {
       if (!propertyId) return;
-      const { data } = await supabase
-        .from('assignment_targets')
-        .select(`
-          status, unit_id, party_id,
-          unit:units(id, label),
-          assignment:assignments!inner(customer_id, active, source, pm_status)
-        `)
-        .eq('assignment.customer_id', propertyId)
-        .eq('assignment.active', true)
-        .limit(50000);
+      const PAGE = 1000;
+      let data = [];
+      for (let from = 0; ; from += PAGE) {
+        const { data: page, error: pErr } = await supabase
+          .from('assignment_targets')
+          .select(`
+            status, unit_id, party_id, assignment_id,
+            unit:units(id, label),
+            assignment:assignments!inner(customer_id, active, source, pm_status)
+          `)
+          .eq('assignment.customer_id', propertyId)
+          .eq('assignment.active', true)
+          .order('id', { ascending: true })
+          .range(from, from + PAGE - 1);
+        if (pErr) break;
+        data = data.concat(page || []);
+        if (!page || page.length < PAGE) break;
+        if (from > 200000) break;
+      }
       if (cancelled) return;
       const filtered = (data || []).filter(t =>
         (t.assignment?.source !== 'pm' || t.assignment?.pm_status === 'approved') &&
@@ -7189,12 +7199,22 @@ function ViewOnlyAssignmentsPanel({ propertyId, employee, onOpenBedroomHistory }
   const [filter, setFilter] = useState('open'); // 'open' | 'done'
 
   const load = async () => {
-    const { data, error } = await supabase
-      .from('assignment_targets')
-      .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, assignment_type, scheduled_date), unit:units(id, label), party:parties(id, label), starter:employees!started_by(name), completer:employees!completed_by(name)')
-      .eq('assignment.customer_id', propertyId)
-      .eq('assignment.active', true)
-      .limit(50000);
+    const PAGE = 1000;
+    let data = [];
+    let error = null;
+    for (let from = 0; ; from += PAGE) {
+      const { data: page, error: pErr } = await supabase
+        .from('assignment_targets')
+        .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, assignment_type, scheduled_date), unit:units(id, label), party:parties(id, label), starter:employees!started_by(name), completer:employees!completed_by(name)')
+        .eq('assignment.customer_id', propertyId)
+        .eq('assignment.active', true)
+        .order('id', { ascending: true })
+        .range(from, from + PAGE - 1);
+      if (pErr) { error = pErr; break; }
+      data = data.concat(page || []);
+      if (!page || page.length < PAGE) break;
+      if (from > 200000) break;
+    }
     if (error) { console.warn(error); setLoaded(true); return; }
     const filtered = (data || []).filter(t =>
       (t.assignment?.source !== 'pm' || t.assignment?.pm_status === 'approved')
@@ -22846,12 +22866,21 @@ function AssignmentsPanel({ propertyId, employee, refreshKey, onGoToBedroom, onO
   const [counts, setCounts] = useState({ pending: 0, paused: 0, in_progress: 0, done: 0, blocked: 0, mine: 0 });
 
   const loadCounts = async () => {
-    const { data } = await supabase
-      .from('assignment_targets')
-      .select('status, completed_by, completed_at, unit_id, party_id, recheck_passed_at, assignment:assignments!inner(customer_id, active, source, pm_status)')
-      .eq('assignment.customer_id', propertyId)
-      .eq('assignment.active', true)
-      .limit(50000);
+    const PAGE = 1000;
+    let data = [];
+    for (let from = 0; ; from += PAGE) {
+      const { data: page, error: pErr } = await supabase
+        .from('assignment_targets')
+        .select('status, completed_by, completed_at, unit_id, party_id, assignment_id, recheck_passed_at, assignment:assignments!inner(customer_id, active, source, pm_status)')
+        .eq('assignment.customer_id', propertyId)
+        .eq('assignment.active', true)
+        .order('id', { ascending: true })
+        .range(from, from + PAGE - 1);
+      if (pErr) break;
+      data = data.concat(page || []);
+      if (!page || page.length < PAGE) break;
+      if (from > 200000) break;
+    }
     const filtered = (data || []).filter(t =>
       (t.assignment?.source !== 'pm' || t.assignment?.pm_status === 'approved')
     );
@@ -23538,20 +23567,33 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
     // place each bedroom card in exactly ONE tab. This is the fix for
     // "card shows up in both Pending and In progress" — that bug was
     // a direct symptom of the previous per-item-status query.
-    const { data, error } = await supabase
-      .from('assignment_targets')
-      .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, extracted_text, spanish_translation, translation_status, assignment_type, scheduled_date, sheet_type, template_set_id, bathroom_variant, general_variant, created_at), unit:units(id, label), party:parties(id, label), starter:employees!started_by(id, name), completer:employees!completed_by(id, name), assignedTo:employees!assigned_to(id, name)')
-      // SERVER-SIDE filter by customer_id via the inner-joined assignments
-      // table. Without this we'd pull every assignment_target across every
-      // property the user has access to — and PostgREST silently caps the
-      // result at 1000 rows. Anything past row 1000 never reaches the JS
-      // filter, so cleaners would see only a partial slice of approved
-      // assignments while the owner-side view (which already filters by
-      // customer_id at the query level) shows the full count. This was
-      // the "94 approved on owner, 7 visible on cleaner" bug.
-      .eq('assignment.customer_id', propertyId)
-      .eq('assignment.active', true)
-      .limit(50000);
+    // Page through ALL matching targets in 1000-row chunks. Supabase
+    // enforces a hard server-side max-rows ceiling (~1000) that
+    // .limit() can't exceed, so a single query silently truncates once
+    // a property has 1000+ target rows (a move-out check alone is 6-10
+    // rows; a busy property blows past 1000 fast). That truncation was
+    // the "184 jobs but only 48 visible / 998 rows" bug. We loop with
+    // .range() until a page comes back short, guaranteeing we collect
+    // every row. The !inner join + customer_id eq narrows server-side
+    // where supported; we still re-filter client-side as a safety net.
+    const PAGE = 1000;
+    let data = [];
+    let error = null;
+    for (let from = 0; ; from += PAGE) {
+      const { data: page, error: pErr } = await supabase
+        .from('assignment_targets')
+        .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, extracted_text, spanish_translation, translation_status, assignment_type, scheduled_date, sheet_type, template_set_id, bathroom_variant, general_variant, created_at), unit:units(id, label), party:parties(id, label), starter:employees!started_by(id, name), completer:employees!completed_by(id, name), assignedTo:employees!assigned_to(id, name)')
+        .eq('assignment.customer_id', propertyId)
+        .eq('assignment.active', true)
+        .order('id', { ascending: true })
+        .range(from, from + PAGE - 1);
+      if (pErr) { error = pErr; break; }
+      data = data.concat(page || []);
+      // Last page reached when fewer than a full page returned.
+      if (!page || page.length < PAGE) break;
+      // Hard safety stop so a logic error can never infinite-loop.
+      if (from > 200000) break;
+    }
     if (error) {
       console.error('[Assignments] load error:', error);
       setLoadError(error.message);

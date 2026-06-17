@@ -22856,24 +22856,23 @@ function AssignmentsPanel({ propertyId, employee, refreshKey, onGoToBedroom, onO
     const filtered = (data || []).filter(t =>
       (t.assignment?.source !== 'pm' || t.assignment?.pm_status === 'approved')
     );
-    // Count UNIQUE bedrooms per status. Each bedroom gets bucketed
+    // Count UNIQUE assignments per status. Each assignment gets bucketed
     // ONCE based on its DOMINANT status (in_progress > paused > blocked
     // > pending > done). This is the counterpart to the dominant-status
-    // logic in load() — both need to agree or the badge says "1 in
-    // progress" while the tab is empty (or vice versa). Previously the
-    // counter put a mixed-status bedroom in multiple buckets, which
-    // is what made the same card appear in both Pending and In
-    // progress tabs simultaneously.
-    const bedKey = (t) => `${t.unit_id || ''}::${t.party_id || ''}`;
-    const statusesByBed = new Map();
+    // logic in load() — both key by assignment_id so a cleaning-check
+    // and a move-out check at the same bedroom count as two separate
+    // jobs. They must agree or the badge says "1 pending" while the
+    // tab shows something else.
+    const asgnKey = (t) => t.assignment_id || `${t.unit_id || ''}::${t.party_id || ''}`;
+    const statusesByAsgn = new Map();
     filtered.forEach(t => {
-      const k = bedKey(t);
-      if (!statusesByBed.has(k)) statusesByBed.set(k, new Set());
-      statusesByBed.get(k).add(t.status);
+      const k = asgnKey(t);
+      if (!statusesByAsgn.has(k)) statusesByAsgn.set(k, new Set());
+      statusesByAsgn.get(k).add(t.status);
     });
     const dominantOrder = ['in_progress', 'paused', 'blocked', 'pending', 'done'];
     const sets = { pending: new Set(), paused: new Set(), in_progress: new Set(), done: new Set(), blocked: new Set(), mine: new Set(), recheck_passed: new Set() };
-    statusesByBed.forEach((statusSet, k) => {
+    statusesByAsgn.forEach((statusSet, k) => {
       const dom = dominantOrder.find(s => statusSet.has(s)) || 'pending';
       if (sets[dom]) sets[dom].add(k);
     });
@@ -22881,10 +22880,10 @@ function AssignmentsPanel({ propertyId, employee, refreshKey, onGoToBedroom, onO
     // today — it's a derived view, so we walk the items separately.
     const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
     filtered.forEach(t => {
-      if (t.recheck_passed_at) sets.recheck_passed.add(bedKey(t));
+      if (t.recheck_passed_at) sets.recheck_passed.add(asgnKey(t));
       if (t.completed_by && employee?.id && t.completed_by === employee.id && t.completed_at) {
         const ca = new Date(t.completed_at);
-        if (ca >= todayStart) sets.mine.add(bedKey(t));
+        if (ca >= todayStart) sets.mine.add(asgnKey(t));
       }
     });
     setCounts({
@@ -23568,33 +23567,37 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
       (t.assignment?.source !== 'pm' || t.assignment?.pm_status === 'approved')
     );
 
-    // Compute dominant status per assignment (bedroom-level group keyed
-    // by unit_id + party_id). Priority order: in_progress wins over
-    // paused, which wins over blocked, then pending, then done.
-    // This determines which tab the assignment appears in.
-    const bedKey = (t) => `${t.unit_id || ''}::${t.party_id || ''}`;
+    // Compute dominant status per ASSIGNMENT (not per bedroom). Each
+    // assignment is an independent job with its own lifecycle — a
+    // cleaning-check done last week and a move-out check pending this
+    // week at the SAME bedroom are two separate assignments and one
+    // must never override the other. Keying by assignment_id (instead
+    // of unit_id::party_id) keeps them distinct. Priority order:
+    // in_progress > paused > blocked > pending > done determines which
+    // tab the assignment lands in.
+    const asgnKey = (t) => t.assignment_id || `${t.unit_id || ''}::${t.party_id || ''}`;
     const dominantOrder = ['in_progress', 'paused', 'blocked', 'pending', 'done'];
-    const statusesByBed = new Map();
+    const statusesByAsgn = new Map();
     allRelevant.forEach(t => {
-      const k = bedKey(t);
-      if (!statusesByBed.has(k)) statusesByBed.set(k, new Set());
-      statusesByBed.get(k).add(t.status);
+      const k = asgnKey(t);
+      if (!statusesByAsgn.has(k)) statusesByAsgn.set(k, new Set());
+      statusesByAsgn.get(k).add(t.status);
     });
-    const dominantByBed = new Map();
-    statusesByBed.forEach((statusSet, k) => {
+    const dominantByAsgn = new Map();
+    statusesByAsgn.forEach((statusSet, k) => {
       const winner = dominantOrder.find(s => statusSet.has(s)) || 'pending';
-      dominantByBed.set(k, winner);
+      dominantByAsgn.set(k, winner);
     });
 
-    // Filter to bedrooms whose dominant status matches the current tab.
-    // For "mine" / "recheck_passed" / Done we still keep everything
+    // Filter to assignments whose dominant status matches the current
+    // tab. For "mine" / "recheck_passed" / Done we still keep everything
     // status=done since those are derived views — extra clientside
     // narrowing happens below.
     let filtered;
     if (isDoneTab) {
       filtered = allRelevant.filter(t => t.status === 'done' || t.status === 'blocked');
     } else {
-      filtered = allRelevant.filter(t => dominantByBed.get(bedKey(t)) === statusFilter);
+      filtered = allRelevant.filter(t => dominantByAsgn.get(asgnKey(t)) === statusFilter);
     }
     // "Mine" view: only items I personally completed today
     if (statusFilter === 'mine') {
@@ -23931,15 +23934,15 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
   const visibleBuildings = buildingFilter === 'all' ? buildingKeys : buildingKeys.filter(k => k === buildingFilter);
   const toggleCollapse = (b) => setCollapsedBuildings(prev => ({ ...prev, [b]: !prev[b] }));
 
-  // Count DISTINCT bedrooms (unit_id::party_id) in a target list. The
-  // owner thinks in bedrooms, not item-rows: one move-out bedroom can
-  // carry 8 target rows but it's still ONE bedroom that needs cleaning.
-  // All the counters (building chips, "Showing X of Y") use this so the
-  // numbers match the owner-side "96 open assignments" mental model
-  // instead of showing "868 targets".
+  // Count DISTINCT assignments in a target list. Each assignment is an
+  // independent job — a cleaning-check and a move-out check at the same
+  // bedroom are two separate assignments and count as two. This matches
+  // the owner-side count (one per assignment) so "96 open" on owner ==
+  // what the cleaner sees. Falls back to bedroom key for any legacy
+  // target missing an assignment_id.
   const countBedrooms = (list) => {
     const s = new Set();
-    (list || []).forEach(t => s.add(`${t.unit_id || ''}::${t.party_id || ''}`));
+    (list || []).forEach(t => s.add(t.assignment_id || `${t.unit_id || ''}::${t.party_id || ''}`));
     return s.size;
   };
 
@@ -24020,16 +24023,18 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
     return (
       <div className="space-y-2">
         {entries.map(([key, group]) => {
-          // Distinct bedrooms (party_ids) in this apartment with
-          // open work. This is what the owner asked for: the count
-          // chip on the apartment pill should be "how many bedrooms
-          // need cleaning", not "how many item rows" (which can hit
-          // the hundreds in a Fail-Entire scenario).
-          const bedroomIds = new Set();
-          group.items.forEach(t => bedroomIds.add(t.party_id || 'no-party'));
-          const bedroomCount = bedroomIds.size;
+          // Distinct ASSIGNMENTS (jobs) in this apartment with open
+          // work. The chip on the apartment pill counts jobs, not item
+          // rows (which can hit the hundreds in a Fail-Entire scenario)
+          // and not bedrooms (since one bedroom can carry a cleaning-
+          // check AND a move-out check as two separate jobs). This
+          // makes the chip number match the number of cards the cleaner
+          // sees when they expand the apartment.
+          const asgnIds = new Set();
+          group.items.forEach(t => asgnIds.add(t.assignment_id || `${t.party_id || 'no-party'}`));
+          const bedroomCount = asgnIds.size;
 
-          // Single-bedroom + single-item apartments render as a plain
+          // Single-job + single-item apartments render as a plain
           // card with no extra nesting. Saves a click.
           if (group.items.length === 1) {
             const t = group.items[0];
@@ -24058,27 +24063,40 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
           const isOpen = !!bundleOpen[key];
           const unitLabel = group.unit?.label || (key === 'no-unit' ? 'No unit' : key);
           const bundleHasPriority = group.items.some(t => t.priority);
-          // Build the bedroom → section breakdown for the expanded view.
-          const byBedroom = new Map(); // partyId -> { party, sections: { bedroom, vanity, bathroom, general } }
+          // Build the assignment → section breakdown for the expanded
+          // view. We key by party_id + assignment_id (NOT just party_id)
+          // so two independent assignments at the same bedroom — e.g. a
+          // cleaning-check done last week and a move-out check pending
+          // this week — render as TWO separate cards. Each assignment is
+          // its own job with its own lifecycle; marking one done must
+          // never affect the other.
+          const byBedroom = new Map(); // `${partyId}::${assignmentId}` -> { party, items, sections }
           group.items.forEach(t => {
             const pid = t.party_id || 'no-party';
-            if (!byBedroom.has(pid)) {
-              byBedroom.set(pid, {
+            const aid = t.assignment_id || 'no-asgn';
+            const groupKey = `${pid}::${aid}`;
+            if (!byBedroom.has(groupKey)) {
+              byBedroom.set(groupKey, {
                 party: t.party,
                 partyId: t.party_id,
+                assignmentId: t.assignment_id,
+                assignment: t.assignment,
                 items: [],
                 sectionItems: { bedroom: [], vanity: [], bathroom: [], general: [] },
                 hasPriority: false,
               });
             }
-            const b = byBedroom.get(pid);
+            const b = byBedroom.get(groupKey);
             b.items.push(t);
             const sec = (t.template_section || '').toLowerCase();
             if (b.sectionItems[sec]) b.sectionItems[sec].push(t);
             if (t.priority) b.hasPriority = true;
           });
+          // Sort by bedroom label, then by assignment creation so a
+          // bedroom's multiple assignments appear in a stable order.
           const bedroomEntries = Array.from(byBedroom.entries()).sort((a, b) =>
             naturalCompare(a[1].party?.label || '', b[1].party?.label || '')
+            || naturalCompare(a[1].assignment?.created_at || '', b[1].assignment?.created_at || '')
           );
           return (
             <div key={key} className="rounded-xl border-2 border-amber-200 bg-amber-50/40 overflow-hidden">
@@ -24088,7 +24106,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                   <Building2 size={16} className="text-amber-700 flex-shrink-0" />
                   <span className="font-serif text-base text-stone-900 truncate">{unitLabel}</span>
                   <span className="text-xs font-mono px-2 py-0.5 rounded-full bg-amber-600 text-white font-bold flex-shrink-0">
-                    {bedroomCount} bedroom{bedroomCount === 1 ? '' : 's'}
+                    {bedroomCount} job{bedroomCount === 1 ? '' : 's'}
                   </span>
                   {bundleHasPriority && <PriorityChip on={true} size="xs" />}
                 </div>
@@ -24096,7 +24114,12 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
               </button>
               {isOpen && (
                 <div className="px-3 pb-3 space-y-2 border-t border-amber-100 pt-3">
-                  {bedroomEntries.map(([pid, bed]) => {
+                  {bedroomEntries.map(([groupKey, bed]) => {
+                    // Real party_id for this entry — used for whosHere
+                    // lookups (which are per-bedroom) and as a stable
+                    // React key suffix. The map key is partyId::asgnId
+                    // so two assignments at one bedroom stay separate.
+                    const pid = bed.partyId || 'no-party';
                     const bedLabel = bed.party?.label || (pid === 'no-party' ? 'Unassigned' : pid);
                     const sectionCounts = {
                       bedroom: bed.sectionItems.bedroom.length,
@@ -24164,7 +24187,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                       // assignments at one bedroom) still gets a
                       // useful "open one of them" affordance.
                       bulkCard = (
-                        <div key={`bulk-${pid}`} className="rounded-xl border border-stone-200 bg-white p-3">
+                        <div key={`bulk-${groupKey}`} className="rounded-xl border border-stone-200 bg-white p-3">
                           {/* Cleaner request banner — shows at the very
                              top of the card whenever a cleaner has
                              submitted a request at this bedroom that's
@@ -24221,6 +24244,16 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                                   <span className="font-bold">{group.unit?.label || unitLabel}</span>
                                   <span className="text-stone-400 mx-1.5">·</span>
                                   <span className="italic">{bedLabel}</span>
+                                </div>
+                              )}
+                              {/* Assignment-type chip — identifies WHICH
+                                 job this card is (Cleaning check vs
+                                 Move-out check). Essential now that the
+                                 same bedroom can show multiple cards,
+                                 one per independent assignment. */}
+                              {bed.assignment?.assignment_type && (
+                                <div className="mt-1">
+                                  <AssignmentTypeChip type={bed.assignment.assignment_type} />
                                 </div>
                               )}
                             </div>
@@ -24378,7 +24411,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                       );
                     }
                     return (
-                      <React.Fragment key={pid}>
+                      <React.Fragment key={groupKey}>
                         {/* Legacy items at this bedroom — keep the
                            original per-item rendering so Mon-Wed
                            assignments stay exactly as the cleaners

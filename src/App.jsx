@@ -18956,24 +18956,6 @@ function AssignmentList({ property, employee, onBack, onNew, onNewChecklist, onO
             <div className="text-xs text-stone-500 font-mono mt-1">
               {fmtDate(a.created_at)} · {a.done}/{a.total} done{a.inProgress > 0 && `, ${a.inProgress} in progress`}
             </div>
-            {/* DIAGNOSTIC ROW — temporary. Shows the exact DB state for
-               each assignment so we can debug "approved but cleaner
-               can't see them" issues. If source/pm_status/active don't
-               match what you expect, we know the bug is in writes; if
-               they look fine but cleaner still can't see, we know the
-               bug is in the cleaner-side query or RLS. Remove once
-               the visibility issue is sorted. */}
-            <div className="text-[10px] font-mono text-stone-400 mt-0.5 flex flex-wrap gap-x-2">
-              <span>src: <span className={a.source === 'pm' ? 'text-amber-700' : 'text-stone-600'}>{a.source || '(none)'}</span></span>
-              <span>pm: <span className={
-                a.pm_status === 'approved' ? 'text-emerald-700 font-bold' :
-                a.pm_status === 'pending' ? 'text-amber-700 font-bold' :
-                a.pm_status === 'rejected' ? 'text-red-700' :
-                'text-stone-600'
-              }>{a.pm_status || '(none)'}</span></span>
-              <span>active: <span className={a.active ? 'text-emerald-700' : 'text-red-700 font-bold'}>{String(a.active)}</span></span>
-              <span>targets: {a.total}</span>
-            </div>
             {a.notes && <div className="text-xs text-stone-600 mt-1 line-clamp-1">{a.notes}</div>}
           </div>
           {!bulkMode && <ChevronRight size={14} className="text-stone-400 flex-shrink-0 mt-1" />}
@@ -23634,18 +23616,6 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
     // tab. For "mine" / "recheck_passed" / Done we still keep everything
     // status=done since those are derived views — extra clientside
     // narrowing happens below.
-    // TEMP DIAGNOSTIC — assignment census. Tells us exactly where every
-    // assignment lands so we can reconcile "96 approved" vs "48 pending".
-    // Remove once counts are confirmed correct.
-    try {
-      const census = {};
-      dominantByAsgn.forEach(v => { census[v] = (census[v] || 0) + 1; });
-      console.log('[Assignments census] property=', propertyId,
-        '| distinct assignments loaded=', dominantByAsgn.size,
-        '| by dominant status=', census,
-        '| total target rows=', allRelevant.length);
-    } catch (e) { /* noop */ }
-
     let filtered;
     if (isDoneTab) {
       filtered = allRelevant.filter(t => t.status === 'done' || t.status === 'blocked');

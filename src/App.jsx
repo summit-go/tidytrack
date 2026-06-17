@@ -5141,11 +5141,12 @@ function ApartmentProgressList({ propertyId, workBlocks }) {
           status, unit_id, party_id,
           unit:units(id, label),
           assignment:assignments!inner(customer_id, active, source, pm_status)
-        `);
+        `)
+        .eq('assignment.customer_id', propertyId)
+        .eq('assignment.active', true)
+        .limit(50000);
       if (cancelled) return;
       const filtered = (data || []).filter(t =>
-        t.assignment?.customer_id === propertyId &&
-        t.assignment?.active &&
         (t.assignment?.source !== 'pm' || t.assignment?.pm_status === 'approved') &&
         t.unit_id && t.party_id
       );
@@ -7191,11 +7192,12 @@ function ViewOnlyAssignmentsPanel({ propertyId, employee, onOpenBedroomHistory }
   const load = async () => {
     const { data, error } = await supabase
       .from('assignment_targets')
-      .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, assignment_type, scheduled_date), unit:units(id, label), party:parties(id, label), starter:employees!started_by(name), completer:employees!completed_by(name)');
+      .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, assignment_type, scheduled_date), unit:units(id, label), party:parties(id, label), starter:employees!started_by(name), completer:employees!completed_by(name)')
+      .eq('assignment.customer_id', propertyId)
+      .eq('assignment.active', true)
+      .limit(50000);
     if (error) { console.warn(error); setLoaded(true); return; }
     const filtered = (data || []).filter(t =>
-      t.assignment?.customer_id === propertyId &&
-      t.assignment?.active &&
       (t.assignment?.source !== 'pm' || t.assignment?.pm_status === 'approved')
     );
     setTargets(filtered);
@@ -22847,10 +22849,11 @@ function AssignmentsPanel({ propertyId, employee, refreshKey, onGoToBedroom, onO
   const loadCounts = async () => {
     const { data } = await supabase
       .from('assignment_targets')
-      .select('status, completed_by, completed_at, unit_id, party_id, recheck_passed_at, assignment:assignments!inner(customer_id, active, source, pm_status)');
+      .select('status, completed_by, completed_at, unit_id, party_id, recheck_passed_at, assignment:assignments!inner(customer_id, active, source, pm_status)')
+      .eq('assignment.customer_id', propertyId)
+      .eq('assignment.active', true)
+      .limit(50000);
     const filtered = (data || []).filter(t =>
-      t.assignment?.customer_id === propertyId &&
-      t.assignment?.active &&
       (t.assignment?.source !== 'pm' || t.assignment?.pm_status === 'approved')
     );
     // Count UNIQUE bedrooms per status. Each bedroom gets bucketed
@@ -23539,7 +23542,18 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
     // a direct symptom of the previous per-item-status query.
     const { data, error } = await supabase
       .from('assignment_targets')
-      .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, extracted_text, spanish_translation, translation_status, assignment_type, scheduled_date, sheet_type, template_set_id, bathroom_variant, general_variant, created_at), unit:units(id, label), party:parties(id, label), starter:employees!started_by(id, name), completer:employees!completed_by(id, name), assignedTo:employees!assigned_to(id, name)');
+      .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, extracted_text, spanish_translation, translation_status, assignment_type, scheduled_date, sheet_type, template_set_id, bathroom_variant, general_variant, created_at), unit:units(id, label), party:parties(id, label), starter:employees!started_by(id, name), completer:employees!completed_by(id, name), assignedTo:employees!assigned_to(id, name)')
+      // SERVER-SIDE filter by customer_id via the inner-joined assignments
+      // table. Without this we'd pull every assignment_target across every
+      // property the user has access to — and PostgREST silently caps the
+      // result at 1000 rows. Anything past row 1000 never reaches the JS
+      // filter, so cleaners would see only a partial slice of approved
+      // assignments while the owner-side view (which already filters by
+      // customer_id at the query level) shows the full count. This was
+      // the "94 approved on owner, 7 visible on cleaner" bug.
+      .eq('assignment.customer_id', propertyId)
+      .eq('assignment.active', true)
+      .limit(50000);
     if (error) {
       console.error('[Assignments] load error:', error);
       setLoadError(error.message);

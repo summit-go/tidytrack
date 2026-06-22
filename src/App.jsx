@@ -783,6 +783,27 @@ function floorFromLabel(label) {
   return parseInt(m[1].charAt(0), 10);
 }
 
+// Resolve which BUILDING a unit belongs to. Two ways:
+//   1. If the label carries a prefix (e.g. "B2-305"), use it directly.
+//   2. Otherwise derive it from the cumulative numbering scheme — units
+//      run 4-per-floor per building, so on any floor units 1–4 are
+//      building 1, 5–8 are building 2, 9–12 are building 3, etc.
+//      101–104 → B1, 105–108 → B2, 305–308 → B2 (top floor), and so on.
+// BLOCK_SIZE is the units-per-floor-per-building (4 here). Returns a
+// stable key string like "B1" so we can group/compare by building.
+const BUILDING_BLOCK_SIZE = 4;
+function buildingKey(label, blockSize = BUILDING_BLOCK_SIZE) {
+  const prefixed = buildingFromLabel(label);
+  if (prefixed) return prefixed;
+  const m = String(label || '').match(/(\d{3,})/);
+  if (!m) return null;
+  const num = parseInt(m[1], 10);
+  const floor = parseInt(m[1].charAt(0), 10);
+  const pos = num - floor * 100; // position across buildings on that floor
+  if (pos < 1) return null;
+  return 'B' + Math.ceil(pos / blockSize);
+}
+
 const sessionStore = {
   async get() {
     try { const v = localStorage.getItem('tidytrack_session'); return v ? JSON.parse(v) : null; }
@@ -2623,12 +2644,12 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
                     }
                   }
                 }}
-                  className={`w-full py-3 px-2 rounded-xl border-2 font-medium text-sm transition-all flex flex-col items-center gap-1 ${
+                  className={`w-full pt-6 pb-3 px-1.5 min-h-[92px] rounded-xl border-2 font-medium text-sm transition-all flex flex-col items-center justify-center gap-1.5 ${
                     isOpen ? 'border-stone-900 bg-stone-900 text-stone-50' :
                     isEmpty ? 'border-stone-100 bg-stone-50 text-stone-400' :
                     'border-stone-200 bg-white text-stone-700 hover:border-stone-400'
                   }`}>
-                  <span>{c.label}</span>
+                  <span className="leading-tight text-center">{c.label}</span>
                   {/* Status chip below the section name. Replaces the
                      bare "(busy/total)" count from before. Reads:
                        - "Not assigned" when this section has 0 items
@@ -2650,9 +2671,9 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
                       chipColor = isOpen ? 'bg-stone-700 text-stone-200' : 'bg-stone-100 text-stone-600 border border-stone-200';
                     }
                     return (
-                      <span className={`text-[9px] uppercase tracking-wider font-mono font-bold px-2 py-0.5 rounded-full ${chipColor}`}>
-                        {chipText}
-                        {s.total > 0 && <span className="ml-1 opacity-75">{s.busy}/{s.total}</span>}
+                      <span className={`text-[8px] uppercase tracking-wide font-mono font-bold px-1.5 py-0.5 rounded-full max-w-full inline-flex items-center ${chipColor}`}>
+                        <span className="truncate">{chipText}</span>
+                        {s.total > 0 && <span className="ml-1 opacity-75 flex-shrink-0">{s.busy}/{s.total}</span>}
                       </span>
                     );
                   })()}
@@ -2669,7 +2690,7 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
                     e.stopPropagation();
                     setRequestModalSection(c.id);
                   }}
-                    className={`absolute top-1 right-1 text-[9px] uppercase tracking-wider font-mono px-1.5 py-0.5 rounded-md transition-colors font-bold ${
+                    className={`absolute top-1.5 right-1.5 text-[8px] uppercase tracking-wider font-mono px-1.5 py-0.5 rounded-md transition-colors font-bold ${
                       s.hasRequested
                         ? (isOpen ? 'bg-amber-200 text-amber-900' : 'bg-amber-100 text-amber-800 border border-amber-300 hover:bg-amber-200')
                         : (isOpen ? 'text-stone-400 hover:text-stone-200 hover:bg-stone-800' : 'text-stone-400 hover:text-stone-600 hover:bg-stone-100')
@@ -5273,6 +5294,272 @@ function ApartmentProgressList({ propertyId, workBlocks }) {
   );
 }
 
+// FloorFocusList — the cleaner Home view. Instead of one flat list of
+// every apartment, this focuses on where the cleaner IS and walks them
+// forward bedroom-by-bedroom:
+//   1. CURRENT APARTMENT — the apartment of their active (or most recent)
+//      work block. Shows the bedrooms there that still have open work, so
+//      finishing 301 bedroom 1 surfaces 301 bedroom 2 next.
+//   2. REST OF THIS FLOOR — other apartments in the SAME building + floor
+//      with open work (305 belongs to a different building, so it won't
+//      show up under building 1's floor 3).
+//   3. When the whole floor is done, a "next up" card points at the
+//      nearest remaining bedroom (same building next floor, else the next
+//      building) so they're never left guessing.
+// It also surfaces a small "blocked" count so cleaners can see items that
+// were blocked (which otherwise count as done and disappear from view).
+function FloorFocusList({ propertyId, workBlocks, onGoToBedroom }) {
+  const [state, setState] = useState({ loading: true, anchorLabel: '', anchorBuilding: null, anchorFloor: null, anchorPartyId: null, currentBeds: [], floorApts: [], nextUp: null, blocked: [] });
+  const [showBlocked, setShowBlocked] = useState(false);
+
+  // Re-run whenever a work block opens/closes so the list advances on its
+  // own as the cleaner finishes bedrooms.
+  const blocksFingerprint = (workBlocks || []).map(b => `${b.id}:${b.end_time || 'open'}`).join('|');
+
+  const unitNumFromLabel = (label) => {
+    const m = String(label || '').match(/(\d{3,})/);
+    return m ? parseInt(m[1], 10) : 0;
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!propertyId) return;
+      const [unitsRes, partiesRes] = await Promise.all([
+        supabase.from('units').select('id, label, active').eq('customer_id', propertyId).eq('active', true),
+        supabase.from('parties').select('id, label, unit_id, sort_order, active'),
+      ]);
+      // Paginated target load (1000-row chunks) so we never hit the row cap.
+      const PAGE = 1000;
+      let rows = [];
+      for (let from = 0; ; from += PAGE) {
+        const { data: page, error } = await supabase.from('assignment_targets')
+          .select('status, unit_id, party_id, assignment:assignments!inner(customer_id, active, source, pm_status, deleted_at)')
+          .eq('assignment.customer_id', propertyId)
+          .eq('assignment.active', true)
+          .is('assignment.deleted_at', null)
+          .order('id', { ascending: true })
+          .range(from, from + PAGE - 1);
+        if (error) break;
+        rows = rows.concat(page || []);
+        if (!page || page.length < PAGE) break;
+        if (from > 200000) break;
+      }
+      if (cancelled) return;
+      const valid = rows.filter(t =>
+        (t.assignment?.source !== 'pm' || t.assignment?.pm_status === 'approved') &&
+        t.unit_id && t.party_id
+      );
+      const openTargets = valid.filter(t => t.status !== 'done' && t.status !== 'blocked');
+      const blockedTargets = valid.filter(t => t.status === 'blocked');
+
+      const units = unitsRes.data || [];
+      const unitMap = new Map(units.map(u => [u.id, u]));
+      const parties = (partiesRes.data || []).filter(p => p.active !== false);
+
+      const bedroomsWithWork = new Set();
+      openTargets.forEach(t => bedroomsWithWork.add(t.party_id));
+
+      // Candidate bedrooms = parties with open work, tagged with location.
+      const candidates = parties
+        .filter(p => bedroomsWithWork.has(p.id))
+        .map(p => {
+          const u = unitMap.get(p.unit_id);
+          if (!u) return null;
+          return {
+            partyId: p.id, partyLabel: p.label, sort: p.sort_order ?? 0,
+            unitId: u.id, unitLabel: u.label,
+            building: buildingKey(u.label),
+            floor: floorFromLabel(u.label),
+            unitNum: unitNumFromLabel(u.label),
+          };
+        })
+        .filter(Boolean);
+
+      // Anchor = the apartment the cleaner is currently/most-recently in.
+      const myActive = (workBlocks || []).find(b => !b.end_time);
+      const myRecent = (workBlocks || []).slice()
+        .sort((a, b) => new Date(b.start_time) - new Date(a.start_time))[0];
+      const anchorBlock = myActive || myRecent;
+      let anchorUnitId = anchorBlock?.unit_id || null;
+      const anchorPartyId = myActive?.party_id || null;
+      // No work yet this shift → anchor on the lowest-numbered apartment
+      // that still has work, so the list still has a sensible starting point.
+      if (!anchorUnitId && candidates.length) {
+        anchorUnitId = candidates.slice()
+          .sort((a, b) => (a.unitNum - b.unitNum) || naturalCompare(a.unitLabel, b.unitLabel))[0].unitId;
+      }
+      const anchorUnit = anchorUnitId ? unitMap.get(anchorUnitId) : null;
+      const anchorBuilding = anchorUnit ? buildingKey(anchorUnit.label) : null;
+      const anchorFloor = anchorUnit ? floorFromLabel(anchorUnit.label) : null;
+
+      // Bucket 1: bedrooms still open in the current apartment.
+      const currentBeds = candidates
+        .filter(c => c.unitId === anchorUnitId)
+        .sort((a, b) => (a.sort - b.sort) || naturalCompare(a.partyLabel, b.partyLabel));
+
+      // Bucket 2: other apartments on the SAME building + floor.
+      const floorMates = candidates.filter(c =>
+        c.unitId !== anchorUnitId &&
+        c.building === anchorBuilding &&
+        c.floor === anchorFloor
+      );
+      const aptMap = new Map();
+      floorMates.forEach(c => {
+        if (!aptMap.has(c.unitId)) aptMap.set(c.unitId, { unitId: c.unitId, unitLabel: c.unitLabel, unitNum: c.unitNum, beds: [] });
+        aptMap.get(c.unitId).beds.push(c);
+      });
+      const floorApts = Array.from(aptMap.values())
+        .map(a => ({ ...a, beds: a.beds.sort((x, y) => (x.sort - y.sort) || naturalCompare(x.partyLabel, y.partyLabel)) }))
+        .sort((a, b) => (a.unitNum - b.unitNum) || naturalCompare(a.unitLabel, b.unitLabel));
+
+      // Bucket 3: nearest remaining bedroom once this floor is clear —
+      // same building (nearest floor) first, then the next building.
+      let nextUp = null;
+      if (currentBeds.length === 0 && floorApts.length === 0) {
+        const elsewhere = candidates.filter(c => !(c.building === anchorBuilding && c.floor === anchorFloor));
+        elsewhere.sort((a, b) => {
+          const sameB = (x) => (x.building === anchorBuilding ? 0 : 1);
+          if (sameB(a) !== sameB(b)) return sameB(a) - sameB(b);
+          const fd = Math.abs((a.floor ?? 99) - (anchorFloor ?? 0)) - Math.abs((b.floor ?? 99) - (anchorFloor ?? 0));
+          if (fd !== 0) return fd;
+          return (a.unitNum - b.unitNum) || naturalCompare(a.unitLabel, b.unitLabel);
+        });
+        nextUp = elsewhere[0] || null;
+      }
+
+      // Blocked bedrooms — unique unit+party pairs sitting in blocked.
+      const blockedMap = new Map();
+      blockedTargets.forEach(t => {
+        const key = `${t.unit_id}::${t.party_id}`;
+        if (blockedMap.has(key)) return;
+        const u = unitMap.get(t.unit_id);
+        const p = parties.find(pp => pp.id === t.party_id);
+        blockedMap.set(key, { unitLabel: u?.label || 'Apartment', partyLabel: p?.label || 'Bedroom' });
+      });
+
+      setState({
+        loading: false,
+        anchorLabel: anchorUnit?.label || '',
+        anchorBuilding, anchorFloor, anchorPartyId,
+        currentBeds, floorApts, nextUp,
+        blocked: Array.from(blockedMap.values()),
+      });
+    })();
+    return () => { cancelled = true; };
+  }, [propertyId, blocksFingerprint]);
+
+  const go = (c) => onGoToBedroom && onGoToBedroom({
+    unit_id: c.unitId, party_id: c.partyId,
+    unit: { label: c.unitLabel }, party: { label: c.partyLabel },
+  });
+
+  if (state.loading) return null;
+  const { currentBeds, floorApts, nextUp, blocked, anchorLabel, anchorBuilding, anchorFloor, anchorPartyId } = state;
+  const nothingHere = currentBeds.length === 0 && floorApts.length === 0 && !nextUp;
+  if (nothingHere && blocked.length === 0) return null;
+
+  const floorLabel = [anchorBuilding, anchorFloor != null ? `Floor ${anchorFloor}` : null].filter(Boolean).join(' · ');
+
+  const BedRow = ({ c }) => {
+    const isNow = c.partyId === anchorPartyId;
+    return (
+      <button onClick={() => go(c)}
+        className="w-full flex items-center justify-between gap-2 px-3 py-2.5 rounded-xl bg-white border border-stone-200 hover:border-stone-900 active:scale-98 transition-all text-left">
+        <span className="flex items-center gap-2 min-w-0">
+          <span className="italic text-stone-800 truncate">{c.partyLabel}</span>
+          {isNow && <span className="text-[9px] uppercase tracking-wider font-mono font-bold px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-800 border border-amber-300 flex-shrink-0">Now</span>}
+        </span>
+        <ChevronRight size={15} className="text-stone-400 flex-shrink-0" />
+      </button>
+    );
+  };
+
+  return (
+    <div className="px-4 pt-6">
+      <div className="flex items-center justify-between mb-3">
+        <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">
+          Where to clean
+        </div>
+        {blocked.length > 0 && (
+          <button onClick={() => setShowBlocked(v => !v)}
+            className="text-[10px] uppercase tracking-wider font-mono font-bold px-2 py-1 rounded-full bg-red-50 text-red-700 border border-red-200 flex items-center gap-1 active:scale-95">
+            <AlertCircle size={11} /> {blocked.length} blocked
+          </button>
+        )}
+      </div>
+
+      {showBlocked && blocked.length > 0 && (
+        <div className="mb-4 p-3 rounded-2xl bg-red-50/60 border border-red-200">
+          <div className="text-[10px] uppercase tracking-wider font-mono text-red-700 mb-1.5">Blocked — waiting on your manager</div>
+          <div className="space-y-1">
+            {blocked.map((b, i) => (
+              <div key={i} className="text-xs text-stone-700 font-mono">
+                <span className="font-bold">{b.unitLabel}</span> · {b.partyLabel}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Current apartment */}
+      {currentBeds.length > 0 && (
+        <div className="mb-4">
+          <div className="text-[10px] uppercase tracking-wider font-mono text-stone-400 mb-1.5 px-1">
+            Current apartment · {anchorLabel}
+          </div>
+          <div className="space-y-1.5">
+            {currentBeds.map(c => <BedRow key={c.partyId} c={c} />)}
+          </div>
+        </div>
+      )}
+
+      {/* Rest of this floor */}
+      {floorApts.length > 0 && (
+        <div className="mb-2">
+          <div className="text-[10px] uppercase tracking-wider font-mono text-stone-400 mb-1.5 px-1">
+            Rest of this floor{floorLabel ? ` · ${floorLabel}` : ''}
+          </div>
+          <div className="space-y-3">
+            {floorApts.map(a => (
+              <div key={a.unitId}>
+                <div className="flex items-center gap-2 mb-1 px-1">
+                  <Building2 size={13} className="text-stone-400" />
+                  <span className="text-sm font-bold text-stone-800">{a.unitLabel}</span>
+                  <span className="text-[11px] font-mono text-stone-400">· {a.beds.length} left</span>
+                </div>
+                <div className="space-y-1.5">
+                  {a.beds.map(c => <BedRow key={c.partyId} c={c} />)}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Floor done → next up */}
+      {nextUp && currentBeds.length === 0 && floorApts.length === 0 && (
+        <div className="p-4 rounded-2xl bg-emerald-50 border border-emerald-200">
+          <div className="flex items-center gap-2 mb-2">
+            <Check size={15} className="text-emerald-600" />
+            <span className="text-sm font-medium text-emerald-900">This floor is done — nice work.</span>
+          </div>
+          <button onClick={() => go(nextUp)}
+            className="w-full flex items-center justify-between gap-2 px-3 py-3 rounded-xl bg-white border border-emerald-300 hover:border-emerald-500 active:scale-98 transition-all text-left">
+            <span className="flex items-center gap-2 min-w-0">
+              <span className="text-[10px] uppercase tracking-wider font-mono text-emerald-700 font-bold">Next up</span>
+              <span className="font-bold text-stone-900">{nextUp.unitLabel}</span>
+              <span className="text-stone-400">·</span>
+              <span className="italic text-stone-700 truncate">{nextUp.partyLabel}</span>
+            </span>
+            <ChevronRight size={15} className="text-stone-400 flex-shrink-0" />
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onClockOut, onSwitchProperty, onStartNew, onReopen, onEndBlock, onGoToBedroom, onOpenMessages, onOpenChangePin, onOpenBedroomHistory, onJoinBlock, onUndoBlock, onMoveBlock, cleanerTab: cleanerTabProp, setCleanerTab: setCleanerTabProp, busy }) {
   const [showMenu, setShowMenu] = useState(false);
   const [showAssignmentForm, setShowAssignmentForm] = useState(false);
@@ -5421,12 +5708,10 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
             </div>
           </div>
 
-          {/* Apartment progress — vertical list of apartments with
-             outstanding assignments, showing "X/Y done" so cleaners
-             can see at a glance what's left where. Only apartments
-             with at least one incomplete item are shown so the list
-             stays focused on what still needs attention. */}
-          <ApartmentProgressList propertyId={shift.customer_id} workBlocks={workBlocks} />
+          {/* Where to clean — current apartment first, then the rest of
+             the same building + floor, advancing on its own as bedrooms
+             get finished. Replaces the flat apartment list. */}
+          <FloorFocusList propertyId={shift.customer_id} workBlocks={workBlocks} onGoToBedroom={onGoToBedroom} />
 
           {/* Today's activity — Mine / Others toggle */}
           <div className="px-4 pt-6">
@@ -7487,7 +7772,7 @@ function PartyPicker({ property, unit, onPick, onBack, busy }) {
         .eq('unit_id', unit.id).eq('active', true)
         .order('sort_order').order('label'),
       supabase.from('assignment_targets')
-        .select('party_id, template_section, status, assignment:assignments!inner(customer_id, active, source, pm_status, deleted_at)')
+        .select('party_id, template_section, template_item_key, status, assignment:assignments!inner(customer_id, active, source, pm_status, deleted_at)')
         .eq('unit_id', unit.id)
         .not('status', 'in', '(done,blocked)'),
     ]);
@@ -7501,10 +7786,26 @@ function PartyPicker({ property, unit, onPick, onBack, busy }) {
       if (a.customer_id !== property.id) return;
       if (a.source === 'pm' && a.pm_status !== 'approved') return;
       if (!t.party_id) return;
-      if (!c[t.party_id]) c[t.party_id] = { total: 0, bedroom: 0, vanity: 0, bathroom: 0, general: 0 };
+      if (!c[t.party_id]) c[t.party_id] = { total: 0, bedroom: 0, vanity: 0, bathroom: 0, general: 0, bathTub: false, bathToilet: false, genHot: false, genFridge: false, genFreezer: false };
       c[t.party_id].total += 1;
       const sec = (t.template_section || '').toLowerCase();
       if (sec in c[t.party_id]) c[t.party_id][sec] += 1;
+      // Subsection flags for chip coloring, based ONLY on which items are
+      // actually part of this bedroom's open assignment (not the variant).
+      // A 'tub' bathroom assignment that doesn't include the tub item won't
+      // light up red — it's about what's chosen, not the variant.
+      //   Bathroom: tub item → red, toilet item → blue
+      //   General:  stove/oven item → red; fridge AND freezer both → orange
+      const key = (t.template_item_key || '').toLowerCase();
+      if (sec === 'bathroom') {
+        if (key.includes('tub')) c[t.party_id].bathTub = true;
+        if (key.includes('toilet')) c[t.party_id].bathToilet = true;
+      }
+      if (sec === 'general') {
+        if (key.includes('stove') || key.includes('oven')) c[t.party_id].genHot = true;
+        if (key.includes('refrigerator') || key.includes('fridge')) c[t.party_id].genFridge = true;
+        if (key.includes('freezer')) c[t.party_id].genFreezer = true;
+      }
     });
     setParties(partiesRes.data || []);
     setCounts(c);
@@ -7589,12 +7890,26 @@ function PartyPicker({ property, unit, onPick, onBack, busy }) {
             }).map(p => {
               const c = counts[p.id];
               const total = c?.total || 0;
-              const sectionBits = [];
+              // Section chips with subsection-based colors:
+              //   BR / Vanity        → neutral stone
+              //   Bathroom           → red (tub) / blue (toilet) / neutral
+              //   General            → red (stove or oven) / orange (fridge) / neutral
+              const sectionChips = [];
               if (c) {
-                if (c.bedroom)  sectionBits.push(`Bedroom (${c.bedroom})`);
-                if (c.vanity)   sectionBits.push(`Vanity (${c.vanity})`);
-                if (c.bathroom) sectionBits.push(`Bathroom (${c.bathroom})`);
-                if (c.general)  sectionBits.push(`General (${c.general})`);
+                if (c.bedroom)  sectionChips.push({ label: `BR (${c.bedroom})`, cls: 'bg-stone-100 text-stone-600 border-stone-200' });
+                if (c.vanity)   sectionChips.push({ label: `Vanity (${c.vanity})`, cls: 'bg-stone-100 text-stone-600 border-stone-200' });
+                if (c.bathroom) {
+                  const cls = c.bathTub ? 'bg-red-100 text-red-700 border-red-300'
+                            : c.bathToilet ? 'bg-blue-100 text-blue-700 border-blue-300'
+                            : 'bg-stone-100 text-stone-600 border-stone-200';
+                  sectionChips.push({ label: `Bathroom (${c.bathroom})`, cls });
+                }
+                if (c.general) {
+                  const cls = c.genHot ? 'bg-red-100 text-red-700 border-red-300'
+                            : (c.genFridge || c.genFreezer) ? 'bg-orange-100 text-orange-700 border-orange-300'
+                            : 'bg-stone-100 text-stone-600 border-stone-200';
+                  sectionChips.push({ label: `General (${c.general})`, cls });
+                }
               }
               return (
                 <button key={p.id} onClick={() => setPicked(p)} disabled={busy}
@@ -7610,9 +7925,13 @@ function PartyPicker({ property, unit, onPick, onBack, busy }) {
                         )}
                       </div>
                       {p.full_name && <div className="text-sm text-stone-600">{p.full_name}</div>}
-                      {sectionBits.length > 0 && (
-                        <div className="text-[11px] text-stone-500 font-mono mt-1">
-                          {sectionBits.join(' · ')}
+                      {sectionChips.length > 0 && (
+                        <div className="flex flex-wrap gap-1 mt-1.5">
+                          {sectionChips.map((chip, i) => (
+                            <span key={i} className={`text-[10px] font-mono font-bold px-1.5 py-0.5 rounded-md border ${chip.cls}`}>
+                              {chip.label}
+                            </span>
+                          ))}
                         </div>
                       )}
                       {p.notes && <div className="text-xs text-stone-500 mt-1 italic line-clamp-1">{p.notes}</div>}
@@ -26414,6 +26733,10 @@ function BlockedNoteModal({ target, onSave, onClose, busy }) {
           </button>
         </div>
         <div className="p-5">
+          <div className="mb-3 p-3 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 text-xs flex gap-2">
+            <AlertCircle size={15} className="flex-shrink-0 mt-0.5" />
+            <span>Heads up — marking this blocked <b>closes the entire assignment</b> for this bedroom and sends it to your manager. Only use this when you can't finish the work (e.g. tenant home, no access).</span>
+          </div>
           <textarea value={note} onChange={(e) => setNote(e.target.value)}
             rows={4} placeholder="e.g. Tenant home, couldn't get in. Need new key."
             className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white focus:outline-none focus:border-stone-900 text-stone-900 resize-none" />

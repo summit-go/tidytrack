@@ -2160,12 +2160,13 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
   const loadChecklistTargets = async () => {
     if (!checklistMode) { setChecklistTargets([]); return; }
     const { data } = await supabase.from('assignment_targets')
-      .select('*, assignment:assignments!inner(id, customer_id, active, source, pm_status, sheet_type, template_set_id, bathroom_variant, general_variant)')
+      .select('*, assignment:assignments!inner(id, customer_id, active, source, pm_status, deleted_at, sheet_type, template_set_id, bathroom_variant, general_variant)')
       .eq('unit_id', unitId).eq('party_id', partyId)
       .not('status', 'in', '(done,blocked)');
     const open = (data || []).filter(t =>
       t.assignment?.customer_id === customerId &&
       t.assignment?.active &&
+      !t.assignment?.deleted_at &&
       (t.assignment?.source !== 'pm' || t.assignment?.pm_status === 'approved') &&
       // Only template-based checklist targets — legacy single-row
       // assignments don't have item-level granularity to pick from.
@@ -3416,12 +3417,13 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       // Find pending OR paused targets at this exact bedroom OR property-wide for this customer
       const { data: targets } = await supabase
         .from('assignment_targets')
-        .select('id, status, assignment:assignments!inner(id, customer_id, active, source, pm_status)')
+        .select('id, status, assignment:assignments!inner(id, customer_id, active, source, pm_status, deleted_at)')
         .in('status', ['pending', 'paused'])
         .or(`and(unit_id.eq.${unitId},party_id.eq.${partyId}),and(unit_id.is.null,party_id.is.null)`);
       const eligible = (targets || []).filter(t =>
         t.assignment?.customer_id === shift.customer_id &&
         t.assignment?.active &&
+      !t.assignment?.deleted_at &&
         (t.assignment?.source !== 'pm' || t.assignment?.pm_status === 'approved')
       );
       if (eligible.length === 0) return;
@@ -3841,7 +3843,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     try {
       const { data: inProg } = await supabase
         .from('assignment_targets')
-        .select('id, assignment:assignments!inner(customer_id, active, source, pm_status)')
+        .select('id, assignment:assignments!inner(customer_id, active, source, pm_status, deleted_at)')
         .eq('unit_id', activeBlock.unit_id)
         .eq('party_id', activeBlock.party_id)
         .eq('status', 'in_progress');
@@ -3849,6 +3851,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
         .filter(t =>
           t.assignment?.customer_id === shift?.customer_id &&
           t.assignment?.active &&
+      !t.assignment?.deleted_at &&
           (t.assignment?.source !== 'pm' || t.assignment?.pm_status === 'approved')
         )
         .map(t => t.id);
@@ -3904,30 +3907,53 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
 
   const reopenBlock = async (block) => {
     setBusy(true);
-    // Make sure we're not ending up with two open blocks. Close any other
-    // open block under this shift before reopening this one.
+    // Pre-close any of MY currently-open blocks so we don't end up with
+    // two open at once. We scope this to the current shift since those
+    // are the only blocks "I" own right now. A block closed by mistake
+    // can belong to an earlier shift or another cleaner — we still
+    // reopen it below regardless of whose shift it's under, so anyone
+    // can recover a block that was closed by accident.
     try {
-      const { data: openBlocks } = await supabase.from('work_blocks')
-        .select('id').eq('shift_id', shift.id).is('end_time', null).neq('id', block.id);
-      if (openBlocks && openBlocks.length > 0) {
-        const ts = new Date().toISOString();
-        await supabase.from('work_blocks')
-          .update({ end_time: ts })
-          .in('id', openBlocks.map(b => b.id));
+      if (shift?.id) {
+        const { data: openBlocks } = await supabase.from('work_blocks')
+          .select('id').eq('shift_id', shift.id).is('end_time', null).neq('id', block.id);
+        if (openBlocks && openBlocks.length > 0) {
+          const ts = new Date().toISOString();
+          await supabase.from('work_blocks')
+            .update({ end_time: ts })
+            .in('id', openBlocks.map(b => b.id));
+        }
       }
     } catch (e) {
       console.warn('[reopenBlock] could not pre-close open blocks', e);
     }
-    await supabase.from('work_blocks').update({ end_time: null }).eq('id', block.id);
+    // Reopen the target. Surface any error instead of silently failing
+    // (the old version assumed success and updated local state even if
+    // the DB write was rejected, which looked like "reopen does
+    // nothing").
+    const { error: reErr } = await supabase.from('work_blocks').update({ end_time: null }).eq('id', block.id);
+    if (reErr) {
+      console.error('[reopenBlock] reopen failed', reErr);
+      alert('Could not reopen this work block: ' + reErr.message);
+      setBusy(false);
+      return;
+    }
     const { data: blockTasks } = await supabase.from('tasks').select('*, photos(*, taken_by_employee:employees!taken_by(name))')
       .eq('work_block_id', block.id).order('start_time');
     const updated = { ...block, end_time: null, tasks: blockTasks || [] };
-    setWorkBlocks(prev => prev.map(b => {
-      if (b.id === block.id) return updated;
-      // Reflect the pre-closure in local state for any other currently-open blocks
-      if (!b.end_time) return { ...b, end_time: new Date().toISOString() };
-      return b;
-    }));
+    setWorkBlocks(prev => {
+      const exists = prev.some(b => b.id === block.id);
+      const next = prev.map(b => {
+        if (b.id === block.id) return updated;
+        // Reflect the pre-closure in local state for any other currently-open blocks
+        if (!b.end_time) return { ...b, end_time: new Date().toISOString() };
+        return b;
+      });
+      // If the reopened block wasn't already in local state (e.g. it
+      // belonged to another shift / the Others list), add it so the
+      // active-block view has it.
+      return exists ? next : [updated, ...next];
+    });
     setActiveBlock(updated); setTasks(blockTasks || []);
     // Resume always sends the cleaner back to the Home tab (BlockView).
     // Without this, if they tapped Resume from the Assignments tab,
@@ -4362,7 +4388,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     try {
       const { data: pending } = await supabase
         .from('assignment_targets')
-        .select('id, assignment:assignments!inner(customer_id, active, source, pm_status)')
+        .select('id, assignment:assignments!inner(customer_id, active, source, pm_status, deleted_at)')
         .eq('unit_id', activeBlock.unit_id)
         .eq('party_id', activeBlock.party_id)
         .eq('status', 'pending');
@@ -4370,6 +4396,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
         .filter(t =>
           t.assignment?.customer_id === shift?.customer_id &&
           t.assignment?.active &&
+      !t.assignment?.deleted_at &&
           (t.assignment?.source !== 'pm' || t.assignment?.pm_status === 'approved')
         )
         .map(t => t.id);
@@ -5143,10 +5170,11 @@ function ApartmentProgressList({ propertyId, workBlocks }) {
           .select(`
             status, unit_id, party_id, assignment_id,
             unit:units(id, label),
-            assignment:assignments!inner(customer_id, active, source, pm_status)
+            assignment:assignments!inner(customer_id, active, source, pm_status, deleted_at)
           `)
           .eq('assignment.customer_id', propertyId)
           .eq('assignment.active', true)
+          .is('assignment.deleted_at', null)
           .order('id', { ascending: true })
           .range(from, from + PAGE - 1);
         if (pErr) break;
@@ -5156,6 +5184,7 @@ function ApartmentProgressList({ propertyId, workBlocks }) {
       }
       if (cancelled) return;
       const filtered = (data || []).filter(t =>
+        !t.assignment?.deleted_at &&
         (t.assignment?.source !== 'pm' || t.assignment?.pm_status === 'approved') &&
         t.unit_id && t.party_id
       );
@@ -6304,18 +6333,9 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-50 text-xs font-medium">
             <Home size={12} /> Property home
           </button>
-          {totalActive > 1 && onLeaveBlock && (
-            // Multi-cleaner mode: leave the block but keep it alive.
-            // When the last person leaves, the leaveBlock handler
-            // prompts + auto-finishes. Solo cleaners get the bigger
-            // "I'm done here" button further down the page instead
-            // of a top-right header button — user wanted it lower
-            // and more obvious.
-            <button onClick={onLeaveBlock} disabled={busy}
-              className="px-4 py-2 rounded-full bg-stone-700 text-stone-50 text-sm font-medium flex items-center gap-2 active:scale-95 transition-transform disabled:opacity-50">
-              <LogOut size={14} /> Leave block
-            </button>
-          )}
+          {/* The multi-cleaner "leave" action lives on the big bottom
+             button now ("I'm finished here (others stay)"), so we no
+             longer duplicate it as a small header button. */}
         </div>
         <div className="text-xs uppercase tracking-widest text-stone-400 font-mono">Working on</div>
         <div className="font-serif text-2xl text-stone-50 leading-tight">
@@ -6520,21 +6540,34 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
           } : null}
           onClose={() => setMoveModalOpen(false)} />
       )}
-      {/* "I'm done here" — moved out of the dark header per user
-         feedback ("bring it lower so it's more obvious"). Sits at the
-         natural endpoint of the cleaning workflow: after the cleaner
-         has worked through their tasks, the next thing they see is
-         this big button. Only renders in solo mode; multi-cleaner
-         mode keeps the smaller "Leave block" button in the header
-         since the workblock lifecycle is shared. */}
-      {!(totalActive > 1 && onLeaveBlock) && (
-        <div className="mx-4 mt-6 mb-4">
-          <button onClick={onFinish} disabled={busy}
-            className="w-full py-4 rounded-2xl bg-amber-700 hover:bg-amber-800 text-stone-50 text-base font-bold flex items-center justify-center gap-2 active:scale-98 transition-transform disabled:opacity-50">
-            <Check size={18} /> I'm done here
-          </button>
-        </div>
-      )}
+      {/* "Finished entire assignment" — the natural endpoint of the
+         cleaning workflow. After the cleaner works through their tasks,
+         this is the next thing they see. Behavior depends on whether
+         the workblock is shared:
+           • Solo (totalActive <= 1): onFinish closes the block and
+             marks in-progress items done.
+           • Multi-cleaner (totalActive > 1): onLeaveBlock signs THIS
+             cleaner out of the shared block but keeps it open for the
+             others. The last person to leave triggers the finish +
+             pending-items prompt (handled inside leaveBlock). So one
+             cleaner finishing never kicks the others out. */}
+      <div className="mx-4 mt-6 mb-4">
+        <button
+          onClick={() => {
+            if (totalActive > 1 && onLeaveBlock) return onLeaveBlock();
+            return onFinish();
+          }}
+          disabled={busy}
+          className="w-full py-4 rounded-2xl bg-amber-700 hover:bg-amber-800 text-stone-50 text-base font-bold flex items-center justify-center gap-2 active:scale-98 transition-transform disabled:opacity-50">
+          <Check size={18} />
+          {totalActive > 1 && onLeaveBlock ? "I'm finished here (others stay)" : 'Finished entire assignment'}
+        </button>
+        {totalActive > 1 && onLeaveBlock && (
+          <div className="text-[11px] text-stone-500 text-center mt-1.5 font-mono">
+            {totalActive} cleaners here · the block stays open until everyone finishes
+          </div>
+        )}
+      </div>
 
       {/* Tasks others did today — moved to the very bottom so it
          doesn't interfere with the cleaner's workflow. Shows when
@@ -7205,9 +7238,10 @@ function ViewOnlyAssignmentsPanel({ propertyId, employee, onOpenBedroomHistory }
     for (let from = 0; ; from += PAGE) {
       const { data: page, error: pErr } = await supabase
         .from('assignment_targets')
-        .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, assignment_type, scheduled_date), unit:units(id, label), party:parties(id, label), starter:employees!started_by(name), completer:employees!completed_by(name)')
+        .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, deleted_at, assignment_type, scheduled_date), unit:units(id, label), party:parties(id, label), starter:employees!started_by(name), completer:employees!completed_by(name)')
         .eq('assignment.customer_id', propertyId)
         .eq('assignment.active', true)
+          .is('assignment.deleted_at', null)
         .order('id', { ascending: true })
         .range(from, from + PAGE - 1);
       if (pErr) { error = pErr; break; }
@@ -7217,6 +7251,7 @@ function ViewOnlyAssignmentsPanel({ propertyId, employee, onOpenBedroomHistory }
     }
     if (error) { console.warn(error); setLoaded(true); return; }
     const filtered = (data || []).filter(t =>
+      !t.assignment?.deleted_at &&
       (t.assignment?.source !== 'pm' || t.assignment?.pm_status === 'approved')
     );
     setTargets(filtered);
@@ -7452,7 +7487,7 @@ function PartyPicker({ property, unit, onPick, onBack, busy }) {
         .eq('unit_id', unit.id).eq('active', true)
         .order('sort_order').order('label'),
       supabase.from('assignment_targets')
-        .select('party_id, template_section, status, assignment:assignments!inner(customer_id, active, source, pm_status)')
+        .select('party_id, template_section, status, assignment:assignments!inner(customer_id, active, source, pm_status, deleted_at)')
         .eq('unit_id', unit.id)
         .not('status', 'in', '(done,blocked)'),
     ]);
@@ -7629,7 +7664,7 @@ function SectionPicker({ property, unit, party, onStart, onJoin, onBack, busy })
   useEffect(() => { (async () => {
     const [targetsRes, blocksRes] = await Promise.all([
       supabase.from('assignment_targets')
-        .select('template_section, assignment:assignments!inner(customer_id, active, source, pm_status)')
+        .select('template_section, assignment:assignments!inner(customer_id, active, source, pm_status, deleted_at)')
         .eq('unit_id', unit.id)
         .eq('party_id', party.id)
         .not('status', 'in', '(done,blocked)'),
@@ -9607,7 +9642,7 @@ function useAssignmentsForBedroomOnDate({ propertyId, unitId, partyId, dateISO }
 
       // Build the bedroom filter: bedroom-specific OR property-wide
       let q = supabase.from('assignment_targets')
-        .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, assignment_type, scheduled_date, created_at)')
+        .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, deleted_at, assignment_type, scheduled_date, created_at)')
         .or(
           (unitId && partyId)
             ? `and(unit_id.eq.${unitId},party_id.eq.${partyId}),and(unit_id.is.null,party_id.is.null)`
@@ -9623,6 +9658,7 @@ function useAssignmentsForBedroomOnDate({ propertyId, unitId, partyId, dateISO }
       const all = (data || []).filter(t =>
         t.assignment?.customer_id === propertyId &&
         t.assignment?.active &&
+      !t.assignment?.deleted_at &&
         (t.assignment?.source !== 'pm' || t.assignment?.pm_status === 'approved')
       );
 
@@ -16467,12 +16503,13 @@ function AssignedVsCleanedView({ employee, onBack, onOpenBedroomHistory, persist
           id, status, completed_at, recheck_passed_at, template_section, template_item_key, status_notes,
           unit:units(id, label),
           party:parties(id, label),
-          assignment:assignments!inner(id, title, assignment_type, customer_id, active, source, pm_status, file_url, file_kind)
+          assignment:assignments!inner(id, title, assignment_type, customer_id, active, source, pm_status, deleted_at, file_url, file_kind)
         `)
         .eq('assignment.customer_id', selectedPropertyId);
       const targets = (data || []).filter(t =>
         t.assignment?.customer_id === selectedPropertyId &&
         t.assignment?.active &&
+      !t.assignment?.deleted_at &&
         (t.assignment?.source !== 'pm' || t.assignment?.pm_status === 'approved')
       );
       const startMs = new Date(startISO).getTime();
@@ -16558,12 +16595,13 @@ function AssignedVsCleanedView({ employee, onBack, onOpenBedroomHistory, persist
     // Pre-check what we'd actually change so the confirm prompt and
     // skip-on-empty path are accurate.
     const { data: existing } = await supabase.from('assignment_targets')
-      .select('id, status, assignment:assignments!inner(customer_id, active, source, pm_status)')
+      .select('id, status, assignment:assignments!inner(customer_id, active, source, pm_status, deleted_at)')
       .eq('unit_id', g.unitId)
       .eq('party_id', g.partyId);
     const scoped = (existing || []).filter(t =>
       t.assignment?.customer_id === selectedPropertyId &&
       t.assignment?.active &&
+      !t.assignment?.deleted_at &&
       (t.assignment?.source !== 'pm' || t.assignment?.pm_status === 'approved')
     );
     const targets = scoped.filter(t => t.status !== newStatus);
@@ -18125,13 +18163,14 @@ function BedroomHistoryView({ propertyId, propertyName, unitId, unitLabel, party
 
       // Fetch assignment_targets at this bedroom (and property-wide) in the window
       let targetsQ = supabase.from('assignment_targets')
-        .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, assignment_type, scheduled_date, created_at)')
+        .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, deleted_at, assignment_type, scheduled_date, created_at)')
         .or(`and(unit_id.eq.${unitId},party_id.eq.${partyId}),and(unit_id.is.null,party_id.is.null)`)
         .order('created_at', { ascending: false });
       const { data: targetsRaw } = await targetsQ;
       const targets = (targetsRaw || []).filter(t =>
         t.assignment?.customer_id === propertyId &&
         t.assignment?.active &&
+      !t.assignment?.deleted_at &&
         (t.assignment?.source !== 'pm' || t.assignment?.pm_status === 'approved')
       ).filter(t => {
         if (!sinceISO) return true;
@@ -18759,6 +18798,7 @@ function AssignmentList({ property, employee, onBack, onNew, onNewChecklist, onO
       .from('assignments')
       .select('*, targets:assignment_targets(id, status, priority, unit_id, party_id, unit:units(label), party:parties(label))')
       .eq('customer_id', property.id)
+      .is('deleted_at', null)
       .order('created_at', { ascending: false });
     setAssignments(data || []); setLoaded(true);
   };
@@ -21874,11 +21914,13 @@ function AssignmentDetail({ property, assignment: assignmentInit, employee, onBa
 
   const deleteAssignment = async () => {
     setBusy(true);
-    // Delete file from storage first
-    if (assignment.file_path) {
-      await supabase.storage.from(ASSIGNMENT_BUCKET).remove([assignment.file_path]);
-    }
-    const { error } = await supabase.from('assignments').delete().eq('id', assignment.id);
+    // SOFT delete — stamp deleted_at/deleted_by instead of removing the
+    // row, so a mistaken delete can be undone. We intentionally do NOT
+    // remove the storage file or the target rows; a restore just clears
+    // deleted_at. A future purge job hard-deletes old soft-deleted ones.
+    const { error } = await supabase.from('assignments')
+      .update({ deleted_at: new Date().toISOString(), deleted_by: employee?.id || null })
+      .eq('id', assignment.id);
     setBusy(false);
     if (error) { alert('Could not delete: ' + error.message); return; }
     onBack();
@@ -22008,7 +22050,10 @@ function AssignmentDetail({ property, assignment: assignmentInit, employee, onBa
           )}
         </div>
 
-        {/* Delete */}
+        {/* Delete — gated behind the manage_assignments_admin
+           capability. Owners always have it; others need it granted
+           in their permissions. Soft delete, so it's recoverable. */}
+        {can(employee, 'manage_assignments_admin') && (
         <div className="pt-4 border-t border-stone-200">
           {!confirmingDelete ? (
             <button onClick={() => setConfirmingDelete(true)}
@@ -22018,13 +22063,14 @@ function AssignmentDetail({ property, assignment: assignmentInit, employee, onBa
           ) : (
             <DeleteConfirmModal
               title="Delete this assignment?"
-              description="This removes the assignment document, all its target records, and the file from storage. Cleaners will no longer see it."
+              description="This hides the assignment from cleaners and the assignments list. It's recoverable — nothing is permanently erased, so you can restore it later if this was a mistake."
               itemSummary={assignment.title}
               busy={busy}
               onConfirm={deleteAssignment}
               onClose={() => setConfirmingDelete(false)} />
           )}
         </div>
+        )}
       </div>
     </div>
   );
@@ -22053,7 +22099,7 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
   const load = async () => {
     let q = supabase
       .from('assignment_targets')
-      .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, extracted_text, spanish_translation, translation_status, template_set_id, sheet_type, bathroom_variant, general_variant, assignment_type, created_at), unit:units(id, label), party:parties(id, label), starter:employees!started_by(name), completer:employees!completed_by(name), assignedTo:employees!assigned_to(id, name)');
+      .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, deleted_at, extracted_text, spanish_translation, translation_status, template_set_id, sheet_type, bathroom_variant, general_variant, assignment_type, created_at), unit:units(id, label), party:parties(id, label), starter:employees!started_by(name), completer:employees!completed_by(name), assignedTo:employees!assigned_to(id, name)');
 
     if (!showDone) q = q.not('status', 'in', '(done,blocked)');
 
@@ -22073,6 +22119,7 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
     const filtered = (data || []).filter(t =>
       t.assignment?.customer_id === propertyId &&
       t.assignment?.active &&
+      !t.assignment?.deleted_at &&
       (t.assignment?.source !== 'pm' || t.assignment?.pm_status === 'approved')
     );
     // Priority items first, then by status (pending/in_progress before done)
@@ -22853,9 +22900,10 @@ function AssignmentsPanel({ propertyId, employee, refreshKey, onGoToBedroom, onO
     for (let from = 0; ; from += PAGE) {
       const { data: page, error: pErr } = await supabase
         .from('assignment_targets')
-        .select('status, completed_by, completed_at, unit_id, party_id, assignment_id, recheck_passed_at, assignment:assignments!inner(customer_id, active, source, pm_status)')
+        .select('status, completed_by, completed_at, unit_id, party_id, assignment_id, recheck_passed_at, assignment:assignments!inner(customer_id, active, source, pm_status, deleted_at)')
         .eq('assignment.customer_id', propertyId)
         .eq('assignment.active', true)
+          .is('assignment.deleted_at', null)
         .order('id', { ascending: true })
         .range(from, from + PAGE - 1);
       if (pErr) break;
@@ -22864,6 +22912,7 @@ function AssignmentsPanel({ propertyId, employee, refreshKey, onGoToBedroom, onO
       if (from > 200000) break;
     }
     const filtered = (data || []).filter(t =>
+      !t.assignment?.deleted_at &&
       (t.assignment?.source !== 'pm' || t.assignment?.pm_status === 'approved')
     );
     // Count UNIQUE assignments per status. Each assignment gets bucketed
@@ -23051,7 +23100,7 @@ function SuggestedTabContent({ propertyId, employee, onGoToBedroom, onOpenBedroo
         supabase.from('units').select('id, label, active').eq('customer_id', propertyId).eq('active', true),
         supabase.from('parties').select('id, label, unit_id, sort_order, active'),
         supabase.from('assignment_targets')
-          .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, assignment_type, template_set_id, sheet_type, general_variant, bathroom_variant, created_at), unit:units(id, label), party:parties(id, label), starter:employees!started_by(name), completer:employees!completed_by(name), assignedTo:employees!assigned_to(id, name)')
+          .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, deleted_at, assignment_type, template_set_id, sheet_type, general_variant, bathroom_variant, created_at), unit:units(id, label), party:parties(id, label), starter:employees!started_by(name), completer:employees!completed_by(name), assignedTo:employees!assigned_to(id, name)')
           .not('status', 'in', '(done,blocked)'),
         // Open work blocks property-wide for the "who's here" chips.
         // main_section is pulled so each chip can label which section
@@ -23564,9 +23613,10 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
     for (let from = 0; ; from += PAGE) {
       const { data: page, error: pErr } = await supabase
         .from('assignment_targets')
-        .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, extracted_text, spanish_translation, translation_status, assignment_type, scheduled_date, sheet_type, template_set_id, bathroom_variant, general_variant, created_at), unit:units(id, label), party:parties(id, label), starter:employees!started_by(id, name), completer:employees!completed_by(id, name), assignedTo:employees!assigned_to(id, name)')
+        .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, deleted_at, extracted_text, spanish_translation, translation_status, assignment_type, scheduled_date, sheet_type, template_set_id, bathroom_variant, general_variant, created_at), unit:units(id, label), party:parties(id, label), starter:employees!started_by(id, name), completer:employees!completed_by(id, name), assignedTo:employees!assigned_to(id, name)')
         .eq('assignment.customer_id', propertyId)
         .eq('assignment.active', true)
+          .is('assignment.deleted_at', null)
         .order('id', { ascending: true })
         .range(from, from + PAGE - 1);
       if (pErr) { error = pErr; break; }
@@ -23587,6 +23637,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
     let allRelevant = (data || []).filter(t =>
       t.assignment?.customer_id === propertyId &&
       t.assignment?.active &&
+      !t.assignment?.deleted_at &&
       (t.assignment?.source !== 'pm' || t.assignment?.pm_status === 'approved')
     );
 
@@ -24883,7 +24934,7 @@ function NextUpModal({ from, employeeId, onPick, onClose }) {
         supabase.from('parties')
           .select('id, label, unit_id, sort_order, active'),
         supabase.from('assignment_targets')
-          .select('unit_id, party_id, status, assignment:assignments!inner(customer_id, active, source, pm_status)')
+          .select('unit_id, party_id, status, assignment:assignments!inner(customer_id, active, source, pm_status, deleted_at)')
           .not('status', 'in', '(done,blocked)'),
         // Open work blocks at this property so we can show "who's here"
         supabase.from('work_blocks')
@@ -25136,13 +25187,61 @@ function ReassignModal({ target, propertyId, onSaved, onClose }) {
 
   const save = async () => {
     if (!unitId || !partyId) { setError('Pick a unit and a party.'); return; }
+    if (unitId === target.unit_id && partyId === target.party_id) {
+      setError("That's already where this is assigned. Pick a different spot.");
+      return;
+    }
     setBusy(true);
-    const { error: e } = await supabase.from('assignment_targets')
-      .update({ unit_id: unitId, party_id: partyId })
-      .eq('id', target.id);
-    setBusy(false);
-    if (e) { setError(e.message); return; }
-    onSaved();
+    try {
+      const newUnit = units.find(u => u.id === unitId);
+      const newParty = (newUnit?.parties || []).find(p => p.id === partyId);
+      const newUnitLabel = newUnit?.label || '';
+      const newPartyLabel = newParty?.label || '';
+
+      // Move EVERY target belonging to this assignment — not just the
+      // single target row behind the tapped card. A cleaning-check has
+      // 8-16 targets at one bedroom; updating only one left the rest
+      // behind, which is why a reassign looked like it "didn't work"
+      // and needed 2-3 tries. We scope by assignment_id when available,
+      // falling back to the (unit,party) pair for legacy rows.
+      const asgnId = target.assignment_id || target.assignment?.id;
+      let upd = supabase.from('assignment_targets').update({ unit_id: unitId, party_id: partyId });
+      if (asgnId) {
+        upd = upd.eq('assignment_id', asgnId);
+      } else {
+        upd = upd.eq('unit_id', target.unit_id).eq('party_id', target.party_id);
+      }
+      const { error: e } = await upd;
+      if (e) { setError(e.message); setBusy(false); return; }
+
+      // Rewrite the assignment title's location so it reflects the new
+      // apartment + bedroom instead of keeping the stale old name (#4a).
+      // Titles follow the pattern "<Type> · <Unit> · <Bedroom>". We
+      // rebuild from the assignment_type + new labels when we can; if
+      // the title doesn't match that shape we leave it alone to avoid
+      // clobbering a custom name.
+      if (asgnId) {
+        const { data: asgn } = await supabase.from('assignments')
+          .select('id, title, assignment_type').eq('id', asgnId).maybeSingle();
+        if (asgn) {
+          const typeLabel = (asgn.assignment_type || '')
+            .replace(/_/g, ' ')
+            .replace(/\b\w/g, c => c.toUpperCase());
+          // Only auto-rewrite titles that look auto-generated (contain
+          // " · "). Custom titles without that separator are preserved.
+          if ((asgn.title || '').includes(' · ')) {
+            const newTitle = [typeLabel || 'Assignment', newUnitLabel, newPartyLabel]
+              .filter(Boolean).join(' · ');
+            await supabase.from('assignments').update({ title: newTitle }).eq('id', asgnId);
+          }
+        }
+      }
+      setBusy(false);
+      onSaved();
+    } catch (err) {
+      setError(err.message || String(err));
+      setBusy(false);
+    }
   };
 
   return (

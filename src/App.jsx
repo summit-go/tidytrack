@@ -14108,69 +14108,114 @@ function CleaningsReportView({ employee, onSignOut, onOpenMessages, onLogoClick,
 // multiplied by minutes entered per line). This is the "remember".
 // =================================================================
 function PriceBookEditor({ property, onBack }) {
-  const [rows, setRows] = useState([]);
+  // Priceable "subsections" are the real checklist ITEMS (tub, vanity,
+  // fridge inside, ...), keyed `section:item_key` so they match what's
+  // recorded as cleaned. Loaded from the property's template set.
+  const [items, setItems] = useState([]);        // [{key, section, label, sort}]
+  const [prices, setPrices] = useState({});       // key -> {mode, base_amount, rate, default_minutes}
   const [originalKeys, setOriginalKeys] = useState([]);
+  const [expanded, setExpanded] = useState(new Set());
   const [loaded, setLoaded] = useState(false);
+  const [error, setError] = useState(null);
   const [saving, setSaving] = useState(false);
 
-  const COMMON = [
-    { subsection_key: 'tub', label: 'Tub / shower' },
-    { subsection_key: 'toilet', label: 'Toilet' },
-    { subsection_key: 'vanity', label: 'Vanity' },
-    { subsection_key: 'bedroom', label: 'Bedroom' },
-    { subsection_key: 'kitchen', label: 'Kitchen' },
-    { subsection_key: 'living_room', label: 'Living room' },
-  ];
+  const SECTION_LABELS = { bedroom: 'Bedroom', vanity: 'Vanity', bathroom: 'Bathroom', general: 'General / kitchen' };
+  const SECTION_ORDER = ['bathroom', 'vanity', 'general', 'bedroom'];
 
-  const load = async () => {
-    const { data } = await supabase.from('invoice_price_book')
-      .select('*').eq('customer_id', property.id).order('sort_order').order('label');
-    setRows((data || []).map(r => ({ ...r })));
-    setOriginalKeys((data || []).map(r => r.subsection_key));
+  useEffect(() => { (async () => {
+    setLoaded(false); setError(null);
+    try {
+      // Resolve template set: property-specific, else global default.
+      let { data: ownSet } = await supabase.from('section_template_sets')
+        .select('*').eq('customer_id', property.id).limit(1);
+      let chosen = (ownSet && ownSet[0]) || null;
+      if (!chosen) {
+        const { data: def } = await supabase.from('section_template_sets')
+          .select('*').eq('is_default', true).is('customer_id', null).limit(1);
+        chosen = (def && def[0]) || null;
+      }
+      if (!chosen) { setError('No checklist template found for this property.'); setLoaded(true); return; }
+      const { data: vData } = await supabase.from('section_template_variants')
+        .select('*').eq('set_id', chosen.id).order('sort_order');
+      const variants = vData || [];
+      const variantById = Object.fromEntries(variants.map(v => [v.id, v]));
+      const variantIds = variants.map(v => v.id);
+      let itemRows = [];
+      if (variantIds.length) {
+        const { data: iData } = await supabase.from('section_template_items')
+          .select('*').in('variant_id', variantIds).order('sort_order');
+        itemRows = iData || [];
+      }
+      const seen = new Set();
+      const built = [];
+      itemRows.forEach(it => {
+        const v = variantById[it.variant_id];
+        const section = (v?.section_key || 'general').toLowerCase();
+        const key = `${section}:${it.item_key}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        built.push({ key, section, label: resolveItemLabel(key, 'en', {}, it.label || it.item_key), sort: it.sort_order ?? 0 });
+      });
+      setItems(built);
+      const { data: pb } = await supabase.from('invoice_price_book').select('*').eq('customer_id', property.id);
+      const pmap = {};
+      (pb || []).forEach(r => { pmap[r.subsection_key] = { mode: r.mode, base_amount: r.base_amount ?? '', rate: r.rate ?? '', default_minutes: r.default_minutes ?? '' }; });
+      setPrices(pmap);
+      setOriginalKeys((pb || []).map(r => r.subsection_key));
+    } catch (e) { setError(e.message || 'Could not load template.'); }
     setLoaded(true);
-  };
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [property.id]);
+  })(); /* eslint-disable-next-line */ }, [property.id]);
 
-  const newRow = (seed, i) => ({
-    id: `new-${i}-${Math.random().toString(36).slice(2)}`, _new: true,
-    customer_id: property.id,
-    subsection_key: seed?.subsection_key || '',
-    label: seed?.label || '',
-    mode: 'fixed', base_amount: '', rate: '', default_minutes: '', sort_order: i,
-  });
-  const seedCommon = () => setRows(COMMON.map((c, i) => newRow(c, i)));
-  const addRow = () => setRows(rs => [...rs, newRow(null, rs.length)]);
-  const update = (id, patch) => setRows(rs => rs.map(r => r.id === id ? { ...r, ...patch } : r));
-  const remove = (id) => setRows(rs => rs.filter(r => r.id !== id));
+  const setPrice = (key, patch) => setPrices(p => ({
+    ...p,
+    [key]: { mode: 'fixed', base_amount: '', rate: '', default_minutes: '', ...(p[key] || {}), ...patch },
+  }));
+  const clearPrice = (key) => setPrices(p => { const n = { ...p }; delete n[key]; return n; });
+  const toggleSection = (s) => setExpanded(prev => { const n = new Set(prev); n.has(s) ? n.delete(s) : n.add(s); return n; });
+
+  const pricedCount = (sectionItems) => sectionItems.filter(it => {
+    const pr = prices[it.key]; if (!pr) return false;
+    return (pr.mode === 'time' ? parseFloat(pr.rate) : parseFloat(pr.base_amount)) > 0;
+  }).length;
 
   const save = async () => {
     setSaving(true);
-    const payload = rows
-      .filter(r => (r.label || '').trim())
-      .map((r, i) => ({
-        customer_id: property.id,
-        subsection_key: (r.subsection_key || r.label).trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, ''),
-        label: r.label.trim(),
-        mode: r.mode === 'time' ? 'time' : 'fixed',
-        base_amount: r.mode === 'time' ? 0 : (parseFloat(r.base_amount) || 0),
-        rate: r.mode === 'time' ? (parseFloat(r.rate) || 0) : 0,
-        default_minutes: r.mode === 'time' ? (parseFloat(r.default_minutes) || 0) : 0,
-        sort_order: i,
-        updated_at: new Date().toISOString(),
-      }));
-    const keys = payload.map(p => p.subsection_key);
-    const { error } = await supabase.from('invoice_price_book')
-      .upsert(payload, { onConflict: 'customer_id,subsection_key' });
-    if (error) { setSaving(false); alert('Could not save prices: ' + error.message); return; }
-    // Delete any rows the user removed.
-    const removed = originalKeys.filter(k => !keys.includes(k));
-    for (const k of removed) {
-      await supabase.from('invoice_price_book').delete()
-        .eq('customer_id', property.id).eq('subsection_key', k);
+    const payload = [];
+    const keepKeys = [];
+    items.forEach(it => {
+      const pr = prices[it.key];
+      if (!pr) return;
+      const mode = pr.mode === 'time' ? 'time' : 'fixed';
+      const base = mode === 'fixed' ? (parseFloat(pr.base_amount) || 0) : 0;
+      const rate = mode === 'time' ? (parseFloat(pr.rate) || 0) : 0;
+      if (mode === 'fixed' && base === 0) return;   // unpriced — skip
+      if (mode === 'time' && rate === 0) return;
+      keepKeys.push(it.key);
+      payload.push({
+        customer_id: property.id, subsection_key: it.key, label: it.label,
+        mode, base_amount: base, rate,
+        default_minutes: mode === 'time' ? (parseFloat(pr.default_minutes) || 0) : 0,
+        sort_order: 0, updated_at: new Date().toISOString(),
+      });
+    });
+    if (payload.length) {
+      const { error: upErr } = await supabase.from('invoice_price_book').upsert(payload, { onConflict: 'customer_id,subsection_key' });
+      if (upErr) { setSaving(false); alert('Could not save prices: ' + upErr.message); return; }
     }
-    setSaving(false);
-    onBack();
+    const removed = originalKeys.filter(k => !keepKeys.includes(k));
+    for (const k of removed) {
+      await supabase.from('invoice_price_book').delete().eq('customer_id', property.id).eq('subsection_key', k);
+    }
+    setSaving(false); onBack();
   };
+
+  // Group items by section in a friendly order.
+  const bySection = {};
+  items.forEach(it => { (bySection[it.section] = bySection[it.section] || []).push(it); });
+  const sections = [
+    ...SECTION_ORDER.filter(s => bySection[s]),
+    ...Object.keys(bySection).filter(s => !SECTION_ORDER.includes(s)),
+  ];
 
   return (
     <div className="pb-28">
@@ -14186,80 +14231,80 @@ function PriceBookEditor({ property, onBack }) {
       <div className="px-5 pt-6">
         <div className="text-xs uppercase tracking-widest text-stone-400 font-mono mb-2">{property.name}</div>
         <h1 className="text-3xl font-light text-stone-900 tracking-tight mb-2">
-          Subsection <span className="font-serif italic text-amber-700">prices</span>
+          Item <span className="font-serif italic text-amber-700">prices</span>
         </h1>
         <p className="text-sm text-stone-600 mb-6">
-          What each part of a clean costs here. Invoices auto-fill from these and add them up — you can still override any line.
+          Price the items you bill for (tub, vanity, fridge inside…). Each can be a fixed amount or a $/hr rate × minutes. Invoices add up the items that were actually cleaned. Leave the rest blank.
         </p>
 
-        {!loaded ? <Splash text="Loading…" /> : rows.length === 0 ? (
-          <div className="text-center py-10 border-2 border-dashed border-stone-200 rounded-2xl">
-            <div className="text-sm text-stone-500 mb-4">No prices set for this property yet.</div>
-            <button onClick={seedCommon}
-              className="px-4 py-2.5 rounded-xl bg-amber-600 text-white text-sm font-medium inline-flex items-center gap-2">
-              <Plus size={15} /> Start with common subsections
-            </button>
-            <div className="text-xs text-stone-400 mt-3">or add your own below</div>
-            <button onClick={addRow} className="mt-3 text-xs font-mono text-stone-500 underline">Add a subsection</button>
-          </div>
+        {!loaded ? <Splash text="Loading items…" /> : error ? (
+          <div className="p-4 rounded-2xl bg-amber-50 border border-amber-200 text-sm text-amber-900">{error}</div>
+        ) : items.length === 0 ? (
+          <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">No template items found.</div>
         ) : (
           <div className="space-y-3">
-            {rows.map(r => {
-              const isTime = r.mode === 'time';
+            {sections.map(s => {
+              const list = bySection[s].slice().sort((a, b) => a.sort - b.sort);
+              const open = expanded.has(s);
+              const np = pricedCount(list);
               return (
-                <div key={r.id} className="p-3 rounded-2xl bg-white border border-stone-200">
-                  <div className="flex items-center gap-2 mb-3">
-                    <input type="text" value={r.label}
-                      onChange={e => update(r.id, { label: e.target.value })}
-                      placeholder="Subsection name (e.g. Tub / shower)"
-                      className="flex-1 px-3 py-2 rounded-lg border border-stone-300 bg-white text-sm text-stone-900" />
-                    <button onClick={() => remove(r.id)}
-                      className="p-2 rounded-lg text-stone-400 hover:text-red-600 hover:bg-red-50">
-                      <Trash2 size={15} />
-                    </button>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <div className="flex p-0.5 bg-stone-100 rounded-lg">
-                      <button onClick={() => update(r.id, { mode: 'fixed' })}
-                        className={`px-3 py-1.5 rounded-md text-xs font-mono flex items-center gap-1 ${!isTime ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
-                        <DollarSign size={12} /> Fixed
-                      </button>
-                      <button onClick={() => update(r.id, { mode: 'time' })}
-                        className={`px-3 py-1.5 rounded-md text-xs font-mono flex items-center gap-1 ${isTime ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
-                        <Clock size={12} /> Time × rate
-                      </button>
-                    </div>
-                    {!isTime ? (
-                      <label className="flex items-center gap-1 ml-auto text-sm font-mono text-stone-700">
-                        <span className="text-stone-400">$</span>
-                        <input type="number" step="0.01" value={r.base_amount}
-                          onChange={e => update(r.id, { base_amount: e.target.value })}
-                          placeholder="0.00"
-                          className="w-24 px-2 py-1.5 rounded-lg border border-stone-300 bg-white text-right" />
-                      </label>
-                    ) : (
-                      <label className="flex items-center gap-1 ml-auto text-sm font-mono text-stone-700">
-                        <span className="text-stone-400">$</span>
-                        <input type="number" step="0.01" value={r.rate}
-                          onChange={e => update(r.id, { rate: e.target.value })}
-                          placeholder="0.00"
-                          className="w-20 px-2 py-1.5 rounded-lg border border-stone-300 bg-white text-right" />
-                        <span className="text-stone-400 text-xs">/hr</span>
-                      </label>
-                    )}
-                  </div>
-                  {isTime && (
-                    <div className="text-[11px] text-stone-400 font-mono mt-2">
-                      You'll enter minutes per line; the invoice computes minutes × rate.
+                <div key={s} className="rounded-2xl bg-white border border-stone-200 overflow-hidden">
+                  <button onClick={() => toggleSection(s)}
+                    className="w-full flex items-center justify-between px-4 py-3 hover:bg-stone-50">
+                    <span className="font-serif text-base text-stone-900">{SECTION_LABELS[s] || s}</span>
+                    <span className="flex items-center gap-2">
+                      {np > 0 && <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800">{np} priced</span>}
+                      <span className="text-[10px] font-mono text-stone-400">{list.length} items</span>
+                      <ChevronRight size={15} className={`text-stone-400 transition-transform ${open ? 'rotate-90' : ''}`} />
+                    </span>
+                  </button>
+                  {open && (
+                    <div className="border-t border-stone-100 divide-y divide-stone-100">
+                      {list.map(it => {
+                        const pr = prices[it.key];
+                        const isTime = pr?.mode === 'time';
+                        const hasPrice = pr && ((isTime ? parseFloat(pr.rate) : parseFloat(pr.base_amount)) > 0);
+                        return (
+                          <div key={it.key} className="px-4 py-2.5">
+                            <div className="flex items-center gap-2">
+                              <span className={`flex-1 text-sm ${hasPrice ? 'text-stone-900' : 'text-stone-500'}`}>{it.label}</span>
+                              <div className="flex p-0.5 bg-stone-100 rounded-lg">
+                                <button onClick={() => setPrice(it.key, { mode: 'fixed' })}
+                                  className={`px-2 py-1 rounded-md text-[10px] font-mono flex items-center gap-0.5 ${!isTime ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+                                  <DollarSign size={10} />
+                                </button>
+                                <button onClick={() => setPrice(it.key, { mode: 'time' })}
+                                  className={`px-2 py-1 rounded-md text-[10px] font-mono flex items-center gap-0.5 ${isTime ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+                                  <Clock size={10} />
+                                </button>
+                              </div>
+                              {!isTime ? (
+                                <span className="flex items-center gap-0.5 text-sm font-mono text-stone-700">
+                                  <span className="text-stone-400">$</span>
+                                  <input type="number" step="0.01" value={pr?.base_amount ?? ''}
+                                    onChange={e => setPrice(it.key, { base_amount: e.target.value })}
+                                    placeholder="0.00"
+                                    className="w-20 px-2 py-1 rounded-lg border border-stone-300 bg-white text-right" />
+                                </span>
+                              ) : (
+                                <span className="flex items-center gap-0.5 text-sm font-mono text-stone-700">
+                                  <span className="text-stone-400">$</span>
+                                  <input type="number" step="0.01" value={pr?.rate ?? ''}
+                                    onChange={e => setPrice(it.key, { rate: e.target.value })}
+                                    placeholder="0.00"
+                                    className="w-16 px-2 py-1 rounded-lg border border-stone-300 bg-white text-right" />
+                                  <span className="text-stone-400 text-[10px]">/hr</span>
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
                     </div>
                   )}
                 </div>
               );
             })}
-            <button onClick={addRow}
-              className="w-full py-2.5 rounded-xl border border-dashed border-stone-300 text-stone-500 text-sm font-mono flex items-center justify-center gap-2 hover:border-stone-400">
-              <Plus size={15} /> Add subsection
-            </button>
           </div>
         )}
       </div>

@@ -8964,38 +8964,97 @@ function ManagerDashboard({ employee, onSignOut, onOpenMessages, onLogoClick }) 
   const [shifts, setShifts] = useState([]);
   const [view, setView] = useState('shifts');
   const [selectedShift, setSelectedShift] = useState(null);
-  const [filter, setFilter] = useState('week');
   const [subView, setSubView] = useState('list'); // 'list' | 'today'
   const [loaded, setLoaded] = useState(false);
   const [liveSheetOpen, setLiveSheetOpen] = useState(false);
   const showMoney = canSeeMoney(employee);
 
+  // Date filter = a custom range OR all time. Empty range = all time,
+  // and all time really means all (the query below paginates so nothing
+  // gets cut off by the 1000-row cap). Defaults to today.
+  const todayKey = new Date().toISOString().slice(0, 10);
+  const [dateFrom, setDateFrom] = useState(todayKey); // default: today
+  const [dateTo, setDateTo] = useState(todayKey);
+  const [filterCleaners, setFilterCleaners] = useState(new Set());
+  const [filterProperties, setFilterProperties] = useState(new Set());
+  const [filterStatuses, setFilterStatuses] = useState(new Set()); // open|in_progress|completed
+  const [filtersOpen, setFiltersOpen] = useState(false);
+
   const load = useCallback(async () => {
-    const sinceDays = filter === 'today' ? 1 : filter === 'week' ? 7 : 365;
-    const since = new Date(Date.now() - sinceDays * 24 * 60 * 60 * 1000).toISOString();
-    const { data } = await supabase
-      .from('shifts')
-      .select('*, employee:employees(id,name), customer:customers(id,name,property_type,bill_rate_hourly), work_blocks(id, end_time, start_time, bill_rate_at_work, unit:units(label), party:parties(label))')
-      .gte('start_time', since)
-      .eq('is_preview', false)  // Hide preview-mode shifts from the dashboard
-      .order('start_time', { ascending: false });
-    setShifts(data || []); setLoaded(true);
-  }, [filter]);
+    // Paginated load so "all time" returns every shift, not just the
+    // first 1000. Date bounds applied when set; empty = no bound.
+    const PAGE = 1000;
+    let rows = [];
+    for (let from = 0; ; from += PAGE) {
+      let q = supabase
+        .from('shifts')
+        .select('*, employee:employees(id,name), customer:customers(id,name,property_type,bill_rate_hourly), work_blocks(id, end_time, start_time, bill_rate_at_work, unit:units(label), party:parties(label))')
+        .eq('is_preview', false)
+        .order('start_time', { ascending: false })
+        .range(from, from + PAGE - 1);
+      if (dateFrom) q = q.gte('start_time', dateFrom + 'T00:00:00');
+      if (dateTo) q = q.lte('start_time', dateTo + 'T23:59:59');
+      const { data, error } = await q;
+      if (error) break;
+      rows = rows.concat(data || []);
+      if (!data || data.length < PAGE) break;
+      if (from > 100000) break;
+    }
+    setShifts(rows); setLoaded(true);
+  }, [dateFrom, dateTo]);
   useEffect(() => { load(); }, [load, view]);
 
-  if (!loaded) return <Splash text="Loading dashboard…" />;
+  if (!loaded) return <Splash text="Loading shifts…" />;
   if (view === 'detail' && selectedShift) {
     return <ShiftDetail shiftId={selectedShift.id} viewerRole={employee.role} viewerEmployee={employee}
       onBack={() => { setView('shifts'); setSelectedShift(null); load(); }} />;
   }
 
-  const activeCount = shifts.filter(s => !s.end_time).length;
-  const totalHours = shifts.filter(s => s.end_time)
-    .reduce((sum, s) => sum + shiftBillableMs(s), 0);
-  // Total billable across all shifts (only used if showMoney)
+  // Mutually-exclusive shift status.
+  const shiftStatus = (s) => {
+    if (s.end_time) return 'completed';
+    return (s.work_blocks || []).some(b => !b.end_time) ? 'in_progress' : 'open';
+  };
+
+  // Filter chip sources, derived from the loaded set.
+  const cleanerMap = new Map();
+  const propertyMap = new Map();
+  shifts.forEach(s => {
+    if (s.employee?.id) cleanerMap.set(s.employee.id, s.employee.name || '—');
+    if (s.customer?.id) propertyMap.set(s.customer.id, s.customer.name || '—');
+  });
+  const availableCleaners = Array.from(cleanerMap, ([id, name]) => ({ id, name })).sort((a, b) => naturalCompare(a.name, b.name));
+  const availableProperties = Array.from(propertyMap, ([id, name]) => ({ id, name })).sort((a, b) => naturalCompare(a.name, b.name));
+
+  const toggleIn = (setter) => (val) => setter(prev => { const n = new Set(prev); n.has(val) ? n.delete(val) : n.add(val); return n; });
+  const toggleCleaner = toggleIn(setFilterCleaners);
+  const toggleProperty = toggleIn(setFilterProperties);
+  const toggleStatus = toggleIn(setFilterStatuses);
+
+  const filteredShifts = shifts.filter(s => {
+    if (filterCleaners.size && !filterCleaners.has(s.employee?.id)) return false;
+    if (filterProperties.size && !filterProperties.has(s.customer?.id)) return false;
+    if (filterStatuses.size && !filterStatuses.has(shiftStatus(s))) return false;
+    return true;
+  });
+
+  const isAllTime = !dateFrom && !dateTo;
+  // The date is the scope (always shown in the header label), so it
+  // doesn't inflate the "N active" badge — that counts the extra filters.
+  const activeFilterCount = filterCleaners.size + filterProperties.size + filterStatuses.size;
+
+  const clearAll = () => {
+    setFilterCleaners(new Set()); setFilterProperties(new Set()); setFilterStatuses(new Set());
+    setDateFrom(todayKey); setDateTo(todayKey);
+  };
+
+  // Stats — from the filtered set so the numbers track what's shown.
+  const activeCount = filteredShifts.filter(s => !s.end_time).length;
+  const totalHours = filteredShifts.filter(s => s.end_time).reduce((sum, s) => sum + shiftBillableMs(s), 0);
+  const cleanerCount = new Set(filteredShifts.map(s => s.employee?.id).filter(Boolean)).size;
   let totalBillable = 0;
   if (showMoney) {
-    shifts.forEach(s => {
+    filteredShifts.forEach(s => {
       if (!s.end_time) return;
       if (s.customer?.property_type === 'multi_unit') {
         (s.work_blocks || []).forEach(b => {
@@ -9004,47 +9063,117 @@ function ManagerDashboard({ employee, onSignOut, onOpenMessages, onLogoClick }) 
           totalBillable += h * (b.bill_rate_at_work || s.customer?.bill_rate_hourly || 0);
         });
       } else if (s.bill_rate_at_work) {
-        // Simple-property: bill against shift's billable time (idle/adjustments applied)
         const h = shiftBillableHours(s);
         totalBillable += h * s.bill_rate_at_work;
       }
     });
   }
 
+  const fmtD = (k) => k ? new Date(k + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '';
+  const rangeLabel = isAllTime ? 'all time'
+    : (dateFrom && dateTo) ? `${fmtD(dateFrom)} – ${fmtD(dateTo)}`
+    : dateFrom ? `since ${fmtD(dateFrom)}`
+    : `through ${fmtD(dateTo)}`;
+
+  const chip = (on, onClick, content) => (
+    <button onClick={onClick}
+      className={`px-3 py-1 rounded-full text-xs font-mono flex items-center gap-1.5 ${on ? 'bg-stone-900 text-stone-50' : 'bg-white border border-stone-300 text-stone-600'}`}>
+      {on && <Check size={11} />}{content}
+    </button>
+  );
+
   return (
     <div className="pb-24">
       <Header name={employee.name} onSignOut={onSignOut} role={employee.role} employee={employee} onOpenMessages={onOpenMessages} onLogoClick={onLogoClick} />
       <div className="px-5 pt-6">
-        <div className="text-xs uppercase tracking-widest text-stone-400 font-mono mb-3">
-          {new Date().toLocaleDateString('en-US', { weekday:'long', month:'long', day:'numeric' })}
+        <div className="text-xs uppercase tracking-widest text-stone-400 font-mono mb-4">
+          Shifts · {rangeLabel}
         </div>
-        <h1 className="text-4xl font-light text-stone-900 tracking-tight mb-6">
-          Dash<span className="font-serif italic text-amber-700">board</span>
-        </h1>
-        <div className="grid grid-cols-2 gap-3 mb-6">
+        <div className="grid grid-cols-2 gap-3 mb-5">
           <StatCard label="On the clock" value={activeCount} unit="now" highlight={activeCount > 0}
             onClick={() => setLiveSheetOpen(true)} />
-          <StatCard label={`${filter === 'today' ? 'Today' : filter === 'week' ? 'Week' : 'Total'} hours`} value={fmtTimeShort(totalHours)} />
+          <StatCard label="Hours" value={fmtTimeShort(totalHours)} />
           {showMoney ? (
             <StatCard label="Billable" value={fmtMoney(totalBillable)} accent />
           ) : (
-            <StatCard label="Shifts" value={shifts.length} unit="logged" />
+            <StatCard label="Shifts" value={filteredShifts.length} unit="logged" />
           )}
-          <StatCard label="Active" value={activeCount} unit="cleaners"
-            onClick={() => setLiveSheetOpen(true)} />
+          <StatCard label="Cleaners" value={cleanerCount} unit="worked" />
+        </div>
+
+        {/* Filters — time, cleaner, property, status all live here now */}
+        <div className="mb-2">
+          <button onClick={() => setFiltersOpen(o => !o)}
+            className={`w-full flex items-center justify-between px-3 py-2 rounded-xl border transition-colors ${activeFilterCount > 0 ? 'bg-amber-50 border-amber-300 text-amber-900' : 'bg-white border-stone-200 text-stone-600 hover:border-stone-400'}`}>
+            <span className="flex items-center gap-2 text-sm font-medium">
+              <Filter size={15} /> Filters{activeFilterCount > 0 ? ` · ${activeFilterCount} active` : ''}
+            </span>
+            <ChevronRight size={16} className={`transition-transform ${filtersOpen ? 'rotate-90' : ''}`} />
+          </button>
+          {filtersOpen && (
+            <div className="mt-2 p-3 rounded-2xl bg-stone-50 border border-stone-200 space-y-4">
+              <div>
+                <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1.5">Dates</div>
+                <div className="flex gap-2 items-center flex-wrap">
+                  <button onClick={() => { setDateFrom(''); setDateTo(''); }}
+                    className={`px-3 py-1 rounded-full text-xs font-mono ${isAllTime ? 'bg-stone-900 text-stone-50' : 'bg-white border border-stone-300 text-stone-600'}`}>
+                    All time
+                  </button>
+                  <label className="flex items-center gap-1 text-xs font-mono text-stone-600">
+                    <span className="text-stone-400">From</span>
+                    <input type="date" value={dateFrom} max={dateTo || undefined} onChange={e => setDateFrom(e.target.value)}
+                      className="px-2 py-1 rounded-lg border border-stone-300 bg-white text-stone-700" />
+                  </label>
+                  <label className="flex items-center gap-1 text-xs font-mono text-stone-600">
+                    <span className="text-stone-400">To</span>
+                    <input type="date" value={dateTo} min={dateFrom || undefined} onChange={e => setDateTo(e.target.value)}
+                      className="px-2 py-1 rounded-lg border border-stone-300 bg-white text-stone-700" />
+                  </label>
+                </div>
+                <div className="text-[10px] font-mono text-stone-400 mt-1">
+                  Pick a From/To range, or All time to show everything.
+                </div>
+              </div>
+
+              {availableCleaners.length > 0 && (
+                <div>
+                  <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1.5">Cleaner</div>
+                  <div className="flex gap-1.5 flex-wrap">
+                    {availableCleaners.map(c => chip(filterCleaners.has(c.id), () => toggleCleaner(c.id), c.name))}
+                  </div>
+                </div>
+              )}
+
+              {availableProperties.length > 1 && (
+                <div>
+                  <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1.5">Property</div>
+                  <div className="flex gap-1.5 flex-wrap">
+                    {availableProperties.map(p => chip(filterProperties.has(p.id), () => toggleProperty(p.id), p.name))}
+                  </div>
+                </div>
+              )}
+
+              <div>
+                <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1.5">Status</div>
+                <div className="flex gap-1.5 flex-wrap">
+                  {chip(filterStatuses.has('open'), () => toggleStatus('open'), <><span className="w-1.5 h-1.5 rounded-full bg-stone-400" />Open</>)}
+                  {chip(filterStatuses.has('in_progress'), () => toggleStatus('in_progress'), <><span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />In progress</>)}
+                  {chip(filterStatuses.has('completed'), () => toggleStatus('completed'), <><span className="w-1.5 h-1.5 rounded-full bg-stone-500" />Completed</>)}
+                </div>
+              </div>
+
+              {activeFilterCount > 0 && (
+                <button onClick={clearAll} className="text-[10px] uppercase tracking-wider font-mono text-amber-700 hover:text-amber-900">
+                  Clear all filters
+                </button>
+              )}
+            </div>
+          )}
         </div>
       </div>
-      <div className="px-5 mb-4 flex gap-2">
-        {[{ id:'today', label:'Today' }, { id:'week', label:'This week' }, { id:'all', label:'All time' }].map(f => (
-          <button key={f.id} onClick={() => setFilter(f.id)}
-            className={`px-4 py-2 rounded-full text-sm font-medium transition-colors ${filter === f.id ? 'bg-stone-900 text-stone-50' : 'bg-stone-100 text-stone-600'}`}>
-            {f.label}
-          </button>
-        ))}
-      </div>
 
-      {/* New: sub-view toggle (List of shifts vs grouped-by-apartment) */}
-      <div className="px-5 mb-4 flex gap-2 border-b border-stone-200 pb-3">
+      {/* Sub-view toggle (List of shifts vs grouped-by-apartment) */}
+      <div className="px-5 mb-4 mt-2 flex gap-2 border-b border-stone-200 pb-3">
         <button onClick={() => setSubView('list')}
           className={`px-3 py-1.5 rounded-full text-xs font-mono uppercase tracking-wider transition-colors ${subView === 'list' ? 'bg-stone-200 text-stone-900' : 'text-stone-500'}`}>
           Shift list
@@ -9056,10 +9185,10 @@ function ManagerDashboard({ employee, onSignOut, onOpenMessages, onLogoClick }) 
       </div>
 
       {subView === 'today' ? (
-        <GroupedByPartyView shifts={shifts} showMoney={showMoney}
+        <GroupedByPartyView shifts={filteredShifts} showMoney={showMoney}
           onOpenShift={(s) => { setSelectedShift(s); setView('detail'); }} />
       ) : (
-        <ShiftList shifts={shifts} showMoney={showMoney}
+        <ShiftList shifts={filteredShifts} showMoney={showMoney}
           onOpen={(s) => { setSelectedShift(s); setView('detail'); }} />
       )}
 

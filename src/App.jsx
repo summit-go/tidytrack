@@ -8964,7 +8964,8 @@ function ManagerDashboard({ employee, onSignOut, onOpenMessages, onLogoClick }) 
   const [shifts, setShifts] = useState([]);
   const [view, setView] = useState('shifts');
   const [selectedShift, setSelectedShift] = useState(null);
-  const [subView, setSubView] = useState('list'); // 'list' | 'today'
+  const [subView, setSubView] = useState('cleaner'); // 'cleaner' | 'list' | 'today'
+  const [selectedCleanerId, setSelectedCleanerId] = useState(null);
   const [loaded, setLoaded] = useState(false);
   const [liveSheetOpen, setLiveSheetOpen] = useState(false);
   const showMoney = canSeeMoney(employee);
@@ -9046,6 +9047,7 @@ function ManagerDashboard({ employee, onSignOut, onOpenMessages, onLogoClick }) 
   const clearAll = () => {
     setFilterCleaners(new Set()); setFilterProperties(new Set()); setFilterStatuses(new Set());
     setDateFrom(todayKey); setDateTo(todayKey);
+    setSelectedCleanerId(null);
   };
 
   // Stats — from the filtered set so the numbers track what's shown.
@@ -9162,29 +9164,39 @@ function ManagerDashboard({ employee, onSignOut, onOpenMessages, onLogoClick }) 
                 </div>
               </div>
 
-              {activeFilterCount > 0 && (
-                <button onClick={clearAll} className="text-[10px] uppercase tracking-wider font-mono text-amber-700 hover:text-amber-900">
-                  Clear all filters
+              <div className="pt-1 border-t border-stone-200">
+                <button onClick={clearAll}
+                  className="text-[11px] uppercase tracking-wider font-mono text-amber-700 hover:text-amber-900 flex items-center gap-1.5">
+                  <X size={12} /> Reset all filters
                 </button>
-              )}
+              </div>
             </div>
           )}
         </div>
       </div>
 
-      {/* Sub-view toggle (List of shifts vs grouped-by-apartment) */}
-      <div className="px-5 mb-4 mt-2 flex gap-2 border-b border-stone-200 pb-3">
-        <button onClick={() => setSubView('list')}
-          className={`px-3 py-1.5 rounded-full text-xs font-mono uppercase tracking-wider transition-colors ${subView === 'list' ? 'bg-stone-200 text-stone-900' : 'text-stone-500'}`}>
-          Shift list
+      {/* Sub-view toggle */}
+      <div className="px-5 mb-4 mt-2 flex gap-2 border-b border-stone-200 pb-3 overflow-x-auto">
+        <button onClick={() => { setSubView('cleaner'); }}
+          className={`px-3 py-1.5 rounded-full text-xs font-mono uppercase tracking-wider whitespace-nowrap transition-colors ${subView === 'cleaner' ? 'bg-stone-200 text-stone-900' : 'text-stone-500'}`}>
+          By cleaner
         </button>
-        <button onClick={() => setSubView('today')}
-          className={`px-3 py-1.5 rounded-full text-xs font-mono uppercase tracking-wider transition-colors ${subView === 'today' ? 'bg-stone-200 text-stone-900' : 'text-stone-500'}`}>
-          By apartment / party
+        <button onClick={() => { setSubView('list'); setSelectedCleanerId(null); }}
+          className={`px-3 py-1.5 rounded-full text-xs font-mono uppercase tracking-wider whitespace-nowrap transition-colors ${subView === 'list' ? 'bg-stone-200 text-stone-900' : 'text-stone-500'}`}>
+          All shifts
+        </button>
+        <button onClick={() => { setSubView('today'); setSelectedCleanerId(null); }}
+          className={`px-3 py-1.5 rounded-full text-xs font-mono uppercase tracking-wider whitespace-nowrap transition-colors ${subView === 'today' ? 'bg-stone-200 text-stone-900' : 'text-stone-500'}`}>
+          By apartment
         </button>
       </div>
 
-      {subView === 'today' ? (
+      {subView === 'cleaner' ? (
+        <ShiftsByCleanerView shifts={filteredShifts} showMoney={showMoney}
+          selectedCleanerId={selectedCleanerId}
+          onSelectCleaner={setSelectedCleanerId}
+          onOpenShift={(s) => { setSelectedShift(s); setView('detail'); }} />
+      ) : subView === 'today' ? (
         <GroupedByPartyView shifts={filteredShifts} showMoney={showMoney}
           onOpenShift={(s) => { setSelectedShift(s); setView('detail'); }} />
       ) : (
@@ -9262,6 +9274,166 @@ function ShiftList({ shifts, showMoney, onOpen }) {
           })}
         </div>
       )}
+    </div>
+  );
+}
+
+// Per-shift billable helper shared by the cleaner views.
+function shiftBillableAmount(s, showMoney) {
+  if (!showMoney || !s.end_time) return 0;
+  if (s.customer?.property_type === 'multi_unit') {
+    return (s.work_blocks || []).reduce((sum, b) => {
+      if (!b.end_time) return sum;
+      const h = (new Date(b.end_time) - new Date(b.start_time)) / 1000 / 3600;
+      return sum + h * (b.bill_rate_at_work || s.customer?.bill_rate_hourly || 0);
+    }, 0);
+  }
+  if (s.bill_rate_at_work) return shiftBillableHours(s) * s.bill_rate_at_work;
+  return 0;
+}
+
+const localDayKey = (ts) => {
+  const d = new Date(ts);
+  return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+};
+
+// Shifts grouped BY CLEANER. Level 1 = one card per cleaner (no matter how
+// many shifts they logged). Drill in = that cleaner's work grouped BY DAY
+// (a day with two shifts is one row, not two). A day expands to its
+// shift(s); clicking a shift opens the full detail.
+function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCleaner, onOpenShift }) {
+  const [expandedDays, setExpandedDays] = useState(new Set());
+  const toggleDay = (k) => setExpandedDays(prev => {
+    const n = new Set(prev); n.has(k) ? n.delete(k) : n.add(k); return n;
+  });
+
+  // ---- Level 1: cleaner cards -----------------------------------------
+  if (!selectedCleanerId) {
+    const byCleaner = new Map();
+    shifts.forEach(s => {
+      const id = s.employee?.id;
+      if (!id) return;
+      if (!byCleaner.has(id)) byCleaner.set(id, { id, name: s.employee?.name || '—', shifts: [] });
+      byCleaner.get(id).shifts.push(s);
+    });
+    const cleaners = Array.from(byCleaner.values()).sort((a, b) => naturalCompare(a.name, b.name));
+    return (
+      <div className="px-5">
+        <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-3">Cleaners ({cleaners.length})</div>
+        {cleaners.length === 0 ? (
+          <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">No one worked in this period.</div>
+        ) : (
+          <div className="space-y-2">
+            {cleaners.map(c => {
+              const dayKeys = new Set(c.shifts.map(s => localDayKey(s.start_time)));
+              const totalMs = c.shifts.filter(s => s.end_time).reduce((sum, s) => sum + shiftBillableMs(s), 0);
+              const active = c.shifts.some(s => !s.end_time);
+              const billable = c.shifts.reduce((sum, s) => sum + shiftBillableAmount(s, showMoney), 0);
+              const sorted = c.shifts.map(s => new Date(s.start_time)).sort((a, b) => a - b);
+              const dayCount = dayKeys.size;
+              const rangeLabel = dayCount <= 1
+                ? fmtDate(sorted[0])
+                : `${fmtDate(sorted[0])} – ${fmtDate(sorted[sorted.length - 1])}`;
+              return (
+                <button key={c.id} onClick={() => onSelectCleaner(c.id)}
+                  className="w-full text-left p-4 rounded-2xl bg-white border border-stone-200 hover:border-stone-400 transition-colors">
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="flex items-center gap-2">
+                      {active && <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />}
+                      <span className="font-serif text-lg text-stone-900">{c.name}</span>
+                    </div>
+                    <ChevronRight size={16} className="text-stone-400" />
+                  </div>
+                  <div className="flex items-center justify-between text-xs text-stone-500 font-mono">
+                    <span>{rangeLabel} · {c.shifts.length} {c.shifts.length === 1 ? 'shift' : 'shifts'} · {dayCount} {dayCount === 1 ? 'day' : 'days'} · {fmtTimeShort(totalMs)}</span>
+                    {showMoney && billable > 0 && <span className="text-emerald-700 font-medium">{fmtMoney(billable)}</span>}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // ---- Level 2: one cleaner's days ------------------------------------
+  const cShifts = shifts.filter(s => s.employee?.id === selectedCleanerId);
+  const name = cShifts[0]?.employee?.name || 'Cleaner';
+  const byDay = new Map();
+  cShifts.forEach(s => {
+    const k = localDayKey(s.start_time);
+    if (!byDay.has(k)) byDay.set(k, { key: k, date: new Date(s.start_time), shifts: [] });
+    byDay.get(k).shifts.push(s);
+  });
+  const days = Array.from(byDay.values()).sort((a, b) => b.date - a.date);
+
+  return (
+    <div className="px-5">
+      <button onClick={() => onSelectCleaner(null)}
+        className="flex items-center gap-1.5 text-xs font-mono text-stone-500 hover:text-stone-800 mb-3">
+        <ArrowLeft size={14} /> All cleaners
+      </button>
+      <div className="flex items-center gap-2 mb-3">
+        {cShifts.some(s => !s.end_time) && <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />}
+        <span className="font-serif text-2xl text-stone-900">{name}</span>
+        <span className="text-xs text-stone-400 font-mono">· {days.length} {days.length === 1 ? 'day' : 'days'}</span>
+      </div>
+      <div className="space-y-2">
+        {days.map(d => {
+          const totalMs = d.shifts.filter(s => s.end_time).reduce((sum, s) => sum + shiftBillableMs(s), 0);
+          const billable = d.shifts.reduce((sum, s) => sum + shiftBillableAmount(s, showMoney), 0);
+          const blocks = d.shifts.reduce((n, s) => n + (s.work_blocks?.length || 0), 0);
+          const active = d.shifts.some(s => !s.end_time);
+          const multi = d.shifts.length > 1;
+          const expanded = expandedDays.has(d.key);
+          const props = Array.from(new Set(d.shifts.map(s => s.customer?.name).filter(Boolean)));
+          return (
+            <div key={d.key} className="rounded-2xl bg-white border border-stone-200 overflow-hidden">
+              <button
+                onClick={() => { if (multi) toggleDay(d.key); else onOpenShift(d.shifts[0]); }}
+                className="w-full text-left p-4 hover:bg-stone-50 transition-colors">
+                <div className="flex items-center justify-between mb-1.5">
+                  <div className="flex items-center gap-2">
+                    {active && <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />}
+                    <span className="font-serif text-base text-stone-900">{fmtDate(d.date)}</span>
+                  </div>
+                  {multi
+                    ? <ChevronRight size={15} className={`text-stone-400 transition-transform ${expanded ? 'rotate-90' : ''}`} />
+                    : <ChevronRight size={15} className="text-stone-400" />}
+                </div>
+                {props.length > 0 && (
+                  <div className="text-xs text-amber-700 font-mono mb-1.5 flex items-center gap-1.5">
+                    <Building2 size={11} /> {props.join(' · ')}
+                  </div>
+                )}
+                <div className="flex items-center justify-between text-xs text-stone-500 font-mono">
+                  <span>{d.shifts.length} {d.shifts.length === 1 ? 'shift' : 'shifts'} · {blocks} {blocks === 1 ? 'block' : 'blocks'} · {fmtTimeShort(totalMs)}</span>
+                  {showMoney && billable > 0 && <span className="text-emerald-700 font-medium">{fmtMoney(billable)}</span>}
+                </div>
+              </button>
+              {multi && expanded && (
+                <div className="border-t border-stone-100 divide-y divide-stone-100">
+                  {d.shifts.slice().sort((a, b) => new Date(a.start_time) - new Date(b.start_time)).map(s => {
+                    const dur = s.end_time ? shiftBillableMs(s) : (new Date() - new Date(s.start_time));
+                    const sb = shiftBillableAmount(s, showMoney);
+                    return (
+                      <button key={s.id} onClick={() => onOpenShift(s)}
+                        className="w-full text-left px-4 py-2.5 hover:bg-stone-50 flex items-center justify-between text-xs font-mono text-stone-600">
+                        <span>{fmtClock(s.start_time)} {s.end_time ? `— ${fmtClock(s.end_time)}` : '— active'} · {fmtTimeShort(dur)}</span>
+                        <span className="flex items-center gap-2">
+                          {showMoney && sb > 0 && <span className="text-emerald-700">{fmtMoney(sb)}</span>}
+                          <ChevronRight size={13} className="text-stone-400" />
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }

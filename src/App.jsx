@@ -91,6 +91,14 @@ function buildTargetTitle(unitLabel, partyLabel) {
   return `${u} - ${p}`;
 }
 
+// Abbreviate "Bedroom" -> "BR" in space-tight card labels so titles like
+// "B1-201 · Bedroom 4" fit without wrapping. Display-only — the stored
+// party label is untouched. e.g. "Bedroom 4" -> "BR 4".
+function shortenBedroom(label) {
+  if (!label) return label;
+  return String(label).replace(/\bBedroom\b/gi, 'BR');
+}
+
 const SUPPORTED_TRANSLATE_LANGUAGES = [
   { code: 'es', label: 'Spanish' },
   { code: 'en', label: 'English' },
@@ -5571,7 +5579,7 @@ function FloorFocusList({ propertyId, workBlocks, onGoToBedroom }) {
       <button onClick={() => go(c)}
         className="w-full flex items-center justify-between gap-2 px-3 py-2.5 rounded-xl bg-white border border-stone-200 hover:border-stone-900 active:scale-98 transition-all text-left">
         <span className="flex items-center gap-2 min-w-0">
-          <span className="italic text-stone-800 truncate">{c.partyLabel}</span>
+          <span className="italic text-stone-800 truncate">{shortenBedroom(c.partyLabel)}</span>
           {isNow && <span className="text-[9px] uppercase tracking-wider font-mono font-bold px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-800 border border-amber-300 flex-shrink-0">Now</span>}
         </span>
         <ChevronRight size={15} className="text-stone-400 flex-shrink-0" />
@@ -5599,7 +5607,7 @@ function FloorFocusList({ propertyId, workBlocks, onGoToBedroom }) {
           <div className="space-y-1">
             {blocked.map((b, i) => (
               <div key={i} className="text-xs text-stone-700 font-mono">
-                <span className="font-bold">{b.unitLabel}</span> · {b.partyLabel}
+                <span className="font-bold">{b.unitLabel}</span> · {shortenBedroom(b.partyLabel)}
               </div>
             ))}
           </div>
@@ -5654,7 +5662,7 @@ function FloorFocusList({ propertyId, workBlocks, onGoToBedroom }) {
               <span className="text-[10px] uppercase tracking-wider font-mono text-emerald-700 font-bold">Next up</span>
               <span className="font-bold text-stone-900">{nextUp.unitLabel}</span>
               <span className="text-stone-400">·</span>
-              <span className="italic text-stone-700 truncate">{nextUp.partyLabel}</span>
+              <span className="italic text-stone-700 truncate">{shortenBedroom(nextUp.partyLabel)}</span>
             </span>
             <ChevronRight size={15} className="text-stone-400 flex-shrink-0" />
           </button>
@@ -24616,7 +24624,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                     // React key suffix. The map key is partyId::asgnId
                     // so two assignments at one bedroom stay separate.
                     const pid = bed.partyId || 'no-party';
-                    const bedLabel = bed.party?.label || (pid === 'no-party' ? 'Unassigned' : pid);
+                    const bedLabel = shortenBedroom(bed.party?.label || (pid === 'no-party' ? 'Unassigned' : pid));
                     const sectionCounts = {
                       bedroom: bed.sectionItems.bedroom.length,
                       vanity: bed.sectionItems.vanity.length,
@@ -24807,7 +24815,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                           {/* === ASSIGNMENT TITLE + TYPE + SECTION BREAKDOWN === */}
                           <div className="mb-2">
                             <div className="font-serif text-sm text-stone-700">
-                              {firstTarget?.assignment?.title || 'Cleaning assignment'}
+                              {shortenBedroom(firstTarget?.assignment?.title) || 'Cleaning assignment'}
                             </div>
                             {firstTarget?.assignment?.assignment_type && (
                               <div className="mt-1">

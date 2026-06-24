@@ -2102,9 +2102,9 @@ function RequestItemsModal({ section, templateSetId, bathroomVariant, generalVar
       // Step 1: load all variants for this template_set scoped to
       // the section the cleaner is requesting in.
       const { data: variants } = await supabase.from('section_template_variants')
-        .select('id, section, variant_key')
+        .select('id, section_key, variant_key')
         .eq('set_id', templateSetId)
-        .eq('section', section);
+        .eq('section_key', section);
       // Step 2: filter to just the variant assigned for this section
       // at this bedroom. Bathroom uses bathroom_variant (e.g. 'tub'
       // vs 'toilet'); General uses general_variant (a/b/c/d); Bedroom

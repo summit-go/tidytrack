@@ -14101,6 +14101,172 @@ function CleaningsReportView({ employee, onSignOut, onOpenMessages, onLogoClick,
   );
 }
 
+// =================================================================
+// PRICE BOOK EDITOR — per-property "subsection" prices the invoice
+// generator reads to auto-price each line. Each subsection is either
+// a FIXED base price (e.g. tub = $22.50) or TIME-based (a $/hr rate
+// multiplied by minutes entered per line). This is the "remember".
+// =================================================================
+function PriceBookEditor({ property, onBack }) {
+  const [rows, setRows] = useState([]);
+  const [originalKeys, setOriginalKeys] = useState([]);
+  const [loaded, setLoaded] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  const COMMON = [
+    { subsection_key: 'tub', label: 'Tub / shower' },
+    { subsection_key: 'toilet', label: 'Toilet' },
+    { subsection_key: 'vanity', label: 'Vanity' },
+    { subsection_key: 'bedroom', label: 'Bedroom' },
+    { subsection_key: 'kitchen', label: 'Kitchen' },
+    { subsection_key: 'living_room', label: 'Living room' },
+  ];
+
+  const load = async () => {
+    const { data } = await supabase.from('invoice_price_book')
+      .select('*').eq('customer_id', property.id).order('sort_order').order('label');
+    setRows((data || []).map(r => ({ ...r })));
+    setOriginalKeys((data || []).map(r => r.subsection_key));
+    setLoaded(true);
+  };
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, [property.id]);
+
+  const newRow = (seed, i) => ({
+    id: `new-${i}-${Math.random().toString(36).slice(2)}`, _new: true,
+    customer_id: property.id,
+    subsection_key: seed?.subsection_key || '',
+    label: seed?.label || '',
+    mode: 'fixed', base_amount: '', rate: '', default_minutes: '', sort_order: i,
+  });
+  const seedCommon = () => setRows(COMMON.map((c, i) => newRow(c, i)));
+  const addRow = () => setRows(rs => [...rs, newRow(null, rs.length)]);
+  const update = (id, patch) => setRows(rs => rs.map(r => r.id === id ? { ...r, ...patch } : r));
+  const remove = (id) => setRows(rs => rs.filter(r => r.id !== id));
+
+  const save = async () => {
+    setSaving(true);
+    const payload = rows
+      .filter(r => (r.label || '').trim())
+      .map((r, i) => ({
+        customer_id: property.id,
+        subsection_key: (r.subsection_key || r.label).trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, ''),
+        label: r.label.trim(),
+        mode: r.mode === 'time' ? 'time' : 'fixed',
+        base_amount: r.mode === 'time' ? 0 : (parseFloat(r.base_amount) || 0),
+        rate: r.mode === 'time' ? (parseFloat(r.rate) || 0) : 0,
+        default_minutes: r.mode === 'time' ? (parseFloat(r.default_minutes) || 0) : 0,
+        sort_order: i,
+        updated_at: new Date().toISOString(),
+      }));
+    const keys = payload.map(p => p.subsection_key);
+    const { error } = await supabase.from('invoice_price_book')
+      .upsert(payload, { onConflict: 'customer_id,subsection_key' });
+    if (error) { setSaving(false); alert('Could not save prices: ' + error.message); return; }
+    // Delete any rows the user removed.
+    const removed = originalKeys.filter(k => !keys.includes(k));
+    for (const k of removed) {
+      await supabase.from('invoice_price_book').delete()
+        .eq('customer_id', property.id).eq('subsection_key', k);
+    }
+    setSaving(false);
+    onBack();
+  };
+
+  return (
+    <div className="pb-28">
+      <div className="flex items-center justify-between gap-3 px-5 py-4 border-b border-stone-200 bg-white sticky top-0 z-10">
+        <button onClick={onBack} className="flex items-center gap-2 text-stone-700 text-sm">
+          <ArrowLeft size={16} /> Back
+        </button>
+        <button onClick={save} disabled={saving}
+          className="px-4 py-2 rounded-xl bg-stone-900 text-stone-50 text-sm font-medium disabled:opacity-50">
+          {saving ? 'Saving…' : 'Save prices'}
+        </button>
+      </div>
+      <div className="px-5 pt-6">
+        <div className="text-xs uppercase tracking-widest text-stone-400 font-mono mb-2">{property.name}</div>
+        <h1 className="text-3xl font-light text-stone-900 tracking-tight mb-2">
+          Subsection <span className="font-serif italic text-amber-700">prices</span>
+        </h1>
+        <p className="text-sm text-stone-600 mb-6">
+          What each part of a clean costs here. Invoices auto-fill from these and add them up — you can still override any line.
+        </p>
+
+        {!loaded ? <Splash text="Loading…" /> : rows.length === 0 ? (
+          <div className="text-center py-10 border-2 border-dashed border-stone-200 rounded-2xl">
+            <div className="text-sm text-stone-500 mb-4">No prices set for this property yet.</div>
+            <button onClick={seedCommon}
+              className="px-4 py-2.5 rounded-xl bg-amber-600 text-white text-sm font-medium inline-flex items-center gap-2">
+              <Plus size={15} /> Start with common subsections
+            </button>
+            <div className="text-xs text-stone-400 mt-3">or add your own below</div>
+            <button onClick={addRow} className="mt-3 text-xs font-mono text-stone-500 underline">Add a subsection</button>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {rows.map(r => {
+              const isTime = r.mode === 'time';
+              return (
+                <div key={r.id} className="p-3 rounded-2xl bg-white border border-stone-200">
+                  <div className="flex items-center gap-2 mb-3">
+                    <input type="text" value={r.label}
+                      onChange={e => update(r.id, { label: e.target.value })}
+                      placeholder="Subsection name (e.g. Tub / shower)"
+                      className="flex-1 px-3 py-2 rounded-lg border border-stone-300 bg-white text-sm text-stone-900" />
+                    <button onClick={() => remove(r.id)}
+                      className="p-2 rounded-lg text-stone-400 hover:text-red-600 hover:bg-red-50">
+                      <Trash2 size={15} />
+                    </button>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <div className="flex p-0.5 bg-stone-100 rounded-lg">
+                      <button onClick={() => update(r.id, { mode: 'fixed' })}
+                        className={`px-3 py-1.5 rounded-md text-xs font-mono flex items-center gap-1 ${!isTime ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+                        <DollarSign size={12} /> Fixed
+                      </button>
+                      <button onClick={() => update(r.id, { mode: 'time' })}
+                        className={`px-3 py-1.5 rounded-md text-xs font-mono flex items-center gap-1 ${isTime ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+                        <Clock size={12} /> Time × rate
+                      </button>
+                    </div>
+                    {!isTime ? (
+                      <label className="flex items-center gap-1 ml-auto text-sm font-mono text-stone-700">
+                        <span className="text-stone-400">$</span>
+                        <input type="number" step="0.01" value={r.base_amount}
+                          onChange={e => update(r.id, { base_amount: e.target.value })}
+                          placeholder="0.00"
+                          className="w-24 px-2 py-1.5 rounded-lg border border-stone-300 bg-white text-right" />
+                      </label>
+                    ) : (
+                      <label className="flex items-center gap-1 ml-auto text-sm font-mono text-stone-700">
+                        <span className="text-stone-400">$</span>
+                        <input type="number" step="0.01" value={r.rate}
+                          onChange={e => update(r.id, { rate: e.target.value })}
+                          placeholder="0.00"
+                          className="w-20 px-2 py-1.5 rounded-lg border border-stone-300 bg-white text-right" />
+                        <span className="text-stone-400 text-xs">/hr</span>
+                      </label>
+                    )}
+                  </div>
+                  {isTime && (
+                    <div className="text-[11px] text-stone-400 font-mono mt-2">
+                      You'll enter minutes per line; the invoice computes minutes × rate.
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+            <button onClick={addRow}
+              className="w-full py-2.5 rounded-xl border border-dashed border-stone-300 text-stone-500 text-sm font-mono flex items-center justify-center gap-2 hover:border-stone-400">
+              <Plus size={15} /> Add subsection
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function MoneyView({ employee, onSignOut, onOpenMessages, onLogoClick }) {
   const [subTab, setSubTab] = useState('invoices'); // 'invoices' | 'payroll' | 'reports'
 
@@ -14144,6 +14310,7 @@ function InvoiceView({ employee, onSignOut, onOpenMessages, onLogoClick, topTogg
   const [invoice, setInvoice] = useState(null);
   const [busy, setBusy] = useState(false);
   const [showZeros, setShowZeros] = useState(true);
+  const [showPriceBook, setShowPriceBook] = useState(false);
   useEffect(() => { (async () => {
     const { data } = await supabase.from('customers').select('*')
       .eq('property_type', 'multi_unit').eq('active', true).order('name');
@@ -14187,6 +14354,10 @@ function InvoiceView({ employee, onSignOut, onOpenMessages, onLogoClick, topTogg
     setInvoice({ property, units: invoiceUnits, grandTotal, totalHours, start, end });
     setBusy(false);
   };
+  if (showPriceBook && selectedId) {
+    const property = properties.find(p => p.id === selectedId);
+    return <PriceBookEditor property={property} onBack={() => setShowPriceBook(false)} />;
+  }
   if (invoice) {
     return <InvoicePreview invoice={invoice} showZeros={showZeros} setShowZeros={setShowZeros}
       onBack={() => setInvoice(null)} onPrint={() => window.print()} />;
@@ -14231,6 +14402,12 @@ function InvoiceView({ employee, onSignOut, onOpenMessages, onLogoClick, topTogg
             className="w-full py-4 rounded-2xl bg-stone-900 text-stone-50 font-medium active:scale-98 disabled:opacity-50 flex items-center justify-center gap-2">
             <FileText size={18} /> {busy ? 'Generating…' : 'Generate invoice'}
           </button>
+          {selectedId && (
+            <button onClick={() => setShowPriceBook(true)}
+              className="w-full py-3 rounded-2xl bg-white border border-stone-300 text-stone-700 text-sm font-medium active:scale-98 flex items-center justify-center gap-2 hover:border-stone-400">
+              <DollarSign size={16} /> Edit subsection prices for this property
+            </button>
+          )}
         </div>
       </div>
     </div>

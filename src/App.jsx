@@ -1979,9 +1979,104 @@ function useItemLabelOverrides(propertyId, locale, employee) {
 
 // Resolve a label for an item key in the current locale.
 // Lookup order: override > dictionary > humanized English fallback.
+// English display labels for template item keys, keyed by
+// `${section}:${item_key}`. Sourced from section_template_items so the
+// app shows the clean stored label (e.g. 'Breezeway sweep') instead of
+// a humanized key ('Bw sweep'). Falls through to humanize for any key
+// not listed here.
+const PICKER_EN = {
+  'general:sink_short': 'Sink',
+  'general:faucet_short': 'Faucet',
+  'general:under_sink': 'Under sink',
+  'general:counter_tops': 'Counter tops',
+  'general:cupboards_oiled': 'Cupboards oiled',
+  'general:drawers_oiled': 'Drawers oiled',
+  'general:kitchen_floor': 'Kitchen floor',
+  'general:table_chairs_short': 'Table/chairs',
+  'general:kitchen_walls_short': 'Walls',
+  'general:baseboards': 'Baseboards',
+  'general:lt_switches': 'Light switches',
+  'general:lt_fixtures': 'Light fixtures',
+  'general:trash': 'Trash',
+  'vanity:sink': 'Sink',
+  'vanity:faucet': 'Faucet',
+  'vanity:counter': 'Counter',
+  'vanity:mirror': 'Mirror',
+  'vanity:lt_switch': 'Light switch',
+  'vanity:walls': 'Walls',
+  'vanity:floor': 'Floor',
+  'vanity:baseboard': 'Baseboard',
+  'vanity:door_knob': 'Door knob',
+  'bathroom:tub': 'Tub',
+  'bathroom:faucet': 'Faucet',
+  'bathroom:tub_walls': 'Tub walls',
+  'bathroom:walls_above_tub': 'Walls above tub',
+  'bathroom:door_knob': 'Door knobs',
+  'bathroom:light_fixtures': 'Light fixtures',
+  'bathroom:lt_switch': 'Light switches',
+  'bedroom:vacuum_entire': 'Vacuum',
+  'bedroom:dust': 'Dust',
+  'bedroom:lt_switch': 'Light switch',
+  'bedroom:dr_knob': 'Door knob',
+  'bedroom:top_df_ct': 'Top of door frame & closet trim',
+  'bedroom:window_blinds': 'Blinds',
+  'bedroom:window_track': 'Window track',
+  'bedroom:window_sill': 'Window sill',
+  'bedroom:window_walls': 'Window walls',
+  'bedroom:baseboard': 'Baseboard',
+  'general:lrm_vac': 'LRM vac',
+  'general:hw_mop_vac': 'HW mop/vac',
+  'general:lrm_hw_bb': 'LRM/HW baseboards',
+  'general:lrm_hw_walls': 'LRM/HW walls',
+  'general:dust_furniture': 'Dust furniture',
+  'general:lamp_shades': 'Lamp/shades',
+  'general:under_cushions': 'Under cushions',
+  'general:lt_switches': 'Light switches',
+  'general:blinds': 'Blinds',
+  'general:patio_door': 'Patio door',
+  'general:track': 'Track',
+  'general:patio_walls': 'Patio walls',
+  'general:patio_floor': 'Patio floor',
+  'general:top_water_heater': 'Top of water heater',
+  'general:heater_closet_floor': 'Heater closet floor',
+  'general:stove_top_short': 'Stove top',
+  'general:hood': 'Hood',
+  'general:under_burners': 'Under burners',
+  'general:rings_spill_pan': 'Rings/spill pan',
+  'general:oven_inside_short': 'Oven inside',
+  'general:oven_outside': 'Oven outside',
+  'general:oven_handle': 'Oven handle',
+  'general:drawer_handle': 'Drawer handle',
+  'general:drawer': 'Drawer',
+  'general:dishwasher_inside': 'Dishwasher inside',
+  'general:dishwasher_outside': 'Dishwasher outside',
+  'general:vents_4': 'Vents in hallway (4)',
+  'bathroom:toilet_ring': 'Toilet/ring',
+  'bathroom:fan_vent': 'Fan vent',
+  'bathroom:walls': 'Walls',
+  'bathroom:baseboard': 'Baseboard',
+  'bathroom:floor': 'Floor',
+  'bathroom:ceiling_mold': 'Ceiling mold',
+  'general:fridge_top': 'Fridge outside/top',
+  'general:fridge_drawers': 'Fridge inside/drawers',
+  'general:fridge_gasket': 'Fridge rubber gasket',
+  'general:freezer_inside': 'Freezer inside',
+  'general:freezer_gasket': 'Freezer rubber gasket',
+  'general:microwave_short': 'Microwave',
+  'general:bw_sweep': 'Breezeway sweep',
+  'general:bw_vacuum': 'Breezeway vacuum',
+  'general:bw_walls': 'Breezeway walls',
+  'general:fd_inside': 'Front door inside',
+  'general:fd_outside': 'Front door outside',
+  'general:doorbell': 'Doorbell',
+  'general:bw_ceiling': 'Breezeway ceiling around front door',
+  'general:front_room_closet': 'Front room closet',
+};
+
 function resolveItemLabel(key, locale, overrides, englishFallback) {
   if (overrides && overrides.has(key)) return overrides.get(key);
   if (locale === 'es' && PICKER_ES[key]) return PICKER_ES[key];
+  if (PICKER_EN[key]) return PICKER_EN[key];
   return englishFallback;
 }
 
@@ -2101,7 +2196,7 @@ function RequestItemsModal({ section, templateSetId, bathroomVariant, generalVar
                       {checked && <Check size={13} className="text-white" />}
                     </div>
                     <span className="text-sm text-stone-900">
-                      {humanize(item.item_key)}
+                      {PICKER_EN[`${section}:${item.item_key}`] || humanize(item.item_key)}
                     </span>
                   </button>
                 );
@@ -2747,6 +2842,10 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
               // same reason.
               requested_by: employee?.id || null,
               requested_at: nowISO,
+              // Enters the owner's approval queue. The item is still
+              // immediately cleanable (status 'pending' above) — approval
+              // is after-the-fact, it doesn't gate the cleaner.
+              request_status: 'pending',
             }));
             const { error } = await supabase.from('assignment_targets').insert(rows);
             if (error) {
@@ -6840,12 +6939,13 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
         <button
           onClick={() => {
             if (totalActive > 1 && onLeaveBlock) return onLeaveBlock();
+            if (!confirm('Finish ALL assignments in this bedroom?\n\nThis closes out every assignment here and ends your work block. Anything not marked done will be completed automatically.')) return;
             return onFinish();
           }}
           disabled={busy}
           className="w-full py-4 rounded-2xl bg-amber-700 hover:bg-amber-800 text-stone-50 text-base font-bold flex items-center justify-center gap-2 active:scale-98 transition-transform disabled:opacity-50">
           <Check size={18} />
-          {totalActive > 1 && onLeaveBlock ? "I'm finished here (others stay)" : 'Finished entire assignment'}
+          {totalActive > 1 && onLeaveBlock ? "I'm finished in this bedroom (others stay)" : 'Finished All Assignments'}
         </button>
         {totalActive > 1 && onLeaveBlock && (
           <div className="text-[11px] text-stone-500 text-center mt-1.5 font-mono">
@@ -23293,10 +23393,6 @@ function AssignmentsPanel({ propertyId, employee, refreshKey, onGoToBedroom, onO
           className={`flex-1 min-w-fit py-2 px-2 rounded-lg text-xs font-medium transition-colors whitespace-nowrap ${tab === 'pending' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
           Pending{counts.pending > 0 && ` (${counts.pending})`}
         </button>
-        <button onClick={() => setTab('suggested')}
-          className={`flex-1 min-w-fit py-2 px-2 rounded-lg text-xs font-medium transition-colors whitespace-nowrap ${tab === 'suggested' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
-          Suggested
-        </button>
         <button onClick={() => setTab('paused')}
           className={`flex-1 min-w-fit py-2 px-2 rounded-lg text-xs font-medium transition-colors whitespace-nowrap ${tab === 'paused' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
           Paused{counts.paused > 0 && ` (${counts.paused})`}
@@ -23332,19 +23428,9 @@ function AssignmentsPanel({ propertyId, employee, refreshKey, onGoToBedroom, onO
           </button>
         )}
       </div>
-      {tab === 'suggested' ? (
-        // Suggested tab uses a different content component — it doesn't
-        // list pending targets, it ranks BEDROOMS by proximity to the
-        // cleaner's last work block, same algorithm as the post-finish
-        // NextUpModal but always available.
-        <SuggestedTabContent propertyId={propertyId} employee={employee}
-          onGoToBedroom={onGoToBedroom} onOpenBedroomHistory={onOpenBedroomHistory}
-          onJoinBlock={onJoinBlock} />
-      ) : (
-        <AssignmentTabContent propertyId={propertyId} employee={employee} statusFilter={tab}
-          onUpdate={loadCounts} onGoToBedroom={onGoToBedroom} onOpenBedroomHistory={onOpenBedroomHistory}
-          onJoinBlock={onJoinBlock} />
-      )}
+      <AssignmentTabContent propertyId={propertyId} employee={employee} statusFilter={tab}
+        onUpdate={loadCounts} onGoToBedroom={onGoToBedroom} onOpenBedroomHistory={onOpenBedroomHistory}
+        onJoinBlock={onJoinBlock} />
     </div>
   );
 }
@@ -23851,11 +23937,10 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
   const [statusModal, setStatusModal] = useState(null);
   const [reassignTarget, setReassignTarget] = useState(null);
   const [busy, setBusy] = useState(false);
-  const [buildingFilter, setBuildingFilter] = useState('all'); // 'all' or a building prefix like 'B3'
+  const [filterBuildings, setFilterBuildings] = useState(new Set()); // multi-select building keys; empty = all
   const [collapsedBuildings, setCollapsedBuildings] = useState({}); // { B3: true } = collapsed
   // Floor collapse keyed by `${building}::${floor}`. Default expanded.
   const [collapsedFloors, setCollapsedFloors] = useState({});
-  const [doneSubTab, setDoneSubTab] = useState('dayOf'); // 'dayOf' | 'last3' | 'older'
 
   // Filters — apply on top of the loaded targets
   const [filtersOpen, setFiltersOpen] = useState(false);
@@ -23863,7 +23948,10 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
   // (e.g. "show both Matias and Eli"). Empty Set means "no filter".
   const [filterTypes, setFilterTypes] = useState(new Set());        // assignment_type values
   const [filterCleaners, setFilterCleaners] = useState(new Set());  // employee ids
-  const [filterDays, setFilterDays] = useState(new Set());          // 'today' | 'week' | YYYY-MM-DD strings
+  // Completed-date RANGE filter (Done view). Empty string = no bound on
+  // that side. Replaces the old day-of / last-3 / older quick tabs.
+  const [dateFrom, setDateFrom] = useState(''); // YYYY-MM-DD inclusive start
+  const [dateTo, setDateTo] = useState('');     // YYYY-MM-DD inclusive end
   const [filterCategories, setFilterCategories] = useState(new Set()); // task categories like 'bedroom'
 
   // Track which unit-bundles are expanded on the Pending view
@@ -24245,28 +24333,15 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
       const hit = ids.some(id => filterCleaners.has(id));
       if (!hit) return false;
     }
-    // Day filter (multi-select). 'today' / 'week' / specific date string.
-    // Filters on COMPLETED day (when the work was actually done) so the
-    // owner can see "what got cleaned today" cleanly. Items without a
-    // completed_at are excluded from this filter — they show up under
-    // the Pending tab anyway.
-    if (filterDays.size > 0) {
-      const completed = t.completed_at;
-      const cd = completed ? new Date(completed).toISOString().slice(0, 10) : null;
-      let matched = false;
-      for (const day of filterDays) {
-        if (day === 'today' && cd === todayKey) { matched = true; break; }
-        if (day === 'week') {
-          if (!cd) continue;
-          const d = new Date(cd + 'T00:00:00');
-          const now = new Date(todayKey + 'T00:00:00');
-          const diff = (now - d) / (24 * 60 * 60 * 1000);
-          // Last 7 days (inclusive)
-          if (diff >= 0 && diff <= 7) { matched = true; break; }
-        }
-        if (cd && day === cd) { matched = true; break; }
-      }
-      if (!matched) return false;
+    // Completed-date RANGE filter (Done view). Inclusive on both ends;
+    // a blank side means "no bound". Filters on the day the work was
+    // actually completed. Items without a completed date drop out when
+    // any bound is set (they live under Pending anyway).
+    if (dateFrom || dateTo) {
+      const cd = t.completed_at ? new Date(t.completed_at).toISOString().slice(0, 10) : null;
+      if (!cd) return false;
+      if (dateFrom && cd < dateFrom) return false;
+      if (dateTo && cd > dateTo) return false;
     }
     // Category filter — checks if any task at this bedroom matches
     if (filterCategories.size > 0) {
@@ -24300,7 +24375,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
   const activeFilterCount =
     (filterTypes.size > 0 ? 1 : 0) +
     (filterCleaners.size > 0 ? 1 : 0) +
-    (filterDays.size > 0 ? 1 : 0) +
+    ((dateFrom || dateTo) ? 1 : 0) +
     (filterCategories.size > 0 ? 1 : 0);
 
   // Toggle helpers — add/remove a value from a Set state
@@ -24312,8 +24387,24 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
   });
   const toggleType = toggleSetValue(setFilterTypes);
   const toggleCleaner = toggleSetValue(setFilterCleaners);
-  const toggleDay = toggleSetValue(setFilterDays);
   const toggleCategory = toggleSetValue(setFilterCategories);
+
+  // Owner approval for cleaner-requested items. The work may already be
+  // done — this is an after-the-fact decision (e.g. for billing). Approve
+  // marks the request settled; Reject flags it so it can be excluded.
+  // Acts on the still-pending requests in the passed-in item list.
+  const reviewRequest = async (items, decision) => {
+    const ids = (items || [])
+      .filter(t => t.requested_by && (t.request_status || 'pending') === 'pending')
+      .map(t => t.id);
+    if (ids.length === 0) return;
+    const { error } = await supabase.from('assignment_targets')
+      .update({ request_status: decision })
+      .in('id', ids);
+    if (error) { alert('Could not update request: ' + error.message); return; }
+    load();
+    if (onUpdate) onUpdate();
+  };
 
   // Group targets by building, derived from the unit label (e.g. "B3-205" -> "B3")
   // Targets without a unit go into a "No unit" bucket
@@ -24324,8 +24415,15 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
     buildings[b].push(t);
   });
   const buildingKeys = Object.keys(buildings).sort(naturalCompare);
-  const visibleBuildings = buildingFilter === 'all' ? buildingKeys : buildingKeys.filter(k => k === buildingFilter);
+  const visibleBuildings = filterBuildings.size === 0 ? buildingKeys : buildingKeys.filter(k => filterBuildings.has(k));
   const toggleCollapse = (b) => setCollapsedBuildings(prev => ({ ...prev, [b]: !prev[b] }));
+  const toggleBuilding = (b) => setFilterBuildings(prev => {
+    const next = new Set(prev);
+    if (next.has(b)) next.delete(b); else next.add(b);
+    return next;
+  });
+  // Done-family tabs get the completed-date range picker.
+  const isDoneView = statusFilter === 'done' || statusFilter === 'mine' || statusFilter === 'recheck_passed';
 
   // Count DISTINCT assignments in a target list. Each assignment is an
   // independent job — a cleaning-check and a move-out check at the same
@@ -24566,6 +24664,10 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                       // card so the owner sees there's something new
                       // to approve here.
                       const hasRequestedItems = newItems.some(t => t.requested_by);
+                      const pendingReview = newItems.filter(t => t.requested_by && (t.request_status || 'pending') === 'pending');
+                      const hasPendingReview = pendingReview.length > 0;
+                      const reviewedApproved = newItems.some(t => t.requested_by && t.request_status === 'approved');
+                      const reviewedRejected = newItems.some(t => t.requested_by && t.request_status === 'rejected');
                       const statusOrder = ['pending', 'in_progress', 'paused', 'blocked', 'done'];
                       const dominantStatus =
                         statusOrder.find(s => newItems.some(t => t.status === s)) || 'pending';
@@ -24587,14 +24689,42 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                              still pending. Drops a clear "needs review"
                              signal in front of the owner without
                              interrupting the rest of the card. */}
-                          {hasRequestedItems && (
-                            <div className="mb-2 flex items-center gap-1.5 px-2 py-1 rounded-md bg-amber-100 border border-amber-300">
-                              <span className="w-1.5 h-1.5 rounded-full bg-amber-600 animate-pulse" />
-                              <span className="text-[10px] uppercase tracking-wider font-mono text-amber-900 font-bold">
-                                Cleaner requested items here
-                              </span>
+                          {/* Cleaner request banner — when there are
+                             requests awaiting review, show Approve /
+                             Reject. Once reviewed, it collapses to a
+                             quiet status line. The requested items are
+                             already on the cleaner's list regardless;
+                             this is owner sign-off after the fact. */}
+                          {hasPendingReview ? (
+                            <div className="mb-2 px-2 py-1.5 rounded-md bg-amber-100 border border-amber-300">
+                              <div className="flex items-center gap-1.5 mb-1.5">
+                                <span className="w-1.5 h-1.5 rounded-full bg-amber-600 animate-pulse" />
+                                <span className="text-[10px] uppercase tracking-wider font-mono text-amber-900 font-bold">
+                                  Cleaner requested {pendingReview.length} item{pendingReview.length === 1 ? '' : 's'} — review
+                                </span>
+                              </div>
+                              <div className="flex gap-1.5">
+                                <button onClick={() => reviewRequest(newItems, 'approved')} disabled={busy}
+                                  className="flex-1 py-1 rounded-md bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold flex items-center justify-center gap-1 disabled:opacity-50">
+                                  <Check size={12} /> Approve
+                                </button>
+                                <button onClick={() => reviewRequest(newItems, 'rejected')} disabled={busy}
+                                  className="flex-1 py-1 rounded-md bg-white hover:bg-stone-100 border border-stone-300 text-stone-700 text-[11px] font-bold flex items-center justify-center gap-1 disabled:opacity-50">
+                                  <X size={12} /> Reject
+                                </button>
+                              </div>
                             </div>
-                          )}
+                          ) : hasRequestedItems && (reviewedApproved || reviewedRejected) ? (
+                            <div className="mb-2 flex items-center gap-1.5 px-2 py-1 rounded-md bg-stone-100 border border-stone-200">
+                              {reviewedApproved && !reviewedRejected ? (
+                                <span className="text-[10px] uppercase tracking-wider font-mono text-emerald-700 font-bold flex items-center gap-1"><Check size={11} /> Request approved</span>
+                              ) : reviewedRejected && !reviewedApproved ? (
+                                <span className="text-[10px] uppercase tracking-wider font-mono text-stone-500 font-bold flex items-center gap-1"><X size={11} /> Request rejected</span>
+                              ) : (
+                                <span className="text-[10px] uppercase tracking-wider font-mono text-stone-500 font-bold">Request reviewed</span>
+                              )}
+                            </div>
+                          ) : null}
                           {/* "Who's here" chips — only shows when ANOTHER
                              cleaner has an open workblock at this bedroom.
                              Each chip carries the cleaner's name + section
@@ -24878,49 +25008,25 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
     );
   };
 
-  // For Done: collapsed by default for Older and Archived
+  // Done items are already narrowed by the completed-date range (if any)
+  // up in filteredTargets, so here we just render the list — no more
+  // day-of / last-3 / older sub-tabs.
   const renderDoneBuckets = (items) => {
-    const buckets = bucketByAge(items);
-    const subTabs = [
-      { id: 'dayOf', label: 'Day of',    hint: 'today',  subtitle: 'Completed today',          items: buckets.dayOf },
-      { id: 'last3', label: 'Last 3d',   hint: '1-3d',   subtitle: 'Completed in the last 3 days', items: buckets.last3 },
-      { id: 'older', label: '4+ days',   hint: '4d+',    subtitle: 'Completed 4+ days ago',     items: buckets.older },
-    ];
-    const active = subTabs.find(s => s.id === doneSubTab) || subTabs[0];
-    return (
-      <div>
-        {/* Sub-tab pills */}
-        <div className="flex gap-1 mb-3 bg-stone-100 p-1 rounded-xl">
-          {subTabs.map(s => (
-            <button key={s.id} onClick={() => setDoneSubTab(s.id)}
-              className={`flex-1 py-1.5 px-2 rounded-lg transition-colors ${doneSubTab === s.id ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
-              <div className="text-[11px] font-medium leading-tight">
-                {s.label}
-                {s.items.length > 0 && <span className="ml-1 text-stone-400">({s.items.length})</span>}
-              </div>
-              <div className={`text-[9px] font-mono leading-tight ${doneSubTab === s.id ? 'text-stone-500' : 'text-stone-400'}`}>
-                {s.hint}
-              </div>
-            </button>
-          ))}
+    if (!items || items.length === 0) {
+      return (
+        <div className="text-center py-8 text-stone-400 text-xs border-2 border-dashed border-stone-200 rounded-2xl">
+          Nothing matches these filters.
         </div>
-        <div className="text-[10px] uppercase tracking-wider font-mono text-stone-400 mb-2 px-1">
-          {active.subtitle}
-        </div>
-        {active.items.length === 0 ? (
-          <div className="text-center py-8 text-stone-400 text-xs border-2 border-dashed border-stone-200 rounded-2xl">
-            Nothing in this bucket.
-          </div>
-        ) : renderAssignmentList(active.items)}
-      </div>
-    );
+      );
+    }
+    return renderAssignmentList(items);
   };
 
   return (
     <div>
       {/* Filters bar: toggle to expand, pills inside. Counts active filters
          on the button so the user knows when filters are narrowing things. */}
-      {targets.length > 0 && (availableTypes.length > 1 || availableCleaners.length > 0 || availableCategories.length > 0) && (
+      {targets.length > 0 && (availableTypes.length > 1 || availableCleaners.length > 0 || availableCategories.length > 0 || isDoneView) && (
         <div className="mb-3">
           <button onClick={() => setFiltersOpen(o => !o)}
             className={`w-full flex items-center justify-between px-3 py-2 rounded-xl border transition-colors ${activeFilterCount > 0 ? 'bg-amber-50 border-amber-300 text-amber-900' : 'bg-white border-stone-200 text-stone-600 hover:border-stone-400'}`}>
@@ -24993,47 +25099,41 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                   </div>
                 </div>
               )}
-              {/* Day — multi-select. Filters by COMPLETED day so the
-                 owner sees what got cleaned on the picked day(s). */}
-              <div>
-                <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1">Completed day</div>
-                <div className="flex gap-1.5 flex-wrap items-center">
-                  {[
-                    { id: 'today', label: 'Today' },
-                    { id: 'week',  label: 'Last 7 days' },
-                  ].map(opt => {
-                    const active = filterDays.has(opt.id);
-                    return (
-                      <button key={opt.id} onClick={() => toggleDay(opt.id)}
-                        className={`px-2.5 py-1 rounded-full text-xs font-mono flex items-center gap-1 ${active ? 'bg-stone-900 text-stone-50' : 'bg-white border border-stone-300 text-stone-600'}`}>
-                        {active && <Check size={10} />}
-                        {opt.label}
+              {/* Completed-date RANGE — pick a start and end day. Leave a
+                 side blank for an open-ended range. Only shown on the
+                 Done-family tabs where completed dates exist. */}
+              {isDoneView && (
+                <div>
+                  <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1">Completed between</div>
+                  <div className="flex gap-2 flex-wrap items-center">
+                    <label className="flex items-center gap-1 text-xs font-mono text-stone-600">
+                      <span className="text-stone-400">From</span>
+                      <input type="date" value={dateFrom} max={dateTo || undefined}
+                        onChange={(e) => setDateFrom(e.target.value)}
+                        className="px-2 py-1 rounded-lg border border-stone-300 bg-white text-stone-700" />
+                    </label>
+                    <label className="flex items-center gap-1 text-xs font-mono text-stone-600">
+                      <span className="text-stone-400">To</span>
+                      <input type="date" value={dateTo} min={dateFrom || undefined}
+                        onChange={(e) => setDateTo(e.target.value)}
+                        className="px-2 py-1 rounded-lg border border-stone-300 bg-white text-stone-700" />
+                    </label>
+                    {(dateFrom || dateTo) && (
+                      <button onClick={() => { setDateFrom(''); setDateTo(''); }}
+                        className="px-2.5 py-1 rounded-full text-xs font-mono bg-stone-200 text-stone-600 hover:bg-stone-300">
+                        Clear dates
                       </button>
-                    );
-                  })}
-                  {/* Pick-a-date affordance — wrapped in a label so the
-                     "Pick date" text is clickable and opens the native
-                     date picker. */}
-                  <label className="px-2.5 py-1 rounded-full text-xs font-mono bg-white border border-stone-300 text-stone-600 flex items-center gap-1 cursor-pointer hover:bg-stone-50">
-                    <Calendar size={10} />
-                    <span>Pick date</span>
-                    <input type="date"
-                      onChange={(e) => { if (e.target.value) toggleDay(e.target.value); e.target.value = ''; }}
-                      className="sr-only" />
-                  </label>
-                  {/* Show any selected specific dates as removable chips */}
-                  {Array.from(filterDays).filter(d => d !== 'today' && d !== 'week').map(d => (
-                    <button key={d} onClick={() => toggleDay(d)}
-                      className="px-2.5 py-1 rounded-full text-xs font-mono flex items-center gap-1 bg-stone-900 text-stone-50">
-                      <Check size={10} /> {d}
-                    </button>
-                  ))}
+                    )}
+                  </div>
+                  <div className="text-[10px] font-mono text-stone-400 mt-1">
+                    Leave blank to show all. Pick the same day twice for one day, or a span for a range.
+                  </div>
                 </div>
-              </div>
+              )}
               {activeFilterCount > 0 && (
                 <button onClick={() => {
                   setFilterTypes(new Set()); setFilterCleaners(new Set());
-                  setFilterDays(new Set()); setFilterCategories(new Set());
+                  setDateFrom(''); setDateTo(''); setFilterCategories(new Set());
                 }}
                   className="text-[10px] uppercase tracking-wider font-mono text-amber-700 hover:text-amber-900">
                   Clear all filters
@@ -25044,19 +25144,23 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
         </div>
       )}
 
-      {/* Building filter pills — only show if there's more than 1 building */}
+      {/* Building filter pills — multi-select. Empty = all buildings. */}
       {buildingKeys.length > 1 && (
         <div className="flex gap-1.5 mb-3 overflow-x-auto pb-1 -mx-1 px-1">
-          <button onClick={() => setBuildingFilter('all')}
-            className={`px-3 py-1 rounded-full text-xs font-mono whitespace-nowrap ${buildingFilter === 'all' ? 'bg-stone-900 text-stone-50' : 'bg-stone-100 text-stone-600'}`}>
+          <button onClick={() => setFilterBuildings(new Set())}
+            className={`px-3 py-1 rounded-full text-xs font-mono whitespace-nowrap ${filterBuildings.size === 0 ? 'bg-stone-900 text-stone-50' : 'bg-stone-100 text-stone-600'}`}>
             All ({countBedrooms(filteredTargets)})
           </button>
-          {buildingKeys.map(b => (
-            <button key={b} onClick={() => setBuildingFilter(b)}
-              className={`px-3 py-1 rounded-full text-xs font-mono whitespace-nowrap ${buildingFilter === b ? 'bg-stone-900 text-stone-50' : 'bg-stone-100 text-stone-600'}`}>
-              {b} ({countBedrooms(buildings[b])})
-            </button>
-          ))}
+          {buildingKeys.map(b => {
+            const on = filterBuildings.has(b);
+            return (
+              <button key={b} onClick={() => toggleBuilding(b)}
+                className={`px-3 py-1 rounded-full text-xs font-mono whitespace-nowrap flex items-center gap-1 ${on ? 'bg-stone-900 text-stone-50' : 'bg-stone-100 text-stone-600'}`}>
+                {on && <Check size={10} />}
+                {b === '—' ? 'No unit' : b} ({countBedrooms(buildings[b])})
+              </button>
+            );
+          })}
         </div>
       )}
 

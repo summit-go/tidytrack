@@ -14154,7 +14154,7 @@ function PriceBookEditor({ property, onBack }) {
         const key = `${section}:${it.item_key}`;
         if (seen.has(key)) return;
         seen.add(key);
-        built.push({ key, section, label: resolveItemLabel(key, 'en', {}, it.label || it.item_key), sort: it.sort_order ?? 0 });
+        built.push({ key, section, label: resolveItemLabel(key, 'en', null, it.label || it.item_key), sort: it.sort_order ?? 0 });
       });
       setItems(built);
       const { data: pb } = await supabase.from('invoice_price_book').select('*').eq('customer_id', property.id);

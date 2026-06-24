@@ -2827,19 +2827,21 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
               alert("Cannot request items — no existing assignment found at this bedroom.");
               return;
             }
+            const section = requestModalSection;
             const nowISO = new Date().toISOString();
             const rows = itemKeys.map(key => ({
               assignment_id: hostAssignmentId,
               unit_id: unitId,
               party_id: partyId,
               status: 'pending',
-              template_section: requestModalSection,
-              template_item_key: key,
-              // Flags identifying this as a cleaner request rather than
-              // a template-seeded target. The owner-side approval flow
-              // (next turn) filters by requested_by to find pending
-              // requests; the picker shows a "Requested" badge for the
-              // same reason.
+              template_section: section,
+              // Store the SECTION-PREFIXED key (e.g. 'bathroom:tub', not
+              // 'tub') so it matches every other target in the app —
+              // labels, counts, and dedup all key off this format.
+              template_item_key: key.includes(':') ? key : `${section}:${key}`,
+              // Flags identifying this as a cleaner request. The owner's
+              // approval banner filters by requested_by; the picker shows
+              // a "Requested" badge for the same reason.
               requested_by: employee?.id || null,
               requested_at: nowISO,
               // Enters the owner's approval queue. The item is still
@@ -2853,9 +2855,12 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
               return;
             }
             setRequestModalSection(null);
-            // realtime sync will reload checklistTargets so the new
-            // items appear in the picker as pending. Cleaner picks +
-            // starts them via the normal flow.
+            // Reload right away (don't wait on realtime) so the new
+            // items appear, then open that section so the cleaner sees
+            // them land instead of wondering where they went.
+            await loadChecklistTargets();
+            setPickerTab('not_started');
+            setCategory(section);
           }}
         />
       )}

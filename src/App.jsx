@@ -14287,13 +14287,21 @@ function PriceBookEditor({ property, onBack }) {
                                     className="w-20 px-2 py-1 rounded-lg border border-stone-300 bg-white text-right" />
                                 </span>
                               ) : (
-                                <span className="flex items-center gap-0.5 text-sm font-mono text-stone-700">
+                                <span className="flex items-center gap-1 text-sm font-mono text-stone-700 flex-wrap justify-end">
                                   <span className="text-stone-400">$</span>
                                   <input type="number" step="0.01" value={pr?.rate ?? ''}
                                     onChange={e => setPrice(it.key, { rate: e.target.value })}
                                     placeholder="0.00"
-                                    className="w-16 px-2 py-1 rounded-lg border border-stone-300 bg-white text-right" />
-                                  <span className="text-stone-400 text-[10px]">/hr</span>
+                                    className="w-14 px-2 py-1 rounded-lg border border-stone-300 bg-white text-right" />
+                                  <span className="text-stone-400 text-[10px]">/hr ×</span>
+                                  <input type="number" step="1" value={pr?.default_minutes ?? ''}
+                                    onChange={e => setPrice(it.key, { default_minutes: e.target.value })}
+                                    placeholder="min"
+                                    className="w-12 px-2 py-1 rounded-lg border border-stone-300 bg-white text-right" />
+                                  <span className="text-stone-400 text-[10px]">min =</span>
+                                  <span className="text-emerald-700 font-medium min-w-[52px] text-right">
+                                    ${(((parseFloat(pr?.rate) || 0) * (parseFloat(pr?.default_minutes) || 0)) / 60).toFixed(2)}
+                                  </span>
                                 </span>
                               )}
                             </div>

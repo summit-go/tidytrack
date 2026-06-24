@@ -9106,7 +9106,7 @@ function ManagerDashboard({ employee, onSignOut, onOpenMessages, onLogoClick }) 
           <button onClick={() => setFiltersOpen(o => !o)}
             className={`w-full flex items-center justify-between px-3 py-2 rounded-xl border transition-colors ${activeFilterCount > 0 ? 'bg-amber-50 border-amber-300 text-amber-900' : 'bg-white border-stone-200 text-stone-600 hover:border-stone-400'}`}>
             <span className="flex items-center gap-2 text-sm font-medium">
-              <Filter size={15} /> Filters{activeFilterCount > 0 ? ` · ${activeFilterCount} active` : ''}
+              Filters{activeFilterCount > 0 ? ` · ${activeFilterCount} active` : ''}
             </span>
             <ChevronRight size={16} className={`transition-transform ${filtersOpen ? 'rotate-90' : ''}`} />
           </button>

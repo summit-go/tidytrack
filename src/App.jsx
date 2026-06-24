@@ -8691,12 +8691,15 @@ async function deleteMessagePhoto(path) {
   try { await supabase.storage.from(MESSAGE_BUCKET).remove([path]); } catch {}
 }
 
-function Header({ name, onSignOut, role, employee, onOpenMessages, onLogoClick, onBack, onOpenWhosHere }) {
+function Header({ name, onSignOut, role, employee, onOpenMessages, onLogoClick, onBack, onOpenWhosHere, menuItems }) {
   // Messages icon in header for all signed-in roles (cleaner/manager/owner)
   const showMessagesIcon = !!(onOpenMessages && employee);
   const unread = useUnreadCount({ employee: showMessagesIcon ? employee : null });
   const { locale, setLocale } = useLocale();
   const translateConfigured = isTextTranslateConfigured();
+  // Overflow "⋯" menu — holds occasional owner tools so they don't
+  // clutter the home screen. Only rendered when menuItems are provided.
+  const [menuOpen, setMenuOpen] = useState(false);
 
   const logoBlock = (
     <div className="flex items-center gap-3">
@@ -8797,6 +8800,29 @@ function Header({ name, onSignOut, role, employee, onOpenMessages, onLogoClick, 
             title="Who's here right now">
             <User size={18} />
           </button>
+        )}
+        {menuItems && menuItems.length > 0 && (
+          <div className="relative">
+            <button onClick={() => setMenuOpen(o => !o)}
+              className="relative p-2 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-50"
+              title="More">
+              <MoreVertical size={18} />
+            </button>
+            {menuOpen && (
+              <>
+                <div className="fixed inset-0 z-40" onClick={() => setMenuOpen(false)} />
+                <div className="absolute right-0 mt-2 w-60 z-50 rounded-2xl bg-white border border-stone-200 shadow-xl overflow-hidden py-1">
+                  {menuItems.map((mi, i) => (
+                    <button key={i} onClick={() => { setMenuOpen(false); mi.onClick?.(); }}
+                      className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-stone-50 transition-colors">
+                      {mi.icon && <span className={`flex-shrink-0 ${mi.danger ? 'text-red-600' : 'text-stone-500'}`}>{mi.icon}</span>}
+                      <span className={`text-sm ${mi.danger ? 'text-red-600' : 'text-stone-800'}`}>{mi.label}</span>
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
         )}
         <button onClick={onSignOut} className="text-xs text-stone-300 font-mono hover:text-stone-50">Sign out</button>
       </div>
@@ -17748,6 +17774,9 @@ function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenAssi
   // returns true (beta tester logged in + currently in BETA view).
   const [showActivityTimeline, setShowActivityTimeline] = useState(false);
   const betaEnabled = isBetaFeaturesEnabled(employee);
+  // Who's-where modal — opened from the person icon in the header,
+  // replacing the always-visible panel on the home screen.
+  const [whosWhereOpen, setWhosWhereOpen] = useState(false);
 
   // Load inbox counts
   useEffect(() => {
@@ -17858,7 +17887,13 @@ function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenAssi
 
   return (
     <div className="pb-24">
-      <Header name={employee.name} onSignOut={onSignOut} role={employee.role} employee={employee} onOpenMessages={onOpenMessages} onLogoClick={onLogoClick} />
+      <Header name={employee.name} onSignOut={onSignOut} role={employee.role} employee={employee} onOpenMessages={onOpenMessages} onLogoClick={onLogoClick}
+        onOpenWhosHere={() => setWhosWhereOpen(true)}
+        menuItems={[
+          ...(onOpenAssignedVsCleaned ? [{ icon: <Eye size={18} />, label: 'Assigned vs cleaned', onClick: onOpenAssignedVsCleaned }] : []),
+          ...(betaEnabled ? [{ icon: <Clock size={18} />, label: 'Activity timeline', onClick: () => setShowActivityTimeline(true) }] : []),
+          { icon: <Languages size={18} />, label: 'Label overrides', onClick: () => setShowOverrides(true) },
+        ]} />
       <div className="px-5 pt-6">
         {inboxTotal > 0 && (
           <button onClick={onOpenInbox}
@@ -17884,83 +17919,16 @@ function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenAssi
             <ChevronRight size={18} className="text-stone-400 flex-shrink-0" />
           </button>
         )}
-        {/* Live "who's working right now" widget — auto-refreshes; one
-           card per active work_block across all properties. Owner sees
-           cleaner name, property, bedroom, elapsed time. Empty state
-           appears when no one is on the clock. */}
-        <WhosWherePanel employee={employee} />
-        {/* Quick access to the side-by-side audit view — owner picks
-           a date range and sees what was assigned vs what was
-           actually cleaned, with status symbols per bedroom. */}
-        {onOpenAssignedVsCleaned && (
-          <button onClick={onOpenAssignedVsCleaned}
-            className="w-full mb-5 p-4 rounded-2xl bg-white border-2 border-stone-200 hover:border-stone-400 active:scale-98 transition-all flex items-center justify-between gap-3">
-            <div className="flex items-center gap-3">
-              <div className="w-9 h-9 rounded-full bg-stone-900 text-stone-50 flex items-center justify-center">
-                <Eye size={16} />
-              </div>
-              <div className="text-left">
-                <div className="font-serif text-base text-stone-900">
-                  Assigned vs cleaned
-                </div>
-                <div className="text-xs text-stone-600 font-mono">
-                  Audit what was actually done vs what was sent
-                </div>
-              </div>
-            </div>
-            <ChevronRight size={18} className="text-stone-400 flex-shrink-0" />
-          </button>
-        )}
-        {/* BETA-gated — Activity Timeline. Renders only when the
-           logged-in employee is a beta tester AND currently in BETA
-           view. Amber accent so beta features are visually distinct
-           from production ones. */}
-        {betaEnabled && (
-          <button onClick={() => setShowActivityTimeline(true)}
-            className="w-full mb-5 p-4 rounded-2xl bg-amber-50 border-2 border-amber-300 hover:border-amber-500 active:scale-98 transition-all flex items-center justify-between gap-3">
-            <div className="flex items-center gap-3">
-              <div className="w-9 h-9 rounded-full bg-amber-600 text-stone-50 flex items-center justify-center">
-                <Clock size={16} />
-              </div>
-              <div className="text-left">
-                <div className="font-serif text-base text-stone-900 flex items-center gap-2">
-                  Activity timeline
-                  <span className="text-[8px] uppercase tracking-widest font-mono px-1.5 py-0.5 rounded-full bg-amber-200 text-amber-800">Beta</span>
-                </div>
-                <div className="text-xs text-stone-600 font-mono">
-                  Today's events in chronological order
-                </div>
-              </div>
-            </div>
-            <ChevronRight size={18} className="text-amber-700 flex-shrink-0" />
-          </button>
-        )}
-        {/* Owner-only — manage Spanish label overrides cleaners have
-           saved per property. Lets the owner revert mistakes
-           centrally instead of asking each cleaner to undo their own. */}
-        <button onClick={() => setShowOverrides(true)}
-          className="w-full mb-5 p-4 rounded-2xl bg-white border-2 border-stone-200 hover:border-stone-400 active:scale-98 transition-all flex items-center justify-between gap-3">
-          <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-full bg-stone-900 text-stone-50 flex items-center justify-center">
-              <Languages size={16} />
-            </div>
-            <div className="text-left">
-              <div className="font-serif text-base text-stone-900">
-                Label overrides
-              </div>
-              <div className="text-xs text-stone-600 font-mono">
-                Manage Spanish item names cleaners have edited per property
-              </div>
-            </div>
+        {/* "Who's working now" moved to the person icon in the header.
+           The three occasional tools (Assigned vs cleaned, Activity
+           timeline, Label overrides) moved into the header ⋯ menu — see
+           the menuItems passed to <Header> above. This keeps the home
+           focused on the inbox + the calendar. */}
+        <div className="flex items-center justify-between mb-3 mt-1">
+          <div className="text-xs uppercase tracking-widest text-stone-400 font-mono">
+            Daily browser
           </div>
-          <ChevronRight size={18} className="text-stone-400 flex-shrink-0" />
-        </button>
-        <div className="text-xs uppercase tracking-widest text-stone-400 font-mono mb-3">
-          Daily browser
         </div>
-        <h1 className="text-4xl font-light text-stone-900 tracking-tight mb-6">
-          By <span className="font-serif italic text-amber-700">date</span>
-        </h1>
 
         {/* Month navigator */}
         <div className="flex items-center justify-between mb-4">
@@ -18051,6 +18019,26 @@ function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenAssi
         <ActivityTimelineView
           employee={employee}
           onClose={() => setShowActivityTimeline(false)} />
+      )}
+      {/* Who's-where modal — opened from the header person icon. Reuses
+         the all-properties live panel that used to sit on the home. */}
+      {whosWhereOpen && (
+        <div className="fixed inset-0 z-50 bg-black/40 flex items-end sm:items-center justify-center sm:p-4"
+          onClick={() => setWhosWhereOpen(false)}>
+          <div className="bg-stone-50 w-full sm:max-w-md rounded-t-3xl sm:rounded-3xl max-h-[85vh] overflow-y-auto"
+            onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-5 py-4 border-b border-stone-200 sticky top-0 bg-stone-50 z-10">
+              <div className="font-serif text-lg text-stone-900">Who's where right now</div>
+              <button onClick={() => setWhosWhereOpen(false)}
+                className="p-2 rounded-full hover:bg-stone-200 active:scale-95 transition-transform">
+                <X size={18} className="text-stone-600" />
+              </button>
+            </div>
+            <div className="p-4">
+              <WhosWherePanel employee={employee} />
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

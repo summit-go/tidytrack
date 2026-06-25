@@ -14419,6 +14419,7 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
   const [dueDate, setDueDate] = useState('');
   const [billTo, setBillTo] = useState({ org: '', contact: '', email: '', phone: '', address: '' });
   const [billOpen, setBillOpen] = useState(false);
+  const [diag, setDiag] = useState(null);
 
   useEffect(() => { (async () => {
     setLoading(true);
@@ -14430,22 +14431,35 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
     const { data: unitRows } = await supabase.from('units').select('id,label').eq('customer_id', property.id);
     const unitIds = (unitRows || []).map(u => u.id);
     const unitLabelById = Object.fromEntries((unitRows || []).map(u => [u.id, u.label]));
-    // 3) Done items in range (paginated).
+    // 3) Done items in range (paginated). Resilient: if v41's
+    //    invoiced_on column isn't there yet, retry without that filter.
     let targets = [];
-    if (unitIds.length) {
+    let fetchErr = null;
+    const fetchTargets = async (useInvoiced) => {
+      let rows = []; let err = null;
       const PAGE = 1000;
       for (let from = 0; ; from += PAGE) {
-        const { data, error } = await supabase.from('assignment_targets')
-          .select('id, unit_id, party_id, assignment_id, template_item_key, completed_at, assignment:assignments(id, assignment_type), party:parties(id,label)')
-          .eq('status', 'done').is('deleted_at', null).is('invoiced_on', null)
+        let q = supabase.from('assignment_targets')
+          .select('id, unit_id, party_id, assignment_id, template_item_key, completed_at, status, assignment:assignments(id, assignment_type), party:parties(id,label)')
+          .eq('status', 'done').is('deleted_at', null)
           .in('unit_id', unitIds)
           .gte('completed_at', start + 'T00:00:00').lte('completed_at', end + 'T23:59:59')
           .range(from, from + PAGE - 1);
-        if (error) break;
-        targets = targets.concat(data || []);
+        if (useInvoiced) q = q.is('invoiced_on', null);
+        const { data, error } = await q;
+        if (error) { err = error; break; }
+        rows = rows.concat(data || []);
         if (!data || data.length < PAGE) break;
         if (from > 100000) break;
       }
+      return { rows, err };
+    };
+    if (unitIds.length) {
+      let res = await fetchTargets(true);
+      if (res.err && /invoiced_on|column|does not exist/i.test(res.err.message || '')) {
+        res = await fetchTargets(false);  // v41 not run — fall back
+      }
+      targets = res.rows; fetchErr = res.err;
     }
     // 4) Group by assignment (= one bedroom clean).
     const byAssign = new Map();
@@ -14474,6 +14488,17 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
       return { key: g.aid, unitId: g.unit_id, partyId: g.party_id, label, serviceType: g.type, description: INVOICE_DESCR[g.type] || '', subsections: subs, amountOverride: '', sourceTargetIds: g.targetIds };
     }).filter(l => l.label).sort((a, b) => a.label.localeCompare(b.label, undefined, { numeric: true }));
     setLines(built);
+    // Diagnostics — surfaced in the empty state so we can see where it
+    // breaks (no items found vs found-but-unpriced vs query error).
+    const pricedKeys = Object.keys(book).length;
+    setDiag({
+      units: unitIds.length,
+      doneItems: targets.length,
+      bedrooms: byAssign.size,
+      lines: built.length,
+      pricedKeys,
+      err: fetchErr ? (fetchErr.message || String(fetchErr)) : null,
+    });
     // 6) Next invoice number (last numeric + 1).
     const { data: lastInv } = await supabase.from('invoices').select('invoice_number').order('created_at', { ascending: false }).limit(1);
     const lastNum = parseInt((lastInv && lastInv[0] && lastInv[0].invoice_number) || '', 10);
@@ -14597,8 +14622,23 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
         {/* Lines */}
         <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2">Line items ({lines.length})</div>
         {lines.length === 0 ? (
-          <div className="text-center py-10 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
-            Nothing cleaned in this range — or no items priced yet. Set prices in the price book, or widen the date range.
+          <div className="py-6 px-4 border-2 border-dashed border-stone-200 rounded-2xl text-sm">
+            <div className="text-stone-500 mb-3 text-center">Nothing to bill in this range yet.</div>
+            {diag && (
+              <div className="text-xs font-mono text-stone-500 space-y-1 bg-stone-50 rounded-xl p-3">
+                <div>Units in property: <span className="text-stone-800">{diag.units}</span></div>
+                <div>Cleaned items found in range: <span className="text-stone-800">{diag.doneItems}</span></div>
+                <div>Bedrooms with work: <span className="text-stone-800">{diag.bedrooms}</span></div>
+                <div>Priced items in price book: <span className="text-stone-800">{diag.pricedKeys}</span></div>
+                {diag.err && <div className="text-red-600 break-words">Query error: {diag.err}</div>}
+                <div className="pt-2 text-stone-400">
+                  {diag.units === 0 ? 'This property has no units — generation needs unit/bedroom data.'
+                    : diag.doneItems === 0 ? 'No items were marked done with a completion date in this range. Try widening the dates, or check that these cleans were completed (not just started).'
+                    : diag.pricedKeys === 0 ? 'Items were cleaned, but nothing is priced yet — set prices in the price book.'
+                    : 'Items were cleaned but none matched a priced subsection key. Tell me a cleaned item and I can check the key mapping.'}
+                </div>
+              </div>
+            )}
           </div>
         ) : (
           <div className="space-y-2">

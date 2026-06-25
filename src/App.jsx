@@ -14231,7 +14231,11 @@ function PriceBookEditor({ property, onBack }) {
     if (dr <= 0) {
       await supabase.from('invoice_price_book').delete().eq('customer_id', property.id).eq('subsection_key', '__hourly_rate__');
     }
-    const removed = originalKeys.filter(k => !keepKeys.includes(k));
+    // Only remove template-item keys the user cleared — never touch
+    // learned keys like "__flat__:cleaning_check" that aren't in the
+    // template item list.
+    const templateKeys = new Set(items.map(it => it.key));
+    const removed = originalKeys.filter(k => !keepKeys.includes(k) && templateKeys.has(k));
     for (const k of removed) {
       await supabase.from('invoice_price_book').delete().eq('customer_id', property.id).eq('subsection_key', k);
     }
@@ -14521,6 +14525,22 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
           });
         }
       });
+      // Bedrooms with no itemized failures (cleaning checks where nothing
+      // failed) still get billed — give them one flat "whole bedroom"
+      // line, priced per service type and remembered like any item.
+      if (subs.length === 0) {
+        const flatKey = `__flat__:${g.type || 'clean'}`;
+        const b = book[flatKey];
+        const flatLabel = g.type === 'cleaning_check' ? 'Cleaning check (whole bedroom)'
+          : g.type === 'move_out_check' ? 'Move-out clean (whole bedroom)'
+          : 'Whole bedroom';
+        if (b) {
+          const mode = b.mode === 'time' ? 'time' : 'fixed';
+          subs.push({ key: flatKey, label: b.label || flatLabel, mode, amount: mode === 'fixed' ? (b.base_amount || 0) : '', rate: b.rate || defRate || 0, minutes: b.default_minutes || '', included: true, fromBook: true });
+        } else {
+          subs.push({ key: flatKey, label: flatLabel, mode: 'fixed', amount: '', rate: defRate || 0, minutes: '', included: true, fromBook: false });
+        }
+      }
       subs.sort((a, b) => a.label.localeCompare(b.label));
       return { key: g.aid, unitId: g.unit_id, partyId: g.party_id, label, serviceType: g.type, description: INVOICE_DESCR[g.type] || '', subsections: subs, amountOverride: '', sourceTargetIds: g.targetIds };
     }).filter(l => l.label && l.subsections.length > 0).sort((a, b) => a.label.localeCompare(b.label, undefined, { numeric: true }));
@@ -14958,7 +14978,8 @@ function InvoiceDocument({ invoiceId, data, preview, onBack, onChanged }) {
       </div>
 
       {/* The sheet */}
-      <div className="max-w-[800px] mx-auto bg-white my-4 print:my-0 shadow-sm print:shadow-none px-8 py-8 text-stone-800">
+      <div className="max-w-[800px] mx-auto bg-white my-4 print:my-0 shadow-sm print:shadow-none px-8 py-8 text-stone-800"
+        style={{ WebkitPrintColorAdjust: 'exact', printColorAdjust: 'exact' }}>
         {/* Header */}
         <div className="flex items-start justify-between gap-6 pb-6 border-b border-stone-200">
           <img src={SUMMIT_LOGO_URL} alt="Summit Clean" className="w-28 h-28 object-contain bg-stone-900 rounded-lg p-2" />
@@ -15010,7 +15031,9 @@ function InvoiceDocument({ invoiceId, data, preview, onBack, onChanged }) {
               const amount = parseFloat(l.amount) || 0;
               const price = qty ? amount / qty : amount;
               return (
-                <tr key={l.id} className={i % 2 === 0 ? 'bg-white' : 'bg-stone-50'}>
+                <tr key={l.id}
+                  className={i % 2 === 0 ? 'bg-white' : 'bg-stone-100'}
+                  style={{ WebkitPrintColorAdjust: 'exact', printColorAdjust: 'exact' }}>
                   <td className="px-3 py-2.5 align-top">
                     <div className="font-semibold text-stone-800">{INVOICE_TYPE_LABEL[l.service_type] || 'Cleaning'}</div>
                     <div className="text-stone-700">{l.label}</div>

@@ -14478,12 +14478,25 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
       const label = brm ? `${apt} - ${brm}` : apt;
       const subs = [];
       g.items.forEach(k => {
-        const b = book[k]; if (!b) return;  // only priced items contribute
-        const mode = b.mode === 'time' ? 'time' : 'fixed';
-        const rate = b.rate || defRate || 0;
-        const minutes = b.default_minutes || 0;
-        const amount = mode === 'fixed' ? (b.base_amount || 0) : (rate * minutes / 60);
-        subs.push({ key: k, label: b.label || k, mode, amount, rate, minutes, included: true });
+        const b = book[k];
+        const fallback = resolveItemLabel(k, 'en', null, String(k).split(':').pop());
+        if (b) {
+          const mode = b.mode === 'time' ? 'time' : 'fixed';
+          subs.push({
+            key: k, label: b.label || fallback, mode,
+            amount: mode === 'fixed' ? (b.base_amount || 0) : '',
+            rate: b.rate || defRate || 0,
+            minutes: b.default_minutes || '',
+            included: true, fromBook: true,
+          });
+        } else {
+          // Cleaned but not priced yet — show it so it can be priced here.
+          subs.push({
+            key: k, label: fallback, mode: 'fixed',
+            amount: '', rate: defRate || 0, minutes: '',
+            included: true, fromBook: false,
+          });
+        }
       });
       subs.sort((a, b) => a.label.localeCompare(b.label));
       return { key: g.aid, unitId: g.unit_id, partyId: g.party_id, label, serviceType: g.type, description: INVOICE_DESCR[g.type] || '', subsections: subs, amountOverride: '', sourceTargetIds: g.targetIds };
@@ -14552,6 +14565,22 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
     for (let i = 0; i < allTargetIds.length; i += 200) {
       const chunk = allTargetIds.slice(i, i + 200);
       if (chunk.length) await supabase.from('assignment_targets').update({ invoiced_on: inv.id }).in('id', chunk);
+    }
+    // Learn: any item priced inline that wasn't already in the price book
+    // gets remembered (as a fixed price) for next time.
+    const learnMap = {};
+    lines.forEach(l => (l.subsections || []).forEach(s => {
+      if (!s.fromBook && s.included && s.mode !== 'time' && (parseFloat(s.amount) || 0) > 0) {
+        learnMap[s.key] = {
+          customer_id: property.id, subsection_key: s.key, label: s.label,
+          mode: 'fixed', base_amount: parseFloat(s.amount) || 0, rate: 0, default_minutes: 0,
+          sort_order: 0, updated_at: new Date().toISOString(),
+        };
+      }
+    }));
+    const learnRows = Object.values(learnMap);
+    if (learnRows.length) {
+      await supabase.from('invoice_price_book').upsert(learnRows, { onConflict: 'customer_id,subsection_key' });
     }
     setSaving(false);
     onSaved && onSaved(inv);
@@ -14670,7 +14699,10 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
                             className={`w-5 h-5 rounded-md flex items-center justify-center flex-shrink-0 ${s.included ? 'bg-stone-900 text-white' : 'border border-stone-300 text-transparent'}`}>
                             <Check size={12} />
                           </button>
-                          <span className={`flex-1 text-sm ${s.included ? 'text-stone-800' : 'text-stone-400 line-through'}`}>{s.label}</span>
+                          <span className={`flex-1 text-sm flex items-center gap-1.5 ${s.included ? 'text-stone-800' : 'text-stone-400 line-through'}`}>
+                            {s.label}
+                            {!s.fromBook && <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 font-mono">needs price</span>}
+                          </span>
                           {s.mode === 'time' ? (
                             <span className="flex items-center gap-1 text-xs font-mono text-stone-600">
                               <input type="number" step="1" value={s.minutes}
@@ -14684,7 +14716,8 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
                               <span className="text-stone-400">$</span>
                               <input type="number" step="0.01" value={s.amount}
                                 onChange={e => updateSub(l.key, si, { amount: e.target.value })}
-                                className="w-20 px-2 py-1 rounded-lg border border-stone-300 bg-white text-right" />
+                                placeholder="0.00"
+                                className={`w-20 px-2 py-1 rounded-lg border bg-white text-right ${s.fromBook ? 'border-stone-300' : 'border-amber-300'}`} />
                             </span>
                           )}
                         </div>

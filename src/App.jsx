@@ -14114,6 +14114,7 @@ function PriceBookEditor({ property, onBack }) {
   const [items, setItems] = useState([]);        // [{key, section, label, sort}]
   const [prices, setPrices] = useState({});       // key -> {mode, base_amount, rate, default_minutes}
   const [originalKeys, setOriginalKeys] = useState([]);
+  const [defaultRate, setDefaultRate] = useState(''); // preset $/hr for time items
   const [expanded, setExpanded] = useState(new Set());
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState(null);
@@ -14159,9 +14160,14 @@ function PriceBookEditor({ property, onBack }) {
       setItems(built);
       const { data: pb } = await supabase.from('invoice_price_book').select('*').eq('customer_id', property.id);
       const pmap = {};
-      (pb || []).forEach(r => { pmap[r.subsection_key] = { mode: r.mode, base_amount: r.base_amount ?? '', rate: r.rate ?? '', default_minutes: r.default_minutes ?? '' }; });
+      let dr = '';
+      (pb || []).forEach(r => {
+        if (r.subsection_key === '__hourly_rate__') { dr = r.rate ?? ''; return; }
+        pmap[r.subsection_key] = { mode: r.mode, base_amount: r.base_amount ?? '', rate: r.rate ?? '', default_minutes: r.default_minutes ?? '' };
+      });
       setPrices(pmap);
-      setOriginalKeys((pb || []).map(r => r.subsection_key));
+      setDefaultRate(dr === 0 ? '' : (dr ?? ''));
+      setOriginalKeys((pb || []).filter(r => r.subsection_key !== '__hourly_rate__').map(r => r.subsection_key));
     } catch (e) { setError(e.message || 'Could not load template.'); }
     setLoaded(true);
   })(); /* eslint-disable-next-line */ }, [property.id]);
@@ -14173,9 +14179,12 @@ function PriceBookEditor({ property, onBack }) {
   const clearPrice = (key) => setPrices(p => { const n = { ...p }; delete n[key]; return n; });
   const toggleSection = (s) => setExpanded(prev => { const n = new Set(prev); n.has(s) ? n.delete(s) : n.add(s); return n; });
 
+  // Effective rate for a time item = its own rate, else the preset.
+  const effRate = (pr) => (parseFloat(pr?.rate) || parseFloat(defaultRate) || 0);
+
   const pricedCount = (sectionItems) => sectionItems.filter(it => {
     const pr = prices[it.key]; if (!pr) return false;
-    return (pr.mode === 'time' ? parseFloat(pr.rate) : parseFloat(pr.base_amount)) > 0;
+    return (pr.mode === 'time' ? effRate(pr) : parseFloat(pr.base_amount)) > 0;
   }).length;
 
   const save = async () => {
@@ -14187,7 +14196,7 @@ function PriceBookEditor({ property, onBack }) {
       if (!pr) return;
       const mode = pr.mode === 'time' ? 'time' : 'fixed';
       const base = mode === 'fixed' ? (parseFloat(pr.base_amount) || 0) : 0;
-      const rate = mode === 'time' ? (parseFloat(pr.rate) || 0) : 0;
+      const rate = mode === 'time' ? effRate(pr) : 0;
       if (mode === 'fixed' && base === 0) return;   // unpriced — skip
       if (mode === 'time' && rate === 0) return;
       keepKeys.push(it.key);
@@ -14198,9 +14207,22 @@ function PriceBookEditor({ property, onBack }) {
         sort_order: 0, updated_at: new Date().toISOString(),
       });
     });
+    // Persist the preset hourly rate as a sentinel row (skipped by the
+    // invoice generator). Generators must ignore keys starting with '__'.
+    const dr = parseFloat(defaultRate) || 0;
+    if (dr > 0) {
+      payload.push({
+        customer_id: property.id, subsection_key: '__hourly_rate__', label: 'Default hourly rate',
+        mode: 'time', base_amount: 0, rate: dr, default_minutes: 0, sort_order: -1,
+        updated_at: new Date().toISOString(),
+      });
+    }
     if (payload.length) {
       const { error: upErr } = await supabase.from('invoice_price_book').upsert(payload, { onConflict: 'customer_id,subsection_key' });
       if (upErr) { setSaving(false); alert('Could not save prices: ' + upErr.message); return; }
+    }
+    if (dr <= 0) {
+      await supabase.from('invoice_price_book').delete().eq('customer_id', property.id).eq('subsection_key', '__hourly_rate__');
     }
     const removed = originalKeys.filter(k => !keepKeys.includes(k));
     for (const k of removed) {
@@ -14233,9 +14255,20 @@ function PriceBookEditor({ property, onBack }) {
         <h1 className="text-3xl font-light text-stone-900 tracking-tight mb-2">
           Item <span className="font-serif italic text-amber-700">prices</span>
         </h1>
-        <p className="text-sm text-stone-600 mb-6">
+        <p className="text-sm text-stone-600 mb-4">
           Price the items you bill for (tub, vanity, fridge inside…). Each can be a fixed amount or a $/hr rate × minutes. Invoices add up the items that were actually cleaned. Leave the rest blank.
         </p>
+
+        {/* Preset hourly rate — time items use this so you only type
+           minutes, not the rate, on every item. */}
+        <div className="mb-5 p-3 rounded-2xl bg-amber-50 border border-amber-200 flex items-center gap-2 flex-wrap">
+          <span className="text-xs font-mono uppercase tracking-wider text-amber-800">Default hourly rate</span>
+          <span className="text-amber-700 font-mono">$</span>
+          <input type="number" step="0.01" value={defaultRate}
+            onChange={e => setDefaultRate(e.target.value)} placeholder="0.00"
+            className="w-28 px-3 py-1.5 rounded-lg border border-amber-300 bg-white text-right text-sm font-mono" />
+          <span className="text-[11px] text-amber-700/80 font-mono">/hr — time items use this unless you override one</span>
+        </div>
 
         {!loaded ? <Splash text="Loading items…" /> : error ? (
           <div className="p-4 rounded-2xl bg-amber-50 border border-amber-200 text-sm text-amber-900">{error}</div>
@@ -14263,7 +14296,7 @@ function PriceBookEditor({ property, onBack }) {
                       {list.map(it => {
                         const pr = prices[it.key];
                         const isTime = pr?.mode === 'time';
-                        const hasPrice = pr && ((isTime ? parseFloat(pr.rate) : parseFloat(pr.base_amount)) > 0);
+                        const hasPrice = pr && ((isTime ? effRate(pr) : parseFloat(pr.base_amount)) > 0);
                         return (
                           <div key={it.key} className="px-4 py-2.5">
                             <div className="flex items-center gap-2">
@@ -14279,28 +14312,29 @@ function PriceBookEditor({ property, onBack }) {
                                 </button>
                               </div>
                               {!isTime ? (
-                                <span className="flex items-center gap-0.5 text-sm font-mono text-stone-700">
+                                <span className="flex items-center gap-1 text-sm font-mono text-stone-700">
                                   <span className="text-stone-400">$</span>
                                   <input type="number" step="0.01" value={pr?.base_amount ?? ''}
                                     onChange={e => setPrice(it.key, { base_amount: e.target.value })}
                                     placeholder="0.00"
-                                    className="w-20 px-2 py-1 rounded-lg border border-stone-300 bg-white text-right" />
+                                    className="w-24 px-3 py-1.5 rounded-lg border border-stone-300 bg-white text-right" />
                                 </span>
                               ) : (
-                                <span className="flex items-center gap-1 text-sm font-mono text-stone-700 flex-wrap justify-end">
+                                <span className="flex items-center gap-1.5 text-sm font-mono text-stone-700 flex-wrap justify-end">
                                   <span className="text-stone-400">$</span>
                                   <input type="number" step="0.01" value={pr?.rate ?? ''}
                                     onChange={e => setPrice(it.key, { rate: e.target.value })}
-                                    placeholder="0.00"
-                                    className="w-14 px-2 py-1 rounded-lg border border-stone-300 bg-white text-right" />
-                                  <span className="text-stone-400 text-[10px]">/hr ×</span>
+                                    placeholder={defaultRate ? String(defaultRate) : '0.00'}
+                                    title="Leave blank to use the default rate"
+                                    className="w-20 px-3 py-1.5 rounded-lg border border-stone-300 bg-white text-right" />
+                                  <span className="text-stone-400 text-[11px]">/hr ×</span>
                                   <input type="number" step="1" value={pr?.default_minutes ?? ''}
                                     onChange={e => setPrice(it.key, { default_minutes: e.target.value })}
                                     placeholder="min"
-                                    className="w-12 px-2 py-1 rounded-lg border border-stone-300 bg-white text-right" />
-                                  <span className="text-stone-400 text-[10px]">min =</span>
-                                  <span className="text-emerald-700 font-medium min-w-[52px] text-right">
-                                    ${(((parseFloat(pr?.rate) || 0) * (parseFloat(pr?.default_minutes) || 0)) / 60).toFixed(2)}
+                                    className="w-20 px-3 py-1.5 rounded-lg border border-stone-300 bg-white text-right" />
+                                  <span className="text-stone-400 text-[11px]">min =</span>
+                                  <span className="text-emerald-700 font-medium min-w-[60px] text-right">
+                                    ${((effRate(pr) * (parseFloat(pr?.default_minutes) || 0)) / 60).toFixed(2)}
                                   </span>
                                 </span>
                               )}

@@ -14420,6 +14420,8 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
   const [billTo, setBillTo] = useState({ org: '', contact: '', email: '', phone: '', address: '' });
   const [billOpen, setBillOpen] = useState(false);
   const [diag, setDiag] = useState(null);
+  const [defaultRate, setDefaultRate] = useState(0);
+  const [previewing, setPreviewing] = useState(false);
 
   useEffect(() => { (async () => {
     setLoading(true);
@@ -14427,6 +14429,7 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
     const { data: pb } = await supabase.from('invoice_price_book').select('*').eq('customer_id', property.id);
     let defRate = 0; const book = {};
     (pb || []).forEach(r => { if (r.subsection_key === '__hourly_rate__') { defRate = r.rate || 0; return; } book[r.subsection_key] = r; });
+    setDefaultRate(defRate);
     // 2) Units for this property.
     const { data: unitRows } = await supabase.from('units').select('id,label').eq('customer_id', property.id);
     const unitIds = (unitRows || []).map(u => u.id);
@@ -14586,13 +14589,22 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
       if (chunk.length) await supabase.from('assignment_targets').update({ invoiced_on: inv.id }).in('id', chunk);
     }
     // Learn: any item priced inline that wasn't already in the price book
-    // gets remembered (as a fixed price) for next time.
+    // gets remembered for next time (fixed amount or time rate+minutes).
     const learnMap = {};
     lines.forEach(l => (l.subsections || []).forEach(s => {
-      if (!s.fromBook && s.included && s.mode !== 'time' && (parseFloat(s.amount) || 0) > 0) {
-        learnMap[s.key] = {
+      if (s.fromBook || !s.included) return;
+      if (s.mode === 'time') {
+        const rate = parseFloat(s.rate) || defaultRate || 0;
+        if (rate > 0) learnMap[s.key] = {
           customer_id: property.id, subsection_key: s.key, label: s.label,
-          mode: 'fixed', base_amount: parseFloat(s.amount) || 0, rate: 0, default_minutes: 0,
+          mode: 'time', base_amount: 0, rate, default_minutes: parseFloat(s.minutes) || 0,
+          sort_order: 0, updated_at: new Date().toISOString(),
+        };
+      } else {
+        const amt = parseFloat(s.amount) || 0;
+        if (amt > 0) learnMap[s.key] = {
+          customer_id: property.id, subsection_key: s.key, label: s.label,
+          mode: 'fixed', base_amount: amt, rate: 0, default_minutes: 0,
           sort_order: 0, updated_at: new Date().toISOString(),
         };
       }
@@ -14607,6 +14619,20 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
 
   if (loading) return <Splash text="Building draft…" />;
 
+  if (previewing) {
+    const previewInv = {
+      invoice_number: invoiceNumber, title, invoice_date: invoiceDate, due_date: dueDate, status: 'draft',
+      bill_to_org: billTo.org, bill_to_contact: billTo.contact, bill_to_email: billTo.email,
+      bill_to_phone: billTo.phone, bill_to_address: billTo.address,
+    };
+    const previewLines = lines.map(l => ({
+      id: l.key, label: l.label, service_type: l.serviceType,
+      description: l.description, qty: 1, amount: lineAmount(l),
+    }));
+    return <InvoiceDocument data={{ inv: previewInv, lines: previewLines }} preview
+      onBack={() => setPreviewing(false)} />;
+  }
+
   return (
     <div className="pb-28">
       <div className="flex items-center justify-between gap-3 px-5 py-4 border-b border-stone-200 bg-white sticky top-0 z-10">
@@ -14614,6 +14640,10 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
           <ArrowLeft size={16} /> Back
         </button>
         <div className="flex items-center gap-2">
+          <button onClick={() => setPreviewing(true)}
+            className="px-3 py-2 rounded-xl bg-white border border-stone-300 text-stone-700 text-sm font-medium flex items-center gap-1.5">
+            <Eye size={15} /> Preview
+          </button>
           <button onClick={() => save('draft')} disabled={saving}
             className="px-4 py-2 rounded-xl bg-stone-900 text-stone-50 text-sm font-medium disabled:opacity-50">
             {saving ? 'Saving…' : 'Save draft'}
@@ -14726,22 +14756,38 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
                       {l.subsections.length === 0 ? (
                         <div className="text-xs text-stone-400 font-mono">No priced items detected for this bedroom. Set a line total below, or price its items in the price book.</div>
                       ) : l.subsections.map((s, si) => (
-                        <div key={s.key} className="flex items-center gap-2">
+                        <div key={s.key} className="flex items-center gap-2 flex-wrap">
                           <button onClick={() => updateSub(l.key, si, { included: !s.included })}
                             className={`w-5 h-5 rounded-md flex items-center justify-center flex-shrink-0 ${s.included ? 'bg-stone-900 text-white' : 'border border-stone-300 text-transparent'}`}>
                             <Check size={12} />
                           </button>
-                          <span className={`flex-1 text-sm flex items-center gap-1.5 ${s.included ? 'text-stone-800' : 'text-stone-400 line-through'}`}>
+                          <span className={`flex-1 min-w-[120px] text-sm flex items-center gap-1.5 ${s.included ? 'text-stone-800' : 'text-stone-400 line-through'}`}>
                             {s.label}
                             {!s.fromBook && <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 font-mono">needs price</span>}
                           </span>
+                          <div className="flex p-0.5 bg-stone-100 rounded-lg flex-shrink-0">
+                            <button onClick={() => updateSub(l.key, si, { mode: 'fixed' })}
+                              className={`px-1.5 py-1 rounded-md ${s.mode !== 'time' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+                              <DollarSign size={10} />
+                            </button>
+                            <button onClick={() => updateSub(l.key, si, { mode: 'time', rate: (parseFloat(s.rate) > 0 ? s.rate : (defaultRate || 0)) })}
+                              className={`px-1.5 py-1 rounded-md ${s.mode === 'time' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+                              <Clock size={10} />
+                            </button>
+                          </div>
                           {s.mode === 'time' ? (
                             <span className="flex items-center gap-1 text-xs font-mono text-stone-600">
+                              <span className="text-stone-400">$</span>
+                              <input type="number" step="0.01" value={s.rate}
+                                onChange={e => updateSub(l.key, si, { rate: e.target.value })}
+                                placeholder={defaultRate ? String(defaultRate) : '0.00'}
+                                className="w-14 px-2 py-1 rounded-lg border border-stone-300 bg-white text-right" />
+                              <span className="text-stone-400">×</span>
                               <input type="number" step="1" value={s.minutes}
                                 onChange={e => updateSub(l.key, si, { minutes: e.target.value })}
-                                className="w-14 px-2 py-1 rounded-lg border border-stone-300 bg-white text-right" />
-                              <span className="text-stone-400">min →</span>
-                              <span className="text-stone-800 min-w-[48px] text-right">${subAmount(s).toFixed(2)}</span>
+                                placeholder="min"
+                                className="w-12 px-2 py-1 rounded-lg border border-stone-300 bg-white text-right" />
+                              <span className="text-emerald-700 font-medium min-w-[48px] text-right">${subAmount(s).toFixed(2)}</span>
                             </span>
                           ) : (
                             <span className="flex items-center gap-0.5 text-xs font-mono text-stone-600">
@@ -14812,7 +14858,7 @@ function fmtInvoiceDate(d) {
 // invoice + its lines and renders the polished layout matching the
 // company's PDF, with print / status / delete actions.
 // =================================================================
-function InvoiceDocument({ invoiceId, onBack, onChanged }) {
+function InvoiceDocument({ invoiceId, data, preview, onBack, onChanged }) {
   const [inv, setInv] = useState(null);
   const [lines, setLines] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -14826,7 +14872,11 @@ function InvoiceDocument({ invoiceId, onBack, onChanged }) {
     setLines(lineData || []);
     setLoading(false);
   };
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [invoiceId]);
+  useEffect(() => {
+    if (data) { setInv(data.inv); setLines(data.lines || []); setLoading(false); return; }
+    load();
+    /* eslint-disable-next-line */
+  }, [invoiceId, data]);
 
   const setStatus = async (status) => {
     setWorking(true);
@@ -14860,14 +14910,15 @@ function InvoiceDocument({ invoiceId, onBack, onChanged }) {
       {/* Action bar — hidden when printing */}
       <div className="print:hidden flex items-center justify-between gap-2 px-5 py-3 border-b border-stone-200 bg-white sticky top-0 z-10 flex-wrap">
         <button onClick={onBack} className="flex items-center gap-2 text-stone-700 text-sm">
-          <ArrowLeft size={16} /> Back
+          <ArrowLeft size={16} /> {preview ? 'Back to draft' : 'Back'}
         </button>
         <div className="flex items-center gap-2 flex-wrap">
-          {inv.status !== 'sent' && <button onClick={() => setStatus('sent')} disabled={working} className="px-3 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-medium disabled:opacity-50">Mark sent</button>}
-          {inv.status !== 'paid' && <button onClick={() => setStatus('paid')} disabled={working} className="px-3 py-1.5 rounded-lg bg-emerald-600 text-white text-xs font-medium disabled:opacity-50">Mark paid</button>}
-          {inv.status !== 'draft' && <button onClick={() => setStatus('draft')} disabled={working} className="px-3 py-1.5 rounded-lg bg-white border border-stone-300 text-stone-600 text-xs">Back to draft</button>}
+          {preview && <span className="text-xs font-mono text-amber-700 px-2 py-1 rounded bg-amber-50">Preview — not saved</span>}
+          {!preview && inv.status !== 'sent' && <button onClick={() => setStatus('sent')} disabled={working} className="px-3 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-medium disabled:opacity-50">Mark sent</button>}
+          {!preview && inv.status !== 'paid' && <button onClick={() => setStatus('paid')} disabled={working} className="px-3 py-1.5 rounded-lg bg-emerald-600 text-white text-xs font-medium disabled:opacity-50">Mark paid</button>}
+          {!preview && inv.status !== 'draft' && <button onClick={() => setStatus('draft')} disabled={working} className="px-3 py-1.5 rounded-lg bg-white border border-stone-300 text-stone-600 text-xs">Back to draft</button>}
           <button onClick={() => window.print()} className="px-3 py-1.5 rounded-lg bg-stone-900 text-white text-xs font-medium flex items-center gap-1.5"><FileText size={13} /> Print / PDF</button>
-          <button onClick={del} disabled={working} className="p-1.5 rounded-lg text-stone-400 hover:text-red-600 hover:bg-red-50"><Trash2 size={15} /></button>
+          {!preview && <button onClick={del} disabled={working} className="p-1.5 rounded-lg text-stone-400 hover:text-red-600 hover:bg-red-50"><Trash2 size={15} /></button>}
         </div>
       </div>
 

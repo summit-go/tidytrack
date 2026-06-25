@@ -14403,6 +14403,9 @@ function subAmount(s) {
     : (parseFloat(s.amount) || 0);
 }
 function lineAmount(l) {
+  if (l.overrideMode === 'time') {
+    return ((parseFloat(l.overrideRate) || 0) * (parseFloat(l.overrideMinutes) || 0)) / 60;
+  }
   if (l.amountOverride !== '' && l.amountOverride != null) return parseFloat(l.amountOverride) || 0;
   return (l.subsections || []).filter(s => s.included).reduce((sum, s) => sum + subAmount(s), 0);
 }
@@ -14734,12 +14737,13 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
           </div>
         ) : (
           <div className="space-y-2">
-            {lines.map(l => {
+            {lines.map((l, idx) => {
               const open = expanded.has(l.key);
               const amt = lineAmount(l);
-              const overridden = l.amountOverride !== '' && l.amountOverride != null;
+              const overridden = l.overrideMode === 'time'
+                || (l.amountOverride !== '' && l.amountOverride != null);
               return (
-                <div key={l.key} className="rounded-2xl bg-white border border-stone-200 overflow-hidden">
+                <div key={l.key} className={`rounded-2xl border border-stone-200 overflow-hidden ${idx % 2 === 0 ? 'bg-white' : 'bg-stone-50'}`}>
                   <div className="flex items-center gap-2 px-4 py-3">
                     <button onClick={() => toggleExpand(l.key)} className="flex-1 flex items-center gap-2 text-left">
                       <ChevronRight size={15} className={`text-stone-400 transition-transform ${open ? 'rotate-90' : ''}`} />
@@ -14805,15 +14809,46 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
                         <input value={l.description} onChange={e => updateLine(l.key, { description: e.target.value })}
                           className="w-full px-3 py-2 rounded-lg border border-stone-300 bg-white text-sm text-stone-700" />
                       </div>
-                      <div className="flex items-center justify-between">
-                        <span className="text-[11px] font-mono text-stone-500">Override line total</span>
-                        <span className="flex items-center gap-1 text-sm font-mono">
-                          <span className="text-stone-400">$</span>
-                          <input type="number" step="0.01" value={l.amountOverride}
-                            onChange={e => updateLine(l.key, { amountOverride: e.target.value })}
-                            placeholder={l.subsections.filter(s => s.included).reduce((sum, s) => sum + subAmount(s), 0).toFixed(2)}
-                            className="w-24 px-2 py-1 rounded-lg border border-stone-300 bg-white text-right" />
-                        </span>
+                      <div className="pt-2 border-t border-stone-100">
+                        <div className="flex items-center justify-between mb-2">
+                          <span className="text-[11px] font-mono text-stone-500">Override line total</span>
+                          <div className="flex p-0.5 bg-stone-100 rounded-lg">
+                            <button onClick={() => updateLine(l.key, { overrideMode: 'fixed' })}
+                              className={`px-2 py-1 rounded-md text-[10px] font-mono flex items-center gap-0.5 ${l.overrideMode !== 'time' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+                              <DollarSign size={10} /> Amount
+                            </button>
+                            <button onClick={() => updateLine(l.key, { overrideMode: 'time', overrideRate: (parseFloat(l.overrideRate) > 0 ? l.overrideRate : (defaultRate || 0)) })}
+                              className={`px-2 py-1 rounded-md text-[10px] font-mono flex items-center gap-0.5 ${l.overrideMode === 'time' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+                              <Clock size={10} /> Time × rate
+                            </button>
+                          </div>
+                        </div>
+                        {l.overrideMode === 'time' ? (
+                          <div className="flex items-center justify-end gap-1 text-sm font-mono text-stone-600 flex-wrap">
+                            <span className="text-stone-400">$</span>
+                            <input type="number" step="0.01" value={l.overrideRate || ''}
+                              onChange={e => updateLine(l.key, { overrideRate: e.target.value })}
+                              placeholder={defaultRate ? String(defaultRate) : '0.00'}
+                              className="w-16 px-2 py-1 rounded-lg border border-stone-300 bg-white text-right" />
+                            <span className="text-stone-400 text-xs">/hr ×</span>
+                            <input type="number" step="1" value={l.overrideMinutes || ''}
+                              onChange={e => updateLine(l.key, { overrideMinutes: e.target.value })}
+                              placeholder="min"
+                              className="w-16 px-2 py-1 rounded-lg border border-stone-300 bg-white text-right" />
+                            <span className="text-stone-400 text-xs">min =</span>
+                            <span className="text-emerald-700 font-medium min-w-[56px] text-right">${amt.toFixed(2)}</span>
+                          </div>
+                        ) : (
+                          <div className="flex items-center justify-end">
+                            <span className="flex items-center gap-1 text-sm font-mono">
+                              <span className="text-stone-400">$</span>
+                              <input type="number" step="0.01" value={l.amountOverride}
+                                onChange={e => updateLine(l.key, { amountOverride: e.target.value })}
+                                placeholder={l.subsections.filter(s => s.included).reduce((sum, s) => sum + subAmount(s), 0).toFixed(2)}
+                                className="w-24 px-2 py-1 rounded-lg border border-stone-300 bg-white text-right" />
+                            </span>
+                          </div>
+                        )}
                       </div>
                     </div>
                   )}

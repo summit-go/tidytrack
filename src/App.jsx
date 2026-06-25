@@ -14440,8 +14440,8 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
       const PAGE = 1000;
       for (let from = 0; ; from += PAGE) {
         let q = supabase.from('assignment_targets')
-          .select('id, unit_id, party_id, assignment_id, template_item_key, completed_at, status, assignment:assignments(id, assignment_type), party:parties(id,label)')
-          .eq('status', 'done').is('deleted_at', null)
+          .select('id, unit_id, party_id, assignment_id, template_item_key, completed_at, status, assignment:assignments(id, assignment_type, deleted_at), party:parties(id,label)')
+          .eq('status', 'done')
           .in('unit_id', unitIds)
           .gte('completed_at', start + 'T00:00:00').lte('completed_at', end + 'T23:59:59')
           .range(from, from + PAGE - 1);
@@ -14464,6 +14464,7 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
     // 4) Group by assignment (= one bedroom clean).
     const byAssign = new Map();
     targets.forEach(t => {
+      if (t.assignment && t.assignment.deleted_at) return;  // skip soft-deleted assignments
       const aid = t.assignment_id || `${t.unit_id}:${t.party_id}`;
       if (!byAssign.has(aid)) byAssign.set(aid, { aid, unit_id: t.unit_id, party_id: t.party_id, type: t.assignment?.assignment_type, partyLabel: t.party?.label || '', items: new Set(), targetIds: [] });
       if (t.template_item_key) byAssign.get(aid).items.add(t.template_item_key);

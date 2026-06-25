@@ -14440,7 +14440,7 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
       const PAGE = 1000;
       for (let from = 0; ; from += PAGE) {
         let q = supabase.from('assignment_targets')
-          .select('id, unit_id, party_id, assignment_id, template_item_key, completed_at, status, assignment:assignments(id, assignment_type, deleted_at), party:parties(id,label)')
+          .select('id, unit_id, party_id, assignment_id, template_item_key, template_section, completed_at, status, assignment:assignments(id, assignment_type, deleted_at), party:parties(id,label)')
           .eq('status', 'done')
           .in('unit_id', unitIds)
           .gte('completed_at', start + 'T00:00:00').lte('completed_at', end + 'T23:59:59')
@@ -14463,36 +14463,54 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
     }
     // 4) Group by assignment (= one bedroom clean).
     const byAssign = new Map();
+    const sample = [];
+    let withItemKey = 0, sectionOnly = 0;
     targets.forEach(t => {
       if (t.assignment && t.assignment.deleted_at) return;  // skip soft-deleted assignments
       const aid = t.assignment_id || `${t.unit_id}:${t.party_id}`;
-      if (!byAssign.has(aid)) byAssign.set(aid, { aid, unit_id: t.unit_id, party_id: t.party_id, type: t.assignment?.assignment_type, partyLabel: t.party?.label || '', items: new Set(), targetIds: [] });
-      if (t.template_item_key) byAssign.get(aid).items.add(t.template_item_key);
+      if (!byAssign.has(aid)) byAssign.set(aid, { aid, unit_id: t.unit_id, party_id: t.party_id, type: t.assignment?.assignment_type, partyLabel: t.party?.label || '', items: [], targetIds: [] });
+      const sec = (t.template_section || '').toLowerCase();
+      const itemKey = t.template_item_key || '';
+      // Stored keys are bare ("tub") + a separate section; reconstruct
+      // the full "section:item" key the price book uses. Rows with no
+      // item key are section-level (cleaning-check "rep" rows).
+      const fullKey = itemKey
+        ? (itemKey.includes(':') ? itemKey : (sec ? `${sec}:${itemKey}` : itemKey))
+        : (sec ? `${sec}:__section__` : null);
+      if (fullKey) byAssign.get(aid).items.push({ fullKey, sec, itemKey });
       if (t.id) byAssign.get(aid).targetIds.push(t.id);
+      if (itemKey) withItemKey++; else sectionOnly++;
+      if (sample.length < 20) sample.push(`${sec || '?'} / ${itemKey || '(section)'} [${t.status}]`);
     });
-    // 5) Build priced lines.
+    // 5) Build lines (show every cleaned thing — priced or not).
+    const SEC_LABEL = { bathroom: 'Bathroom', vanity: 'Vanity', general: 'General / kitchen', bedroom: 'Bedroom' };
     const built = Array.from(byAssign.values()).map(g => {
       const unitLabel = unitLabelById[g.unit_id] || '';
       const apt = String(unitLabel).replace(/^B\d+-/i, '').trim();
       const brm = (g.partyLabel.match(/(\d+)\s*$/) || [])[1] || '';
       const label = brm ? `${apt} - ${brm}` : apt;
       const subs = [];
-      g.items.forEach(k => {
-        const b = book[k];
-        const fallback = resolveItemLabel(k, 'en', null, String(k).split(':').pop());
+      const seen = new Set();
+      g.items.forEach(it => {
+        if (seen.has(it.fullKey)) return;
+        seen.add(it.fullKey);
+        const b = book[it.fullKey];
+        const isSection = !it.itemKey;
+        const fallback = isSection
+          ? `Whole ${SEC_LABEL[it.sec] || it.sec || 'section'}`
+          : resolveItemLabel(it.fullKey, 'en', null, it.itemKey);
         if (b) {
           const mode = b.mode === 'time' ? 'time' : 'fixed';
           subs.push({
-            key: k, label: b.label || fallback, mode,
+            key: it.fullKey, label: b.label || fallback, mode,
             amount: mode === 'fixed' ? (b.base_amount || 0) : '',
             rate: b.rate || defRate || 0,
             minutes: b.default_minutes || '',
             included: true, fromBook: true,
           });
         } else {
-          // Cleaned but not priced yet — show it so it can be priced here.
           subs.push({
-            key: k, label: fallback, mode: 'fixed',
+            key: it.fullKey, label: fallback, mode: 'fixed',
             amount: '', rate: defRate || 0, minutes: '',
             included: true, fromBook: false,
           });
@@ -14508,9 +14526,11 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
     setDiag({
       units: unitIds.length,
       doneItems: targets.length,
+      withItemKey, sectionOnly,
       bedrooms: byAssign.size,
       lines: built.length,
       pricedKeys,
+      sample,
       err: fetchErr ? (fetchErr.message || String(fetchErr)) : null,
     });
     // 6) Next invoice number (last numeric + 1).
@@ -14650,6 +14670,17 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
         </div>
 
         {/* Lines */}
+        {diag && (
+          <details className="mb-3 rounded-xl bg-stone-50 border border-stone-200 text-xs">
+            <summary className="px-3 py-2 cursor-pointer font-mono text-stone-500">⚙ Debug — what generation found</summary>
+            <div className="px-3 pb-3 font-mono text-stone-600 space-y-1">
+              <div>units {diag.units} · done rows {diag.doneItems} · with item-key {diag.withItemKey} · section-only {diag.sectionOnly} · bedrooms {diag.bedrooms} · priced-in-book {diag.pricedKeys}</div>
+              {diag.err && <div className="text-red-600 break-words">err: {diag.err}</div>}
+              <div className="text-stone-400 pt-1">sample rows (section / item [status]):</div>
+              {(diag.sample || []).map((s, i) => <div key={i} className="text-stone-700">{s}</div>)}
+            </div>
+          </details>
+        )}
         <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2">Line items ({lines.length})</div>
         {lines.length === 0 ? (
           <div className="py-6 px-4 border-2 border-dashed border-stone-200 rounded-2xl text-sm">

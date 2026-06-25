@@ -14155,7 +14155,14 @@ function PriceBookEditor({ property, onBack }) {
         const key = `${section}:${it.item_key}`;
         if (seen.has(key)) return;
         seen.add(key);
-        built.push({ key, section, label: resolveItemLabel(key, 'en', null, it.label || it.item_key), sort: it.sort_order ?? 0 });
+        built.push({
+          key, section,
+          label: resolveItemLabel(key, 'en', null, it.label || it.item_key),
+          sort: it.sort_order ?? 0,
+          vsort: v?.sort_order ?? 0,
+          vlabel: v?.label || '',
+          vkey: v?.variant_key || '',
+        });
       });
       setItems(built);
       const { data: pb } = await supabase.from('invoice_price_book').select('*').eq('customer_id', property.id);
@@ -14277,9 +14284,21 @@ function PriceBookEditor({ property, onBack }) {
         ) : (
           <div className="space-y-3">
             {sections.map(s => {
-              const list = bySection[s].slice().sort((a, b) => a.sort - b.sort);
+              // Order by variant first, then by the item's own order, so
+              // related items (fridge inside / freezer inside) stay
+              // together instead of interleaving across variants.
+              const list = bySection[s].slice().sort((a, b) =>
+                (a.vsort - b.vsort) || (a.sort - b.sort) || a.label.localeCompare(b.label));
               const open = expanded.has(s);
               const np = pricedCount(list);
+              // Group consecutive items by variant.
+              const groups = [];
+              list.forEach(it => {
+                const last = groups[groups.length - 1];
+                if (last && last.vkey === it.vkey) last.items.push(it);
+                else groups.push({ vkey: it.vkey, vlabel: it.vlabel, items: [it] });
+              });
+              const showSub = groups.length > 1;
               return (
                 <div key={s} className="rounded-2xl bg-white border border-stone-200 overflow-hidden">
                   <button onClick={() => toggleSection(s)}
@@ -14292,8 +14311,16 @@ function PriceBookEditor({ property, onBack }) {
                     </span>
                   </button>
                   {open && (
-                    <div className="border-t border-stone-100 divide-y divide-stone-100">
-                      {list.map(it => {
+                    <div className="border-t border-stone-100">
+                      {groups.map((g, gi) => (
+                        <div key={g.vkey || gi}>
+                          {showSub && g.vlabel && (
+                            <div className="px-4 pt-2.5 pb-1 text-[10px] uppercase tracking-wider font-mono text-amber-700/80 bg-stone-50/60">
+                              {g.vlabel}
+                            </div>
+                          )}
+                          <div className="divide-y divide-stone-100">
+                            {g.items.map(it => {
                         const pr = prices[it.key];
                         const isTime = pr?.mode === 'time';
                         const hasPrice = pr && ((isTime ? effRate(pr) : parseFloat(pr.base_amount)) > 0);
@@ -14341,7 +14368,10 @@ function PriceBookEditor({ property, onBack }) {
                             </div>
                           </div>
                         );
-                      })}
+                            })}
+                          </div>
+                        </div>
+                      ))}
                     </div>
                   )}
                 </div>
@@ -14350,6 +14380,521 @@ function PriceBookEditor({ property, onBack }) {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+// =================================================================
+// INVOICE DRAFT EDITOR (Phase 1b) — generates an editable draft from
+// the items actually cleaned in the period, auto-priced from the
+// property's price book, then lets the owner adjust and save it.
+// =================================================================
+const INVOICE_DESCR = {
+  cleaning_check: 'Cleaned all items failed during cleaning checks',
+  move_out_check: 'Move Out Cleaning',
+  deep: 'Deep clean',
+  reclean: 'Re-clean',
+  standard: 'Standard cleaning',
+};
+
+function subAmount(s) {
+  return s.mode === 'time'
+    ? ((parseFloat(s.rate) || 0) * (parseFloat(s.minutes) || 0) / 60)
+    : (parseFloat(s.amount) || 0);
+}
+function lineAmount(l) {
+  if (l.amountOverride !== '' && l.amountOverride != null) return parseFloat(l.amountOverride) || 0;
+  return (l.subsections || []).filter(s => s.included).reduce((sum, s) => sum + subAmount(s), 0);
+}
+
+function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved }) {
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [lines, setLines] = useState([]);
+  const [expanded, setExpanded] = useState(new Set());
+  const [invoiceNumber, setInvoiceNumber] = useState('');
+  const [title, setTitle] = useState('');
+  const today = new Date().toISOString().split('T')[0];
+  const [invoiceDate, setInvoiceDate] = useState(today);
+  const [dueDate, setDueDate] = useState('');
+  const [billTo, setBillTo] = useState({ org: '', contact: '', email: '', phone: '', address: '' });
+  const [billOpen, setBillOpen] = useState(false);
+
+  useEffect(() => { (async () => {
+    setLoading(true);
+    // 1) Price book for this property (+ preset hourly rate).
+    const { data: pb } = await supabase.from('invoice_price_book').select('*').eq('customer_id', property.id);
+    let defRate = 0; const book = {};
+    (pb || []).forEach(r => { if (r.subsection_key === '__hourly_rate__') { defRate = r.rate || 0; return; } book[r.subsection_key] = r; });
+    // 2) Units for this property.
+    const { data: unitRows } = await supabase.from('units').select('id,label').eq('customer_id', property.id);
+    const unitIds = (unitRows || []).map(u => u.id);
+    const unitLabelById = Object.fromEntries((unitRows || []).map(u => [u.id, u.label]));
+    // 3) Done items in range (paginated).
+    let targets = [];
+    if (unitIds.length) {
+      const PAGE = 1000;
+      for (let from = 0; ; from += PAGE) {
+        const { data, error } = await supabase.from('assignment_targets')
+          .select('id, unit_id, party_id, assignment_id, template_item_key, completed_at, assignment:assignments(id, assignment_type), party:parties(id,label)')
+          .eq('status', 'done').is('deleted_at', null).is('invoiced_on', null)
+          .in('unit_id', unitIds)
+          .gte('completed_at', start + 'T00:00:00').lte('completed_at', end + 'T23:59:59')
+          .range(from, from + PAGE - 1);
+        if (error) break;
+        targets = targets.concat(data || []);
+        if (!data || data.length < PAGE) break;
+        if (from > 100000) break;
+      }
+    }
+    // 4) Group by assignment (= one bedroom clean).
+    const byAssign = new Map();
+    targets.forEach(t => {
+      const aid = t.assignment_id || `${t.unit_id}:${t.party_id}`;
+      if (!byAssign.has(aid)) byAssign.set(aid, { aid, unit_id: t.unit_id, party_id: t.party_id, type: t.assignment?.assignment_type, partyLabel: t.party?.label || '', items: new Set(), targetIds: [] });
+      if (t.template_item_key) byAssign.get(aid).items.add(t.template_item_key);
+      if (t.id) byAssign.get(aid).targetIds.push(t.id);
+    });
+    // 5) Build priced lines.
+    const built = Array.from(byAssign.values()).map(g => {
+      const unitLabel = unitLabelById[g.unit_id] || '';
+      const apt = String(unitLabel).replace(/^B\d+-/i, '').trim();
+      const brm = (g.partyLabel.match(/(\d+)\s*$/) || [])[1] || '';
+      const label = brm ? `${apt} - ${brm}` : apt;
+      const subs = [];
+      g.items.forEach(k => {
+        const b = book[k]; if (!b) return;  // only priced items contribute
+        const mode = b.mode === 'time' ? 'time' : 'fixed';
+        const rate = b.rate || defRate || 0;
+        const minutes = b.default_minutes || 0;
+        const amount = mode === 'fixed' ? (b.base_amount || 0) : (rate * minutes / 60);
+        subs.push({ key: k, label: b.label || k, mode, amount, rate, minutes, included: true });
+      });
+      subs.sort((a, b) => a.label.localeCompare(b.label));
+      return { key: g.aid, unitId: g.unit_id, partyId: g.party_id, label, serviceType: g.type, description: INVOICE_DESCR[g.type] || '', subsections: subs, amountOverride: '', sourceTargetIds: g.targetIds };
+    }).filter(l => l.label).sort((a, b) => a.label.localeCompare(b.label, undefined, { numeric: true }));
+    setLines(built);
+    // 6) Next invoice number (last numeric + 1).
+    const { data: lastInv } = await supabase.from('invoices').select('invoice_number').order('created_at', { ascending: false }).limit(1);
+    const lastNum = parseInt((lastInv && lastInv[0] && lastInv[0].invoice_number) || '', 10);
+    setInvoiceNumber(Number.isFinite(lastNum) ? String(lastNum + 1) : '');
+    // 7) Bill-to defaults from the property.
+    setBillTo({
+      org: property.name || '', contact: property.billing_contact_name || '',
+      email: property.billing_email || '', phone: property.billing_phone || '',
+      address: property.billing_address || property.address || '',
+    });
+    setLoading(false);
+  })(); /* eslint-disable-next-line */ }, []);
+
+  const toggleExpand = (k) => setExpanded(prev => { const n = new Set(prev); n.has(k) ? n.delete(k) : n.add(k); return n; });
+  const updateLine = (key, patch) => setLines(ls => ls.map(l => l.key === key ? { ...l, ...patch } : l));
+  const updateSub = (key, si, patch) => setLines(ls => ls.map(l => {
+    if (l.key !== key) return l;
+    const subsections = l.subsections.map((s, i) => i === si ? { ...s, ...patch } : s);
+    return { ...l, subsections };
+  }));
+  const removeLine = (key) => setLines(ls => ls.filter(l => l.key !== key));
+
+  const grandTotal = lines.reduce((s, l) => s + lineAmount(l), 0);
+
+  const save = async (status) => {
+    setSaving(true);
+    const total = lines.reduce((s, l) => s + lineAmount(l), 0);
+    const { data: inv, error } = await supabase.from('invoices').insert({
+      customer_id: property.id, invoice_number: invoiceNumber || null, title: title || null,
+      invoice_date: invoiceDate || null, due_date: dueDate || null, status: status || 'draft',
+      bill_to_org: billTo.org || null, bill_to_contact: billTo.contact || null,
+      bill_to_email: billTo.email || null, bill_to_phone: billTo.phone || null, bill_to_address: billTo.address || null,
+      period_start: start, period_end: end, total, created_by: employee?.id || null,
+    }).select().single();
+    if (error) { setSaving(false); alert('Could not save invoice: ' + error.message); return; }
+    const lineRows = lines.map((l, i) => ({
+      invoice_id: inv.id, unit_id: l.unitId || null, party_id: l.partyId || null,
+      label: l.label, service_type: l.serviceType || null, description: l.description || null,
+      subsections: l.subsections.filter(s => s.included).map(s => ({ key: s.key, label: s.label, mode: s.mode, amount: subAmount(s), minutes: s.minutes, rate: s.rate })),
+      amount: lineAmount(l), amount_overridden: l.amountOverride !== '' && l.amountOverride != null,
+      qty: 1, sort_order: i, source_unit_id: l.unitId || null, source_party_id: l.partyId || null,
+    }));
+    if (lineRows.length) {
+      const { error: le } = await supabase.from('invoice_lines').insert(lineRows);
+      if (le) { setSaving(false); alert('Invoice saved but lines failed: ' + le.message); return; }
+    }
+    // Stamp every covered item as invoiced so it can't be billed again.
+    // (Removed lines aren't stamped, so they stay billable.)
+    const allTargetIds = lines.flatMap(l => l.sourceTargetIds || []);
+    for (let i = 0; i < allTargetIds.length; i += 200) {
+      const chunk = allTargetIds.slice(i, i + 200);
+      if (chunk.length) await supabase.from('assignment_targets').update({ invoiced_on: inv.id }).in('id', chunk);
+    }
+    setSaving(false);
+    onSaved && onSaved(inv);
+  };
+
+  if (loading) return <Splash text="Building draft…" />;
+
+  return (
+    <div className="pb-28">
+      <div className="flex items-center justify-between gap-3 px-5 py-4 border-b border-stone-200 bg-white sticky top-0 z-10">
+        <button onClick={onBack} className="flex items-center gap-2 text-stone-700 text-sm">
+          <ArrowLeft size={16} /> Back
+        </button>
+        <div className="flex items-center gap-2">
+          <button onClick={() => save('draft')} disabled={saving}
+            className="px-4 py-2 rounded-xl bg-stone-900 text-stone-50 text-sm font-medium disabled:opacity-50">
+            {saving ? 'Saving…' : 'Save draft'}
+          </button>
+        </div>
+      </div>
+
+      <div className="px-5 pt-6">
+        <div className="text-xs uppercase tracking-widest text-stone-400 font-mono mb-2">{property.name}</div>
+        <h1 className="text-3xl font-light text-stone-900 tracking-tight mb-1">
+          Invoice <span className="font-serif italic text-amber-700">draft</span>
+        </h1>
+        <p className="text-xs text-stone-500 font-mono mb-5">{start} → {end} · {lines.length} bedrooms</p>
+
+        {/* Invoice meta */}
+        <div className="grid grid-cols-2 gap-3 mb-3">
+          <label className="text-xs font-mono text-stone-500">Invoice #
+            <input value={invoiceNumber} onChange={e => setInvoiceNumber(e.target.value)}
+              className="mt-1 w-full px-3 py-2 rounded-lg border border-stone-300 bg-white text-sm text-stone-900" />
+          </label>
+          <label className="text-xs font-mono text-stone-500">Invoice date
+            <input type="date" value={invoiceDate} onChange={e => setInvoiceDate(e.target.value)}
+              className="mt-1 w-full px-3 py-2 rounded-lg border border-stone-300 bg-white text-sm text-stone-900" />
+          </label>
+        </div>
+        <div className="grid grid-cols-2 gap-3 mb-3">
+          <label className="text-xs font-mono text-stone-500">Due date
+            <input type="date" value={dueDate} onChange={e => setDueDate(e.target.value)}
+              className="mt-1 w-full px-3 py-2 rounded-lg border border-stone-300 bg-white text-sm text-stone-900" />
+          </label>
+          <label className="text-xs font-mono text-stone-500">Title
+            <input value={title} onChange={e => setTitle(e.target.value)} placeholder="e.g. Cleaning Checks June Bldg 6-10"
+              className="mt-1 w-full px-3 py-2 rounded-lg border border-stone-300 bg-white text-sm text-stone-900" />
+          </label>
+        </div>
+
+        {/* Bill to (collapsible, defaulted from property) */}
+        <div className="mb-5 rounded-2xl bg-white border border-stone-200 overflow-hidden">
+          <button onClick={() => setBillOpen(o => !o)} className="w-full flex items-center justify-between px-4 py-3 hover:bg-stone-50">
+            <span className="text-sm font-medium text-stone-800">Bill to · {billTo.org || '—'}</span>
+            <ChevronRight size={15} className={`text-stone-400 transition-transform ${billOpen ? 'rotate-90' : ''}`} />
+          </button>
+          {billOpen && (
+            <div className="border-t border-stone-100 p-4 space-y-2">
+              {[['org', 'Organization'], ['contact', 'Contact name'], ['email', 'Email'], ['phone', 'Phone'], ['address', 'Address']].map(([k, lbl]) => (
+                <label key={k} className="block text-[11px] font-mono text-stone-500">{lbl}
+                  <input value={billTo[k]} onChange={e => setBillTo(b => ({ ...b, [k]: e.target.value }))}
+                    className="mt-1 w-full px-3 py-2 rounded-lg border border-stone-300 bg-white text-sm text-stone-900" />
+                </label>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Lines */}
+        <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2">Line items ({lines.length})</div>
+        {lines.length === 0 ? (
+          <div className="text-center py-10 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
+            Nothing cleaned in this range — or no items priced yet. Set prices in the price book, or widen the date range.
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {lines.map(l => {
+              const open = expanded.has(l.key);
+              const amt = lineAmount(l);
+              const overridden = l.amountOverride !== '' && l.amountOverride != null;
+              return (
+                <div key={l.key} className="rounded-2xl bg-white border border-stone-200 overflow-hidden">
+                  <div className="flex items-center gap-2 px-4 py-3">
+                    <button onClick={() => toggleExpand(l.key)} className="flex-1 flex items-center gap-2 text-left">
+                      <ChevronRight size={15} className={`text-stone-400 transition-transform ${open ? 'rotate-90' : ''}`} />
+                      <span className="font-mono text-sm font-medium text-stone-900">{l.label}</span>
+                      {l.serviceType && <span className="text-[10px] px-2 py-0.5 rounded-full bg-stone-100 text-stone-600">{assignmentTypeLabel ? assignmentTypeLabel(l.serviceType) : l.serviceType}</span>}
+                    </button>
+                    <span className={`font-mono text-sm ${overridden ? 'text-amber-700' : 'text-stone-900'}`}>${amt.toFixed(2)}</span>
+                    <button onClick={() => removeLine(l.key)} className="p-1.5 rounded-lg text-stone-300 hover:text-red-600 hover:bg-red-50">
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                  {open && (
+                    <div className="border-t border-stone-100 p-4 space-y-3">
+                      {l.subsections.length === 0 ? (
+                        <div className="text-xs text-stone-400 font-mono">No priced items detected for this bedroom. Set a line total below, or price its items in the price book.</div>
+                      ) : l.subsections.map((s, si) => (
+                        <div key={s.key} className="flex items-center gap-2">
+                          <button onClick={() => updateSub(l.key, si, { included: !s.included })}
+                            className={`w-5 h-5 rounded-md flex items-center justify-center flex-shrink-0 ${s.included ? 'bg-stone-900 text-white' : 'border border-stone-300 text-transparent'}`}>
+                            <Check size={12} />
+                          </button>
+                          <span className={`flex-1 text-sm ${s.included ? 'text-stone-800' : 'text-stone-400 line-through'}`}>{s.label}</span>
+                          {s.mode === 'time' ? (
+                            <span className="flex items-center gap-1 text-xs font-mono text-stone-600">
+                              <input type="number" step="1" value={s.minutes}
+                                onChange={e => updateSub(l.key, si, { minutes: e.target.value })}
+                                className="w-14 px-2 py-1 rounded-lg border border-stone-300 bg-white text-right" />
+                              <span className="text-stone-400">min →</span>
+                              <span className="text-stone-800 min-w-[48px] text-right">${subAmount(s).toFixed(2)}</span>
+                            </span>
+                          ) : (
+                            <span className="flex items-center gap-0.5 text-xs font-mono text-stone-600">
+                              <span className="text-stone-400">$</span>
+                              <input type="number" step="0.01" value={s.amount}
+                                onChange={e => updateSub(l.key, si, { amount: e.target.value })}
+                                className="w-20 px-2 py-1 rounded-lg border border-stone-300 bg-white text-right" />
+                            </span>
+                          )}
+                        </div>
+                      ))}
+                      <div className="pt-2 border-t border-stone-100">
+                        <label className="block text-[11px] font-mono text-stone-500 mb-1">Description (prints on invoice)</label>
+                        <input value={l.description} onChange={e => updateLine(l.key, { description: e.target.value })}
+                          className="w-full px-3 py-2 rounded-lg border border-stone-300 bg-white text-sm text-stone-700" />
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <span className="text-[11px] font-mono text-stone-500">Override line total</span>
+                        <span className="flex items-center gap-1 text-sm font-mono">
+                          <span className="text-stone-400">$</span>
+                          <input type="number" step="0.01" value={l.amountOverride}
+                            onChange={e => updateLine(l.key, { amountOverride: e.target.value })}
+                            placeholder={l.subsections.filter(s => s.included).reduce((sum, s) => sum + subAmount(s), 0).toFixed(2)}
+                            className="w-24 px-2 py-1 rounded-lg border border-stone-300 bg-white text-right" />
+                        </span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {/* Total */}
+        <div className="flex items-center justify-between mt-5 pt-4 border-t-2 border-stone-900">
+          <span className="text-xs uppercase tracking-widest text-stone-500 font-mono">Total</span>
+          <span className="font-serif text-2xl text-stone-900">${grandTotal.toFixed(2)}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Brand constants for the printable invoice.
+const SUMMIT_LOGO_URL = 'https://bbaynvqnbkjyqhzhhypr.supabase.co/storage/v1/object/public/brand/unnamed%20(2).png';
+const SUMMIT_COMPANY = { name: 'Summit Clean LLC', lines: ['1391 North 380 West', 'Provo, Utah 84604', 'United States'], url: 'www.gosummitclean.com' };
+const INVOICE_TYPE_LABEL = {
+  cleaning_check: 'Cleaning Checks Cleaning',
+  move_out_check: 'Move Out Cleaning',
+  deep: 'Deep Clean',
+  reclean: 'Re-clean',
+  standard: 'Standard Cleaning',
+};
+const INVOICE_STATUS_STYLE = {
+  draft: 'bg-stone-100 text-stone-600',
+  sent: 'bg-blue-100 text-blue-700',
+  paid: 'bg-emerald-100 text-emerald-700',
+};
+function fmtInvoiceDate(d) {
+  if (!d) return '—';
+  return new Date(d + 'T00:00:00').toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+}
+
+// =================================================================
+// INVOICE DOCUMENT (Phase 1c) — the printable invoice. Loads a saved
+// invoice + its lines and renders the polished layout matching the
+// company's PDF, with print / status / delete actions.
+// =================================================================
+function InvoiceDocument({ invoiceId, onBack, onChanged }) {
+  const [inv, setInv] = useState(null);
+  const [lines, setLines] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [working, setWorking] = useState(false);
+
+  const load = async () => {
+    setLoading(true);
+    const { data: invData } = await supabase.from('invoices').select('*').eq('id', invoiceId).single();
+    const { data: lineData } = await supabase.from('invoice_lines').select('*').eq('invoice_id', invoiceId).order('sort_order');
+    setInv(invData || null);
+    setLines(lineData || []);
+    setLoading(false);
+  };
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, [invoiceId]);
+
+  const setStatus = async (status) => {
+    setWorking(true);
+    const patch = { status };
+    if (status === 'sent') patch.sent_at = new Date().toISOString();
+    if (status === 'paid') patch.paid_at = new Date().toISOString();
+    await supabase.from('invoices').update(patch).eq('id', invoiceId);
+    setWorking(false);
+    await load();
+    onChanged && onChanged();
+  };
+  const del = async () => {
+    if (!confirm('Delete this invoice? Its items become billable again.')) return;
+    setWorking(true);
+    const { error } = await supabase.from('invoices').delete().eq('id', invoiceId);
+    setWorking(false);
+    if (error) { alert('Could not delete: ' + error.message); return; }
+    onChanged && onChanged();
+    onBack && onBack();
+  };
+
+  if (loading) return <Splash text="Loading invoice…" />;
+  if (!inv) return (
+    <div className="p-6"><button onClick={onBack} className="text-sm text-stone-600 flex items-center gap-2"><ArrowLeft size={16} /> Back</button><div className="mt-4 text-stone-500">Invoice not found.</div></div>
+  );
+
+  const total = lines.reduce((s, l) => s + (parseFloat(l.amount) || 0), 0);
+
+  return (
+    <div className="pb-28 bg-stone-100 min-h-screen">
+      {/* Action bar — hidden when printing */}
+      <div className="print:hidden flex items-center justify-between gap-2 px-5 py-3 border-b border-stone-200 bg-white sticky top-0 z-10 flex-wrap">
+        <button onClick={onBack} className="flex items-center gap-2 text-stone-700 text-sm">
+          <ArrowLeft size={16} /> Back
+        </button>
+        <div className="flex items-center gap-2 flex-wrap">
+          {inv.status !== 'sent' && <button onClick={() => setStatus('sent')} disabled={working} className="px-3 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-medium disabled:opacity-50">Mark sent</button>}
+          {inv.status !== 'paid' && <button onClick={() => setStatus('paid')} disabled={working} className="px-3 py-1.5 rounded-lg bg-emerald-600 text-white text-xs font-medium disabled:opacity-50">Mark paid</button>}
+          {inv.status !== 'draft' && <button onClick={() => setStatus('draft')} disabled={working} className="px-3 py-1.5 rounded-lg bg-white border border-stone-300 text-stone-600 text-xs">Back to draft</button>}
+          <button onClick={() => window.print()} className="px-3 py-1.5 rounded-lg bg-stone-900 text-white text-xs font-medium flex items-center gap-1.5"><FileText size={13} /> Print / PDF</button>
+          <button onClick={del} disabled={working} className="p-1.5 rounded-lg text-stone-400 hover:text-red-600 hover:bg-red-50"><Trash2 size={15} /></button>
+        </div>
+      </div>
+
+      {/* The sheet */}
+      <div className="max-w-[800px] mx-auto bg-white my-4 print:my-0 shadow-sm print:shadow-none px-8 py-8 text-stone-800">
+        {/* Header */}
+        <div className="flex items-start justify-between gap-6 pb-6 border-b border-stone-200">
+          <img src={SUMMIT_LOGO_URL} alt="Summit Clean" className="w-28 h-28 object-contain bg-stone-900 rounded-lg p-2" />
+          <div className="text-right">
+            <div className="text-3xl font-light tracking-tight text-stone-900">INVOICE</div>
+            {inv.title && <div className="text-sm text-stone-500 mt-0.5">{inv.title}</div>}
+            <div className="mt-3 text-xs text-stone-600 leading-relaxed">
+              <div className="font-semibold text-stone-800">{SUMMIT_COMPANY.name}</div>
+              {SUMMIT_COMPANY.lines.map((l, i) => <div key={i}>{l}</div>)}
+              <div className="mt-2">{SUMMIT_COMPANY.url}</div>
+            </div>
+          </div>
+        </div>
+
+        {/* Bill to + meta */}
+        <div className="flex items-start justify-between gap-6 py-6">
+          <div className="text-xs text-stone-600 leading-relaxed">
+            <div className="text-stone-400 uppercase tracking-wider text-[10px] mb-1">Bill to</div>
+            {inv.bill_to_org && <div className="font-semibold text-stone-800">{inv.bill_to_org}</div>}
+            {inv.bill_to_contact && <div>{inv.bill_to_contact}</div>}
+            {inv.bill_to_address && <div className="whitespace-pre-line">{inv.bill_to_address}</div>}
+            {inv.bill_to_phone && <div className="mt-1">{inv.bill_to_phone}</div>}
+            {inv.bill_to_email && <div>{inv.bill_to_email}</div>}
+          </div>
+          <div className="text-xs min-w-[220px]">
+            <div className="flex justify-between py-1"><span className="text-stone-500">Invoice Number:</span><span className="font-medium text-stone-800">{inv.invoice_number || '—'}</span></div>
+            <div className="flex justify-between py-1"><span className="text-stone-500">Invoice Date:</span><span className="text-stone-800">{fmtInvoiceDate(inv.invoice_date)}</span></div>
+            <div className="flex justify-between py-1"><span className="text-stone-500">Payment Due:</span><span className="text-stone-800">{fmtInvoiceDate(inv.due_date)}</span></div>
+            <div className="flex justify-between py-2 mt-1 px-2 bg-stone-100 rounded"><span className="text-stone-600 font-medium">Amount Due (USD):</span><span className="font-semibold text-stone-900">${total.toFixed(2)}</span></div>
+            <div className="mt-2 text-right">
+              <span className={`text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full ${INVOICE_STATUS_STYLE[inv.status] || 'bg-stone-100 text-stone-600'}`}>{inv.status}</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Items table */}
+        <table className="w-full text-xs border-collapse">
+          <thead>
+            <tr className="bg-stone-700 text-white">
+              <th className="text-left font-medium px-3 py-2">Items</th>
+              <th className="text-center font-medium px-3 py-2 w-20">Quantity</th>
+              <th className="text-right font-medium px-3 py-2 w-24">Price</th>
+              <th className="text-right font-medium px-3 py-2 w-24">Amount</th>
+            </tr>
+          </thead>
+          <tbody>
+            {lines.map((l, i) => {
+              const qty = parseFloat(l.qty) || 1;
+              const amount = parseFloat(l.amount) || 0;
+              const price = qty ? amount / qty : amount;
+              return (
+                <tr key={l.id} className={i % 2 === 0 ? 'bg-white' : 'bg-stone-50'}>
+                  <td className="px-3 py-2.5 align-top">
+                    <div className="font-semibold text-stone-800">{INVOICE_TYPE_LABEL[l.service_type] || 'Cleaning'}</div>
+                    <div className="text-stone-700">{l.label}</div>
+                    {l.description && <div className="text-stone-500">{l.description}</div>}
+                  </td>
+                  <td className="px-3 py-2.5 text-center align-top">{qty}</td>
+                  <td className="px-3 py-2.5 text-right align-top">${price.toFixed(2)}</td>
+                  <td className="px-3 py-2.5 text-right align-top">${amount.toFixed(2)}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+
+        {/* Totals */}
+        <div className="flex justify-end mt-4">
+          <div className="w-64 text-sm">
+            <div className="flex justify-between py-2 border-t border-stone-300"><span className="text-stone-600">Total:</span><span className="font-medium text-stone-900">${total.toFixed(2)}</span></div>
+            <div className="flex justify-between py-2 px-2 bg-stone-100 rounded"><span className="text-stone-700 font-medium">Amount Due (USD):</span><span className="font-bold text-stone-900">${total.toFixed(2)}</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// =================================================================
+// INVOICE LIST (Phase 1c) — saved-invoice history for a property.
+// =================================================================
+function InvoiceList({ property, onOpen, onNew }) {
+  const [invoices, setInvoices] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  const load = async () => {
+    setLoading(true);
+    const { data } = await supabase.from('invoices').select('*').eq('customer_id', property.id).order('created_at', { ascending: false });
+    setInvoices(data || []);
+    setLoading(false);
+  };
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, [property.id]);
+
+  if (loading) return <Splash text="Loading invoices…" />;
+
+  return (
+    <div>
+      {invoices.length === 0 ? (
+        <div className="text-center py-12 border-2 border-dashed border-stone-200 rounded-2xl">
+          <div className="text-sm text-stone-500 mb-4">No saved invoices for {property.name} yet.</div>
+          <button onClick={onNew} className="px-4 py-2.5 rounded-xl bg-stone-900 text-white text-sm font-medium inline-flex items-center gap-2"><FileText size={15} /> Generate one</button>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {invoices.map(iv => {
+            const total = parseFloat(iv.total) || 0;
+            return (
+              <button key={iv.id} onClick={() => onOpen(iv.id)}
+                className="w-full text-left p-4 rounded-2xl bg-white border border-stone-200 hover:border-stone-400 transition-colors flex items-center justify-between gap-3">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="font-mono text-sm font-medium text-stone-900">#{iv.invoice_number || '—'}</span>
+                    <span className={`text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full ${INVOICE_STATUS_STYLE[iv.status] || 'bg-stone-100 text-stone-600'}`}>{iv.status}</span>
+                  </div>
+                  <div className="text-xs text-stone-500 font-mono mt-1">
+                    {iv.title ? iv.title + ' · ' : ''}{fmtInvoiceDate(iv.invoice_date)}
+                    {iv.period_start && iv.period_end ? ` · ${iv.period_start} → ${iv.period_end}` : ''}
+                  </div>
+                </div>
+                <div className="text-right flex items-center gap-2">
+                  <span className="font-mono text-sm text-stone-900">${total.toFixed(2)}</span>
+                  <ChevronRight size={16} className="text-stone-400" />
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
@@ -14398,6 +14943,10 @@ function InvoiceView({ employee, onSignOut, onOpenMessages, onLogoClick, topTogg
   const [busy, setBusy] = useState(false);
   const [showZeros, setShowZeros] = useState(true);
   const [showPriceBook, setShowPriceBook] = useState(false);
+  const [draftOn, setDraftOn] = useState(false);
+  const [savedMsg, setSavedMsg] = useState('');
+  const [viewingInvoiceId, setViewingInvoiceId] = useState(null);
+  const [mode, setMode] = useState('new'); // 'new' | 'saved'
   useEffect(() => { (async () => {
     const { data } = await supabase.from('customers').select('*')
       .eq('property_type', 'multi_unit').eq('active', true).order('name');
@@ -14445,6 +14994,17 @@ function InvoiceView({ employee, onSignOut, onOpenMessages, onLogoClick, topTogg
     const property = properties.find(p => p.id === selectedId);
     return <PriceBookEditor property={property} onBack={() => setShowPriceBook(false)} />;
   }
+  if (viewingInvoiceId) {
+    return <InvoiceDocument invoiceId={viewingInvoiceId}
+      onBack={() => { setViewingInvoiceId(null); setMode('saved'); }}
+      onChanged={() => {}} />;
+  }
+  if (draftOn && selectedId) {
+    const property = properties.find(p => p.id === selectedId);
+    return <InvoiceDraftEditor property={property} start={start} end={end} employee={employee}
+      onBack={() => setDraftOn(false)}
+      onSaved={(inv) => { setDraftOn(false); setViewingInvoiceId(inv?.id || null); }} />;
+  }
   if (invoice) {
     return <InvoicePreview invoice={invoice} showZeros={showZeros} setShowZeros={setShowZeros}
       onBack={() => setInvoice(null)} onPrint={() => window.print()} />;
@@ -14473,27 +15033,56 @@ function InvoiceView({ employee, onSignOut, onOpenMessages, onLogoClick, topTogg
               </select>
             )}
           </div>
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Start</label>
-              <input type="date" value={start} onChange={(e) => setStart(e.target.value)}
-                className="w-full px-3 py-2.5 rounded-xl border border-stone-300 bg-white" />
-            </div>
-            <div>
-              <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">End</label>
-              <input type="date" value={end} onChange={(e) => setEnd(e.target.value)}
-                className="w-full px-3 py-2.5 rounded-xl border border-stone-300 bg-white" />
-            </div>
-          </div>
-          <button onClick={generate} disabled={!selectedId || busy}
-            className="w-full py-4 rounded-2xl bg-stone-900 text-stone-50 font-medium active:scale-98 disabled:opacity-50 flex items-center justify-center gap-2">
-            <FileText size={18} /> {busy ? 'Generating…' : 'Generate invoice'}
-          </button>
-          {selectedId && (
-            <button onClick={() => setShowPriceBook(true)}
-              className="w-full py-3 rounded-2xl bg-white border border-stone-300 text-stone-700 text-sm font-medium active:scale-98 flex items-center justify-center gap-2 hover:border-stone-400">
-              <DollarSign size={16} /> Edit subsection prices for this property
+          <div className="flex gap-1 p-1 bg-stone-100 rounded-xl">
+            <button onClick={() => setMode('new')}
+              className={`flex-1 py-2 px-3 rounded-lg text-xs font-medium transition-colors ${mode === 'new' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+              New invoice
             </button>
+            <button onClick={() => setMode('saved')}
+              className={`flex-1 py-2 px-3 rounded-lg text-xs font-medium transition-colors ${mode === 'saved' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+              Saved invoices
+            </button>
+          </div>
+
+          {mode === 'new' ? (
+            <>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Start</label>
+                  <input type="date" value={start} onChange={(e) => setStart(e.target.value)}
+                    className="w-full px-3 py-2.5 rounded-xl border border-stone-300 bg-white" />
+                </div>
+                <div>
+                  <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">End</label>
+                  <input type="date" value={end} onChange={(e) => setEnd(e.target.value)}
+                    className="w-full px-3 py-2.5 rounded-xl border border-stone-300 bg-white" />
+                </div>
+              </div>
+              <button onClick={() => { setSavedMsg(''); setDraftOn(true); }} disabled={!selectedId}
+                className="w-full py-4 rounded-2xl bg-stone-900 text-stone-50 font-medium active:scale-98 disabled:opacity-50 flex items-center justify-center gap-2">
+                <FileText size={18} /> Generate draft
+              </button>
+              {selectedId && (
+                <button onClick={() => setShowPriceBook(true)}
+                  className="w-full py-3 rounded-2xl bg-white border border-stone-300 text-stone-700 text-sm font-medium active:scale-98 flex items-center justify-center gap-2 hover:border-stone-400">
+                  <DollarSign size={16} /> Edit subsection prices for this property
+                </button>
+              )}
+              {selectedId && (
+                <button onClick={generate} disabled={busy}
+                  className="w-full py-2 text-xs font-mono text-stone-400 hover:text-stone-600 disabled:opacity-50">
+                  {busy ? 'Generating…' : 'Old time-based print view'}
+                </button>
+              )}
+            </>
+          ) : (
+            selectedId ? (
+              <InvoiceList property={properties.find(p => p.id === selectedId)}
+                onOpen={(id) => setViewingInvoiceId(id)}
+                onNew={() => setMode('new')} />
+            ) : (
+              <div className="p-4 rounded-2xl bg-stone-50 border border-stone-200 text-sm text-stone-500">Pick a property above to see its saved invoices.</div>
+            )
           )}
         </div>
       </div>

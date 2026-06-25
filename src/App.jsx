@@ -14497,7 +14497,7 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
         const isSection = !it.itemKey;
         const fallback = isSection
           ? `Whole ${SEC_LABEL[it.sec] || it.sec || 'section'}`
-          : resolveItemLabel(it.fullKey, 'en', null, it.itemKey);
+          : resolveItemLabel(it.fullKey, 'en', null, String(it.itemKey).replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()));
         if (b) {
           const mode = b.mode === 'time' ? 'time' : 'fixed';
           subs.push({
@@ -14517,7 +14517,7 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
       });
       subs.sort((a, b) => a.label.localeCompare(b.label));
       return { key: g.aid, unitId: g.unit_id, partyId: g.party_id, label, serviceType: g.type, description: INVOICE_DESCR[g.type] || '', subsections: subs, amountOverride: '', sourceTargetIds: g.targetIds };
-    }).filter(l => l.label).sort((a, b) => a.label.localeCompare(b.label, undefined, { numeric: true }));
+    }).filter(l => l.label && l.subsections.length > 0).sort((a, b) => a.label.localeCompare(b.label, undefined, { numeric: true }));
     setLines(built);
     // Diagnostics — surfaced in the empty state so we can see where it
     // breaks (no items found vs found-but-unpriced vs query error).

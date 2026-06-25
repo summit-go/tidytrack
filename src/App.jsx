@@ -14463,7 +14463,8 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
     }
     // 4) Group by assignment (= one bedroom clean).
     const byAssign = new Map();
-    const sample = [];
+    const sampleItems = [];
+    const sampleSecs = [];
     let withItemKey = 0, sectionOnly = 0;
     targets.forEach(t => {
       if (t.assignment && t.assignment.deleted_at) return;  // skip soft-deleted assignments
@@ -14471,16 +14472,14 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
       if (!byAssign.has(aid)) byAssign.set(aid, { aid, unit_id: t.unit_id, party_id: t.party_id, type: t.assignment?.assignment_type, partyLabel: t.party?.label || '', items: [], targetIds: [] });
       const sec = (t.template_section || '').toLowerCase();
       const itemKey = t.template_item_key || '';
-      // Stored keys are bare ("tub") + a separate section; reconstruct
-      // the full "section:item" key the price book uses. Rows with no
-      // item key are section-level (cleaning-check "rep" rows).
       const fullKey = itemKey
         ? (itemKey.includes(':') ? itemKey : (sec ? `${sec}:${itemKey}` : itemKey))
         : (sec ? `${sec}:__section__` : null);
       if (fullKey) byAssign.get(aid).items.push({ fullKey, sec, itemKey });
       if (t.id) byAssign.get(aid).targetIds.push(t.id);
-      if (itemKey) withItemKey++; else sectionOnly++;
-      if (sample.length < 20) sample.push(`${sec || '?'} / ${itemKey || '(section)'} [${t.status}]`);
+      const aType = t.assignment?.assignment_type || '?';
+      if (itemKey) { withItemKey++; if (sampleItems.length < 15) sampleItems.push(`${sec || '(no sec)'}:${itemKey} · ${aType}`); }
+      else { sectionOnly++; if (sampleSecs.length < 8) sampleSecs.push(`sec=${sec || '(empty)'} · ${aType}`); }
     });
     // 5) Build lines (show every cleaned thing — priced or not).
     const SEC_LABEL = { bathroom: 'Bathroom', vanity: 'Vanity', general: 'General / kitchen', bedroom: 'Bedroom' };
@@ -14530,7 +14529,7 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
       bedrooms: byAssign.size,
       lines: built.length,
       pricedKeys,
-      sample,
+      sampleItems, sampleSecs,
       err: fetchErr ? (fetchErr.message || String(fetchErr)) : null,
     });
     // 6) Next invoice number (last numeric + 1).
@@ -14676,8 +14675,10 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
             <div className="px-3 pb-3 font-mono text-stone-600 space-y-1">
               <div>units {diag.units} · done rows {diag.doneItems} · with item-key {diag.withItemKey} · section-only {diag.sectionOnly} · bedrooms {diag.bedrooms} · priced-in-book {diag.pricedKeys}</div>
               {diag.err && <div className="text-red-600 break-words">err: {diag.err}</div>}
-              <div className="text-stone-400 pt-1">sample rows (section / item [status]):</div>
-              {(diag.sample || []).map((s, i) => <div key={i} className="text-stone-700">{s}</div>)}
+              <div className="text-stone-400 pt-1">item-key rows (section:item · type):</div>
+              {(diag.sampleItems || []).map((s, i) => <div key={'i' + i} className="text-stone-700">{s}</div>)}
+              <div className="text-stone-400 pt-1">section-only rows (section · type):</div>
+              {(diag.sampleSecs || []).map((s, i) => <div key={'s' + i} className="text-stone-700">{s}</div>)}
             </div>
           </details>
         )}

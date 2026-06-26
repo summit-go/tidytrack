@@ -14722,19 +14722,6 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
         </div>
 
         {/* Lines */}
-        {diag && (
-          <details className="mb-3 rounded-xl bg-stone-50 border border-stone-200 text-xs">
-            <summary className="px-3 py-2 cursor-pointer font-mono text-stone-500">⚙ Debug — what generation found</summary>
-            <div className="px-3 pb-3 font-mono text-stone-600 space-y-1">
-              <div>units {diag.units} · done rows {diag.doneItems} · with item-key {diag.withItemKey} · section-only {diag.sectionOnly} · bedrooms {diag.bedrooms} · priced-in-book {diag.pricedKeys}</div>
-              {diag.err && <div className="text-red-600 break-words">err: {diag.err}</div>}
-              <div className="text-stone-400 pt-1">item-key rows (section:item · type):</div>
-              {(diag.sampleItems || []).map((s, i) => <div key={'i' + i} className="text-stone-700">{s}</div>)}
-              <div className="text-stone-400 pt-1">section-only rows (section · type):</div>
-              {(diag.sampleSecs || []).map((s, i) => <div key={'s' + i} className="text-stone-700">{s}</div>)}
-            </div>
-          </details>
-        )}
         <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2">Line items ({lines.length})</div>
         {lines.length === 0 ? (
           <div className="py-6 px-4 border-2 border-dashed border-stone-200 rounded-2xl text-sm">

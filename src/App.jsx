@@ -719,6 +719,28 @@ const fmtMoney = (n) => {
 const fmtDate = (ts) => new Date(ts).toLocaleDateString('en-US', { month:'short', day:'numeric' });
 const fmtDateLong = (ts) => new Date(ts).toLocaleDateString('en-US', { month:'long', day:'numeric', year:'numeric' });
 const fmtDateWithDay = (ts) => new Date(ts).toLocaleDateString('en-US', { weekday:'short', month:'short', day:'numeric' });
+
+// Due-date helpers for assignments. scheduled_date is 'YYYY-MM-DD'.
+const localTodayKey = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
+// 'overdue' | 'today' | 'upcoming' | null
+const assignmentDueKind = (scheduledDate) => {
+  if (!scheduledDate) return null;
+  const today = localTodayKey();
+  if (scheduledDate < today) return 'overdue';
+  if (scheduledDate === today) return 'today';
+  return 'upcoming';
+};
+// Sort rank: overdue first, then today, then undated, then upcoming.
+const assignmentDueRank = (scheduledDate) => {
+  const k = assignmentDueKind(scheduledDate);
+  if (k === 'overdue') return 0;
+  if (k === 'today') return 1;
+  if (!k) return 2;
+  return 3;
+};
 const fmtClock = (ts) => new Date(ts).toLocaleTimeString('en-US', { hour:'numeric', minute:'2-digit' });
 
 // Time-of-day greeting helper. Returns "Good morning", "Good afternoon",
@@ -7668,8 +7690,27 @@ function ViewOnlyAssignmentsPanel({ propertyId, employee, onOpenBedroomHistory }
   useEffect(() => { load(); /* eslint-disable-next-line */ }, [propertyId]);
   useAssignmentSync(load, 'view-only-asgn');
 
+  const todayKey = (() => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  })();
+  // Rank for sorting: overdue first, then today, then undated, then upcoming.
+  const dueRank = (t) => {
+    const sd = t.assignment?.scheduled_date;
+    if (!sd) return 2;
+    if (sd < todayKey) return 0;
+    if (sd === todayKey) return 1;
+    return 3;
+  };
+  const dueTodayCount = targets.filter(t => t.status !== 'done' && t.assignment?.scheduled_date === todayKey).length;
+  const overdueCount = targets.filter(t => t.status !== 'done' && t.assignment?.scheduled_date && t.assignment.scheduled_date < todayKey).length;
+
   const visible = filter === 'open'
-    ? targets.filter(t => t.status !== 'done')
+    ? targets.filter(t => t.status !== 'done').sort((a, b) => {
+        const ra = dueRank(a), rb = dueRank(b);
+        if (ra !== rb) return ra - rb;
+        return (a.assignment?.scheduled_date || '').localeCompare(b.assignment?.scheduled_date || '');
+      })
     : targets.filter(t => t.status === 'done').sort((a, b) =>
         new Date(b.completed_at || 0) - new Date(a.completed_at || 0)
       );
@@ -7690,6 +7731,13 @@ function ViewOnlyAssignmentsPanel({ propertyId, employee, onOpenBedroomHistory }
           Done ({targets.filter(t => t.status === 'done').length})
         </button>
       </div>
+
+      {filter === 'open' && (dueTodayCount > 0 || overdueCount > 0) && (
+        <div className="flex items-center gap-2 mb-3 text-xs font-mono">
+          {dueTodayCount > 0 && <span className="px-2 py-1 rounded-full bg-emerald-100 text-emerald-800">{dueTodayCount} due today</span>}
+          {overdueCount > 0 && <span className="px-2 py-1 rounded-full bg-red-100 text-red-700">{overdueCount} overdue</span>}
+        </div>
+      )}
 
       {!loaded ? (
         <Splash text="Loading…" />
@@ -7725,9 +7773,19 @@ function ViewOnlyAssignmentsPanel({ propertyId, employee, onOpenBedroomHistory }
                         </span>
                       )}
                       {a.scheduled_date && (
-                        <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-stone-200 text-stone-700 flex items-center gap-1">
-                          <Calendar size={9} /> {fmtDateWithDay(a.scheduled_date)}
-                        </span>
+                        a.scheduled_date < todayKey ? (
+                          <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-red-100 text-red-700 flex items-center gap-1">
+                            <Calendar size={9} /> Overdue · {fmtDateWithDay(a.scheduled_date)}
+                          </span>
+                        ) : a.scheduled_date === todayKey ? (
+                          <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 flex items-center gap-1">
+                            <Calendar size={9} /> Today
+                          </span>
+                        ) : (
+                          <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-stone-200 text-stone-600 flex items-center gap-1">
+                            <Calendar size={9} /> {fmtDateWithDay(a.scheduled_date)}
+                          </span>
+                        )
                       )}
                     </div>
                   </div>
@@ -25861,8 +25919,12 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
           || naturalCompare(a.party?.label || '', b.party?.label || '');
       });
     } else {
-      // Priority items sort to the top, then natural unit/party order.
+      // Overdue → today → undated → upcoming, then priority, then
+      // natural unit/party order, so cleaners see today's work first.
       filtered.sort((a, b) => {
+        const ra = assignmentDueRank(a.assignment?.scheduled_date);
+        const rb = assignmentDueRank(b.assignment?.scheduled_date);
+        if (ra !== rb) return ra - rb;
         const ap = a.priority ? 1 : 0;
         const bp = b.priority ? 1 : 0;
         if (ap !== bp) return bp - ap;
@@ -26295,6 +26357,15 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
           const isOpen = !!bundleOpen[key];
           const unitLabel = group.unit?.label || (key === 'no-unit' ? 'No unit' : key);
           const bundleHasPriority = group.items.some(t => t.priority);
+          // Most-urgent due status across this apartment's jobs.
+          const unitDueKinds = group.items.map(t => assignmentDueKind(t.assignment?.scheduled_date)).filter(Boolean);
+          const unitDue = unitDueKinds.includes('overdue') ? 'overdue'
+            : unitDueKinds.includes('today') ? 'today'
+            : unitDueKinds.includes('upcoming') ? 'upcoming' : null;
+          const earliestUpcoming = group.items
+            .map(t => t.assignment?.scheduled_date)
+            .filter(d => d && assignmentDueKind(d) === 'upcoming')
+            .sort()[0];
           // Build the assignment → section breakdown for the expanded
           // view. We key by party_id + assignment_id (NOT just party_id)
           // so two independent assignments at the same bedroom — e.g. a
@@ -26340,6 +26411,9 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                   <span className="text-xs font-mono px-2 py-0.5 rounded-full bg-amber-600 text-white font-bold flex-shrink-0">
                     {bedroomCount} job{bedroomCount === 1 ? '' : 's'}
                   </span>
+                  {unitDue === 'overdue' && <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-red-100 text-red-700 flex-shrink-0">Overdue</span>}
+                  {unitDue === 'today' && <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 flex-shrink-0">Today</span>}
+                  {unitDue === 'upcoming' && earliestUpcoming && <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-stone-200 text-stone-600 flex-shrink-0">{fmtDateWithDay(earliestUpcoming)}</span>}
                   {bundleHasPriority && <PriorityChip on={true} size="xs" />}
                 </div>
                 <ChevronRight size={14} className={`text-amber-700 flex-shrink-0 transition-transform ${isOpen ? 'rotate-90' : ''}`} />

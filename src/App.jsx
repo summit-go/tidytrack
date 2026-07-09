@@ -11730,7 +11730,13 @@ function PropertyAdmin({ employee, onSignOut, onOpenMessages, onLogoClick }) {
       }}
       onNew={() => setView({ kind: 'assignment-new', property: view.property })}
       onNewChecklist={() => setView({ kind: 'assignment-new-checklist', property: view.property })}
+      onNewQuick={() => setView({ kind: 'assignment-new-quick', property: view.property })}
       onOpen={(a) => setView({ kind: 'assignment-detail', property: view.property, assignment: a })} />;
+  }
+  if (view.kind === 'assignment-new-quick') {
+    return <QuickAssignmentForm property={view.property} employee={employee}
+      onCancel={() => setView({ kind: 'assignment-list', property: view.property })}
+      onSaved={() => setView({ kind: 'assignment-list', property: view.property })} />;
   }
   if (view.kind === 'assignment-new') {
     return <AssignmentForm property={view.property} employee={employee}
@@ -13505,12 +13511,20 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
       onSaved={() => { setView('open'); load(); }} />;
   }
 
+  // Picked property + Quick sub-view → render the lightweight form
+  if (picked && view === 'quick') {
+    return <QuickAssignmentForm property={picked} employee={employee}
+      onCancel={() => setView('open')}
+      onSaved={() => { setView('open'); load(); }} />;
+  }
+
   // Picked property + Open sub-view → render list
   if (picked && view === 'open') {
     return <AssignmentList property={picked} employee={employee}
       onBack={() => { setPicked(null); load(); }}
       onNew={() => setView('upload')}
       onNewChecklist={() => setView('upload-checklist')}
+      onNewQuick={() => setView('quick')}
       onOpen={(a) => { setDetail(a); setView('detail'); }} />;
   }
 
@@ -20641,7 +20655,7 @@ function DailyUnitDayDetail({ date, propertyId, unitId, unitLabel, propertyName,
 // =================================================================
 // ASSIGNMENT LIST — owner/manager view of all assignments for a property
 // =================================================================
-function AssignmentList({ property, employee, onBack, onNew, onNewChecklist, onOpen }) {
+function AssignmentList({ property, employee, onBack, onNew, onNewChecklist, onNewQuick, onOpen }) {
   const [assignments, setAssignments] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [filter, setFilter] = useState('open'); // open | all
@@ -20947,9 +20961,15 @@ function AssignmentList({ property, employee, onBack, onNew, onNewChecklist, onO
       <div className="px-5 pt-6">
         {can(employee, 'upload_assignments') && (
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-4">
+            {onNewQuick && (
+              <button onClick={onNewQuick}
+                className="p-4 rounded-2xl bg-stone-900 text-stone-50 font-medium flex items-center justify-center gap-2 active:scale-98">
+                <Building2 size={18} /> Quick assignment
+              </button>
+            )}
             {onNewChecklist && (
               <button onClick={onNewChecklist}
-                className="p-4 rounded-2xl bg-stone-900 text-stone-50 font-medium flex items-center justify-center gap-2 active:scale-98">
+                className="p-4 rounded-2xl border-2 border-stone-300 bg-white text-stone-700 font-medium flex items-center justify-center gap-2 active:scale-98">
                 <FileText size={18} /> New checklist assignment
               </button>
             )}
@@ -21218,6 +21238,167 @@ function AssignmentList({ property, employee, onBack, onNew, onNewChecklist, onO
 // `property` is the *default* property (where they came from). Each
 // file can be retargeted to a different property if needed.
 // =================================================================
+// =================================================================
+// QUICK ASSIGNMENT — for properties without the full bedroom/template
+// setup (e.g. Bridges, Citifront). Just: apartment number, how many
+// bed/bath, and the clean type. Creates the apartment (unit) on the
+// fly if it doesn't exist, so a cleaner can pick it up right away.
+// =================================================================
+const QUICK_TYPES = [
+  { key: 'standard',        label: 'Standard' },
+  { key: 'deep',            label: 'Deep clean' },
+  { key: 'move_out_check',  label: 'Move-out' },
+  { key: 'cleaning_check',  label: 'Cleaning check' },
+  { key: 'reclean',         label: 'Re-clean' },
+];
+function QuickAssignmentForm({ property, employee, onCancel, onSaved }) {
+  const [apt, setApt] = useState('');
+  const [bedrooms, setBedrooms] = useState(2);
+  const [bathrooms, setBathrooms] = useState(2);
+  const [cleanType, setCleanType] = useState('');
+  const [scheduledDate, setScheduledDate] = useState('');
+  const [priority, setPriority] = useState(false);
+  const [notes, setNotes] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  const step = (setter, val, delta, min = 0, max = 12) =>
+    setter(Math.max(min, Math.min(max, (parseInt(val, 10) || 0) + delta)));
+
+  const submit = async () => {
+    const label = apt.trim();
+    if (!label) { setError('Enter an apartment number.'); return; }
+    if (!cleanType) { setError('Pick a clean type.'); return; }
+    if (busy) return;
+    setBusy(true); setError('');
+    try {
+      const br = parseInt(bedrooms, 10) || 0;
+      const ba = parseInt(bathrooms, 10) || 0;
+      // Find the apartment (unit), else create it.
+      const { data: existing } = await supabase.from('units').select('*')
+        .eq('customer_id', property.id).ilike('label', label).limit(1);
+      let unit = (existing && existing[0]) || null;
+      if (!unit) {
+        const { data: created, error: ue } = await supabase.from('units').insert({
+          customer_id: property.id, label, kind: 'townhome',
+          bedrooms: br, bathrooms: ba, active: true, sort_order: 0,
+        }).select().single();
+        if (ue) throw ue;
+        unit = created;
+      } else {
+        await supabase.from('units').update({ bedrooms: br, bathrooms: ba }).eq('id', unit.id);
+      }
+      // Ensure a party to attach the job to (whole-apartment "Main").
+      const { data: parties } = await supabase.from('parties').select('*')
+        .eq('unit_id', unit.id).eq('active', true).order('sort_order');
+      let party = (parties || []).find(p => (p.label || '').toLowerCase() === 'main') || (parties || [])[0] || null;
+      if (!party) {
+        const { data: cp, error: pe } = await supabase.from('parties').insert({
+          unit_id: unit.id, label: 'Main', sort_order: 1, active: true,
+        }).select().single();
+        if (pe) throw pe;
+        party = cp;
+      }
+      // Create the assignment + one target.
+      const typeLabel = (QUICK_TYPES.find(t => t.key === cleanType) || {}).label || cleanType;
+      const title = `Apt ${label} · ${br}BR/${ba}BA · ${typeLabel}`;
+      const { data: asg, error: ae } = await supabase.from('assignments').insert({
+        customer_id: property.id, title, notes: notes.trim() || null,
+        uploaded_by: employee.id, active: true, assignment_type: cleanType,
+        scheduled_date: scheduledDate || null,
+      }).select().single();
+      if (ae) throw ae;
+      const { error: te } = await supabase.from('assignment_targets').insert({
+        assignment_id: asg.id, unit_id: unit.id, party_id: party.id,
+        status: 'pending', priority: !!priority,
+      });
+      if (te) throw te;
+      setBusy(false);
+      onSaved();
+    } catch (e) {
+      setBusy(false);
+      setError(e.message || String(e));
+    }
+  };
+
+  const Stepper = ({ label, value, setter }) => (
+    <div className="flex-1">
+      <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">{label}</label>
+      <div className="flex items-center gap-2">
+        <button onClick={() => step(setter, value, -1)} className="w-10 h-10 rounded-xl border border-stone-300 bg-white text-stone-700 text-lg font-medium active:scale-95">–</button>
+        <div className="flex-1 text-center text-lg font-mono text-stone-900 py-2 rounded-xl bg-stone-100">{value}</div>
+        <button onClick={() => step(setter, value, 1)} className="w-10 h-10 rounded-xl border border-stone-300 bg-white text-stone-700 text-lg font-medium active:scale-95">+</button>
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="min-h-screen bg-stone-50 pb-28">
+      <div className="flex items-center gap-3 px-5 py-4 border-b border-stone-200 sticky top-0 bg-stone-50 z-10">
+        <button onClick={onCancel} className="p-2 -ml-2 rounded-full hover:bg-stone-100">
+          <ArrowLeft size={20} className="text-stone-700" />
+        </button>
+        <div>
+          <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">{property.name}</div>
+          <div className="font-serif text-xl text-stone-900">Quick assignment</div>
+        </div>
+      </div>
+
+      <div className="px-5 pt-6 space-y-5 max-w-md mx-auto">
+        <p className="text-sm text-stone-600">Just clean an apartment — no checklist needed. We'll create the apartment if it's not in the system yet.</p>
+
+        <div>
+          <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Apartment number</label>
+          <input value={apt} onChange={e => setApt(e.target.value)} placeholder="e.g. 302"
+            className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white text-stone-900" />
+        </div>
+
+        <div className="flex gap-3">
+          <Stepper label="Bedrooms" value={bedrooms} setter={setBedrooms} />
+          <Stepper label="Bathrooms" value={bathrooms} setter={setBathrooms} />
+        </div>
+
+        <div>
+          <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Clean type</label>
+          <div className="grid grid-cols-2 gap-2">
+            {QUICK_TYPES.map(t => (
+              <button key={t.key} onClick={() => setCleanType(t.key)}
+                className={`px-3 py-2.5 rounded-xl border-2 text-sm font-medium transition-colors ${cleanType === t.key ? 'bg-amber-50 border-amber-500 text-amber-900' : 'bg-white border-stone-200 text-stone-700 hover:border-stone-400'}`}>
+                {t.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div>
+          <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Target date (optional)</label>
+          <input type="date" value={scheduledDate} onChange={e => setScheduledDate(e.target.value)}
+            className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white text-stone-900" />
+        </div>
+
+        <button onClick={() => setPriority(p => !p)}
+          className={`w-full px-4 py-3 rounded-xl border-2 text-sm font-medium flex items-center justify-between transition-colors ${priority ? 'bg-red-50 border-red-400 text-red-800' : 'bg-white border-stone-200 text-stone-600'}`}>
+          <span>Mark urgent (sorts to top for cleaners)</span>
+          <span className={`w-5 h-5 rounded-md flex items-center justify-center ${priority ? 'bg-red-600 text-white' : 'border-2 border-stone-300'}`}>{priority && <Check size={12} />}</span>
+        </button>
+
+        <div>
+          <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Notes (optional)</label>
+          <textarea value={notes} onChange={e => setNotes(e.target.value)} rows={2} placeholder="Anything the cleaner should know…"
+            className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white text-stone-900 text-sm" />
+        </div>
+
+        {error && <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-sm text-red-700">{error}</div>}
+
+        <button onClick={submit} disabled={busy || !apt.trim() || !cleanType}
+          className="w-full py-4 rounded-2xl bg-stone-900 text-stone-50 font-medium active:scale-98 disabled:opacity-50 flex items-center justify-center gap-2">
+          <Plus size={18} /> {busy ? 'Creating…' : 'Create assignment'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function AssignmentForm({ property, employee, onCancel, onSaved }) {
   // Each row: { id, file, title, notes, propertyId, scope, unitId, partyId, multipleTargets }
   const [rows, setRows] = useState([]);
@@ -21956,6 +22137,7 @@ function ChecklistAssignmentWizard({ property, employee, actorKind = null, porta
   // set or the global default. Re-runs when the sheet type changes.
   // -----------------------------------------------------------------
   useEffect(() => {
+    let cancelled = false;
     (async () => {
       setTemplateLoading(true); setTemplateError(null);
       try {
@@ -21983,6 +22165,7 @@ function ChecklistAssignmentWizard({ property, employee, actorKind = null, porta
             chosen = (defaultSet && defaultSet[0]) || null;
           }
         }
+        if (cancelled) return;
         if (!chosen) {
           setTemplateError('No checklist template found for this property. Run the v27 migration first.');
           setTemplateLoading(false);
@@ -21992,20 +22175,23 @@ function ChecklistAssignmentWizard({ property, employee, actorKind = null, porta
         // Load variants + items in one go
         const { data: vData } = await supabase.from('section_template_variants')
           .select('*').eq('set_id', chosen.id).order('sort_order');
+        if (cancelled) return;
         setVariants(vData || []);
         const variantIds = (vData || []).map(v => v.id);
         if (variantIds.length > 0) {
           const { data: iData } = await supabase.from('section_template_items')
             .select('*').in('variant_id', variantIds).order('sort_order');
+          if (cancelled) return;
           setItems(iData || []);
         } else {
           setItems([]);
         }
       } catch (e) {
-        setTemplateError(e.message || 'Could not load checklist templates.');
+        if (!cancelled) setTemplateError(e.message || 'Could not load checklist templates.');
       }
-      setTemplateLoading(false);
+      if (!cancelled) setTemplateLoading(false);
     })();
+    return () => { cancelled = true; };
   }, [property.id, sheetType]);
 
   // -----------------------------------------------------------------
@@ -23126,6 +23312,11 @@ function ChecklistAssignmentWizard({ property, employee, actorKind = null, porta
       <div>
         <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-1">Step 4 · Configure each bedroom</div>
         <div className="text-sm text-stone-600 mb-3">Tap a bedroom tab, then mark sections as passed or check the items that need cleaning.</div>
+
+        {/* Which template is loaded — confirms move-out vs cleaning-check. */}
+        <div className={`mb-3 px-3 py-2 rounded-lg text-[11px] font-mono flex items-center gap-2 ${templateSet?.sheet_type === 'move_out_clean' ? 'bg-emerald-50 text-emerald-800 border border-emerald-200' : 'bg-stone-100 text-stone-600'}`}>
+          Template: {templateSet?.sheet_type === 'move_out_clean' ? 'Move-out (granular)' : (templateSet?.name || 'Cleaning-check / default')} · {items.length} items{templateLoading ? ' · loading…' : ''}
+        </div>
 
         {/* Sheet strip — only shows when one or more sheets were
            uploaded in step 0. Lets the uploader quick-view each sheet

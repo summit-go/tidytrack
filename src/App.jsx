@@ -24935,6 +24935,26 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
             <span className={`text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full border ${s.color}`}>
               {s.label}
             </span>
+            {/* Due-date signal from the assignment's scheduled_date. */}
+            {!isDone && (() => {
+              const kind = assignmentDueKind(t.assignment?.scheduled_date);
+              if (!kind) return null;
+              if (kind === 'overdue') return (
+                <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-red-100 text-red-700 border border-red-200 flex items-center gap-1">
+                  <Calendar size={9} /> Overdue · {fmtDateWithDay(t.assignment.scheduled_date)}
+                </span>
+              );
+              if (kind === 'today') return (
+                <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 border border-emerald-200 flex items-center gap-1">
+                  <Calendar size={9} /> Today
+                </span>
+              );
+              return (
+                <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-stone-100 text-stone-600 border border-stone-200 flex items-center gap-1">
+                  <Calendar size={9} /> {fmtDateWithDay(t.assignment.scheduled_date)}
+                </span>
+              );
+            })()}
           </div>
           {/* Mini-row 2: View doc + History — right-aligned. Stays a
              separate mini-row so the chip pairs never split awkwardly:

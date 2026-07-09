@@ -21302,6 +21302,12 @@ function QuickAssignmentForm({ property, employee, onCancel, onSaved }) {
       // Create the assignment + one target.
       const typeLabel = (QUICK_TYPES.find(t => t.key === cleanType) || {}).label || cleanType;
       const title = `Apt ${label} · ${br}BR/${ba}BA · ${typeLabel}`;
+      // Route this property through the multi-unit cleaner flow (property →
+      // pick apartment → clean), like Carriage — otherwise a cleaner
+      // clocking in jumps straight into one clean with no apartment shown.
+      if (property.property_type !== 'multi_unit') {
+        await supabase.from('customers').update({ property_type: 'multi_unit' }).eq('id', property.id);
+      }
       const { data: asg, error: ae } = await supabase.from('assignments').insert({
         customer_id: property.id, title, notes: notes.trim() || null,
         uploaded_by: employee.id, active: true, assignment_type: cleanType,

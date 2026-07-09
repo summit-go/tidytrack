@@ -169,6 +169,7 @@ async function translateText(strings, targetLang) {
 // (matches the cleaner's preference, doesn't broadcast to PMs).
 // =================================================================
 const LocaleContext = React.createContext({ locale: 'en', setLocale: () => {} });
+const PreviewContext = React.createContext(null);
 
 function useLocale() {
   return React.useContext(LocaleContext);
@@ -1591,6 +1592,15 @@ const can = (employee, capabilityKey) => {
   return false;
 };
 
+// The beta apartment complex (any property with "beta" in its name) is
+// only visible to owners and granted beta testers — everyone else has
+// it filtered out of property lists, like the other beta-gated things.
+const visibleProps = (list, employee) => {
+  if (!Array.isArray(list)) return list || [];
+  if (employee?.is_beta_tester || employee?.role === 'owner') return list;
+  return list.filter(c => !/\bbeta\b/i.test(c?.name || ''));
+};
+
 // =================================================================
 // TASK CATEGORIES — structured picker for cleaners. Coexists with
 // freeform task names. Each task has both a category (e.g. "general")
@@ -2319,7 +2329,7 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
   // dictionary > English. Keeps the picker readable without needing
   // the full template_items join (cleaners don't care about the key).
   const labelForTarget = (t) => {
-    if (t.status_notes && t.template_item_key?.startsWith?.('requested:')) return t.status_notes;
+    if (t.status_notes && (t.template_item_key?.startsWith?.('requested:') || t.template_item_key?.startsWith?.('custom_'))) return t.status_notes;
     const key = t.template_item_key || '';
     const englishFallback = key.replace(/^[a-z]+:/, '').replace(/_/g, ' ').replace(/^./, c => c.toUpperCase());
     return resolveItemLabel(key, locale, overrides, englishFallback);
@@ -4801,14 +4811,14 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   }
 
   if (!shift && clockInFlow?.step === 'property') {
-    return withIdleModal(<PropertyPicker onPick={onPickProperty} onCancel={() => setClockInFlow(null)} busy={busy} />);
+    return withIdleModal(<PropertyPicker onPick={onPickProperty} onCancel={() => setClockInFlow(null)} busy={busy} employee={employee} />);
   }
   if (!shift && clockInFlow?.step === 'view-only-property') {
     return withIdleModal(<PropertyPicker onPick={onPickViewOnlyProperty}
       onCancel={() => setClockInFlow(null)} busy={busy}
       title="Which property do you want to look at?"
       subtitle="View-only — no time will be tracked"
-      viewOnly={true} />);
+      viewOnly={true} employee={employee} />);
   }
   if (shift && clockInFlow?.step === 'attach-property') {
     return withIdleModal(<PropertyPicker
@@ -4817,7 +4827,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       busy={busy}
       title="Attach a property to this shift"
       subtitle="You'll stay clocked in — no time lost"
-      viewOnly={true} />);
+      viewOnly={true} employee={employee} />);
   }
   if (shift && blockStartFlow?.step === 'unit') {
     return withIdleModal(<UnitPicker property={shift.customer} onPick={onPickBlockUnit}
@@ -7395,7 +7405,7 @@ function SimpleShiftView({ shift, tasks, activeTask, employeeName, employee, onS
 // =================================================================
 // Pickers
 // =================================================================
-function PropertyPicker({ onPick, onCancel, busy, title, subtitle, viewOnly = false }) {
+function PropertyPicker({ onPick, onCancel, busy, title, subtitle, viewOnly = false, employee }) {
   const [properties, setProperties] = useState([]);
   const [assignmentCounts, setAssignmentCounts] = useState({}); // { customer_id: number }
   const [loaded, setLoaded] = useState(false);
@@ -7431,7 +7441,7 @@ function PropertyPicker({ onPick, onCancel, busy, title, subtitle, viewOnly = fa
       seenBedrooms.add(key);
       counts[cid] = (counts[cid] || 0) + 1;
     });
-    setProperties(propsRes.data || []);
+    setProperties(visibleProps(propsRes.data || [], employee));
     setAssignmentCounts(counts);
     setLoaded(true);
   })(); }, []);
@@ -8696,6 +8706,7 @@ function Header({ name, onSignOut, role, employee, onOpenMessages, onLogoClick, 
   const showMessagesIcon = !!(onOpenMessages && employee);
   const unread = useUnreadCount({ employee: showMessagesIcon ? employee : null });
   const { locale, setLocale } = useLocale();
+  const previewCtx = React.useContext(PreviewContext);
   const translateConfigured = isTextTranslateConfigured();
   // Overflow "⋯" menu — holds occasional owner tools so they don't
   // clutter the home screen. Only rendered when menuItems are provided.
@@ -8753,6 +8764,14 @@ function Header({ name, onSignOut, role, employee, onOpenMessages, onLogoClick, 
           title="Home">
           {logoBlock}
         </button>
+        {/* Owner-only "Preview as cleaner" — sits by the logo. */}
+        {previewCtx && previewCtx.isOwner && previewCtx.onPreview && (
+          <button onClick={previewCtx.onPreview}
+            className="ml-1 px-2 py-1.5 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-50 text-[11px] font-mono flex items-center gap-1.5 active:scale-95 transition-transform"
+            title="Preview as cleaner">
+            <Eye size={12} /> <span className="hidden sm:inline">Preview</span>
+          </button>
+        )}
       </div>
       <div className="flex items-center gap-2" data-no-translate>
         {/* Locale toggle: cleaner can flip the entire UI to Spanish.
@@ -8911,16 +8930,8 @@ function ManagerShell({ employee, onSignOut }) {
   }
 
   return (
+    <PreviewContext.Provider value={{ onPreview: () => setPreviewMode(true), isOwner: employee?.role === 'owner' }}>
     <div className="min-h-screen bg-stone-50">
-      {/* Floating "Preview as cleaner" button for owners only — bottom-right,
-         above the tab bar. Lets them see the app as a cleaner would. */}
-      {employee?.role === 'owner' && (
-        <button onClick={() => setPreviewMode(true)}
-          className="fixed bottom-20 right-4 z-40 px-3 py-2 rounded-full bg-stone-900 hover:bg-stone-800 text-stone-50 text-xs font-mono shadow-lg flex items-center gap-1.5">
-          <Eye size={12} /> Preview as cleaner
-        </button>
-      )}
-
       {tab === 'daily'       && <DailyView         employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} onLogoClick={goHome} />}
       {tab === 'dashboard'   && <ManagerDashboard  employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} onLogoClick={goHome} />}
       {tab === 'team'        && <EmployeeAdmin    employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} onLogoClick={goHome} />}
@@ -8939,6 +8950,7 @@ function ManagerShell({ employee, onSignOut }) {
         </div>
       </div>
     </div>
+    </PreviewContext.Provider>
   );
 }
 
@@ -11650,7 +11662,7 @@ function PropertyAdmin({ employee, onSignOut, onOpenMessages, onLogoClick }) {
   const [showInactive, setShowInactive] = useState(false);
   const load = async () => {
     const { data } = await supabase.from('customers').select('*').order('active', { ascending: false }).order('name');
-    setProps(data || []); setLoaded(true);
+    setProps(visibleProps(data, employee)); setLoaded(true);
   };
   useEffect(() => { load(); }, []);
   if (!loaded) return <Splash text="Loading…" />;
@@ -13467,7 +13479,7 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
       seenBedrooms.add(key);
       counts[cid] = (counts[cid] || 0) + 1;
     });
-    setProperties(propsRes.data || []);
+    setProperties(visibleProps(propsRes.data || [], employee));
     setAssignmentCounts(counts);
     setLoaded(true);
   };
@@ -13729,7 +13741,7 @@ function CleaningsReportView({ employee, onSignOut, onOpenMessages, onLogoClick,
         return { key: meta.group || sub, label: meta.groupLabel || meta.label };
       };
       const labelForItem = (t) => {
-        if (t.status_notes && t.template_item_key?.startsWith?.('requested:')) return t.status_notes;
+        if (t.status_notes && (t.template_item_key?.startsWith?.('requested:') || t.template_item_key?.startsWith?.('custom_'))) return t.status_notes;
         const k = t.template_item_key || '';
         return k.replace(/^[a-z_]+:/, '').replace(/_/g, ' ').replace(/^./, c => c.toUpperCase()) || 'Item';
       };
@@ -14450,7 +14462,7 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
       const PAGE = 1000;
       for (let from = 0; ; from += PAGE) {
         let q = supabase.from('assignment_targets')
-          .select('id, unit_id, party_id, assignment_id, template_item_key, template_section, completed_at, status, assignment:assignments(id, assignment_type, deleted_at), party:parties(id,label)')
+          .select('id, unit_id, party_id, assignment_id, template_item_key, template_section, status_notes, completed_at, status, assignment:assignments(id, assignment_type, deleted_at), party:parties(id,label)')
           .eq('status', 'done')
           .in('unit_id', unitIds)
           .gte('completed_at', start + 'T00:00:00').lte('completed_at', end + 'T23:59:59')
@@ -14485,7 +14497,7 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
       const fullKey = itemKey
         ? (itemKey.includes(':') ? itemKey : (sec ? `${sec}:${itemKey}` : itemKey))
         : (sec ? `${sec}:__section__` : null);
-      if (fullKey) byAssign.get(aid).items.push({ fullKey, sec, itemKey });
+      if (fullKey) byAssign.get(aid).items.push({ fullKey, sec, itemKey, notes: t.status_notes });
       if (t.id) byAssign.get(aid).targetIds.push(t.id);
       const aType = t.assignment?.assignment_type || '?';
       if (itemKey) { withItemKey++; if (sampleItems.length < 15) sampleItems.push(`${sec || '(no sec)'}:${itemKey} · ${aType}`); }
@@ -14505,9 +14517,12 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
         seen.add(it.fullKey);
         const b = book[it.fullKey];
         const isSection = !it.itemKey;
+        const isCustom = it.itemKey && it.itemKey.startsWith('custom_');
         const fallback = isSection
           ? `Whole ${SEC_LABEL[it.sec] || it.sec || 'section'}`
-          : resolveItemLabel(it.fullKey, 'en', null, String(it.itemKey).replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()));
+          : isCustom
+            ? (it.notes || 'Custom item')
+            : resolveItemLabel(it.fullKey, 'en', null, String(it.itemKey).replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()));
         if (b) {
           const mode = b.mode === 'time' ? 'time' : 'fixed';
           subs.push({
@@ -15246,7 +15261,7 @@ function InvoiceView({ employee, onSignOut, onOpenMessages, onLogoClick, topTogg
   useEffect(() => { (async () => {
     const { data } = await supabase.from('customers').select('*')
       .eq('property_type', 'multi_unit').eq('active', true).order('name');
-    setProperties(data || []);
+    setProperties(visibleProps(data, employee));
   })(); }, []);
   const generate = async () => {
     if (!selectedId) return;
@@ -21220,7 +21235,7 @@ function AssignmentForm({ property, employee, onCancel, onSaved }) {
     (async () => {
       const { data } = await supabase.from('customers').select('*')
         .eq('active', true).order('name');
-      setAllProperties(data || []);
+      setAllProperties(visibleProps(data, employee));
       const { data: emps } = await supabase.from('employees')
         .select('id, name, role').eq('active', true)
         .in('role', ['employee', 'manager']).order('name');
@@ -21899,6 +21914,8 @@ function ChecklistAssignmentWizard({ property, employee, actorKind = null, porta
   const [items, setItems] = useState([]);       // all items under those variants
   const [templateLoading, setTemplateLoading] = useState(true);
   const [templateError, setTemplateError] = useState(null);
+  // Draft text for the "add a custom item" inputs, keyed by partyId:section
+  const [customText, setCustomText] = useState({});
 
   // Submission
   const [busy, setBusy] = useState(false);
@@ -21934,20 +21951,37 @@ function ChecklistAssignmentWizard({ property, employee, actorKind = null, porta
   }, [property.id]);
 
   // -----------------------------------------------------------------
-  // Load template set (sets with customer_id matching, else default)
+  // Load template set. Move-out cleans use their own granular set
+  // (sheet_type='move_out_clean'); cleaning checks use the property's
+  // set or the global default. Re-runs when the sheet type changes.
   // -----------------------------------------------------------------
   useEffect(() => {
     (async () => {
       setTemplateLoading(true); setTemplateError(null);
       try {
-        // Prefer property-specific, fall back to global default
-        let { data: ownSet } = await supabase.from('section_template_sets')
-          .select('*').eq('customer_id', property.id).limit(1);
-        let chosen = (ownSet && ownSet[0]) || null;
+        let chosen = null;
+        if (sheetType === 'move_out_clean') {
+          // Property-specific move-out set, else the global move-out set.
+          const { data: ownMO } = await supabase.from('section_template_sets')
+            .select('*').eq('customer_id', property.id).eq('sheet_type', 'move_out_clean').limit(1);
+          chosen = (ownMO && ownMO[0]) || null;
+          if (!chosen) {
+            const { data: globalMO } = await supabase.from('section_template_sets')
+              .select('*').eq('sheet_type', 'move_out_clean').is('customer_id', null).limit(1);
+            chosen = (globalMO && globalMO[0]) || null;
+          }
+        }
         if (!chosen) {
-          const { data: defaultSet } = await supabase.from('section_template_sets')
-            .select('*').eq('is_default', true).is('customer_id', null).limit(1);
-          chosen = (defaultSet && defaultSet[0]) || null;
+          // Cleaning checks (and fallback if the move-out set isn't there yet):
+          // property-specific, then global default.
+          const { data: ownSet } = await supabase.from('section_template_sets')
+            .select('*').eq('customer_id', property.id).limit(1);
+          chosen = (ownSet && ownSet[0]) || null;
+          if (!chosen) {
+            const { data: defaultSet } = await supabase.from('section_template_sets')
+              .select('*').eq('is_default', true).is('customer_id', null).limit(1);
+            chosen = (defaultSet && defaultSet[0]) || null;
+          }
         }
         if (!chosen) {
           setTemplateError('No checklist template found for this property. Run the v27 migration first.');
@@ -21964,13 +21998,15 @@ function ChecklistAssignmentWizard({ property, employee, actorKind = null, porta
           const { data: iData } = await supabase.from('section_template_items')
             .select('*').in('variant_id', variantIds).order('sort_order');
           setItems(iData || []);
+        } else {
+          setItems([]);
         }
       } catch (e) {
         setTemplateError(e.message || 'Could not load checklist templates.');
       }
       setTemplateLoading(false);
     })();
-  }, [property.id]);
+  }, [property.id, sheetType]);
 
   // -----------------------------------------------------------------
   // Load ALL parties for ALL units of this property up-front. The
@@ -22249,6 +22285,36 @@ function ChecklistAssignmentWizard({ property, employee, actorKind = null, porta
       const checked = { ...current.checked };
       if (checked[key]) delete checked[key]; else checked[key] = true;
       return { ...prev, [partyId]: { ...current, checked, mode: 'configure' } };
+    });
+  };
+
+  // Add a custom item to a section for THIS assignment only (not the
+  // template). Stored with a "custom_" key + the label; on submit it
+  // becomes a target with the label in status_notes (same idea as a
+  // cleaner's requested item).
+  const addCustomItem = (partyId, sectionKey, label) => {
+    const trimmed = (label || '').trim();
+    if (!trimmed) return;
+    const itemKey = `custom_${Date.now()}${Math.floor(Math.random() * 1000)}`;
+    const key = `${sectionKey}:${itemKey}`;
+    setConfig(prev => {
+      const current = prev[partyId] || { mode: 'configure', checked: {}, customLabels: {} };
+      return { ...prev, [partyId]: {
+        ...current, mode: 'configure',
+        checked: { ...(current.checked || {}), [key]: true },
+        customLabels: { ...(current.customLabels || {}), [key]: trimmed },
+        // adding work means the section isn't "passed"
+        passedSections: { ...(current.passedSections || {}), [sectionKey]: false },
+      } };
+    });
+  };
+  const removeCustomItem = (partyId, key) => {
+    setConfig(prev => {
+      const current = prev[partyId];
+      if (!current) return prev;
+      const checked = { ...(current.checked || {}) }; delete checked[key];
+      const customLabels = { ...(current.customLabels || {}) }; delete customLabels[key];
+      return { ...prev, [partyId]: { ...current, checked, customLabels } };
     });
   };
 
@@ -22645,14 +22711,19 @@ function ChecklistAssignmentWizard({ property, employee, actorKind = null, porta
         const targetRows = [];
         Object.keys(c.checked).forEach(k => {
           const [sectionKey, itemKey] = k.split(':', 2);
-          targetRows.push({
+          const row = {
             assignment_id: created_assignment.id,
             unit_id: partyUnit?.id || null,
             party_id: partyId,
             status: 'pending',
             template_section: sectionKey,
             template_item_key: itemKey,
-          });
+          };
+          // Custom (uploader-added) items carry their label in status_notes.
+          if (itemKey && itemKey.startsWith('custom_') && c.customLabels && c.customLabels[k]) {
+            row.status_notes = c.customLabels[k];
+          }
+          targetRows.push(row);
         });
         if (targetRows.length > 0) {
           const { error: tErr } = await supabase.from('assignment_targets').insert(targetRows);
@@ -23546,6 +23617,36 @@ function ChecklistAssignmentWizard({ property, employee, actorKind = null, porta
                     </button>
                   );
                 })}
+                {/* Custom (uploader-added) items for this section */}
+                {Object.keys(c.customLabels || {}).filter(k => k.startsWith(`${sectionKey}:`)).map(k => {
+                  const isChecked = !!checked[k];
+                  const itemKey = k.slice(sectionKey.length + 1);
+                  return (
+                    <div key={k} className={`w-full px-2 py-2 rounded-lg flex items-center gap-2 ${isChecked ? 'bg-amber-50' : 'bg-stone-50'}`}>
+                      <button onClick={() => toggleItem(partyId, sectionKey, itemKey)} className="flex items-center gap-2 flex-1 text-left min-w-0">
+                        <div className={`w-4 h-4 rounded border-2 flex items-center justify-center flex-shrink-0 ${isChecked ? 'bg-amber-600 border-amber-600 text-white' : 'border-stone-300'}`}>
+                          {isChecked && <Check size={10} />}
+                        </div>
+                        <div className="text-xs text-stone-800 leading-snug truncate">{c.customLabels[k]}</div>
+                      </button>
+                      <button onClick={() => removeCustomItem(partyId, k)} className="p-0.5 rounded text-stone-400 hover:text-red-600 flex-shrink-0" title="Remove"><X size={13} /></button>
+                    </div>
+                  );
+                })}
+              </div>
+              {/* Add a custom item not on the template — for this assignment only */}
+              <div className="px-2 pb-2 pt-2 border-t border-stone-100 flex gap-2">
+                <input
+                  value={customText[`${partyId}:${sectionKey}`] || ''}
+                  onChange={e => setCustomText(prev => ({ ...prev, [`${partyId}:${sectionKey}`]: e.target.value }))}
+                  onKeyDown={e => { if (e.key === 'Enter') { addCustomItem(partyId, sectionKey, customText[`${partyId}:${sectionKey}`]); setCustomText(prev => ({ ...prev, [`${partyId}:${sectionKey}`]: '' })); } }}
+                  placeholder="Add an item not on the list…"
+                  className="flex-1 px-3 py-2 rounded-lg border border-stone-300 bg-white text-xs" />
+                <button
+                  onClick={() => { addCustomItem(partyId, sectionKey, customText[`${partyId}:${sectionKey}`]); setCustomText(prev => ({ ...prev, [`${partyId}:${sectionKey}`]: '' })); }}
+                  className="px-3 py-2 rounded-lg bg-stone-900 text-white text-xs font-medium flex items-center gap-1 flex-shrink-0">
+                  <Plus size={12} /> Add
+                </button>
               </div>
             </div>
           ) : (
@@ -27369,7 +27470,7 @@ function AssignmentViewer({ target, onClose, employee }) {
   };
 
   const labelForT = (t) => {
-    if (t.status_notes && t.template_item_key?.startsWith?.('requested:')) return t.status_notes;
+    if (t.status_notes && (t.template_item_key?.startsWith?.('requested:') || t.template_item_key?.startsWith?.('custom_'))) return t.status_notes;
     const k = t.template_item_key || '';
     return k.replace(/^[a-z_]+:/, '').replace(/_/g, ' ').replace(/^./, c => c.toUpperCase()) || 'Item';
   };
@@ -27768,7 +27869,7 @@ function ChecklistAssignmentView({ assignment, employee, onClose, onOpenSheet, q
   // Rendered when the quickGlance prop is true.
   const quickGlanceBody = (() => {
     const labelForT = (t) => {
-      if (t.status_notes && t.template_item_key?.startsWith?.('requested:')) return t.status_notes;
+      if (t.status_notes && (t.template_item_key?.startsWith?.('requested:') || t.template_item_key?.startsWith?.('custom_'))) return t.status_notes;
       const k = t.template_item_key || '';
       return k.replace(/^[a-z_]+:/, '').replace(/_/g, ' ').replace(/^./, c => c.toUpperCase()) || 'Item';
     };
@@ -29700,7 +29801,7 @@ function RecheckRequestModal({ assignment, property, portalUser, onClose, onSave
   }, [assignment.id]);
 
   const labelForTarget = (t) => {
-    if (t.status_notes && t.template_item_key?.startsWith?.('requested:')) return t.status_notes;
+    if (t.status_notes && (t.template_item_key?.startsWith?.('requested:') || t.template_item_key?.startsWith?.('custom_'))) return t.status_notes;
     const key = t.template_item_key || '';
     if (!key) return 'Item';
     return key.replace(/^[a-z]+:/, '').replace(/_/g, ' ').replace(/^./, c => c.toUpperCase());
@@ -30104,7 +30205,7 @@ function ReviewRecheckModal({ recheck, employee, onDone, onClose }) {
   })();
 
   const labelForTarget = (t) => {
-    if (t.status_notes && t.template_item_key?.startsWith?.('requested:')) return t.status_notes;
+    if (t.status_notes && (t.template_item_key?.startsWith?.('requested:') || t.template_item_key?.startsWith?.('custom_'))) return t.status_notes;
     const key = t.template_item_key || '';
     if (!key) return 'Item';
     return key.replace(/^[a-z]+:/, '').replace(/_/g, ' ').replace(/^./, c => c.toUpperCase());
@@ -31312,7 +31413,7 @@ function NewPropertyThreadPicker({ employee, onBack, onPicked }) {
         .select('id, name, address')
         .eq('active', true)
         .order('name');
-      setProperties(data || []);
+      setProperties(visibleProps(data, employee));
       setLoaded(true);
     })();
   }, []);

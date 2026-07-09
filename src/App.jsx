@@ -719,6 +719,28 @@ const fmtMoney = (n) => {
 const fmtDate = (ts) => new Date(ts).toLocaleDateString('en-US', { month:'short', day:'numeric' });
 const fmtDateLong = (ts) => new Date(ts).toLocaleDateString('en-US', { month:'long', day:'numeric', year:'numeric' });
 const fmtDateWithDay = (ts) => new Date(ts).toLocaleDateString('en-US', { weekday:'short', month:'short', day:'numeric' });
+
+// Due-date helpers for assignments. scheduled_date is 'YYYY-MM-DD'.
+const localTodayKey = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
+// 'overdue' | 'today' | 'upcoming' | null
+const assignmentDueKind = (scheduledDate) => {
+  if (!scheduledDate) return null;
+  const today = localTodayKey();
+  if (scheduledDate < today) return 'overdue';
+  if (scheduledDate === today) return 'today';
+  return 'upcoming';
+};
+// Sort rank: overdue first, then today, then undated, then upcoming.
+const assignmentDueRank = (scheduledDate) => {
+  const k = assignmentDueKind(scheduledDate);
+  if (k === 'overdue') return 0;
+  if (k === 'today') return 1;
+  if (!k) return 2;
+  return 3;
+};
 const fmtClock = (ts) => new Date(ts).toLocaleTimeString('en-US', { hour:'numeric', minute:'2-digit' });
 
 // Time-of-day greeting helper. Returns "Good morning", "Good afternoon",
@@ -7668,8 +7690,27 @@ function ViewOnlyAssignmentsPanel({ propertyId, employee, onOpenBedroomHistory }
   useEffect(() => { load(); /* eslint-disable-next-line */ }, [propertyId]);
   useAssignmentSync(load, 'view-only-asgn');
 
+  const todayKey = (() => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  })();
+  // Rank for sorting: overdue first, then today, then undated, then upcoming.
+  const dueRank = (t) => {
+    const sd = t.assignment?.scheduled_date;
+    if (!sd) return 2;
+    if (sd < todayKey) return 0;
+    if (sd === todayKey) return 1;
+    return 3;
+  };
+  const dueTodayCount = targets.filter(t => t.status !== 'done' && t.assignment?.scheduled_date === todayKey).length;
+  const overdueCount = targets.filter(t => t.status !== 'done' && t.assignment?.scheduled_date && t.assignment.scheduled_date < todayKey).length;
+
   const visible = filter === 'open'
-    ? targets.filter(t => t.status !== 'done')
+    ? targets.filter(t => t.status !== 'done').sort((a, b) => {
+        const ra = dueRank(a), rb = dueRank(b);
+        if (ra !== rb) return ra - rb;
+        return (a.assignment?.scheduled_date || '').localeCompare(b.assignment?.scheduled_date || '');
+      })
     : targets.filter(t => t.status === 'done').sort((a, b) =>
         new Date(b.completed_at || 0) - new Date(a.completed_at || 0)
       );
@@ -7690,6 +7731,13 @@ function ViewOnlyAssignmentsPanel({ propertyId, employee, onOpenBedroomHistory }
           Done ({targets.filter(t => t.status === 'done').length})
         </button>
       </div>
+
+      {filter === 'open' && (dueTodayCount > 0 || overdueCount > 0) && (
+        <div className="flex items-center gap-2 mb-3 text-xs font-mono">
+          {dueTodayCount > 0 && <span className="px-2 py-1 rounded-full bg-emerald-100 text-emerald-800">{dueTodayCount} due today</span>}
+          {overdueCount > 0 && <span className="px-2 py-1 rounded-full bg-red-100 text-red-700">{overdueCount} overdue</span>}
+        </div>
+      )}
 
       {!loaded ? (
         <Splash text="Loading…" />
@@ -7725,9 +7773,19 @@ function ViewOnlyAssignmentsPanel({ propertyId, employee, onOpenBedroomHistory }
                         </span>
                       )}
                       {a.scheduled_date && (
-                        <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-stone-200 text-stone-700 flex items-center gap-1">
-                          <Calendar size={9} /> {fmtDateWithDay(a.scheduled_date)}
-                        </span>
+                        a.scheduled_date < todayKey ? (
+                          <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-red-100 text-red-700 flex items-center gap-1">
+                            <Calendar size={9} /> Overdue · {fmtDateWithDay(a.scheduled_date)}
+                          </span>
+                        ) : a.scheduled_date === todayKey ? (
+                          <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 flex items-center gap-1">
+                            <Calendar size={9} /> Today
+                          </span>
+                        ) : (
+                          <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-stone-200 text-stone-600 flex items-center gap-1">
+                            <Calendar size={9} /> {fmtDateWithDay(a.scheduled_date)}
+                          </span>
+                        )
                       )}
                     </div>
                   </div>
@@ -15031,38 +15089,44 @@ function InvoiceDocument({ invoiceId, data, preview, onBack, onChanged }) {
           </div>
         </div>
 
-        {/* Items table */}
-        <table className="w-full text-xs border-collapse">
-          <thead>
-            <tr className="bg-stone-700 text-white">
-              <th className="text-left font-medium px-3 py-2">Items</th>
-              <th className="text-center font-medium px-3 py-2 w-20">Quantity</th>
-              <th className="text-right font-medium px-3 py-2 w-24">Price</th>
-              <th className="text-right font-medium px-3 py-2 w-24">Amount</th>
-            </tr>
-          </thead>
-          <tbody>
-            {lines.map((l, i) => {
-              const qty = parseFloat(l.qty) || 1;
-              const amount = parseFloat(l.amount) || 0;
-              const price = qty ? amount / qty : amount;
-              return (
-                <tr key={l.id}
-                  className={i % 2 === 0 ? 'bg-white' : 'bg-stone-100'}
-                  style={{ WebkitPrintColorAdjust: 'exact', printColorAdjust: 'exact' }}>
-                  <td className="px-3 py-2.5 align-top">
-                    <div className="font-semibold text-stone-800">{INVOICE_TYPE_LABEL[l.service_type] || 'Cleaning'}</div>
-                    <div className="text-stone-700">{l.label}</div>
-                    {l.description && <div className="text-stone-500">{l.description}</div>}
-                  </td>
-                  <td className="px-3 py-2.5 text-center align-top">{qty}</td>
-                  <td className="px-3 py-2.5 text-right align-top">${price.toFixed(2)}</td>
-                  <td className="px-3 py-2.5 text-right align-top">${amount.toFixed(2)}</td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
+        {/* Items */}
+        <div className="text-xs text-stone-800">
+          {/* Header */}
+          <div className="flex text-white font-medium px-3 py-2"
+            style={{ background: '#44403c', WebkitPrintColorAdjust: 'exact', printColorAdjust: 'exact' }}>
+            <div className="flex-1">Items</div>
+            <div className="text-right" style={{ width: 110 }}>Amount</div>
+          </div>
+          {lines.map((l, i) => {
+            const amount = parseFloat(l.amount) || 0;
+            const n = i + 1;
+            return (
+              <div key={l.id}>
+                <div className="flex px-3 py-2.5"
+                  style={{ background: i % 2 === 0 ? '#ffffff' : '#f5f2ec', WebkitPrintColorAdjust: 'exact', printColorAdjust: 'exact' }}>
+                  <div className="flex-1 flex" style={{ gap: 9 }}>
+                    <div style={{ color: '#2563eb', fontWeight: 600, fontSize: 13, lineHeight: 1.35, minWidth: 12, WebkitPrintColorAdjust: 'exact', printColorAdjust: 'exact' }}>{n}</div>
+                    <div>
+                      <div className="font-semibold text-stone-800">{INVOICE_TYPE_LABEL[l.service_type] || 'Cleaning'}</div>
+                      <div className="text-stone-700">{l.label}</div>
+                      {l.description && <div className="text-stone-500">{l.description}</div>}
+                    </div>
+                  </div>
+                  <div className="text-right align-top" style={{ width: 110 }}>${amount.toFixed(2)}</div>
+                </div>
+                {/* Divider that runs to the end and turns up into a numbered arrow */}
+                <div style={{ position: 'relative', height: 1, background: '#a8a29e', WebkitPrintColorAdjust: 'exact', printColorAdjust: 'exact' }}>
+                  <div style={{ position: 'absolute', right: 2, bottom: 0, display: 'flex', alignItems: 'flex-end', gap: 5 }}>
+                    <span style={{ fontSize: 11, fontWeight: 600, color: '#2563eb', lineHeight: 1, transform: 'translateY(-1px)', WebkitPrintColorAdjust: 'exact', printColorAdjust: 'exact' }}>{n}</span>
+                    <svg width="7" height="15" viewBox="0 0 7 15" style={{ display: 'block' }}>
+                      <path d="M3.5 15 L3.5 3.5 M1 5.5 L3.5 2.5 L6 5.5" stroke="#2563eb" fill="none" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
 
         {/* Totals */}
         <div className="flex justify-end mt-4">
@@ -21302,6 +21366,12 @@ function QuickAssignmentForm({ property, employee, onCancel, onSaved }) {
       // Create the assignment + one target.
       const typeLabel = (QUICK_TYPES.find(t => t.key === cleanType) || {}).label || cleanType;
       const title = `Apt ${label} · ${br}BR/${ba}BA · ${typeLabel}`;
+      // Route this property through the multi-unit cleaner flow (property →
+      // pick apartment → clean), like Carriage — otherwise a cleaner
+      // clocking in jumps straight into one clean with no apartment shown.
+      if (property.property_type !== 'multi_unit') {
+        await supabase.from('customers').update({ property_type: 'multi_unit' }).eq('id', property.id);
+      }
       const { data: asg, error: ae } = await supabase.from('assignments').insert({
         customer_id: property.id, title, notes: notes.trim() || null,
         uploaded_by: employee.id, active: true, assignment_type: cleanType,
@@ -24871,6 +24941,26 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
             <span className={`text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full border ${s.color}`}>
               {s.label}
             </span>
+            {/* Due-date signal from the assignment's scheduled_date. */}
+            {!isDone && (() => {
+              const kind = assignmentDueKind(t.assignment?.scheduled_date);
+              if (!kind) return null;
+              if (kind === 'overdue') return (
+                <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-red-100 text-red-700 border border-red-200 flex items-center gap-1">
+                  <Calendar size={9} /> Overdue · {fmtDateWithDay(t.assignment.scheduled_date)}
+                </span>
+              );
+              if (kind === 'today') return (
+                <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 border border-emerald-200 flex items-center gap-1">
+                  <Calendar size={9} /> Today
+                </span>
+              );
+              return (
+                <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-stone-100 text-stone-600 border border-stone-200 flex items-center gap-1">
+                  <Calendar size={9} /> {fmtDateWithDay(t.assignment.scheduled_date)}
+                </span>
+              );
+            })()}
           </div>
           {/* Mini-row 2: View doc + History — right-aligned. Stays a
              separate mini-row so the chip pairs never split awkwardly:
@@ -25855,8 +25945,12 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
           || naturalCompare(a.party?.label || '', b.party?.label || '');
       });
     } else {
-      // Priority items sort to the top, then natural unit/party order.
+      // Overdue → today → undated → upcoming, then priority, then
+      // natural unit/party order, so cleaners see today's work first.
       filtered.sort((a, b) => {
+        const ra = assignmentDueRank(a.assignment?.scheduled_date);
+        const rb = assignmentDueRank(b.assignment?.scheduled_date);
+        if (ra !== rb) return ra - rb;
         const ap = a.priority ? 1 : 0;
         const bp = b.priority ? 1 : 0;
         if (ap !== bp) return bp - ap;
@@ -26289,6 +26383,15 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
           const isOpen = !!bundleOpen[key];
           const unitLabel = group.unit?.label || (key === 'no-unit' ? 'No unit' : key);
           const bundleHasPriority = group.items.some(t => t.priority);
+          // Most-urgent due status across this apartment's jobs.
+          const unitDueKinds = group.items.map(t => assignmentDueKind(t.assignment?.scheduled_date)).filter(Boolean);
+          const unitDue = unitDueKinds.includes('overdue') ? 'overdue'
+            : unitDueKinds.includes('today') ? 'today'
+            : unitDueKinds.includes('upcoming') ? 'upcoming' : null;
+          const earliestUpcoming = group.items
+            .map(t => t.assignment?.scheduled_date)
+            .filter(d => d && assignmentDueKind(d) === 'upcoming')
+            .sort()[0];
           // Build the assignment → section breakdown for the expanded
           // view. We key by party_id + assignment_id (NOT just party_id)
           // so two independent assignments at the same bedroom — e.g. a
@@ -26334,6 +26437,9 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                   <span className="text-xs font-mono px-2 py-0.5 rounded-full bg-amber-600 text-white font-bold flex-shrink-0">
                     {bedroomCount} job{bedroomCount === 1 ? '' : 's'}
                   </span>
+                  {unitDue === 'overdue' && <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-red-100 text-red-700 flex-shrink-0">Overdue</span>}
+                  {unitDue === 'today' && <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 flex-shrink-0">Today</span>}
+                  {unitDue === 'upcoming' && earliestUpcoming && <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-stone-200 text-stone-600 flex-shrink-0">{fmtDateWithDay(earliestUpcoming)}</span>}
                   {bundleHasPriority && <PriorityChip on={true} size="xs" />}
                 </div>
                 <ChevronRight size={14} className={`text-amber-700 flex-shrink-0 transition-transform ${isOpen ? 'rotate-90' : ''}`} />

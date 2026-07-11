@@ -18123,14 +18123,6 @@ function PortalPhotoSection({ label, photos, highlight, description, onResolve, 
                 className={`relative aspect-square w-full rounded-lg overflow-hidden ${isDamage ? 'ring-2 ring-red-400' : ''} ${isSelected ? 'ring-4 ring-stone-900' : ''}`}>
                 <img loading="lazy" src={p.public_url} alt="" className="w-full h-full object-cover" />
                 {kindBadge(p)}
-                {/* Cleaner attribution — show who took the photo when
-                   we have the join. Tiny pill above the bedroom label
-                   so owners can spot who's responsible. */}
-                {p.taken_by_employee?.name && (
-                  <span className="absolute top-0.5 left-0.5 right-0.5 px-1 py-0.5 rounded bg-stone-900/70 text-white text-[8px] font-mono truncate">
-                    {p.taken_by_employee.name}
-                  </span>
-                )}
                 {p.partyLabel && (
                   <span className="absolute bottom-0.5 left-0.5 right-0.5 px-1 py-0.5 rounded bg-black/70 text-white text-[8px] font-mono truncate">
                     {p.partyLabel}

@@ -14602,9 +14602,10 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
     (pb || []).forEach(r => { if (r.subsection_key === '__hourly_rate__') { defRate = r.rate || 0; return; } book[r.subsection_key] = r; });
     setDefaultRate(defRate);
     // 2) Units for this property.
-    const { data: unitRows } = await supabase.from('units').select('id,label').eq('customer_id', property.id);
+    const { data: unitRows } = await supabase.from('units').select('id,label,bedrooms,bathrooms').eq('customer_id', property.id);
     const unitIds = (unitRows || []).map(u => u.id);
     const unitLabelById = Object.fromEntries((unitRows || []).map(u => [u.id, u.label]));
+    const unitMetaById = Object.fromEntries((unitRows || []).map(u => [u.id, { bedrooms: u.bedrooms, bathrooms: u.bathrooms }]));
     // 3) Done items in range (paginated). Resilient: if v41's
     //    invoiced_on column isn't there yet, retry without that filter.
     let targets = [];
@@ -14661,7 +14662,13 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
       const unitLabel = unitLabelById[g.unit_id] || '';
       const apt = String(unitLabel).replace(/^B\d+-/i, '').trim();
       const brm = (g.partyLabel.match(/(\d+)\s*$/) || [])[1] || '';
-      const label = brm ? `${apt} - ${brm}` : apt;
+      // Whole-apartment (quick) cleans have no bedroom number — surface the
+      // apartment's bed/bath count (e.g. "D302 · 2BR/2BA") on the invoice.
+      const meta = unitMetaById[g.unit_id] || {};
+      const brBa = (!brm && (meta.bedrooms || meta.bathrooms))
+        ? ` · ${meta.bedrooms || 0}BR/${meta.bathrooms || 0}BA`
+        : '';
+      const label = brm ? `${apt} - ${brm}` : `${apt}${brBa}`;
       const subs = [];
       const seen = new Set();
       g.items.forEach(it => {

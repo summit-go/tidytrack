@@ -16,6 +16,7 @@ import {
 const SUPABASE_URL = "https://bbaynvqnbkjyqhzhhypr.supabase.co/";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJiYXludnFuYmtqeXFoemhoeXByIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc0NzQ2MTMsImV4cCI6MjA5MzA1MDYxM30.ZXUoHFj_IwMe6rX8RxK8Dj4kAB9AS7X9xZAhQ84wDEk";
 
+
 // =================================================================
 // 🌍 GOOGLE TRANSLATE API KEY (optional — for the Translate button)
 // Restrict the key to HTTP referrers app.gosummitclean.com + tidytrack-ten.vercel.app
@@ -16627,6 +16628,8 @@ function PortalApp() {
     property={selectedProperty}
     portalKind={portalUser.kind}
     portalUser={portalUser}
+    properties={properties}
+    onSwitchProperty={onPickProperty}
     hasMultipleProperties={properties.length > 1}
     onBackToPicker={onBackToPicker}
     onSignOut={onSignOut}
@@ -16809,7 +16812,7 @@ function PortalPropertyPicker({ portalUser, properties, onPick, onSignOut }) {
   );
 }
 
-function PortalDashboard({ property, portalKind, portalUser, hasMultipleProperties, onBackToPicker, onSignOut, onRefreshProperty }) {
+function PortalDashboard({ property, portalKind, portalUser, properties, onSwitchProperty, hasMultipleProperties, onBackToPicker, onSignOut, onRefreshProperty }) {
   const [view, setView] = useState({ kind: 'home' });
   // 'home' (recent activity), 'unit-day' (drill into one unit's day), 'all-photos' (gallery)
 
@@ -16820,14 +16823,16 @@ function PortalDashboard({ property, portalKind, portalUser, hasMultipleProperti
   }
 
   return <PortalHome property={property} portalKind={portalKind} portalUser={portalUser}
+    properties={properties} onSwitchProperty={onSwitchProperty}
     hasMultipleProperties={hasMultipleProperties} onBackToPicker={onBackToPicker}
     onSignOut={onSignOut}
     onRefreshProperty={onRefreshProperty}
     onOpenUnitDay={(unitId, date) => setView({ kind: 'unit-day', unitId, date })} />;
 }
 
-function PortalHome({ property, portalKind, portalUser, hasMultipleProperties, onBackToPicker, onSignOut, onRefreshProperty, onOpenUnitDay }) {
-  const [tab, setTab] = useState('history'); // 'history' | 'upload-photo' | 'assignments'
+function PortalHome({ property, portalKind, portalUser, properties, onSwitchProperty, hasMultipleProperties, onBackToPicker, onSignOut, onRefreshProperty, onOpenUnitDay }) {
+  const [tab, setTab] = useState('history'); // 'history' | 'assignments'
+  const [asgSub, setAsgSub] = useState('requests'); // 'requests' | 'concerns'
   const [groups, setGroups] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [filter, setFilter] = useState('7d');
@@ -16876,40 +16881,47 @@ function PortalHome({ property, portalKind, portalUser, hasMultipleProperties, o
           .gte('start_time', since)
           .order('start_time', { ascending: false }),
         supabase.from('assignment_targets')
-          .select('unit_id, party_id, assignment:assignments!inner(customer_id, active)')
+          .select('unit_id, party_id, completed_at, unit:units(id, label), assignment:assignments!inner(customer_id, active, deleted_at)')
           .eq('status', 'done'),
       ]);
 
       // Build a Set of "unit_id:party_id" keys that are currently Done.
       // Property-level Done assignments (no unit/party) cover everything
-      // under that property, so we track those separately.
+      // under that property, so we track those separately. We also collect
+      // "done entries" from completed_at so completed cleans show even when
+      // there were no photo tasks logged (e.g. quick/non-checklist cleans).
       const doneUnitParty = new Set();
       let propertyLevelDone = false;
+      const doneEntries = [];
       (doneTargets || []).forEach(t => {
         if (t.assignment?.customer_id !== property.id) return;
-        if (t.assignment?.active === false) return;
+        if (t.assignment?.active === false || t.assignment?.deleted_at) return;
         if (!t.unit_id && !t.party_id) {
           propertyLevelDone = true;
           return;
         }
-        // Match on unit alone if party is null (whole-unit assignment),
-        // or on unit+party for bedroom-level.
         doneUnitParty.add(`${t.unit_id || ''}:${t.party_id || ''}`);
         if (t.unit_id && t.party_id) doneUnitParty.add(`${t.unit_id}:`); // also unit-level match
+        if (t.completed_at && t.completed_at >= since && t.unit) {
+          doneEntries.push({ date: new Date(t.completed_at).toISOString().split('T')[0], unitId: t.unit_id, label: t.unit.label });
+        }
       });
 
+      const byDate = {};
+      // Seed with completed cleans (so they always show, photos or not).
+      doneEntries.forEach(e => {
+        if (!byDate[e.date]) byDate[e.date] = {};
+        if (!byDate[e.date][e.unitId]) byDate[e.date][e.unitId] = { unitId: e.unitId, label: e.label, photoCount: 0, hasDamage: false, hasResolvedDamage: false };
+      });
+
+      // Enrich with photos/damage from work blocks for units that are Done.
       const filtered = (blocks || []).filter(b => {
         if (b.shift?.customer_id !== property.id || !b.unit) return false;
-        // (a) real work: at least one task or photo logged
-        const hasWork = (b.tasks || []).some(t => (t.photos || []).length > 0) || (b.tasks || []).length > 0;
-        if (!hasWork) return false;
-        // (b) linked assignment currently Done
         if (propertyLevelDone) return true;
         const key1 = `${b.unit_id || ''}:${b.party_id || ''}`;
         const key2 = `${b.unit_id || ''}:`;
         return doneUnitParty.has(key1) || doneUnitParty.has(key2);
       });
-      const byDate = {};
       filtered.forEach(b => {
         const date = new Date(b.start_time).toISOString().split('T')[0];
         if (!byDate[date]) byDate[date] = {};
@@ -17023,6 +17035,17 @@ function PortalHome({ property, portalKind, portalUser, hasMultipleProperties, o
           </div>
         )}
         <h1 className="text-3xl font-light tracking-tight mt-1">{property.name}</h1>
+        {hasMultipleProperties && Array.isArray(properties) && properties.length > 1 && onSwitchProperty && (
+          <div className="mt-2 relative inline-flex items-center">
+            <select
+              value={property.id}
+              onChange={(e) => { const p = properties.find(x => x.id === e.target.value); if (p && p.id !== property.id) onSwitchProperty(p); }}
+              className="appearance-none pl-3 pr-8 py-1.5 rounded-lg bg-stone-800 border border-stone-700 text-stone-50 text-xs font-mono cursor-pointer">
+              {properties.map(p => <option key={p.id} value={p.id} className="text-stone-900">{p.name}</option>)}
+            </select>
+            <span className="absolute right-2.5 text-stone-400 pointer-events-none text-[10px]">▾</span>
+          </div>
+        )}
         {property.address && (
           <div className="text-sm text-stone-300 mt-1">
             <AddressLink address={property.address} className="text-amber-400" />
@@ -17042,10 +17065,6 @@ function PortalHome({ property, portalKind, portalUser, hasMultipleProperties, o
             className={`flex-1 py-2 px-2 rounded-lg text-xs font-medium ${tab === 'history' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
             History
           </button>
-          <button onClick={() => setTab('upload-photo')}
-            className={`flex-1 py-2 px-2 rounded-lg text-xs font-medium ${tab === 'upload-photo' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
-            Upload
-          </button>
           <button onClick={() => setTab('assignments')}
             className={`flex-1 py-2 px-2 rounded-lg text-xs font-medium ${tab === 'assignments' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
             Assignments
@@ -17057,11 +17076,29 @@ function PortalHome({ property, portalKind, portalUser, hasMultipleProperties, o
         <PortalHistoryTab property={property} groups={groups} loaded={loaded}
           filter={filter} setFilter={setFilter} onOpenUnitDay={onOpenUnitDay} />
       )}
-      {tab === 'upload-photo' && (
-        <PortalPhotoUploadTab property={property} portalKind={portalKind} />
-      )}
       {tab === 'assignments' && (
-        <PortalAssignmentsTab property={property} portalKind={portalKind} portalUser={portalUser} />
+        <div>
+          <div className="px-5 pt-3">
+            <div className="flex gap-1 bg-stone-100 p-1 rounded-xl">
+              <button onClick={() => setAsgSub('requests')}
+                className={`flex-1 py-2 px-2 rounded-lg text-xs font-medium ${asgSub === 'requests' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+                Assignments
+              </button>
+              <button onClick={() => setAsgSub('concerns')}
+                className={`flex-1 py-2 px-2 rounded-lg text-xs font-medium ${asgSub === 'concerns' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+                Concerns
+              </button>
+            </div>
+            <p className="text-[11px] text-stone-400 font-mono mt-2 px-1">
+              {asgSub === 'requests'
+                ? 'Request a cleaning for the team.'
+                : 'Send us photos or a message — e.g. a resident complaint or something that needs attention.'}
+            </p>
+          </div>
+          {asgSub === 'requests'
+            ? <PortalAssignmentsTab property={property} portalKind={portalKind} portalUser={portalUser} />
+            : <PortalPhotoUploadTab property={property} portalKind={portalKind} />}
+        </div>
       )}
 
       {showWelcome && (

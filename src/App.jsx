@@ -16875,14 +16875,39 @@ function PortalHome({ property, portalKind, portalUser, properties, onSwitchProp
       // where (a) real work happened (at least one task or photo) AND
       // (b) the assignment for that unit/bedroom is currently in 'done'
       // status. Reset back to pending → instantly removed from PM view.
-      const [{ data: blocks }, { data: doneTargets }] = await Promise.all([
+      // Scope the done-targets query to THIS property's units and paginate
+      // it — otherwise PostgREST's 1000-row cap on a global done-targets
+      // query drops this property's cleans (they fall past the cap when a
+      // busy property has thousands of done checklist items).
+      const { data: propUnits } = await supabase.from('units').select('id').eq('customer_id', property.id);
+      const propUnitIds = (propUnits || []).map(u => u.id);
+      const fetchDoneTargets = async () => {
+        let rows = [];
+        if (propUnitIds.length) {
+          const PAGE = 1000;
+          for (let from = 0; ; from += PAGE) {
+            const { data, error } = await supabase.from('assignment_targets')
+              .select('unit_id, party_id, completed_at, unit:units(id, label), assignment:assignments!inner(customer_id, active, deleted_at)')
+              .eq('status', 'done').in('unit_id', propUnitIds)
+              .range(from, from + PAGE - 1);
+            if (error || !data) break;
+            rows = rows.concat(data);
+            if (data.length < PAGE) break;
+            if (from > 100000) break;
+          }
+        }
+        // Whole-property (null-unit) done assignments — few, unscoped is fine.
+        const { data: plData } = await supabase.from('assignment_targets')
+          .select('unit_id, party_id, completed_at, unit:units(id, label), assignment:assignments!inner(customer_id, active, deleted_at)')
+          .eq('status', 'done').is('unit_id', null);
+        return rows.concat(plData || []);
+      };
+      const [{ data: blocks }, doneTargets] = await Promise.all([
         supabase.from('work_blocks')
           .select('id, start_time, end_time, unit_id, party_id, unit:units(id, label), shift:shifts!inner(customer_id), tasks(id, photos(kind, resolved_at))')
           .gte('start_time', since)
           .order('start_time', { ascending: false }),
-        supabase.from('assignment_targets')
-          .select('unit_id, party_id, completed_at, unit:units(id, label), assignment:assignments!inner(customer_id, active, deleted_at)')
-          .eq('status', 'done'),
+        fetchDoneTargets(),
       ]);
 
       // Build a Set of "unit_id:party_id" keys that are currently Done.
@@ -17040,10 +17065,10 @@ function PortalHome({ property, portalKind, portalUser, properties, onSwitchProp
             <select
               value={property.id}
               onChange={(e) => { const p = properties.find(x => x.id === e.target.value); if (p && p.id !== property.id) onSwitchProperty(p); }}
-              className="appearance-none pl-3 pr-8 py-1.5 rounded-lg bg-stone-800 border border-stone-700 text-stone-50 text-xs font-mono cursor-pointer">
-              {properties.map(p => <option key={p.id} value={p.id} className="text-stone-900">{p.name}</option>)}
+              className="appearance-none pl-3 pr-8 py-1.5 rounded-lg bg-stone-100 border border-stone-300 text-stone-900 text-xs font-mono cursor-pointer">
+              {properties.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
             </select>
-            <span className="absolute right-2.5 text-stone-400 pointer-events-none text-[10px]">▾</span>
+            <span className="absolute right-2.5 text-stone-500 pointer-events-none text-[10px]">▾</span>
           </div>
         )}
         {property.address && (

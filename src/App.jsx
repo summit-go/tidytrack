@@ -5705,6 +5705,61 @@ function FloorFocusList({ propertyId, workBlocks, onGoToBedroom }) {
   );
 }
 
+// =================================================================
+// TODAY'S APARTMENTS — on the cleaner's home tab, a quick list of the
+// apartments still due today at this property, so they can see what's
+// left for the day and jump to one.
+// =================================================================
+function TodayApartmentsCard({ propertyId, onGoToBedroom }) {
+  const [units, setUnits] = useState([]);
+  const [loaded, setLoaded] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const todayKey = localTodayKey();
+      const { data: propUnits } = await supabase.from('units').select('id,label').eq('customer_id', propertyId);
+      const unitIds = (propUnits || []).map(u => u.id);
+      const labelById = Object.fromEntries((propUnits || []).map(u => [u.id, u.label]));
+      let rows = [];
+      if (unitIds.length) {
+        const { data } = await supabase.from('assignment_targets')
+          .select('id, unit_id, party_id, status, assignment:assignments!inner(active, deleted_at, scheduled_date)')
+          .in('unit_id', unitIds)
+          .in('status', ['pending', 'in_progress', 'paused']);
+        rows = (data || []).filter(t => t.assignment && t.assignment.active !== false && !t.assignment.deleted_at && t.assignment.scheduled_date === todayKey);
+      }
+      const byUnit = {};
+      rows.forEach(t => {
+        if (!byUnit[t.unit_id]) byUnit[t.unit_id] = { unitId: t.unit_id, label: labelById[t.unit_id] || '', count: 0, partyId: t.party_id };
+        byUnit[t.unit_id].count++;
+      });
+      if (!cancelled) {
+        setUnits(Object.values(byUnit).sort((a, b) => naturalCompare(a.label, b.label)));
+        setLoaded(true);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [propertyId]);
+
+  if (!loaded || units.length === 0) return null;
+  return (
+    <div className="mx-4 mt-4 p-4 rounded-2xl bg-amber-50 border border-amber-200">
+      <div className="text-xs uppercase tracking-wider text-amber-800 font-mono mb-2.5">
+        Due today · {units.length} {units.length === 1 ? 'apartment' : 'apartments'} left
+      </div>
+      <div className="flex flex-wrap gap-2">
+        {units.map(u => (
+          <button key={u.unitId}
+            onClick={() => onGoToBedroom && onGoToBedroom({ unit_id: u.unitId, party_id: u.partyId })}
+            className="px-3 py-1.5 rounded-lg bg-white border border-amber-300 text-sm font-mono text-stone-800 active:scale-95 flex items-center gap-1.5">
+            {u.label}{u.count > 1 ? <span className="text-[10px] text-amber-700">×{u.count}</span> : null}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onClockOut, onSwitchProperty, onStartNew, onReopen, onEndBlock, onGoToBedroom, onOpenMessages, onOpenChangePin, onOpenBedroomHistory, onJoinBlock, onUndoBlock, onMoveBlock, cleanerTab: cleanerTabProp, setCleanerTab: setCleanerTabProp, busy }) {
   const [showMenu, setShowMenu] = useState(false);
   const [showAssignmentForm, setShowAssignmentForm] = useState(false);
@@ -5852,6 +5907,9 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
               </div>
             </div>
           </div>
+
+          {/* Apartments still due today at this property. */}
+          <TodayApartmentsCard propertyId={shift.customer_id} onGoToBedroom={onGoToBedroom} />
 
           {/* Where to clean — current apartment first, then the rest of
              the same building + floor, advancing on its own as bedrooms
@@ -8472,6 +8530,21 @@ function PhotoModal({ kind, taskName, existing, onUpload, onSaveNote, onClose, e
   const inputRef = useRef(null);
   const existingPhotos = Array.isArray(existing) ? existing : [];
 
+  // "Took extra" flag per photo — cleaner marks a photo of an item
+  // (tub, fridge, oven…) that took extra work. Shows for owner + PM.
+  const [extraFlags, setExtraFlags] = useState({});
+  useEffect(() => {
+    const m = {}; existingPhotos.forEach(p => { m[p.id] = !!p.took_extra; });
+    setExtraFlags(m);
+    /* eslint-disable-next-line */
+  }, [existing]);
+  const toggleExtra = async (p) => {
+    const next = !extraFlags[p.id];
+    setExtraFlags(prev => ({ ...prev, [p.id]: next }));
+    const { error: e } = await supabase.from('photos').update({ took_extra: next }).eq('id', p.id);
+    if (e) setExtraFlags(prev => ({ ...prev, [p.id]: !next })); // revert on failure
+  };
+
   const handleFile = async (e) => {
     const file = e.target.files?.[0];
     // Reset the input so picking the same file twice still triggers
@@ -8542,6 +8615,12 @@ function PhotoModal({ kind, taskName, existing, onUpload, onSaveNote, onClose, e
                       className="block aspect-square w-full rounded-xl overflow-hidden active:opacity-80 transition-opacity">
                       <img src={p.public_url} alt="" loading="lazy"
                         className="w-full h-full object-cover" />
+                    </button>
+                    {/* Took-extra toggle — flags this item as extra work. */}
+                    <button type="button"
+                      onClick={(e) => { e.stopPropagation(); toggleExtra(p); }}
+                      className={`absolute top-1 left-1 px-1.5 py-0.5 rounded-full text-[9px] font-mono flex items-center gap-1 ${extraFlags[p.id] ? 'bg-amber-500 text-white' : 'bg-stone-900/60 text-stone-100'}`}>
+                      <Clock size={9} /> {extraFlags[p.id] ? 'Extra' : 'Mark extra'}
                     </button>
                     {/* Attribution + delete overlay row. Sits at the
                        bottom of the thumbnail. Trash only renders when
@@ -18123,6 +18202,11 @@ function PortalPhotoSection({ label, photos, highlight, description, onResolve, 
                 className={`relative aspect-square w-full rounded-lg overflow-hidden ${isDamage ? 'ring-2 ring-red-400' : ''} ${isSelected ? 'ring-4 ring-stone-900' : ''}`}>
                 <img loading="lazy" src={p.public_url} alt="" className="w-full h-full object-cover" />
                 {kindBadge(p)}
+                {p.took_extra && (
+                  <span className="absolute top-0.5 right-0.5 px-1 py-0.5 rounded bg-amber-500 text-white text-[8px] font-mono uppercase tracking-wider flex items-center gap-0.5">
+                    <Clock size={7} /> Extra
+                  </span>
+                )}
                 {p.partyLabel && (
                   <span className="absolute bottom-0.5 left-0.5 right-0.5 px-1 py-0.5 rounded bg-black/70 text-white text-[8px] font-mono truncate">
                     {p.partyLabel}

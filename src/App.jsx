@@ -16,7 +16,6 @@ import {
 const SUPABASE_URL = "https://bbaynvqnbkjyqhzhhypr.supabase.co/";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJiYXludnFuYmtqeXFoemhoeXByIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc0NzQ2MTMsImV4cCI6MjA5MzA1MDYxM30.ZXUoHFj_IwMe6rX8RxK8Dj4kAB9AS7X9xZAhQ84wDEk";
 
-
 // =================================================================
 // 🌍 GOOGLE TRANSLATE API KEY (optional — for the Translate button)
 // Restrict the key to HTTP referrers app.gosummitclean.com + tidytrack-ten.vercel.app
@@ -7513,7 +7512,7 @@ function PropertyPicker({ onPick, onCancel, busy, title, subtitle, viewOnly = fa
     const [propsRes, targetsRes] = await Promise.all([
       supabase.from('customers').select('*').eq('active', true).order('name'),
       supabase.from('assignment_targets')
-        .select('unit_id, party_id, status, assignment:assignments!inner(customer_id, active, scheduled_date)')
+        .select('unit_id, party_id, status, assignment:assignments!inner(customer_id, active, scheduled_date, deleted_at)')
         .not('status', 'in', '(done,blocked)'),
     ]);
     const counts = {};
@@ -7521,7 +7520,7 @@ function PropertyPicker({ onPick, onCancel, busy, title, subtitle, viewOnly = fa
     const dateBedrooms = {}; // dateKey -> propId -> Set(bedroomKey)
     (targetsRes.data || []).forEach(t => {
       const a = t.assignment;
-      if (!a || a.active === false) return;
+      if (!a || a.active === false || a.deleted_at) return;
       const cid = a.customer_id;
       if (!cid) return;
       const bKey = `${t.unit_id || ''}::${t.party_id || ''}`;

@@ -17,6 +17,7 @@ const SUPABASE_URL = "https://bbaynvqnbkjyqhzhhypr.supabase.co/";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJiYXludnFuYmtqeXFoemhoeXByIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc0NzQ2MTMsImV4cCI6MjA5MzA1MDYxM30.ZXUoHFj_IwMe6rX8RxK8Dj4kAB9AS7X9xZAhQ84wDEk";
 
 
+
 // =================================================================
 // 🌍 GOOGLE TRANSLATE API KEY (optional — for the Translate button)
 // Restrict the key to HTTP referrers app.gosummitclean.com + tidytrack-ten.vercel.app
@@ -25947,6 +25948,13 @@ function SuggestedTabContent({ propertyId, employee, onGoToBedroom, onOpenBedroo
   });
   const [reloadKey, setReloadKey] = useState(0);
   const reload = () => setReloadKey(k => k + 1);
+  const [editDueId, setEditDueId] = useState(null);
+  const canEditDatesS = can(employee, 'edit_due_dates');
+  const todayKeyS = localTodayKey();
+  const saveDueS = async (id, date) => {
+    setEditDueId(null);
+    if (id) { await supabase.from('assignments').update({ scheduled_date: date || null }).eq('id', id); reload(); }
+  };
   // Realtime: pick up workblocks opening/closing and target status
   // changes from other cleaners so the "X is here" chip + status pill
   // appear within seconds rather than after a manual refresh.
@@ -25994,7 +26002,7 @@ function SuggestedTabContent({ propertyId, employee, onGoToBedroom, onOpenBedroo
         supabase.from('units').select('id, label, active').eq('customer_id', propertyId).eq('active', true),
         supabase.from('parties').select('id, label, unit_id, sort_order, active'),
         supabase.from('assignment_targets')
-          .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, deleted_at, assignment_type, template_set_id, sheet_type, general_variant, bathroom_variant, created_at), unit:units(id, label), party:parties(id, label), starter:employees!started_by(name), completer:employees!completed_by(name), assignedTo:employees!assigned_to(id, name)')
+          .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, deleted_at, assignment_type, template_set_id, sheet_type, general_variant, bathroom_variant, scheduled_date, created_at), unit:units(id, label), party:parties(id, label), starter:employees!started_by(name), completer:employees!completed_by(name), assignedTo:employees!assigned_to(id, name)')
           .not('status', 'in', '(done,blocked)'),
         // Open work blocks property-wide for the "who's here" chips.
         // main_section is pulled so each chip can label which section
@@ -26206,6 +26214,30 @@ function SuggestedTabContent({ propertyId, employee, onGoToBedroom, onOpenBedroo
               <span className={`text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full border ${statusPill.color}`}>
                 {statusPill.label}
               </span>
+              {(editDueId === rep.assignment?.id ? (
+                <input type="date" autoFocus value={rep.assignment?.scheduled_date || ''}
+                  onChange={(e) => saveDueS(rep.assignment?.id, e.target.value)}
+                  onBlur={() => setEditDueId(null)}
+                  onClick={(e) => e.stopPropagation()}
+                  className="text-[10px] font-mono px-1.5 py-0.5 rounded border border-stone-400 bg-white" />
+              ) : canEditDatesS ? (
+                <button onClick={(e) => { e.stopPropagation(); setEditDueId(rep.assignment?.id); }}
+                  className={`text-[10px] font-mono px-2 py-0.5 rounded-full border inline-flex items-center gap-1 ${rep.assignment?.scheduled_date
+                    ? (rep.assignment.scheduled_date < todayKeyS ? 'bg-red-100 text-red-700 border-red-200'
+                       : rep.assignment.scheduled_date === todayKeyS ? 'bg-emerald-100 text-emerald-800 border-emerald-200'
+                       : 'bg-stone-100 text-stone-600 border-stone-200')
+                    : 'bg-white text-stone-500 border-dashed border-stone-300'}`}>
+                  <Calendar size={9} /> {rep.assignment?.scheduled_date
+                    ? (rep.assignment.scheduled_date < todayKeyS ? `Overdue · ${fmtDueDate(rep.assignment.scheduled_date)}`
+                       : rep.assignment.scheduled_date === todayKeyS ? 'Today'
+                       : fmtDueDate(rep.assignment.scheduled_date))
+                    : 'Set due date'}
+                </button>
+              ) : (rep.assignment?.scheduled_date ? (
+                <span className="text-[10px] font-mono px-2 py-0.5 rounded-full border bg-stone-100 text-stone-600 border-stone-200 inline-flex items-center gap-1">
+                  <Calendar size={9} /> {rep.assignment.scheduled_date === todayKeyS ? 'Today' : fmtDueDate(rep.assignment.scheduled_date)}
+                </span>
+              ) : null))}
             </div>
             <div className="flex items-center gap-1.5 flex-wrap justify-end">
               <button onClick={() => setOpened(rep)}

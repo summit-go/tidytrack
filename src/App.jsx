@@ -5719,7 +5719,7 @@ function FloorFocusList({ propertyId, workBlocks, onGoToBedroom }) {
 // apartments still due today at this property, so they can see what's
 // left for the day and jump to one.
 // =================================================================
-function TodayApartmentsCard({ propertyId, onGoToBedroom }) {
+function TodayApartmentsCard({ propertyId, onGoToBedroom, full = false }) {
   const [units, setUnits] = useState([]);
   const [loaded, setLoaded] = useState(false);
   useEffect(() => {
@@ -5732,14 +5732,14 @@ function TodayApartmentsCard({ propertyId, onGoToBedroom }) {
       let rows = [];
       if (unitIds.length) {
         const { data } = await supabase.from('assignment_targets')
-          .select('id, unit_id, party_id, status, assignment:assignments!inner(active, deleted_at, scheduled_date)')
+          .select('id, unit_id, party_id, status, assignment:assignments!inner(active, deleted_at, scheduled_date, title, assignment_type)')
           .in('unit_id', unitIds)
           .in('status', ['pending', 'in_progress', 'paused']);
         rows = (data || []).filter(t => t.assignment && t.assignment.active !== false && !t.assignment.deleted_at && t.assignment.scheduled_date === todayKey);
       }
       const byUnit = {};
       rows.forEach(t => {
-        if (!byUnit[t.unit_id]) byUnit[t.unit_id] = { unitId: t.unit_id, label: labelById[t.unit_id] || '', count: 0, partyId: t.party_id };
+        if (!byUnit[t.unit_id]) byUnit[t.unit_id] = { unitId: t.unit_id, label: labelById[t.unit_id] || '', count: 0, partyId: t.party_id, title: t.assignment?.title || '', type: t.assignment?.assignment_type || '' };
         byUnit[t.unit_id].count++;
       });
       if (!cancelled) {
@@ -5749,6 +5749,34 @@ function TodayApartmentsCard({ propertyId, onGoToBedroom }) {
     })();
     return () => { cancelled = true; };
   }, [propertyId]);
+
+  // Full list variant — used by the Home "Today" toggle.
+  if (full) {
+    if (!loaded) return <div className="px-4 mt-6 text-center text-stone-400 text-sm">Loading…</div>;
+    if (units.length === 0) return <div className="px-4 mt-10 text-center text-stone-400 text-sm">Nothing scheduled for today. 🎉</div>;
+    return (
+      <div className="px-4 mt-4 space-y-2 pb-4">
+        <div className="text-xs uppercase tracking-wider text-amber-800 font-mono mb-1">
+          Due today · {units.length} {units.length === 1 ? 'apartment' : 'apartments'} left
+        </div>
+        {units.map(u => (
+          <button key={u.unitId}
+            onClick={() => onGoToBedroom && onGoToBedroom({ unit_id: u.unitId, party_id: u.partyId })}
+            className="w-full text-left p-4 rounded-2xl bg-white border border-stone-200 active:scale-98 flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="font-serif text-lg text-stone-900">{u.label}</span>
+                {u.count > 1 && <span className="text-[10px] font-mono text-amber-700">×{u.count}</span>}
+                {u.type && <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-amber-100 text-amber-800">{assignmentTypeLabel(u.type)}</span>}
+              </div>
+              {u.title && <div className="text-xs text-stone-500 mt-0.5 truncate">{u.title}</div>}
+            </div>
+            <ChevronRight size={16} className="text-stone-400 flex-shrink-0" />
+          </button>
+        ))}
+      </div>
+    );
+  }
 
   if (!loaded || units.length === 0) return null;
   return (
@@ -5772,6 +5800,7 @@ function TodayApartmentsCard({ propertyId, onGoToBedroom }) {
 function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onClockOut, onSwitchProperty, onStartNew, onReopen, onEndBlock, onGoToBedroom, onOpenMessages, onOpenChangePin, onOpenBedroomHistory, onJoinBlock, onUndoBlock, onMoveBlock, cleanerTab: cleanerTabProp, setCleanerTab: setCleanerTabProp, busy }) {
   const [showMenu, setShowMenu] = useState(false);
   const [showAssignmentForm, setShowAssignmentForm] = useState(false);
+  const [homeView, setHomeView] = useState('now'); // 'now' | 'today'
   // Bottom nav tab — Home / Assignments / More. Parent (AuthedShift)
   // controls this when provided so the tab persists across BlockView
   // navigation. Falls back to local state for standalone use.
@@ -5901,6 +5930,21 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
       {/* === HOME TAB === */}
       {cleanerTab === 'home' && (
         <>
+          {/* Now / Today toggle */}
+          <div className="px-4 pt-4">
+            <div className="flex gap-1 bg-stone-100 p-1 rounded-xl">
+              <button onClick={() => setHomeView('now')}
+                className={`flex-1 py-2 rounded-lg text-sm font-medium ${homeView === 'now' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>Now</button>
+              <button onClick={() => setHomeView('today')}
+                className={`flex-1 py-2 rounded-lg text-sm font-medium ${homeView === 'today' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>Today</button>
+            </div>
+          </div>
+
+          {homeView === 'today' && (
+            <TodayApartmentsCard full propertyId={shift.customer_id} onGoToBedroom={onGoToBedroom} />
+          )}
+
+          {homeView === 'now' && (<>
           {/* Today's stats card — quick summary of what the cleaner
              has accomplished so far this shift. Always on Home. */}
           <div className="mx-4 mt-4 p-4 rounded-2xl bg-white border border-stone-200">
@@ -5916,9 +5960,6 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
               </div>
             </div>
           </div>
-
-          {/* Apartments still due today at this property. */}
-          <TodayApartmentsCard propertyId={shift.customer_id} onGoToBedroom={onGoToBedroom} />
 
           {/* Where to clean — current apartment first, then the rest of
              the same building + floor, advancing on its own as bedrooms
@@ -6005,6 +6046,7 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
               <OthersActivityToday propertyId={shift.customer_id} myEmployeeId={employee.id} onOpenBedroomHistory={onOpenBedroomHistory} />
             )}
           </div>
+          </>)}
         </>
       )}
 

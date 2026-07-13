@@ -24929,11 +24929,18 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
   const [reassignTarget, setReassignTarget] = useState(null);
   const [busy, setBusy] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
+  const [editDueId, setEditDueId] = useState(null);
+  const canEditDatesB = can(employee, 'edit_due_dates');
+  const todayKeyG = localTodayKey();
+  const saveDueB = async (id, date) => {
+    setEditDueId(null);
+    if (id) { await supabase.from('assignments').update({ scheduled_date: date || null }).eq('id', id); load(); }
+  };
 
   const load = async () => {
     let q = supabase
       .from('assignment_targets')
-      .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, deleted_at, extracted_text, spanish_translation, translation_status, template_set_id, sheet_type, bathroom_variant, general_variant, assignment_type, created_at), unit:units(id, label), party:parties(id, label), starter:employees!started_by(name), completer:employees!completed_by(name), assignedTo:employees!assigned_to(id, name)');
+      .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, deleted_at, extracted_text, spanish_translation, translation_status, template_set_id, sheet_type, bathroom_variant, general_variant, assignment_type, scheduled_date, created_at), unit:units(id, label), party:parties(id, label), starter:employees!started_by(name), completer:employees!completed_by(name), assignedTo:employees!assigned_to(id, name)');
 
     if (!showDone) q = q.not('status', 'in', '(done,blocked)');
 
@@ -25276,6 +25283,30 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
                     <span className={`text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full border ${statusPill.color}`}>
                       {statusPill.label}
                     </span>
+                    {!isAllDone && (editDueId === a?.id ? (
+                      <input type="date" autoFocus value={a?.scheduled_date || ''}
+                        onChange={(e) => saveDueB(a?.id, e.target.value)}
+                        onBlur={() => setEditDueId(null)}
+                        onClick={(e) => e.stopPropagation()}
+                        className="text-[10px] font-mono px-1.5 py-0.5 rounded border border-stone-400 bg-white" />
+                    ) : canEditDatesB ? (
+                      <button onClick={(e) => { e.stopPropagation(); setEditDueId(a?.id); }}
+                        className={`text-[10px] font-mono px-2 py-0.5 rounded-full border inline-flex items-center gap-1 ${a?.scheduled_date
+                          ? (a.scheduled_date < todayKeyG ? 'bg-red-100 text-red-700 border-red-200'
+                             : a.scheduled_date === todayKeyG ? 'bg-emerald-100 text-emerald-800 border-emerald-200'
+                             : 'bg-stone-100 text-stone-600 border-stone-200')
+                          : 'bg-white text-stone-500 border-dashed border-stone-300'}`}>
+                        <Calendar size={9} /> {a?.scheduled_date
+                          ? (a.scheduled_date < todayKeyG ? `Overdue · ${fmtDueDate(a.scheduled_date)}`
+                             : a.scheduled_date === todayKeyG ? 'Today'
+                             : fmtDueDate(a.scheduled_date))
+                          : 'Set due date'}
+                      </button>
+                    ) : (a?.scheduled_date ? (
+                      <span className="text-[10px] font-mono px-2 py-0.5 rounded-full border bg-stone-100 text-stone-600 border-stone-200 inline-flex items-center gap-1">
+                        <Calendar size={9} /> {a.scheduled_date === todayKeyG ? 'Today' : fmtDueDate(a.scheduled_date)}
+                      </span>
+                    ) : null))}
                   </div>
                   {/* Mini-row 2: View doc + History */}
                   <div className="flex items-center gap-1.5 flex-wrap justify-end">

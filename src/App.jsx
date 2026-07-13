@@ -721,6 +721,14 @@ const fmtDate = (ts) => new Date(ts).toLocaleDateString('en-US', { month:'short'
 const fmtDateLong = (ts) => new Date(ts).toLocaleDateString('en-US', { month:'long', day:'numeric', year:'numeric' });
 const fmtDateWithDay = (ts) => new Date(ts).toLocaleDateString('en-US', { weekday:'short', month:'short', day:'numeric' });
 
+// Format a 'YYYY-MM-DD' due date parsed in LOCAL time (avoids the
+// UTC-midnight shift that makes date-only strings render a day early).
+const fmtDueDate = (key) => {
+  if (!key) return '';
+  const d = new Date(String(key).slice(0, 10) + 'T00:00:00');
+  return d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+};
+
 // Due-date helpers for assignments. scheduled_date is 'YYYY-MM-DD'.
 const localTodayKey = () => {
   const d = new Date();
@@ -7882,7 +7890,7 @@ function ViewOnlyAssignmentsPanel({ propertyId, employee, onOpenBedroomHistory }
                       {a.scheduled_date && (
                         a.scheduled_date < todayKey ? (
                           <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-red-100 text-red-700 flex items-center gap-1">
-                            <Calendar size={9} /> Overdue · {fmtDateWithDay(a.scheduled_date)}
+                            <Calendar size={9} /> Overdue · {fmtDueDate(a.scheduled_date)}
                           </span>
                         ) : a.scheduled_date === todayKey ? (
                           <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 flex items-center gap-1">
@@ -7890,7 +7898,7 @@ function ViewOnlyAssignmentsPanel({ propertyId, employee, onOpenBedroomHistory }
                           </span>
                         ) : (
                           <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-stone-200 text-stone-600 flex items-center gap-1">
-                            <Calendar size={9} /> {fmtDateWithDay(a.scheduled_date)}
+                            <Calendar size={9} /> {fmtDueDate(a.scheduled_date)}
                           </span>
                         )
                       )}
@@ -25271,9 +25279,9 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
                 : kind === 'today' ? 'bg-emerald-100 text-emerald-800 border-emerald-200'
                 : 'bg-stone-100 text-stone-600 border-stone-200';
               const label = !localDate ? 'Set date'
-                : kind === 'overdue' ? `Overdue · ${fmtDateWithDay(localDate)}`
+                : kind === 'overdue' ? `Overdue · ${fmtDueDate(localDate)}`
                 : kind === 'today' ? 'Today'
-                : fmtDateWithDay(localDate);
+                : fmtDueDate(localDate);
               if (editingDate && canEditDates) {
                 return (
                   <input type="date" autoFocus value={localDate}

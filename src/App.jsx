@@ -7862,6 +7862,13 @@ function ViewOnlyAssignmentsPanel({ propertyId, employee, onOpenBedroomHistory }
   const dueTodayCount = targets.filter(t => t.status !== 'done' && t.assignment?.scheduled_date === todayKey).length;
   const overdueCount = targets.filter(t => t.status !== 'done' && t.assignment?.scheduled_date && t.assignment.scheduled_date < todayKey).length;
 
+  const canEditDates = can(employee, 'edit_due_dates');
+  const [editDateId, setEditDateId] = useState(null);
+  const saveDue = async (id, date) => {
+    setEditDateId(null);
+    if (id) { await supabase.from('assignments').update({ scheduled_date: date || null }).eq('id', id); load(); }
+  };
+
   const visible = filter === 'open'
     ? targets.filter(t => t.status !== 'done').sort((a, b) => {
         const ra = dueRank(a), rb = dueRank(b);
@@ -7929,7 +7936,26 @@ function ViewOnlyAssignmentsPanel({ propertyId, employee, onOpenBedroomHistory }
                           {assignmentTypeLabel(a.assignment_type)}
                         </span>
                       )}
-                      {a.scheduled_date && (
+                      {editDateId === a.id ? (
+                        <input type="date" autoFocus value={a.scheduled_date || ''}
+                          onChange={(e) => saveDue(a.id, e.target.value)}
+                          onBlur={() => setEditDateId(null)}
+                          onClick={(e) => e.stopPropagation()}
+                          className="text-[10px] font-mono px-1.5 py-0.5 rounded border border-stone-400 bg-white" />
+                      ) : canEditDates ? (
+                        <button onClick={(e) => { e.stopPropagation(); setEditDateId(a.id); }}
+                          className={`text-[10px] font-mono px-2 py-0.5 rounded-full border flex items-center gap-1 ${a.scheduled_date
+                            ? (a.scheduled_date < todayKey ? 'bg-red-100 text-red-700 border-red-200'
+                               : a.scheduled_date === todayKey ? 'bg-emerald-100 text-emerald-800 border-emerald-200'
+                               : 'bg-stone-200 text-stone-600 border-stone-300')
+                            : 'bg-white text-stone-500 border-dashed border-stone-300'}`}>
+                          <Calendar size={9} /> {a.scheduled_date
+                            ? (a.scheduled_date < todayKey ? `Overdue · ${fmtDueDate(a.scheduled_date)}`
+                               : a.scheduled_date === todayKey ? 'Today'
+                               : fmtDueDate(a.scheduled_date))
+                            : 'Set due date'}
+                        </button>
+                      ) : a.scheduled_date && (
                         a.scheduled_date < todayKey ? (
                           <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-red-100 text-red-700 flex items-center gap-1">
                             <Calendar size={9} /> Overdue · {fmtDueDate(a.scheduled_date)}
@@ -21300,6 +21326,14 @@ function AssignmentList({ property, employee, onBack, onNew, onNewChecklist, onN
   // Track which row is currently saving a priority toggle so we can
   // disable the button + show a busy state.
   const [togglingId, setTogglingId] = useState(null);
+  // Inline due-date editing (owners / granted users).
+  const [editDateId, setEditDateId] = useState(null);
+  const canEditDates = can(employee, 'edit_due_dates');
+  const saveDue = async (id, date) => {
+    setEditDateId(null);
+    await supabase.from('assignments').update({ scheduled_date: date || null }).eq('id', id);
+    load();
+  };
 
   const load = async () => {
     // Pull targets so we can group by unit and surface priority/type
@@ -21502,8 +21536,30 @@ function AssignmentList({ property, employee, onBack, onNew, onNewChecklist, onN
                 </span>
               )}
             </div>
-            <div className="text-xs text-stone-500 font-mono mt-1">
-              {fmtDate(a.created_at)} · {a.done}/{a.total} done{a.inProgress > 0 && `, ${a.inProgress} in progress`}
+            <div className="text-xs text-stone-500 font-mono mt-1 flex items-center gap-2 flex-wrap">
+              {editDateId === a.id ? (
+                <input type="date" autoFocus value={a.scheduled_date || ''}
+                  onChange={(e) => saveDue(a.id, e.target.value)}
+                  onBlur={() => setEditDateId(null)}
+                  onClick={(e) => e.stopPropagation()}
+                  className="text-[11px] font-mono px-1.5 py-0.5 rounded border border-stone-400 bg-white" />
+              ) : canEditDates ? (
+                <button onClick={(e) => { e.stopPropagation(); setEditDateId(a.id); }}
+                  className={`px-2 py-0.5 rounded-full border flex items-center gap-1 ${a.scheduled_date
+                    ? (assignmentDueKind(a.scheduled_date) === 'overdue' ? 'bg-red-100 text-red-700 border-red-200'
+                       : assignmentDueKind(a.scheduled_date) === 'today' ? 'bg-emerald-100 text-emerald-800 border-emerald-200'
+                       : 'bg-stone-100 text-stone-600 border-stone-200')
+                    : 'bg-white text-stone-500 border-dashed border-stone-300'}`}>
+                  <Calendar size={9} /> {a.scheduled_date
+                    ? (assignmentDueKind(a.scheduled_date) === 'today' ? 'Due today'
+                       : assignmentDueKind(a.scheduled_date) === 'overdue' ? `Overdue · ${fmtDueDate(a.scheduled_date)}`
+                       : `Due ${fmtDueDate(a.scheduled_date)}`)
+                    : 'Set due date'}
+                </button>
+              ) : (
+                a.scheduled_date ? <span className="flex items-center gap-1"><Calendar size={9} /> Due {fmtDueDate(a.scheduled_date)}</span> : <span>{fmtDate(a.created_at)}</span>
+              )}
+              <span>{a.done}/{a.total} done{a.inProgress > 0 && `, ${a.inProgress} in progress`}</span>
             </div>
             {a.notes && <div className="text-xs text-stone-600 mt-1 line-clamp-1">{a.notes}</div>}
           </div>

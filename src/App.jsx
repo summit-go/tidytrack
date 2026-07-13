@@ -9004,6 +9004,25 @@ function ManagerShell({ employee, onSignOut }) {
   // exit any time via the banner.
   const [previewMode, setPreviewMode] = useState(false);
   const showMoneyTabs = canSeeMoney(employee); // owner only
+  const isOwner = employee?.role === 'owner';
+  // Owner "hats": Operations (cleaning side) vs Business (management).
+  // Reshapes the bottom nav so each mode only shows its own tabs.
+  // Managers keep the flat nav.
+  const [mode, setMode] = usePagePersistence(`manager_mode_${employee.id}`, 'ops'); // 'ops' | 'business'
+  const [pmPreview, setPmPreview] = useState(false);
+  const switchMode = (m) => {
+    setMode(m);
+    if (m === 'ops' && !['daily', 'dashboard', 'assignments'].includes(tab)) setTab('daily');
+    if (m === 'business' && !['props', 'money', 'team'].includes(tab)) setTab('props');
+  };
+  // Keep the active tab valid for the current mode (handles stale
+  // persisted tabs after a refresh).
+  useEffect(() => {
+    if (!isOwner) return;
+    if (mode === 'ops' && !['daily', 'dashboard', 'assignments'].includes(tab)) setTab('daily');
+    if (mode === 'business' && !['props', 'money', 'team'].includes(tab)) setTab('props');
+    /* eslint-disable-next-line */
+  }, [mode, isOwner]);
 
   // If a manager somehow lands on the money tab (e.g. via stale state), bounce them home
   useEffect(() => {
@@ -9062,6 +9081,11 @@ function ManagerShell({ employee, onSignOut }) {
     );
   }
 
+  // Owner "Preview as PM" — renders the portal as a synthetic PM.
+  if (pmPreview) {
+    return <PortalApp previewMode previewEmployee={employee} onExitPreview={() => setPmPreview(false)} />;
+  }
+
   // Messages takes over the whole screen as an overlay
   if (showMessages) {
     return <StaffMessagesTab employee={employee} onClose={() => setShowMessages(false)} />;
@@ -9078,14 +9102,44 @@ function ManagerShell({ employee, onSignOut }) {
       {showMoneyTabs && tab === 'money' && <MoneyView employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} onLogoClick={goHome} />}
 
       <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-stone-200 px-1 py-2 z-30">
-        <div className="max-w-md mx-auto grid gap-0.5" style={{ gridTemplateColumns: `repeat(${colCount}, minmax(0, 1fr))` }}>
-          <TabButton active={tab==='daily'}       onClick={() => setTab('daily')}       icon={<Calendar size={18} />} label="Daily" />
-          <TabButton active={tab==='dashboard'}   onClick={() => setTab('dashboard')}   icon={<LayoutDashboard size={18} />} label="Shifts" />
-          <TabButton active={tab==='team'}        onClick={() => setTab('team')}        icon={<Users size={18} />} label="Team" />
-          <TabButton active={tab==='props'}       onClick={() => setTab('props')}       icon={<Building2 size={18} />} label="Properties" />
-          <TabButton active={tab==='assignments'} onClick={() => setTab('assignments')} icon={<FileText size={18} />} label="Assignments" />
-          {showMoneyTabs && <TabButton active={tab==='money'} onClick={() => setTab('money')} icon={<DollarSign size={18} />} label="Money" />}
-        </div>
+        {isOwner ? (
+          <div className="max-w-md mx-auto">
+            {/* Operations / Business hat toggle */}
+            <div className="flex gap-1 bg-stone-100 p-1 rounded-xl mb-2">
+              <button onClick={() => switchMode('ops')}
+                className={`flex-1 py-1.5 px-3 rounded-lg text-xs font-medium ${mode === 'ops' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+                Operations
+              </button>
+              <button onClick={() => switchMode('business')}
+                className={`flex-1 py-1.5 px-3 rounded-lg text-xs font-medium ${mode === 'business' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+                Business
+              </button>
+            </div>
+            {mode === 'ops' ? (
+              <div className="grid gap-0.5" style={{ gridTemplateColumns: 'repeat(4, minmax(0, 1fr))' }}>
+                <TabButton active={false}                 onClick={() => setPreviewMode(true)}     icon={<Eye size={18} />}             label="Clean" />
+                <TabButton active={tab==='assignments'}   onClick={() => setTab('assignments')}    icon={<FileText size={18} />}        label="Assignments" />
+                <TabButton active={tab==='daily'}         onClick={() => setTab('daily')}          icon={<Calendar size={18} />}        label="Daily" />
+                <TabButton active={tab==='dashboard'}     onClick={() => setTab('dashboard')}      icon={<LayoutDashboard size={18} />} label="Shifts" />
+              </div>
+            ) : (
+              <div className="grid gap-0.5" style={{ gridTemplateColumns: `repeat(${showMoneyTabs ? 4 : 3}, minmax(0, 1fr))` }}>
+                <TabButton active={tab==='props'} onClick={() => setTab('props')} icon={<Building2 size={18} />} label="Properties" />
+                {showMoneyTabs && <TabButton active={tab==='money'} onClick={() => setTab('money')} icon={<DollarSign size={18} />} label="Money" />}
+                <TabButton active={tab==='team'}  onClick={() => setTab('team')}  icon={<Users size={18} />} label="Team" />
+                <TabButton active={false} onClick={() => setPmPreview(true)} icon={<Eye size={18} />} label="PM view" />
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="max-w-md mx-auto grid gap-0.5" style={{ gridTemplateColumns: `repeat(${colCount}, minmax(0, 1fr))` }}>
+            <TabButton active={tab==='daily'}       onClick={() => setTab('daily')}       icon={<Calendar size={18} />} label="Daily" />
+            <TabButton active={tab==='dashboard'}   onClick={() => setTab('dashboard')}   icon={<LayoutDashboard size={18} />} label="Shifts" />
+            <TabButton active={tab==='team'}        onClick={() => setTab('team')}        icon={<Users size={18} />} label="Team" />
+            <TabButton active={tab==='props'}       onClick={() => setTab('props')}       icon={<Building2 size={18} />} label="Properties" />
+            <TabButton active={tab==='assignments'} onClick={() => setTab('assignments')} icon={<FileText size={18} />} label="Assignments" />
+          </div>
+        )}
       </div>
     </div>
     </PreviewContext.Provider>
@@ -15233,11 +15287,37 @@ function InvoiceDocument({ invoiceId, data, preview, onBack, onChanged }) {
 function InvoiceList({ property, onOpen, onNew }) {
   const [invoices, setInvoices] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [needsInvoicing, setNeedsInvoicing] = useState(0);
 
   const load = async () => {
     setLoading(true);
     const { data } = await supabase.from('invoices').select('*').eq('customer_id', property.id).order('created_at', { ascending: false });
     setInvoices(data || []);
+
+    // Flag jobs done over a week ago that still haven't been invoiced
+    // (done targets with no invoiced_on and completed_at older than 7 days).
+    try {
+      const weekAgo = new Date(Date.now() - 7 * 86400 * 1000).toISOString();
+      const { data: propUnits } = await supabase.from('units').select('id').eq('customer_id', property.id);
+      const unitIds = (propUnits || []).map(u => u.id);
+      if (unitIds.length) {
+        const { data: needRows, error } = await supabase.from('assignment_targets')
+          .select('assignment_id, unit_id, assignment:assignments!inner(deleted_at, active)')
+          .eq('status', 'done').is('invoiced_on', null).in('unit_id', unitIds)
+          .lt('completed_at', weekAgo);
+        if (!error) {
+          const jobs = new Set();
+          (needRows || []).forEach(t => {
+            if (t.assignment?.deleted_at || t.assignment?.active === false) return;
+            jobs.add(t.assignment_id || t.unit_id);
+          });
+          setNeedsInvoicing(jobs.size);
+        } else {
+          setNeedsInvoicing(0);
+        }
+      }
+    } catch { setNeedsInvoicing(0); }
+
     setLoading(false);
   };
   useEffect(() => { load(); /* eslint-disable-next-line */ }, [property.id]);
@@ -15246,6 +15326,19 @@ function InvoiceList({ property, onOpen, onNew }) {
 
   return (
     <div>
+      {needsInvoicing > 0 && (
+        <button onClick={onNew}
+          className="w-full mb-3 p-3 rounded-2xl bg-amber-50 border border-amber-300 flex items-center justify-between gap-3 text-left active:scale-98">
+          <div className="flex items-center gap-2.5">
+            <Clock size={18} className="text-amber-700 flex-shrink-0" />
+            <div>
+              <div className="text-sm font-medium text-amber-900">{needsInvoicing} {needsInvoicing === 1 ? 'job' : 'jobs'} need invoicing</div>
+              <div className="text-xs text-amber-700 font-mono">Done over a week ago and not yet billed</div>
+            </div>
+          </div>
+          <span className="text-xs font-medium text-amber-900 flex items-center gap-1 flex-shrink-0">Invoice now <ChevronRight size={14} /></span>
+        </button>
+      )}
       {invoices.length === 0 ? (
         <div className="text-center py-12 border-2 border-dashed border-stone-200 rounded-2xl">
           <div className="text-sm text-stone-500 mb-4">No saved invoices for {property.name} yet.</div>
@@ -16585,7 +16678,7 @@ function ChangePortalCodeModal({ portalUser, onClose, onSaved }) {
 // pick one. They see only that property's photos, dates, and units.
 // No cleaner names, no $ amounts (unless their kind allows it later).
 // =================================================================
-function PortalApp() {
+function PortalApp({ previewMode = false, previewEmployee = null, onExitPreview = null }) {
   const [portalUser, setPortalUser] = useState(null); // the portal_users row
   const [properties, setProperties] = useState([]);   // all props this user can access
   const [selectedProperty, setSelectedProperty] = useState(null);
@@ -16604,6 +16697,20 @@ function PortalApp() {
   };
 
   useEffect(() => {
+    // Owner "Preview as PM": synthetic PM user + all multi-unit properties.
+    if (previewMode) {
+      (async () => {
+        const synth = { id: null, name: previewEmployee?.name || 'Owner', kind: 'property_manager', __preview: true };
+        const { data } = await supabase.from('customers').select('*')
+          .eq('active', true).eq('property_type', 'multi_unit').order('name');
+        const props = data || [];
+        setPortalUser(synth);
+        setProperties(props);
+        if (props.length === 1) setSelectedProperty(props[0]);
+        setLoaded(true);
+      })();
+      return;
+    }
     // Auto-restore previous portal session
     (async () => {
       try {
@@ -16652,7 +16759,7 @@ function PortalApp() {
       }
       setLoaded(true);
     })();
-  }, []);
+  }, [previewMode]);
 
   const onSignIn = async (user, props) => {
     setPortalUser(user);
@@ -16669,6 +16776,7 @@ function PortalApp() {
 
   const onPickProperty = (prop) => {
     setSelectedProperty(prop);
+    if (previewMode) return;
     localStorage.setItem('tidytrack_portal', JSON.stringify({
       userId: portalUser.id,
       propertyId: prop.id,
@@ -16678,6 +16786,7 @@ function PortalApp() {
 
   const onBackToPicker = () => {
     setSelectedProperty(null);
+    if (previewMode) return;
     localStorage.setItem('tidytrack_portal', JSON.stringify({
       userId: portalUser.id,
       propertyId: null,
@@ -16686,6 +16795,7 @@ function PortalApp() {
   };
 
   const onSignOut = () => {
+    if (previewMode) { onExitPreview && onExitPreview(); return; }
     localStorage.removeItem('tidytrack_portal');
     setPortalUser(null);
     setProperties([]);
@@ -16694,7 +16804,7 @@ function PortalApp() {
 
   // Refresh the selected property record + reload properties list
   const refreshProperty = async () => {
-    if (!portalUser) return;
+    if (previewMode || !portalUser || !portalUser.id) return;
     const props = await loadProperties(portalUser.id);
     setProperties(props);
     if (selectedProperty) {
@@ -16704,13 +16814,23 @@ function PortalApp() {
     }
   };
 
-  if (!loaded) return <Splash text="Loading…" />;
+  const withPreviewBanner = (node) => previewMode ? (
+    <div className="min-h-screen bg-stone-50">
+      <div className="bg-indigo-600 text-white px-4 py-2 text-xs font-mono flex items-center justify-between sticky top-0 z-50">
+        <div className="flex items-center gap-2"><Eye size={12} /> Preview as PM — this is what your property managers see</div>
+        <button onClick={() => onExitPreview && onExitPreview()} className="px-2 py-0.5 rounded bg-white/20 hover:bg-white/30">Exit preview</button>
+      </div>
+      {node}
+    </div>
+  ) : node;
+
+  if (!loaded) return withPreviewBanner(<Splash text="Loading…" />);
   if (!portalUser) return <PortalSignIn onSignIn={onSignIn} />;
   if (!selectedProperty) {
-    return <PortalPropertyPicker portalUser={portalUser} properties={properties}
-      onPick={onPickProperty} onSignOut={onSignOut} />;
+    return withPreviewBanner(<PortalPropertyPicker portalUser={portalUser} properties={properties}
+      onPick={onPickProperty} onSignOut={onSignOut} />);
   }
-  return <PortalDashboard
+  return withPreviewBanner(<PortalDashboard
     property={selectedProperty}
     portalKind={portalUser.kind}
     portalUser={portalUser}
@@ -16719,7 +16839,7 @@ function PortalApp() {
     hasMultipleProperties={properties.length > 1}
     onBackToPicker={onBackToPicker}
     onSignOut={onSignOut}
-    onRefreshProperty={refreshProperty} />;
+    onRefreshProperty={refreshProperty} />);
 }
 
 function PortalSignIn({ onSignIn }) {

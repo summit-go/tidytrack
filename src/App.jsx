@@ -16,7 +16,6 @@ import {
 const SUPABASE_URL = "https://bbaynvqnbkjyqhzhhypr.supabase.co/";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJiYXludnFuYmtqeXFoemhoeXByIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc0NzQ2MTMsImV4cCI6MjA5MzA1MDYxM30.ZXUoHFj_IwMe6rX8RxK8Dj4kAB9AS7X9xZAhQ84wDEk";
 
-
 // =================================================================
 // 🌍 GOOGLE TRANSLATE API KEY (optional — for the Translate button)
 // Restrict the key to HTTP referrers app.gosummitclean.com + tidytrack-ten.vercel.app
@@ -7489,6 +7488,7 @@ function SimpleShiftView({ shift, tasks, activeTask, employeeName, employee, onS
 function PropertyPicker({ onPick, onCancel, busy, title, subtitle, viewOnly = false, employee }) {
   const [properties, setProperties] = useState([]);
   const [assignmentCounts, setAssignmentCounts] = useState({}); // { customer_id: number }
+  const [dateCounts, setDateCounts] = useState({}); // { dateKey|'__none__': { customer_id: count } }
   const [loaded, setLoaded] = useState(false);
   const [showAllOthers, setShowAllOthers] = useState(false);
   const [search, setSearch] = useState('');
@@ -7503,27 +7503,34 @@ function PropertyPicker({ onPick, onCancel, busy, title, subtitle, viewOnly = fa
     const [propsRes, targetsRes] = await Promise.all([
       supabase.from('customers').select('*').eq('active', true).order('name'),
       supabase.from('assignment_targets')
-        .select('unit_id, party_id, status, assignment:assignments!inner(customer_id, active)')
+        .select('unit_id, party_id, status, assignment:assignments!inner(customer_id, active, scheduled_date)')
         .not('status', 'in', '(done,blocked)'),
     ]);
     const counts = {};
     const seenBedrooms = new Set();
+    const dateBedrooms = {}; // dateKey -> propId -> Set(bedroomKey)
     (targetsRes.data || []).forEach(t => {
       const a = t.assignment;
       if (!a || a.active === false) return;
       const cid = a.customer_id;
       if (!cid) return;
-      // Bedroom identity = (unit_id, party_id). Property-wide
-      // assignments (both null) count as one "bedroom" per property
-      // since they represent work that isn't scoped to a specific
-      // bedroom but is still real work to do.
-      const key = `${cid}::${t.unit_id || ''}::${t.party_id || ''}`;
-      if (seenBedrooms.has(key)) return;
-      seenBedrooms.add(key);
-      counts[cid] = (counts[cid] || 0) + 1;
+      const bKey = `${t.unit_id || ''}::${t.party_id || ''}`;
+      const key = `${cid}::${bKey}`;
+      if (!seenBedrooms.has(key)) { seenBedrooms.add(key); counts[cid] = (counts[cid] || 0) + 1; }
+      // Per-date bucket (undated work groups under '__none__').
+      const dk = a.scheduled_date || '__none__';
+      dateBedrooms[dk] = dateBedrooms[dk] || {};
+      dateBedrooms[dk][cid] = dateBedrooms[dk][cid] || new Set();
+      dateBedrooms[dk][cid].add(bKey);
+    });
+    const dc = {};
+    Object.entries(dateBedrooms).forEach(([dk, byProp]) => {
+      dc[dk] = {};
+      Object.entries(byProp).forEach(([cid, set]) => { dc[dk][cid] = set.size; });
     });
     setProperties(visibleProps(propsRes.data || [], employee));
     setAssignmentCounts(counts);
+    setDateCounts(dc);
     setLoaded(true);
   })(); }, []);
 
@@ -7534,15 +7541,42 @@ function PropertyPicker({ onPick, onCancel, busy, title, subtitle, viewOnly = fa
   const matchesSearch = (p) => !q
     || (p.name || '').toLowerCase().includes(q)
     || (p.address || '').toLowerCase().includes(q);
-  const withAssignments = properties
-    .filter(p => (assignmentCounts[p.id] || 0) > 0 && matchesSearch(p))
-    .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+  const propById = Object.fromEntries(properties.map(p => [p.id, p]));
+
+  // Group properties under the dates their open work is scheduled for.
+  // Dated groups sort ascending (soonest/overdue first); undated work
+  // drops into its own group at the bottom, then properties with no
+  // open assignments.
+  const rowsForBucket = (bucket) => Object.keys(bucket || {})
+    .map(cid => propById[cid])
+    .filter(p => p && matchesSearch(p))
+    .sort((a, b) => (a.name || '').localeCompare(b.name || ''))
+    .map(p => ({ p, count: bucket[p.id] }));
+
+  const dateSections = Object.keys(dateCounts)
+    .filter(k => k !== '__none__')
+    .sort()
+    .map(dk => ({ dateKey: dk, rows: rowsForBucket(dateCounts[dk]) }))
+    .filter(s => s.rows.length > 0);
+  const noDateRows = rowsForBucket(dateCounts['__none__']);
   const others = properties
     .filter(p => (assignmentCounts[p.id] || 0) === 0 && matchesSearch(p))
     .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
 
-  // Reusable row renderer so both buckets look the same
-  const PropertyRow = ({ p }) => (
+  const fmtSchedDate = (key) => {
+    const today = localTodayKey();
+    const t = new Date(); t.setDate(t.getDate() + 1);
+    const tmr = `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`;
+    if (key === today) return 'Today';
+    if (key === tmr) return 'Tomorrow';
+    const d = new Date(key + 'T00:00:00');
+    return d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+  };
+
+  // Reusable row renderer — count is the number due in this context.
+  const PropertyRow = ({ p, count }) => {
+    const c = count != null ? count : (assignmentCounts[p.id] || 0);
+    return (
     <button key={p.id} onClick={() => onPick(p)} disabled={busy}
       className="w-full text-left p-4 rounded-2xl bg-white border-2 border-stone-200 hover:border-stone-900 active:scale-98 transition-all disabled:opacity-50">
       <div className="flex items-center justify-between gap-3">
@@ -7552,9 +7586,9 @@ function PropertyPicker({ onPick, onCancel, busy, title, subtitle, viewOnly = fa
             {p.property_type === 'multi_unit' && (
               <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-amber-100 text-amber-800">Multi-unit</span>
             )}
-            {(assignmentCounts[p.id] || 0) > 0 && (
+            {c > 0 && (
               <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-amber-600 text-white flex items-center gap-1 font-bold">
-                <FileText size={10} /> {assignmentCounts[p.id]} bedroom{assignmentCounts[p.id] === 1 ? '' : 's'} to clean
+                <FileText size={10} /> {c} bedroom{c === 1 ? '' : 's'} to clean
               </span>
             )}
           </div>
@@ -7567,7 +7601,8 @@ function PropertyPicker({ onPick, onCancel, busy, title, subtitle, viewOnly = fa
         <ChevronRight size={16} className="text-stone-400 flex-shrink-0" />
       </div>
     </button>
-  );
+    );
+  };
 
   return (
     <div className="min-h-screen bg-stone-50 flex flex-col">
@@ -7599,16 +7634,27 @@ function PropertyPicker({ onPick, onCancel, busy, title, subtitle, viewOnly = fa
                     />
                   </div>
                 )}
-                {/* Top section: properties with open assignments — shown
-                   as cards so cleaners can immediately tap the one they
-                   need to work on. */}
-                {withAssignments.length > 0 && (
-                  <div className="mb-6">
+                {/* Scheduled work, grouped by the date it's due. Tapping a
+                   property still clocks the cleaner in there as normal. */}
+                {dateSections.map(section => (
+                  <div key={section.dateKey} className="mb-6">
                     <div className="text-xs uppercase tracking-wider text-amber-700 font-mono mb-2 flex items-center gap-1.5">
-                      <FileText size={11} /> Has open assignments
+                      <Calendar size={11} /> {fmtSchedDate(section.dateKey)}
                     </div>
                     <div className="space-y-2">
-                      {withAssignments.map(p => <PropertyRow key={p.id} p={p} />)}
+                      {section.rows.map(({ p, count }) => <PropertyRow key={p.id} p={p} count={count} />)}
+                    </div>
+                  </div>
+                ))}
+
+                {/* Open work with no scheduled date — kept at the bottom. */}
+                {noDateRows.length > 0 && (
+                  <div className="mb-6">
+                    <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 flex items-center gap-1.5">
+                      <FileText size={11} /> No date set
+                    </div>
+                    <div className="space-y-2">
+                      {noDateRows.map(({ p, count }) => <PropertyRow key={p.id} p={p} count={count} />)}
                     </div>
                   </div>
                 )}
@@ -7623,7 +7669,7 @@ function PropertyPicker({ onPick, onCancel, busy, title, subtitle, viewOnly = fa
                       <div className="flex items-center gap-2">
                         <Building2 size={14} />
                         <span className="text-sm font-medium">
-                          {withAssignments.length > 0 ? 'Other properties' : 'All properties'}
+                          {(dateSections.length > 0 || noDateRows.length > 0) ? 'Other properties' : 'All properties'}
                         </span>
                         <span className="text-[10px] font-mono text-stone-500">({others.length})</span>
                       </div>
@@ -7631,7 +7677,7 @@ function PropertyPicker({ onPick, onCancel, busy, title, subtitle, viewOnly = fa
                     </button>
                     {showAllOthers && (
                       <div className="space-y-2 mt-2">
-                        {others.map(p => <PropertyRow key={p.id} p={p} />)}
+                        {others.map(p => <PropertyRow key={p.id} p={p} count={0} />)}
                       </div>
                     )}
                   </div>

@@ -17415,12 +17415,12 @@ function PortalHome({ property, portalKind, portalUser, properties, onSwitchProp
 
       // Build a Set of "unit_id:party_id" keys that are currently Done.
       // Property-level Done assignments (no unit/party) cover everything
-      // under that property, so we track those separately. We also collect
-      // "done entries" from completed_at so completed cleans show even when
-      // there were no photo tasks logged (e.g. quick/non-checklist cleans).
+      // under that property, so we track those separately. This is only a
+      // gate — history entries themselves come from real work blocks below,
+      // so a unit appears on a date only if it was actually cleaned then
+      // (not merely marked "done" without anyone clocking in).
       const doneUnitParty = new Set();
       let propertyLevelDone = false;
-      const doneEntries = [];
       (doneTargets || []).forEach(t => {
         if (t.assignment?.customer_id !== property.id) return;
         if (t.assignment?.active === false || t.assignment?.deleted_at) return;
@@ -17430,17 +17430,9 @@ function PortalHome({ property, portalKind, portalUser, properties, onSwitchProp
         }
         doneUnitParty.add(`${t.unit_id || ''}:${t.party_id || ''}`);
         if (t.unit_id && t.party_id) doneUnitParty.add(`${t.unit_id}:`); // also unit-level match
-        if (t.completed_at && t.completed_at >= since && t.unit) {
-          doneEntries.push({ date: new Date(t.completed_at).toISOString().split('T')[0], unitId: t.unit_id, label: t.unit.label });
-        }
       });
 
       const byDate = {};
-      // Seed with completed cleans (so they always show, photos or not).
-      doneEntries.forEach(e => {
-        if (!byDate[e.date]) byDate[e.date] = {};
-        if (!byDate[e.date][e.unitId]) byDate[e.date][e.unitId] = { unitId: e.unitId, label: e.label, photoCount: 0, hasDamage: false, hasResolvedDamage: false };
-      });
 
       // Enrich with photos/damage from work blocks for units that are Done.
       const filtered = (blocks || []).filter(b => {

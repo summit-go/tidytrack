@@ -9157,6 +9157,9 @@ function ManagerShell({ employee, onSignOut }) {
       {tab === 'assignments' && <AssignmentsTab   employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} onLogoClick={goHome} />}
       {showMoneyTabs && tab === 'money' && <MoneyView employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} onLogoClick={goHome} />}
 
+      {/* Spacer so the two-row owner nav doesn't cover the last content. */}
+      {isOwner && <div aria-hidden className="h-20" />}
+
       <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-stone-200 px-1 py-2 z-30">
         {isOwner ? (
           <div className="max-w-md mx-auto">
@@ -15078,51 +15081,54 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
                     <div className="border-t border-stone-100 p-4 space-y-3">
                       {l.subsections.length === 0 ? (
                         <div className="text-xs text-stone-400 font-mono">No priced items detected for this bedroom. Set a line total below, or price its items in the price book.</div>
-                      ) : l.subsections.map((s, si) => (
-                        <div key={s.key} className="flex items-center gap-2 flex-wrap">
-                          <button onClick={() => updateSub(l.key, si, { included: !s.included })}
-                            className={`w-5 h-5 rounded-md flex items-center justify-center flex-shrink-0 ${s.included ? 'bg-stone-900 text-white' : 'border border-stone-300 text-transparent'}`}>
-                            <Check size={12} />
-                          </button>
-                          <span className={`flex-1 min-w-[120px] text-sm flex items-center gap-1.5 ${s.included ? 'text-stone-800' : 'text-stone-400 line-through'}`}>
-                            {s.label}
-                            {!s.fromBook && <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 font-mono">needs price</span>}
-                          </span>
-                          <div className="flex p-0.5 bg-stone-100 rounded-lg flex-shrink-0">
-                            <button onClick={() => updateSub(l.key, si, { mode: 'fixed' })}
-                              className={`px-1.5 py-1 rounded-md ${s.mode !== 'time' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
-                              <DollarSign size={10} />
-                            </button>
-                            <button onClick={() => updateSub(l.key, si, { mode: 'time', rate: (parseFloat(s.rate) > 0 ? s.rate : (defaultRate || 0)) })}
-                              className={`px-1.5 py-1 rounded-md ${s.mode === 'time' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
-                              <Clock size={10} />
-                            </button>
+                      ) : (() => {
+                        const bySection = {};
+                        l.subsections.forEach((s, si) => {
+                          const sec = String(s.key || '').split(':')[0] || 'other';
+                          (bySection[sec] = bySection[sec] || []).push({ s, si });
+                        });
+                        const order = ['bedroom', 'vanity', 'bathroom', 'general', 'other'];
+                        const secLabel = { bedroom: 'Bedroom', vanity: 'Vanity', bathroom: 'Bathroom', general: 'General', other: 'Other' };
+                        const secs = Object.keys(bySection).sort((a, b) => {
+                          const ia = order.indexOf(a), ib = order.indexOf(b);
+                          return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
+                        });
+                        return (
+                          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-x-4 gap-y-2">
+                            {secs.map(sec => (
+                              <React.Fragment key={sec}>
+                                <div className="col-span-full text-[10px] uppercase tracking-wider font-mono text-stone-400 border-b border-stone-100 pb-1 mt-1">{secLabel[sec] || sec}</div>
+                                {bySection[sec].map(({ s, si }) => (
+                                  <div key={s.key} className="flex items-center gap-1.5 min-w-0">
+                                    <button onClick={() => updateSub(l.key, si, { included: !s.included })}
+                                      className={`w-4 h-4 rounded flex items-center justify-center flex-shrink-0 ${s.included ? 'bg-stone-900 text-white' : 'border border-stone-300 text-transparent'}`}>
+                                      <Check size={10} />
+                                    </button>
+                                    <span className={`flex-1 min-w-0 text-xs truncate ${s.included ? 'text-stone-800' : 'text-stone-400 line-through'} ${!s.fromBook && s.included ? 'font-medium' : ''}`} title={s.label}>{s.label}</span>
+                                    <button onClick={() => updateSub(l.key, si, { mode: s.mode === 'time' ? 'fixed' : 'time', rate: (parseFloat(s.rate) > 0 ? s.rate : (defaultRate || 0)) })}
+                                      className={`p-0.5 rounded flex-shrink-0 ${s.mode === 'time' ? 'text-stone-900 bg-stone-100' : 'text-stone-300 hover:text-stone-500'}`} title="Switch to time × rate">
+                                      <Clock size={11} />
+                                    </button>
+                                    {s.mode === 'time' ? (
+                                      <span className="flex items-center gap-0.5 text-[11px] font-mono flex-shrink-0">
+                                        <input type="number" step="0.01" value={s.rate} onChange={e => updateSub(l.key, si, { rate: e.target.value })} placeholder={defaultRate ? String(defaultRate) : '0'} className="w-9 px-1 py-0.5 rounded border border-stone-300 bg-white text-right" />
+                                        <span className="text-stone-400">×</span>
+                                        <input type="number" value={s.minutes} onChange={e => updateSub(l.key, si, { minutes: e.target.value })} placeholder="m" className="w-7 px-1 py-0.5 rounded border border-stone-300 bg-white text-right" />
+                                      </span>
+                                    ) : (
+                                      <span className="flex items-center gap-0.5 text-[11px] font-mono flex-shrink-0">
+                                        <span className="text-stone-400">$</span>
+                                        <input type="number" step="0.01" value={s.amount} onChange={e => updateSub(l.key, si, { amount: e.target.value })} placeholder="0.00"
+                                          className={`w-14 px-1.5 py-0.5 rounded border bg-white text-right ${s.fromBook ? 'border-stone-300' : 'border-amber-300'}`} />
+                                      </span>
+                                    )}
+                                  </div>
+                                ))}
+                              </React.Fragment>
+                            ))}
                           </div>
-                          {s.mode === 'time' ? (
-                            <span className="flex items-center gap-1 text-xs font-mono text-stone-600">
-                              <span className="text-stone-400">$</span>
-                              <input type="number" step="0.01" value={s.rate}
-                                onChange={e => updateSub(l.key, si, { rate: e.target.value })}
-                                placeholder={defaultRate ? String(defaultRate) : '0.00'}
-                                className="w-14 px-2 py-1 rounded-lg border border-stone-300 bg-white text-right" />
-                              <span className="text-stone-400">×</span>
-                              <input type="number" step="1" value={s.minutes}
-                                onChange={e => updateSub(l.key, si, { minutes: e.target.value })}
-                                placeholder="min"
-                                className="w-12 px-2 py-1 rounded-lg border border-stone-300 bg-white text-right" />
-                              <span className="text-emerald-700 font-medium min-w-[48px] text-right">${subAmount(s).toFixed(2)}</span>
-                            </span>
-                          ) : (
-                            <span className="flex items-center gap-0.5 text-xs font-mono text-stone-600">
-                              <span className="text-stone-400">$</span>
-                              <input type="number" step="0.01" value={s.amount}
-                                onChange={e => updateSub(l.key, si, { amount: e.target.value })}
-                                placeholder="0.00"
-                                className={`w-20 px-2 py-1 rounded-lg border bg-white text-right ${s.fromBook ? 'border-stone-300' : 'border-amber-300'}`} />
-                            </span>
-                          )}
-                        </div>
-                      ))}
+                        );
+                      })()}
                       <div className="pt-2 border-t border-stone-100">
                         <label className="block text-[11px] font-mono text-stone-500 mb-1">Description (prints on invoice)</label>
                         <input value={l.description} onChange={e => updateLine(l.key, { description: e.target.value })}

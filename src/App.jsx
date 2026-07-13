@@ -14897,6 +14897,14 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
       period_start: start, period_end: end, total, created_by: employee?.id || null,
     }).select().single();
     if (error) { setSaving(false); alert('Could not save invoice: ' + error.message); return; }
+    // Remember this billing contact on the property so the next invoice
+    // for it prefills automatically instead of re-typing.
+    supabase.from('customers').update({
+      billing_contact_name: billTo.contact || null,
+      billing_email: billTo.email || null,
+      billing_phone: billTo.phone || null,
+      billing_address: billTo.address || null,
+    }).eq('id', property.id).then(() => {}, () => {});
     const lineRows = lines.map((l, i) => ({
       invoice_id: inv.id, unit_id: l.unitId || null, party_id: l.partyId || null,
       label: l.label, service_type: l.serviceType || null, description: l.description || null,
@@ -15204,7 +15212,7 @@ function fmtInvoiceDate(d) {
 // invoice + its lines and renders the polished layout matching the
 // company's PDF, with print / status / delete actions.
 // =================================================================
-function InvoiceDocument({ invoiceId, data, preview, onBack, onChanged }) {
+function InvoiceDocument({ invoiceId, data, preview, onBack, onChanged, onEditDraft }) {
   const [inv, setInv] = useState(null);
   const [lines, setLines] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -15260,6 +15268,10 @@ function InvoiceDocument({ invoiceId, data, preview, onBack, onChanged }) {
         </button>
         <div className="flex items-center gap-2 flex-wrap">
           {preview && <span className="text-xs font-mono text-amber-700 px-2 py-1 rounded bg-amber-50">Preview — not saved</span>}
+          {!preview && inv.status === 'draft' && onEditDraft && (
+            <button onClick={() => { if (confirm('Reopen this draft to add more cleanings? Its items are freed and it reopens in the editor so newer cleanings merge in.')) onEditDraft(inv); }}
+              disabled={working} className="px-3 py-1.5 rounded-lg bg-amber-600 text-white text-xs font-medium disabled:opacity-50">Edit / add cleanings</button>
+          )}
           {!preview && inv.status !== 'sent' && <button onClick={() => setStatus('sent')} disabled={working} className="px-3 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-medium disabled:opacity-50">Mark sent</button>}
           {!preview && inv.status !== 'paid' && <button onClick={() => setStatus('paid')} disabled={working} className="px-3 py-1.5 rounded-lg bg-emerald-600 text-white text-xs font-medium disabled:opacity-50">Mark paid</button>}
           {!preview && inv.status !== 'draft' && <button onClick={() => setStatus('draft')} disabled={working} className="px-3 py-1.5 rounded-lg bg-white border border-stone-300 text-stone-600 text-xs">Back to draft</button>}
@@ -15783,6 +15795,17 @@ function InvoiceView({ employee, onSignOut, onOpenMessages, onLogoClick, topTogg
     setInvoice({ property, units: invoiceUnits, grandTotal, totalHours, start, end });
     setBusy(false);
   };
+  // "Edit draft": free this draft's cleanings and reopen the generator for
+  // its period through today, so newer cleanings merge into one invoice.
+  const editDraft = async (inv) => {
+    if (!inv) return;
+    await supabase.from('invoices').delete().eq('id', inv.id);
+    setSelectedId(inv.customer_id);
+    setStart(inv.period_start || twoWeeksAgo);
+    setEnd(today);
+    setViewingInvoiceId(null);
+    setDraftOn(true);
+  };
   if (showPriceBook && selectedId) {
     const property = properties.find(p => p.id === selectedId);
     return <PriceBookEditor property={property} onBack={() => setShowPriceBook(false)} />;
@@ -15790,7 +15813,8 @@ function InvoiceView({ employee, onSignOut, onOpenMessages, onLogoClick, topTogg
   if (viewingInvoiceId) {
     return <InvoiceDocument invoiceId={viewingInvoiceId}
       onBack={() => { setViewingInvoiceId(null); setMode('saved'); }}
-      onChanged={() => {}} />;
+      onChanged={() => {}}
+      onEditDraft={editDraft} />;
   }
   if (draftOn && selectedId) {
     const property = properties.find(p => p.id === selectedId);

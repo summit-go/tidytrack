@@ -11420,6 +11420,21 @@ function EmployeeForm({ employee, currentUserId, currentUserRole, onCancel, onSa
           )}
         </div>
 
+        {canEditOwner && (
+          <div>
+            <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-1.5">Pay rate</div>
+            <div className="relative">
+              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-stone-400 text-sm">$</span>
+              <input type="number" inputMode="decimal" step="0.01" min="0"
+                value={payRate} onChange={(e) => setPayRate(e.target.value)}
+                placeholder="0.00"
+                className="w-full pl-7 pr-16 py-2.5 rounded-xl border border-stone-300 bg-white focus:outline-none focus:border-stone-900 text-stone-900 text-sm" />
+              <span className="absolute right-3 top-1/2 -translate-y-1/2 text-stone-400 text-xs font-mono">/ hour</span>
+            </div>
+            <div className="text-[11px] text-stone-500 mt-1 font-mono">What you pay this person hourly (owner-only). Used in the profit/loss report.</div>
+          </div>
+        )}
+
         <div className="p-4 rounded-2xl bg-white border border-stone-200 space-y-3">
           <div className="flex items-center justify-between gap-2 mb-1">
             <div className="flex items-center gap-2">
@@ -11489,20 +11504,6 @@ function EmployeeForm({ employee, currentUserId, currentUserRole, onCancel, onSa
                 placeholder="e.g. (801) 555-0123"
                 className="w-full px-3 py-2.5 rounded-xl border border-stone-300 bg-white focus:outline-none focus:border-stone-900 text-stone-900 text-sm" />
             </div>
-
-            {canEditOwner && (
-              <div>
-                <label className="text-xs text-stone-700 font-medium mb-1.5 block">Pay rate (per hour)</label>
-                <div className="relative">
-                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-stone-400 text-sm">$</span>
-                  <input type="number" inputMode="decimal" step="0.01" min="0"
-                    value={payRate} onChange={(e) => setPayRate(e.target.value)}
-                    placeholder="0.00"
-                    className="w-full pl-7 pr-3 py-2.5 rounded-xl border border-stone-300 bg-white focus:outline-none focus:border-stone-900 text-stone-900 text-sm" />
-                </div>
-                <div className="text-[11px] text-stone-500 mt-1 font-mono">What you pay this person hourly — used to compare against what you charge.</div>
-              </div>
-            )}
 
             <label className="flex items-center justify-between gap-3 p-3 rounded-xl bg-stone-50 cursor-pointer">
               <div className="flex-1 min-w-0">

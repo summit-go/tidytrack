@@ -16,6 +16,7 @@ import {
 const SUPABASE_URL = "https://bbaynvqnbkjyqhzhhypr.supabase.co/";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJiYXludnFuYmtqeXFoemhoeXByIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc0NzQ2MTMsImV4cCI6MjA5MzA1MDYxM30.ZXUoHFj_IwMe6rX8RxK8Dj4kAB9AS7X9xZAhQ84wDEk";
 
+
 // =================================================================
 // 🌍 GOOGLE TRANSLATE API KEY (optional — for the Translate button)
 // Restrict the key to HTTP referrers app.gosummitclean.com + tidytrack-ten.vercel.app
@@ -11190,7 +11191,11 @@ function EmployeeAdmin({ employee, onSignOut, onOpenMessages, onLogoClick }) {
                       {e.role === 'manager' && <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-200 text-stone-700">Manager</span>}
                       {!e.active && <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-200 text-stone-600">Inactive</span>}
                     </div>
-                    <div className="text-xs text-stone-500 font-mono mb-2">PIN: •••• {isSelfRow && '· (you)'}</div>
+                    <div className="text-xs text-stone-500 font-mono mb-2">PIN: •••• {isSelfRow && '· (you)'}
+                      {canSeeMoney(employee) && e.pay_rate_hourly != null && (
+                        <span className="ml-2 text-emerald-700">· ${Number(e.pay_rate_hourly).toFixed(2)}/hr</span>
+                      )}
+                    </div>
                     {/* Capability summary so owners can scan who has what without
                        drilling into each card. Owners are "Full access" by virtue
                        of their role; others get tiny labelled chips. */}
@@ -11271,6 +11276,7 @@ function EmployeeForm({ employee, currentUserId, currentUserRole, onCancel, onSa
   const [role, setRole] = useState(employee?.role || 'employee');
   const [active, setActive] = useState(employee?.active ?? true);
   const [phone, setPhone] = useState(employee?.phone || '');
+  const [payRate, setPayRate] = useState(employee?.pay_rate_hourly != null ? String(employee.pay_rate_hourly) : '');
   const [smsOptIn, setSmsOptIn] = useState(employee?.sms_opt_in || false);
   const [notifyMessages, setNotifyMessages] = useState(
     employee?.notification_prefs?.messages !== false
@@ -11342,6 +11348,7 @@ function EmployeeForm({ employee, currentUserId, currentUserRole, onCancel, onSa
       sms_opt_in: smsOptIn,
       notification_prefs: { messages: notifyMessages },
       responsibilities,
+      ...(canEditOwner ? { pay_rate_hourly: payRate.trim() ? parseFloat(payRate) : null } : {}),
     };
     const { error: e } = isNew
       ? await supabase.from('employees').insert(payload)
@@ -11479,6 +11486,20 @@ function EmployeeForm({ employee, currentUserId, currentUserRole, onCancel, onSa
                 placeholder="e.g. (801) 555-0123"
                 className="w-full px-3 py-2.5 rounded-xl border border-stone-300 bg-white focus:outline-none focus:border-stone-900 text-stone-900 text-sm" />
             </div>
+
+            {canEditOwner && (
+              <div>
+                <label className="text-xs text-stone-700 font-medium mb-1.5 block">Pay rate (per hour)</label>
+                <div className="relative">
+                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-stone-400 text-sm">$</span>
+                  <input type="number" inputMode="decimal" step="0.01" min="0"
+                    value={payRate} onChange={(e) => setPayRate(e.target.value)}
+                    placeholder="0.00"
+                    className="w-full pl-7 pr-3 py-2.5 rounded-xl border border-stone-300 bg-white focus:outline-none focus:border-stone-900 text-stone-900 text-sm" />
+                </div>
+                <div className="text-[11px] text-stone-500 mt-1 font-mono">What you pay this person hourly — used to compare against what you charge.</div>
+              </div>
+            )}
 
             <label className="flex items-center justify-between gap-3 p-3 rounded-xl bg-stone-50 cursor-pointer">
               <div className="flex-1 min-w-0">
@@ -15429,11 +15450,155 @@ function InvoiceList({ property, onOpen, onNew }) {
   );
 }
 
+// =================================================================
+// PROFIT / LOSS REPORT — invoiced charge vs labor pay, sliced by
+// property or by person. Owner-only (lives under Money).
+// =================================================================
+function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, topToggle }) {
+  const iso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const [start, setStart] = useState(iso(new Date(Date.now() - 29 * 86400000)));
+  const [end, setEnd] = useState(iso(new Date()));
+  const [slice, setSlice] = useState('property'); // 'property' | 'person'
+  const [loading, setLoading] = useState(false);
+  const [rows, setRows] = useState(null);
+  const [totals, setTotals] = useState({ charge: 0, pay: 0 });
+
+  const run = async () => {
+    if (!start || !end) return;
+    setLoading(true);
+    try {
+      const { data: blocks } = await supabase.from('work_blocks')
+        .select('start_time, end_time, shift:shifts!inner(customer_id, is_preview, employee:employees(id, name, pay_rate_hourly), customer:customers(name))')
+        .gte('start_time', start + 'T00:00:00').lte('start_time', end + 'T23:59:59')
+        .not('end_time', 'is', null);
+      const { data: invs } = await supabase.from('invoices')
+        .select('customer_id, total, invoice_date, customer:customers(name)')
+        .gte('invoice_date', start).lte('invoice_date', end);
+
+      const persons = {}; // id -> {name, rate}
+      const props = {};   // id -> name
+      const hoursPP = {}; // personId -> propId -> hours
+      (blocks || []).forEach(b => {
+        const sh = b.shift; if (!sh || sh.is_preview) return;
+        const emp = sh.employee; const pid = emp?.id; const cid = sh.customer_id;
+        if (!pid || !cid || !b.end_time) return;
+        const hrs = (new Date(b.end_time) - new Date(b.start_time)) / 3600000;
+        if (hrs <= 0) return;
+        persons[pid] = persons[pid] || { name: emp.name, rate: Number(emp.pay_rate_hourly) || 0 };
+        props[cid] = props[cid] || (sh.customer?.name || 'Property');
+        hoursPP[pid] = hoursPP[pid] || {};
+        hoursPP[pid][cid] = (hoursPP[pid][cid] || 0) + hrs;
+      });
+
+      const chargeByProp = {};
+      (invs || []).forEach(v => {
+        const cid = v.customer_id; if (!cid) return;
+        props[cid] = props[cid] || (v.customer?.name || 'Property');
+        chargeByProp[cid] = (chargeByProp[cid] || 0) + (Number(v.total) || 0);
+      });
+
+      const hoursByProp = {};
+      Object.keys(hoursPP).forEach(pid => Object.entries(hoursPP[pid]).forEach(([cid, h]) => { hoursByProp[cid] = (hoursByProp[cid] || 0) + h; }));
+
+      const out = [];
+      let tCharge = 0, tPay = 0;
+      if (slice === 'property') {
+        Object.keys(props).forEach(cid => {
+          const charge = chargeByProp[cid] || 0;
+          let pay = 0;
+          Object.keys(hoursPP).forEach(pid => { const h = hoursPP[pid][cid]; if (h) pay += h * persons[pid].rate; });
+          out.push({ id: cid, name: props[cid], charge, pay });
+          tCharge += charge; tPay += pay;
+        });
+      } else {
+        Object.keys(persons).forEach(pid => {
+          let pay = 0, charge = 0;
+          Object.entries(hoursPP[pid] || {}).forEach(([cid, h]) => {
+            pay += h * persons[pid].rate;
+            const ph = hoursByProp[cid] || 0;
+            if (ph > 0) charge += (chargeByProp[cid] || 0) * (h / ph);
+          });
+          out.push({ id: pid, name: persons[pid].name, charge, pay });
+          tCharge += charge; tPay += pay;
+        });
+      }
+      out.sort((a, b) => (b.charge - b.pay) - (a.charge - a.pay));
+      setRows(out);
+      setTotals({ charge: tCharge, pay: tPay });
+    } catch (e) {
+      setRows([]);
+    }
+    setLoading(false);
+  };
+
+  return (
+    <div className="min-h-screen bg-stone-50 pb-24">
+      <Header name={employee.name} onSignOut={onSignOut} role={employee.role} employee={employee} onOpenMessages={onOpenMessages} onLogoClick={onLogoClick} />
+      {topToggle}
+      <div className="px-5 pt-6 space-y-5 max-w-md mx-auto">
+        <div>
+          <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">Report</div>
+          <h1 className="font-serif text-3xl text-stone-900">Profit / loss</h1>
+          <p className="text-sm text-stone-500 mt-1">What you invoiced vs. what you paid in labor.</p>
+        </div>
+
+        <div className="flex gap-1 bg-stone-100 p-1 rounded-xl">
+          <button onClick={() => { setSlice('property'); setRows(null); }} className={`flex-1 py-2 rounded-lg text-xs font-medium ${slice === 'property' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>By property</button>
+          <button onClick={() => { setSlice('person'); setRows(null); }} className={`flex-1 py-2 rounded-lg text-xs font-medium ${slice === 'person' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>By person</button>
+        </div>
+
+        <div>
+          <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2">Date range</div>
+          <DateRangePicker start={start} end={end} onChange={(s, e) => { setStart(s); setEnd(e); }} />
+        </div>
+
+        <button onClick={run} disabled={loading || !start || !end}
+          className="w-full py-4 rounded-2xl bg-stone-900 text-stone-50 font-medium disabled:opacity-50">
+          {loading ? 'Crunching…' : 'Run report'}
+        </button>
+
+        {rows && (
+          <div className="space-y-3">
+            <div className="p-4 rounded-2xl bg-white border border-stone-200 grid grid-cols-3 gap-2 text-center">
+              <div><div className="text-[10px] uppercase text-stone-400 font-mono">Charged</div><div className="text-lg font-mono text-stone-900">${totals.charge.toFixed(0)}</div></div>
+              <div><div className="text-[10px] uppercase text-stone-400 font-mono">Paid</div><div className="text-lg font-mono text-stone-900">${totals.pay.toFixed(0)}</div></div>
+              <div><div className="text-[10px] uppercase text-stone-400 font-mono">Profit</div><div className={`text-lg font-mono ${totals.charge - totals.pay >= 0 ? 'text-emerald-700' : 'text-red-600'}`}>${(totals.charge - totals.pay).toFixed(0)}</div></div>
+            </div>
+            {rows.length === 0 ? (
+              <div className="text-center py-8 text-stone-400 text-sm">No data in this range.</div>
+            ) : rows.map(r => {
+              const profit = r.charge - r.pay;
+              const margin = r.charge > 0 ? (profit / r.charge) * 100 : null;
+              return (
+                <div key={r.id} className="p-4 rounded-2xl bg-white border border-stone-200">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="font-serif text-lg text-stone-900">{r.name}</span>
+                    <span className={`text-sm font-mono font-bold ${profit >= 0 ? 'text-emerald-700' : 'text-red-600'}`}>{profit >= 0 ? '+' : ''}${profit.toFixed(2)}</span>
+                  </div>
+                  <div className="flex items-center gap-4 text-xs font-mono text-stone-600 flex-wrap">
+                    <span>Charged ${r.charge.toFixed(2)}</span>
+                    <span>Paid ${r.pay.toFixed(2)}</span>
+                    {margin != null && <span className={profit >= 0 ? 'text-emerald-700' : 'text-red-600'}>{margin.toFixed(0)}% margin</span>}
+                  </div>
+                </div>
+              );
+            })}
+            {slice === 'person' && rows.length > 0 && (
+              <p className="text-[11px] text-stone-400 font-mono">Per-person "charged" splits each property's invoiced total by that person's share of hours worked there.</p>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function MoneyView({ employee, onSignOut, onOpenMessages, onLogoClick }) {
-  const [subTab, setSubTab] = useState('invoices'); // 'invoices' | 'payroll' | 'reports'
+  const [subTab, setSubTab] = useState('invoices'); // 'invoices' | 'payroll' | 'reports' | 'profit'
 
   const ChildView = subTab === 'invoices' ? InvoiceView
     : subTab === 'payroll' ? ExportView
+    : subTab === 'profit' ? ProfitReportView
     : CleaningsReportView;
   return (
     <div>
@@ -15453,6 +15618,10 @@ function MoneyView({ employee, onSignOut, onOpenMessages, onLogoClick }) {
               <button onClick={() => setSubTab('reports')}
                 className={`flex-1 py-2 px-3 rounded-lg text-xs font-medium transition-colors flex items-center justify-center gap-1.5 ${subTab === 'reports' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
                 <ClipboardList size={13} /> Cleanings
+              </button>
+              <button onClick={() => setSubTab('profit')}
+                className={`flex-1 py-2 px-3 rounded-lg text-xs font-medium transition-colors flex items-center justify-center gap-1.5 ${subTab === 'profit' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+                <DollarSign size={13} /> Profit
               </button>
             </div>
           </div>
@@ -15510,8 +15679,8 @@ function DateRangePicker({ start, end, onChange }) {
       </button>
       {open && (
         <>
-          <div className="fixed inset-0 z-20" onClick={() => setOpen(false)} />
-          <div className="absolute z-30 mt-2 w-[300px] bg-white rounded-2xl border border-stone-200 shadow-xl p-3">
+          <div className="fixed inset-0 z-40 bg-black/20" onClick={() => setOpen(false)} />
+          <div className="fixed z-50 left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[300px] max-w-[calc(100vw-2rem)] max-h-[calc(100vh-2rem)] overflow-auto bg-white rounded-2xl border border-stone-200 shadow-xl p-3">
             <div className="flex gap-1 mb-3 flex-wrap">
               <button onClick={() => setPreset(thisMonthStart, thisMonthEnd)} className="text-[11px] px-2 py-1 rounded-lg bg-stone-100 text-stone-600 hover:bg-stone-200">This month</button>
               <button onClick={() => setPreset(lastMonthStart, lastMonthEnd)} className="text-[11px] px-2 py-1 rounded-lg bg-stone-100 text-stone-600 hover:bg-stone-200">Last month</button>

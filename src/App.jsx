@@ -16,6 +16,7 @@ import {
 const SUPABASE_URL = "https://bbaynvqnbkjyqhzhhypr.supabase.co/";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJiYXludnFuYmtqeXFoemhoeXByIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc0NzQ2MTMsImV4cCI6MjA5MzA1MDYxM30.ZXUoHFj_IwMe6rX8RxK8Dj4kAB9AS7X9xZAhQ84wDEk";
 
+
 // =================================================================
 // 🌍 GOOGLE TRANSLATE API KEY (optional — for the Translate button)
 // Restrict the key to HTTP referrers app.gosummitclean.com + tidytrack-ten.vercel.app
@@ -1601,6 +1602,7 @@ const CAPABILITIES = [
   { key: 'view_pay_info',            label: 'View pay info',              hint: 'See bill rates, money amounts, and invoices.' },
   { key: 'manage_units',             label: 'Manage units & properties',  hint: 'Add or edit units, parties, properties, and bulk imports.' },
   { key: 'manage_assignments_admin', label: 'Reassign & delete assignments', hint: 'Move assignments between bedrooms or delete them entirely.' },
+  { key: 'edit_due_dates',           label: 'Change due dates',           hint: 'Tap an assignment\u2019s date to reschedule when it\u2019s due.' },
 ];
 
 // Returns true if the employee has the given capability key.
@@ -24896,6 +24898,8 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
               canMarkDone={can(employee, 'mark_assignments_done') || t.started_by === employee?.id}
               canMarkDoneAlways={can(employee, 'mark_assignments_done')}
               currentEmployeeId={employee?.id}
+              canEditDates={can(employee, 'edit_due_dates')}
+              onSetDueDate={async (aid, date) => { if (aid) { await supabase.from('assignments').update({ scheduled_date: date }).eq('id', aid); load(); } }}
             onOpenBedroomHistory={onOpenBedroomHistory} />
         );
         // Checklist group card: ONE card representing a whole inspection
@@ -25157,10 +25161,18 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
 }
 
 // Reusable card for one assignment target, used in banner + panel
-function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPending, onDone, onReopen, onBlocked, onReassign, onGoToBedroom, onOpenBedroomHistory, onTogglePriority, canMarkDone = true, canMarkDoneAlways = false, currentEmployeeId, propertyId }) {
+function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPending, onDone, onReopen, onBlocked, onReassign, onGoToBedroom, onOpenBedroomHistory, onTogglePriority, canMarkDone = true, canMarkDoneAlways = false, currentEmployeeId, propertyId, canEditDates = false, onSetDueDate }) {
   const t = target;
   const s = ASSIGNMENT_STATUSES[t.status] || ASSIGNMENT_STATUSES.pending;
   const isDone = t.status === 'done';
+  const [editingDate, setEditingDate] = useState(false);
+  const [localDate, setLocalDate] = useState(t.assignment?.scheduled_date || '');
+  useEffect(() => { setLocalDate(t.assignment?.scheduled_date || ''); }, [t.assignment?.scheduled_date]);
+  const commitDate = async (val) => {
+    setLocalDate(val);
+    setEditingDate(false);
+    if (onSetDueDate) await onSetDueDate(t.assignment_id || t.assignment?.id, val || null);
+  };
   // Title is always tappable as long as we have a bedroom to navigate
   // to — even Done assignments. Tapping a Done one is useful for
   // peeking at history or re-checking the bedroom.
@@ -25252,23 +25264,36 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
             <span className={`text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full border ${s.color}`}>
               {s.label}
             </span>
-            {/* Due-date signal from the assignment's scheduled_date. */}
+            {/* Due-date signal — tappable to reschedule when permitted. */}
             {!isDone && (() => {
-              const kind = assignmentDueKind(t.assignment?.scheduled_date);
-              if (!kind) return null;
-              if (kind === 'overdue') return (
-                <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-red-100 text-red-700 border border-red-200 flex items-center gap-1">
-                  <Calendar size={9} /> Overdue · {fmtDateWithDay(t.assignment.scheduled_date)}
-                </span>
-              );
-              if (kind === 'today') return (
-                <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 border border-emerald-200 flex items-center gap-1">
-                  <Calendar size={9} /> Today
-                </span>
-              );
+              const kind = assignmentDueKind(localDate);
+              const cls = kind === 'overdue' ? 'bg-red-100 text-red-700 border-red-200'
+                : kind === 'today' ? 'bg-emerald-100 text-emerald-800 border-emerald-200'
+                : 'bg-stone-100 text-stone-600 border-stone-200';
+              const label = !localDate ? 'Set date'
+                : kind === 'overdue' ? `Overdue · ${fmtDateWithDay(localDate)}`
+                : kind === 'today' ? 'Today'
+                : fmtDateWithDay(localDate);
+              if (editingDate && canEditDates) {
+                return (
+                  <input type="date" autoFocus value={localDate}
+                    onChange={(e) => commitDate(e.target.value)}
+                    onBlur={() => setEditingDate(false)}
+                    className="text-[10px] font-mono px-1.5 py-0.5 rounded-lg border border-stone-400 bg-white" />
+                );
+              }
+              if (canEditDates) {
+                return (
+                  <button onClick={() => setEditingDate(true)}
+                    className={`text-[10px] font-mono px-2 py-0.5 rounded-full border flex items-center gap-1 ${localDate ? cls : 'bg-white text-stone-500 border-dashed border-stone-300'}`}>
+                    <Calendar size={9} /> {label}
+                  </button>
+                );
+              }
+              if (!localDate) return null;
               return (
-                <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-stone-100 text-stone-600 border border-stone-200 flex items-center gap-1">
-                  <Calendar size={9} /> {fmtDateWithDay(t.assignment.scheduled_date)}
+                <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full border flex items-center gap-1 ${cls}`}>
+                  <Calendar size={9} /> {label}
                 </span>
               );
             })()}
@@ -26684,6 +26709,8 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
               canMarkDoneAlways={can(employee, 'mark_assignments_done')}
               currentEmployeeId={employee?.id}
                 onGoToBedroom={onGoToBedroom ? () => startAndGo(t) : null}
+                canEditDates={can(employee, 'edit_due_dates')}
+                onSetDueDate={async (aid, date) => { if (aid) { await supabase.from('assignments').update({ scheduled_date: date }).eq('id', aid); load(); } }}
                 onOpenBedroomHistory={onOpenBedroomHistory} />
             );
           }
@@ -27096,6 +27123,8 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
               canMarkDoneAlways={can(employee, 'mark_assignments_done')}
                             currentEmployeeId={employee?.id}
                             onGoToBedroom={onGoToBedroom ? () => startAndGo(t) : null}
+                            canEditDates={can(employee, 'edit_due_dates')}
+                            onSetDueDate={async (aid, date) => { if (aid) { await supabase.from('assignments').update({ scheduled_date: date }).eq('id', aid); load(); } }}
                             onOpenBedroomHistory={onOpenBedroomHistory} />
                         ))}
                         {/* NEW items at this bedroom: ONE bedroom-level

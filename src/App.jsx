@@ -44,6 +44,11 @@ const ASSIGNMENT_TYPES = [
 ];
 const assignmentTypeLabel = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value)?.label || value || '';
+
+// Build tag — shows next to "TidyTrack" in the top bar so you can verify
+// which version is live. Kept well away from the Supabase keys so it
+// doesn't get wiped when you paste your keys. Bump it every update.
+const BUILD_TAG = "jul14-cards";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 

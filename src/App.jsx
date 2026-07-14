@@ -14,8 +14,7 @@ import {
 // 🔧 PASTE YOUR SUPABASE KEYS HERE
 // =================================================================
 const SUPABASE_URL = "https://bbaynvqnbkjyqhzhhypr.supabase.co/";
-const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJiYXludnFuYmtqeXFoemhoeXByIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc0NzQ2MTMsImV4cCI6MjA5MzA1MDYxM30.ZXUoHFj_IwMe6rX8RxK8Dj4kAB9AS7X9xZAhQ84wDEk";
-
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJiYXludnFuYmtqeXFoemhoeXByIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc0NzQ2MTMsImV4c
 
 // =================================================================
 // 🌍 GOOGLE TRANSLATE API KEY (optional — for the Translate button)
@@ -26670,7 +26669,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
     // not visible to cleaners get dropped here.
     let allRelevant = (data || []).filter(t =>
       t.assignment?.customer_id === propertyId &&
-      t.assignment?.active &&
+      t.assignment?.active !== false &&
       !t.assignment?.deleted_at &&
       (t.assignment?.source !== 'pm' || t.assignment?.pm_status === 'approved')
     );

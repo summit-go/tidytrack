@@ -16,6 +16,7 @@ import {
 const SUPABASE_URL = "https://bbaynvqnbkjyqhzhhypr.supabase.co/";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJiYXludnFuYmtqeXFoemhoeXByIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc0NzQ2MTMsImV4cCI6MjA5MzA1MDYxM30.ZXUoHFj_IwMe6rX8RxK8Dj4kAB9AS7X9xZAhQ84wDEk";
 
+
 // =================================================================
 // 🌍 GOOGLE TRANSLATE API KEY (optional — for the Translate button)
 // Restrict the key to HTTP referrers app.gosummitclean.com + tidytrack-ten.vercel.app
@@ -38,6 +39,7 @@ const ASSIGNMENT_TYPES = [
   { value: 'deep',           label: 'Deep clean',     short: 'Deep clean',     color: 'bg-purple-100 text-purple-800 border-purple-300' },
   { value: 'move_out_check', label: 'Move-out check', short: 'Move-out check', color: 'bg-orange-100 text-orange-800 border-orange-300' },
   { value: 'reclean',        label: 'Reclean',        short: 'Reclean',        color: 'bg-yellow-100 text-yellow-800 border-yellow-300' },
+  { value: 'trash_out',      label: 'Trash out',      short: 'Trash out',      color: 'bg-lime-100 text-lime-800 border-lime-300' },
   { value: 'standard',       label: 'Standard clean', short: 'Standard clean', color: 'bg-emerald-100 text-emerald-800 border-emerald-300' },
 ];
 const assignmentTypeLabel = (value) =>
@@ -13798,6 +13800,7 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
   const [scheduleMode, setScheduleMode] = useState('schedule'); // 'schedule' | 'property'
   const [adding, setAdding] = useState(false); // property picker for adding
   const [expanded, setExpanded] = useState(() => new Set()); // expanded card keys
+  const [actioning, setActioning] = useState(null); // job id being marked done / deleted
   const [loaded, setLoaded] = useState(false);
   const [picked, setPicked] = useState(null); // selected property
   const [view, setView] = useState('open');   // 'open' | 'upload' | 'detail'
@@ -13808,7 +13811,7 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
     const [propsRes, targetsRes] = await Promise.all([
       supabase.from('customers').select('*').eq('active', true).order('name'),
       supabase.from('assignment_targets')
-        .select('id, status, unit_id, party_id, template_section, unit:units(label), party:parties(label), assignment:assignments!inner(id, title, customer_id, active, deleted_at, scheduled_date, assignment_type)')
+        .select('id, status, unit_id, party_id, template_section, unit:units(label, bedrooms, bathrooms), party:parties(label), assignment:assignments!inner(id, title, customer_id, active, deleted_at, scheduled_date, assignment_type)')
         .not('status', 'in', '(done,blocked)'),
     ]);
     const counts = {};
@@ -13822,7 +13825,7 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
       const key = `${cid}::${t.unit_id || ''}::${t.party_id || ''}`;
       if (!seenBedrooms.has(key)) { seenBedrooms.add(key); counts[cid] = (counts[cid] || 0) + 1; }
       if (!jobsByAsg[a.id]) {
-        jobsByAsg[a.id] = { id: a.id, customerId: cid, title: a.title || '', scheduledDate: a.scheduled_date || null, type: a.assignment_type || '', unitLabel: t.unit?.label || '', partyLabel: t.party?.label || '', count: 0, sections: { bedroom: 0, vanity: 0, bathroom: 0, general: 0, other: 0 } };
+        jobsByAsg[a.id] = { id: a.id, customerId: cid, title: a.title || '', scheduledDate: a.scheduled_date || null, type: a.assignment_type || '', unitLabel: t.unit?.label || '', partyLabel: t.party?.label || '', bedrooms: t.unit?.bedrooms, bathrooms: t.unit?.bathrooms, count: 0, sections: { bedroom: 0, vanity: 0, bathroom: 0, general: 0, other: 0 } };
       }
       jobsByAsg[a.id].count++;
       const sec = (t.template_section || '').toLowerCase();
@@ -13888,6 +13891,28 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
 
   const propById = Object.fromEntries(properties.map(p => [p.id, p]));
   const toggleExpand = (k) => setExpanded(prev => { const n = new Set(prev); n.has(k) ? n.delete(k) : n.add(k); return n; });
+
+  // Quick actions straight from a schedule card.
+  const markJobDone = async (job) => {
+    if (!confirm(`Mark ${job.unitLabel || 'this job'} completed? This marks all its items done.`)) return;
+    setActioning(job.id);
+    await supabase.from('assignment_targets')
+      .update({ status: 'done', completed_at: new Date().toISOString(), completed_by: employee.id })
+      .eq('assignment_id', job.id).neq('status', 'done');
+    setActioning(null);
+    load();
+  };
+  const deleteJob = async (job) => {
+    if (!confirm(`Delete this assignment (${job.unitLabel || ''})? It can be restored later.`)) return;
+    setActioning(job.id);
+    await supabase.from('assignments')
+      .update({ deleted_at: new Date().toISOString(), deleted_by: employee.id })
+      .eq('id', job.id);
+    setActioning(null);
+    load();
+  };
+  const canDelete = can(employee, 'manage_assignments_admin');
+  const canDone = can(employee, 'mark_assignments_done');
   const fmtSched = (key) => {
     const today = localTodayKey();
     const t = new Date(); t.setDate(t.getDate() + 1);
@@ -13940,14 +13965,13 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
                 ['Bathroom', sec.bathroom], ['General', sec.general],
               ].filter(([, n]) => n > 0);
               return (
-              <button key={j.id} onClick={() => { setPicked(property); setView('open'); }}
-                className="w-full text-left px-3 py-2.5 rounded-lg bg-stone-50 hover:bg-stone-100 flex items-start justify-between gap-2">
-                <div className="min-w-0 flex-1">
+              <div key={j.id} className="px-3 py-2.5 rounded-lg bg-stone-50 flex items-start justify-between gap-2">
+                <button onClick={() => { setPicked(property); setView('open'); }} className="min-w-0 flex-1 text-left">
                   <div className="text-sm text-stone-800 truncate">{j.unitLabel || 'Job'}{j.partyLabel ? ` · ${j.partyLabel}` : ''}</div>
                   <div className="text-[11px] text-stone-500 font-mono truncate">
                     {j.type ? assignmentTypeLabel(j.type) : 'Clean'}{j.scheduledDate ? ` · ${fmtSched(j.scheduledDate)}` : ' · no date'} · {j.count} item{j.count === 1 ? '' : 's'}
                   </div>
-                  {secBits.length > 0 && (
+                  {secBits.length > 0 ? (
                     <div className="grid grid-cols-2 gap-x-4 gap-y-0.5 mt-1.5 max-w-[220px]">
                       {secBits.map(([label, n]) => (
                         <div key={label} className="flex items-center justify-between text-[10px] font-mono">
@@ -13956,10 +13980,27 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
                         </div>
                       ))}
                     </div>
+                  ) : (j.bedrooms || j.bathrooms) ? (
+                    <div className="mt-1.5 inline-flex items-center gap-1 text-[10px] font-mono px-2 py-0.5 rounded-full bg-stone-200 text-stone-700">
+                      {j.bedrooms || 0}BR / {j.bathrooms || 0}BA
+                    </div>
+                  ) : null}
+                </button>
+                <div className="flex items-center gap-1 flex-shrink-0">
+                  {canDone && (
+                    <button onClick={() => markJobDone(j)} disabled={actioning === j.id}
+                      title="Mark completed" className="p-1.5 rounded-lg text-emerald-600 hover:bg-emerald-50 disabled:opacity-40">
+                      <Check size={16} />
+                    </button>
+                  )}
+                  {canDelete && (
+                    <button onClick={() => deleteJob(j)} disabled={actioning === j.id}
+                      title="Delete assignment" className="p-1.5 rounded-lg text-stone-400 hover:text-red-600 hover:bg-red-50 disabled:opacity-40">
+                      <Trash2 size={15} />
+                    </button>
                   )}
                 </div>
-                <ChevronRight size={14} className="text-stone-400 flex-shrink-0 mt-0.5" />
-              </button>
+              </div>
               );
             })}
             <button onClick={() => { setPicked(property); setView('open'); }}
@@ -22043,6 +22084,7 @@ const QUICK_TYPES = [
   { key: 'move_out_check',  label: 'Move-out' },
   { key: 'cleaning_check',  label: 'Cleaning check' },
   { key: 'reclean',         label: 'Re-clean' },
+  { key: 'trash_out',       label: 'Trash out' },
 ];
 function QuickAssignmentForm({ property, employee, onCancel, onSaved }) {
   const [apt, setApt] = useState('');

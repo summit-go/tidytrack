@@ -17,7 +17,6 @@ const SUPABASE_URL = "https://bbaynvqnbkjyqhzhhypr.supabase.co/";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJiYXludnFuYmtqeXFoemhoeXByIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc0NzQ2MTMsImV4cCI6MjA5MzA1MDYxM30.ZXUoHFj_IwMe6rX8RxK8Dj4kAB9AS7X9xZAhQ84wDEk";
 
 
-
 // =================================================================
 // 🌍 GOOGLE TRANSLATE API KEY (optional — for the Translate button)
 // Restrict the key to HTTP referrers app.gosummitclean.com + tidytrack-ten.vercel.app
@@ -26474,6 +26473,13 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
   const [dateFrom, setDateFrom] = useState(''); // YYYY-MM-DD inclusive start
   const [dateTo, setDateTo] = useState('');     // YYYY-MM-DD inclusive end
   const [filterCategories, setFilterCategories] = useState(new Set()); // task categories like 'bedroom'
+  const [editDueId, setEditDueId] = useState(null);
+  const canEditDatesT = can(employee, 'edit_due_dates');
+  const todayKeyT = localTodayKey();
+  const saveDueT = async (id, date) => {
+    setEditDueId(null);
+    if (id) { await supabase.from('assignments').update({ scheduled_date: date || null }).eq('id', id); load(); }
+  };
 
   // Track which unit-bundles are expanded on the Pending view
   const [bundleOpen, setBundleOpen] = useState({}); // { unitId: boolean }
@@ -27320,6 +27326,34 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                                 <span className={`text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full border ${statusPill.color}`}>
                                   {statusPill.label}
                                 </span>
+                                {(() => {
+                                  const asg = (newItems[0] || firstTarget)?.assignment;
+                                  const sd = asg?.scheduled_date;
+                                  if (editDueId === asg?.id) return (
+                                    <input type="date" autoFocus value={sd || ''}
+                                      onChange={(e) => saveDueT(asg?.id, e.target.value)}
+                                      onBlur={() => setEditDueId(null)}
+                                      onClick={(e) => e.stopPropagation()}
+                                      className="text-[10px] font-mono px-1.5 py-0.5 rounded border border-stone-400 bg-white" />
+                                  );
+                                  if (canEditDatesT) return (
+                                    <button onClick={(e) => { e.stopPropagation(); setEditDueId(asg?.id); }}
+                                      className={`text-[10px] font-mono px-2 py-0.5 rounded-full border inline-flex items-center gap-1 ${sd
+                                        ? (sd < todayKeyT ? 'bg-red-100 text-red-700 border-red-200'
+                                           : sd === todayKeyT ? 'bg-emerald-100 text-emerald-800 border-emerald-200'
+                                           : 'bg-stone-100 text-stone-600 border-stone-200')
+                                        : 'bg-white text-stone-500 border-dashed border-stone-300'}`}>
+                                      <Calendar size={9} /> {sd
+                                        ? (sd < todayKeyT ? `Overdue · ${fmtDueDate(sd)}` : sd === todayKeyT ? 'Today' : fmtDueDate(sd))
+                                        : 'Set due date'}
+                                    </button>
+                                  );
+                                  return sd ? (
+                                    <span className="text-[10px] font-mono px-2 py-0.5 rounded-full border bg-stone-100 text-stone-600 border-stone-200 inline-flex items-center gap-1">
+                                      <Calendar size={9} /> {sd === todayKeyT ? 'Today' : fmtDueDate(sd)}
+                                    </span>
+                                  ) : null;
+                                })()}
                               </div>
                               <div className="flex items-center gap-1.5 flex-wrap justify-end">
                                 <button onClick={(e) => { e.stopPropagation(); setOpened(firstTarget); }}

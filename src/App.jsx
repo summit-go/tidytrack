@@ -13795,6 +13795,10 @@ function PartyForm({ property, unit, party, onCancel, onSaved }) {
 function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
   const [properties, setProperties] = useState([]);
   const [assignmentCounts, setAssignmentCounts] = useState({}); // { customer_id: open_count }
+  const [jobs, setJobs] = useState([]); // one entry per open assignment
+  const [scheduleMode, setScheduleMode] = useState('schedule'); // 'schedule' | 'property'
+  const [adding, setAdding] = useState(false); // property picker for adding
+  const [expanded, setExpanded] = useState(() => new Set()); // expanded card keys
   const [loaded, setLoaded] = useState(false);
   const [picked, setPicked] = useState(null); // selected property
   const [view, setView] = useState('open');   // 'open' | 'upload' | 'detail'
@@ -13805,28 +13809,27 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
     const [propsRes, targetsRes] = await Promise.all([
       supabase.from('customers').select('*').eq('active', true).order('name'),
       supabase.from('assignment_targets')
-        .select('unit_id, party_id, status, assignment:assignments!inner(customer_id, active)')
+        .select('id, status, unit_id, party_id, unit:units(label), party:parties(label), assignment:assignments!inner(id, title, customer_id, active, deleted_at, scheduled_date, assignment_type)')
         .not('status', 'in', '(done,blocked)'),
     ]);
-    // Count unique (unit_id, party_id) bedrooms per customer rather
-    // than raw item rows. A 4-bedroom apartment with 80 items shows
-    // as 4, not 80 — the count answers "how many bedrooms still need
-    // cleaning", which is what the owner actually wants to know at a
-    // glance.
     const counts = {};
     const seenBedrooms = new Set();
+    const jobsByAsg = {};
     (targetsRes.data || []).forEach(t => {
       const a = t.assignment;
-      if (!a || a.active === false) return;
+      if (!a || a.active === false || a.deleted_at) return;
       const cid = a.customer_id;
       if (!cid) return;
       const key = `${cid}::${t.unit_id || ''}::${t.party_id || ''}`;
-      if (seenBedrooms.has(key)) return;
-      seenBedrooms.add(key);
-      counts[cid] = (counts[cid] || 0) + 1;
+      if (!seenBedrooms.has(key)) { seenBedrooms.add(key); counts[cid] = (counts[cid] || 0) + 1; }
+      if (!jobsByAsg[a.id]) {
+        jobsByAsg[a.id] = { id: a.id, customerId: cid, title: a.title || '', scheduledDate: a.scheduled_date || null, type: a.assignment_type || '', unitLabel: t.unit?.label || '', partyLabel: t.party?.label || '', count: 0 };
+      }
+      jobsByAsg[a.id].count++;
     });
     setProperties(visibleProps(propsRes.data || [], employee));
     setAssignmentCounts(counts);
+    setJobs(Object.values(jobsByAsg));
     setLoaded(true);
   };
   useEffect(() => { load(); }, []);
@@ -13868,8 +13871,8 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
       onOpen={(a) => { setDetail(a); setView('detail'); }} />;
   }
 
-  // No picked property → property picker
-  // Top section: properties with open assignments. Below: everything else alphabetical.
+  // No picked property → new landing: Add button + Schedule/By-property
+  // with expandable property cards showing their scheduled jobs.
   const pq = propSearch.trim().toLowerCase();
   const matchesPropSearch = (p) => !pq
     || (p.name || '').toLowerCase().includes(pq)
@@ -13881,19 +13884,28 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
     .filter(p => (assignmentCounts[p.id] || 0) === 0 && matchesPropSearch(p))
     .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
 
+  const propById = Object.fromEntries(properties.map(p => [p.id, p]));
+  const toggleExpand = (k) => setExpanded(prev => { const n = new Set(prev); n.has(k) ? n.delete(k) : n.add(k); return n; });
+  const fmtSched = (key) => {
+    const today = localTodayKey();
+    const t = new Date(); t.setDate(t.getDate() + 1);
+    const tmr = `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`;
+    if (key === today) return 'Today';
+    if (key === tmr) return 'Tomorrow';
+    return new Date(key + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+  };
+
+  // Row used in the "Add assignment" property picker (tap to pick).
   const PropertyRow = ({ p }) => (
-    <button onClick={() => setPicked(p)}
+    <button onClick={() => { setAdding(false); setPicked(p); setView('open'); }}
       className="w-full text-left p-4 rounded-2xl bg-white border-2 border-stone-200 hover:border-stone-900 transition-all">
       <div className="flex items-center justify-between gap-3">
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 mb-1 flex-wrap">
             <span className="font-serif text-lg text-stone-900">{p.name}</span>
-            {p.property_type === 'multi_unit' && (
-              <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-amber-100 text-amber-800">Multi-unit</span>
-            )}
             {(assignmentCounts[p.id] || 0) > 0 && (
               <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-amber-600 text-white font-bold flex items-center gap-1">
-                <FileText size={10} /> {assignmentCounts[p.id]} bedroom{assignmentCounts[p.id] === 1 ? '' : 's'} to clean
+                <FileText size={10} /> {assignmentCounts[p.id]} open
               </span>
             )}
           </div>
@@ -13904,52 +13916,140 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
     </button>
   );
 
+  // Expandable property card — drops down to show its jobs.
+  const PropertyCard = ({ property, cardJobs, keyId }) => {
+    const isOpen = expanded.has(keyId);
+    return (
+      <div className="rounded-2xl bg-white border border-stone-200 overflow-hidden">
+        <button onClick={() => toggleExpand(keyId)}
+          className="w-full px-4 py-3 flex items-center justify-between hover:bg-stone-50 gap-3">
+          <div className="min-w-0 text-left">
+            <div className="font-serif text-lg text-stone-900 truncate">{property?.name || 'Property'}</div>
+            <div className="text-xs text-stone-500 font-mono">{cardJobs.length} job{cardJobs.length === 1 ? '' : 's'}</div>
+          </div>
+          <ChevronRight size={16} className={`text-stone-400 flex-shrink-0 transition-transform ${isOpen ? 'rotate-90' : ''}`} />
+        </button>
+        {isOpen && (
+          <div className="px-3 pb-3 border-t border-stone-100 pt-2 space-y-1.5">
+            {cardJobs.map(j => (
+              <button key={j.id} onClick={() => { setPicked(property); setView('open'); }}
+                className="w-full text-left px-3 py-2 rounded-lg bg-stone-50 hover:bg-stone-100 flex items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="text-sm text-stone-800 truncate">{j.unitLabel || 'Job'}{j.partyLabel ? ` · ${j.partyLabel}` : ''}</div>
+                  <div className="text-[11px] text-stone-500 font-mono truncate">
+                    {j.type ? assignmentTypeLabel(j.type) : 'Clean'}{j.scheduledDate ? ` · ${fmtSched(j.scheduledDate)}` : ' · no date'}
+                  </div>
+                </div>
+                <ChevronRight size={14} className="text-stone-400 flex-shrink-0" />
+              </button>
+            ))}
+            <button onClick={() => { setPicked(property); setView('open'); }}
+              className="w-full text-center py-2 text-xs font-medium text-amber-700 hover:bg-amber-50 rounded-lg">
+              Manage all →
+            </button>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  // Group jobs by property (for By-property) and by date→property (Schedule).
+  const jobsByProp = {};
+  jobs.forEach(j => { (jobsByProp[j.customerId] = jobsByProp[j.customerId] || []).push(j); });
+  const propKeysSorted = Object.keys(jobsByProp).sort((a, b) => (propById[a]?.name || '').localeCompare(propById[b]?.name || ''));
+
+  const byDate = {};
+  jobs.forEach(j => { const d = j.scheduledDate || '__none__'; (byDate[d] = byDate[d] || []).push(j); });
+  const dateKeysSorted = Object.keys(byDate).filter(k => k !== '__none__').sort();
+
   return (
     <div className="pb-24">
       <Header name={employee.name} onSignOut={onSignOut} role={employee.role} employee={employee} onOpenMessages={onOpenMessages} onLogoClick={onLogoClick} />
       <div className="px-5 pt-6">
         <div className="text-xs uppercase tracking-widest text-stone-400 font-mono mb-3">Manage</div>
-        <h1 className="text-4xl font-light text-stone-900 tracking-tight mb-2">
+        <h1 className="text-4xl font-light text-stone-900 tracking-tight mb-4">
           <span className="font-serif italic text-amber-700">Assignments</span>
         </h1>
-        <p className="text-sm text-stone-600 mb-6">Pick a property to view open assignments or upload new ones.</p>
 
-        {/* Property search — always show when there's more than a couple */}
-        {properties.length > 3 && (
-          <div className="mb-4">
-            <input type="text" value={propSearch}
-              onChange={(e) => setPropSearch(e.target.value)}
-              placeholder={`Search ${properties.length} properties…`}
-              className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white focus:outline-none focus:border-stone-900 text-stone-900 text-sm" />
-          </div>
-        )}
-
-        {!loaded ? <Splash text="Loading…" /> : properties.length === 0 ? (
-          <div className="text-center py-12 text-stone-400 text-sm">No properties yet.</div>
-        ) : (withAssignments.length === 0 && others.length === 0 && pq) ? (
-          <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
-            No properties match "{propSearch}".
-          </div>
-        ) : (
+        {adding ? (
           <>
-            {withAssignments.length > 0 && (
-              <div className="mb-6">
-                <div className="text-xs uppercase tracking-wider text-amber-700 font-mono mb-2 flex items-center gap-1.5">
-                  <FileText size={11} /> Has open assignments
-                </div>
-                <div className="space-y-2">
-                  {withAssignments.map(p => <PropertyRow key={p.id} p={p} />)}
-                </div>
+            <div className="flex items-center justify-between mb-4">
+              <p className="text-sm text-stone-600">Pick a property to add an assignment.</p>
+              <button onClick={() => setAdding(false)} className="text-xs text-stone-500 hover:text-stone-800">Cancel</button>
+            </div>
+            {properties.length > 3 && (
+              <input type="text" value={propSearch} onChange={(e) => setPropSearch(e.target.value)}
+                placeholder={`Search ${properties.length} properties…`}
+                className="w-full px-4 py-3 mb-4 rounded-xl border border-stone-300 bg-white focus:outline-none focus:border-stone-900 text-stone-900 text-sm" />
+            )}
+            {!loaded ? <Splash text="Loading…" /> : (
+              <div className="space-y-4">
+                {withAssignments.length > 0 && (
+                  <div>
+                    <div className="text-xs uppercase tracking-wider text-amber-700 font-mono mb-2">Has open assignments</div>
+                    <div className="space-y-2">{withAssignments.map(p => <PropertyRow key={p.id} p={p} />)}</div>
+                  </div>
+                )}
+                {others.length > 0 && (
+                  <div>
+                    <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2">All properties</div>
+                    <div className="space-y-2">{others.map(p => <PropertyRow key={p.id} p={p} />)}</div>
+                  </div>
+                )}
               </div>
             )}
-            {others.length > 0 && (
-              <div className="mb-6">
-                <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 flex items-center gap-1.5">
-                  <Building2 size={11} /> All properties ({others.length})
-                </div>
-                <div className="space-y-2">
-                  {others.map(p => <PropertyRow key={p.id} p={p} />)}
-                </div>
+          </>
+        ) : (
+          <>
+            <button onClick={() => { setPropSearch(''); setAdding(true); }}
+              className="w-full flex items-center justify-center gap-2 bg-stone-900 text-stone-50 rounded-xl py-3.5 font-medium mb-5 active:scale-98">
+              <Plus size={18} /> Add assignment
+            </button>
+
+            <div className="flex gap-1 bg-stone-100 p-1 rounded-xl mb-5">
+              <button onClick={() => setScheduleMode('schedule')}
+                className={`flex-1 py-2 rounded-lg text-sm font-medium ${scheduleMode === 'schedule' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>Schedule</button>
+              <button onClick={() => setScheduleMode('property')}
+                className={`flex-1 py-2 rounded-lg text-sm font-medium ${scheduleMode === 'property' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>By property</button>
+            </div>
+
+            {!loaded ? <Splash text="Loading…" /> : jobs.length === 0 ? (
+              <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
+                No open assignments. Tap “Add assignment” to create one.
+              </div>
+            ) : scheduleMode === 'schedule' ? (
+              <div className="space-y-6">
+                {dateKeysSorted.map(dk => {
+                  const dJobsByProp = {};
+                  byDate[dk].forEach(j => { (dJobsByProp[j.customerId] = dJobsByProp[j.customerId] || []).push(j); });
+                  const props = Object.keys(dJobsByProp).sort((a, b) => (propById[a]?.name || '').localeCompare(propById[b]?.name || ''));
+                  return (
+                    <div key={dk}>
+                      <div className="text-xs uppercase tracking-wider text-amber-700 font-mono mb-2 flex items-center gap-1.5">
+                        <Calendar size={11} /> {fmtSched(dk)}
+                      </div>
+                      <div className="space-y-2">
+                        {props.map(cid => <PropertyCard key={cid} property={propById[cid]} cardJobs={dJobsByProp[cid]} keyId={`${dk}::${cid}`} />)}
+                      </div>
+                    </div>
+                  );
+                })}
+                {byDate['__none__'] && (
+                  <div>
+                    <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 flex items-center gap-1.5">
+                      <FileText size={11} /> No date set
+                    </div>
+                    <div className="space-y-2">
+                      {Object.entries((() => { const m = {}; byDate['__none__'].forEach(j => { (m[j.customerId] = m[j.customerId] || []).push(j); }); return m; })())
+                        .sort((a, b) => (propById[a[0]]?.name || '').localeCompare(propById[b[0]]?.name || ''))
+                        .map(([cid, cj]) => <PropertyCard key={cid} property={propById[cid]} cardJobs={cj} keyId={`none::${cid}`} />)}
+                    </div>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {propKeysSorted.map(cid => <PropertyCard key={cid} property={propById[cid]} cardJobs={jobsByProp[cid]} keyId={`prop::${cid}`} />)}
               </div>
             )}
           </>

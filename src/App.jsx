@@ -13808,7 +13808,7 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
     const [propsRes, targetsRes] = await Promise.all([
       supabase.from('customers').select('*').eq('active', true).order('name'),
       supabase.from('assignment_targets')
-        .select('id, status, unit_id, party_id, unit:units(label), party:parties(label), assignment:assignments!inner(id, title, customer_id, active, deleted_at, scheduled_date, assignment_type)')
+        .select('id, status, unit_id, party_id, template_section, unit:units(label), party:parties(label), assignment:assignments!inner(id, title, customer_id, active, deleted_at, scheduled_date, assignment_type)')
         .not('status', 'in', '(done,blocked)'),
     ]);
     const counts = {};
@@ -13822,9 +13822,12 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
       const key = `${cid}::${t.unit_id || ''}::${t.party_id || ''}`;
       if (!seenBedrooms.has(key)) { seenBedrooms.add(key); counts[cid] = (counts[cid] || 0) + 1; }
       if (!jobsByAsg[a.id]) {
-        jobsByAsg[a.id] = { id: a.id, customerId: cid, title: a.title || '', scheduledDate: a.scheduled_date || null, type: a.assignment_type || '', unitLabel: t.unit?.label || '', partyLabel: t.party?.label || '', count: 0 };
+        jobsByAsg[a.id] = { id: a.id, customerId: cid, title: a.title || '', scheduledDate: a.scheduled_date || null, type: a.assignment_type || '', unitLabel: t.unit?.label || '', partyLabel: t.party?.label || '', count: 0, sections: { bedroom: 0, vanity: 0, bathroom: 0, general: 0, other: 0 } };
       }
       jobsByAsg[a.id].count++;
+      const sec = (t.template_section || '').toLowerCase();
+      if (sec === 'bedroom' || sec === 'vanity' || sec === 'bathroom' || sec === 'general') jobsByAsg[a.id].sections[sec]++;
+      else jobsByAsg[a.id].sections.other++;
     });
     setProperties(visibleProps(propsRes.data || [], employee));
     setAssignmentCounts(counts);
@@ -13930,18 +13933,35 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
         </button>
         {isOpen && (
           <div className="px-3 pb-3 border-t border-stone-100 pt-2 space-y-1.5">
-            {cardJobs.map(j => (
+            {cardJobs.map(j => {
+              const sec = j.sections || {};
+              const secBits = [
+                ['Bedroom', sec.bedroom], ['Vanity', sec.vanity],
+                ['Bathroom', sec.bathroom], ['General', sec.general],
+              ].filter(([, n]) => n > 0);
+              return (
               <button key={j.id} onClick={() => { setPicked(property); setView('open'); }}
-                className="w-full text-left px-3 py-2 rounded-lg bg-stone-50 hover:bg-stone-100 flex items-center justify-between gap-2">
-                <div className="min-w-0">
+                className="w-full text-left px-3 py-2.5 rounded-lg bg-stone-50 hover:bg-stone-100 flex items-start justify-between gap-2">
+                <div className="min-w-0 flex-1">
                   <div className="text-sm text-stone-800 truncate">{j.unitLabel || 'Job'}{j.partyLabel ? ` · ${j.partyLabel}` : ''}</div>
                   <div className="text-[11px] text-stone-500 font-mono truncate">
-                    {j.type ? assignmentTypeLabel(j.type) : 'Clean'}{j.scheduledDate ? ` · ${fmtSched(j.scheduledDate)}` : ' · no date'}
+                    {j.type ? assignmentTypeLabel(j.type) : 'Clean'}{j.scheduledDate ? ` · ${fmtSched(j.scheduledDate)}` : ' · no date'} · {j.count} item{j.count === 1 ? '' : 's'}
                   </div>
+                  {secBits.length > 0 && (
+                    <div className="grid grid-cols-2 gap-x-4 gap-y-0.5 mt-1.5 max-w-[220px]">
+                      {secBits.map(([label, n]) => (
+                        <div key={label} className="flex items-center justify-between text-[10px] font-mono">
+                          <span className="text-stone-500">{label}</span>
+                          <span className="text-stone-700 font-bold">{n}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
-                <ChevronRight size={14} className="text-stone-400 flex-shrink-0" />
+                <ChevronRight size={14} className="text-stone-400 flex-shrink-0 mt-0.5" />
               </button>
-            ))}
+              );
+            })}
             <button onClick={() => { setPicked(property); setView('open'); }}
               className="w-full text-center py-2 text-xs font-medium text-amber-700 hover:bg-amber-50 rounded-lg">
               Manage all →

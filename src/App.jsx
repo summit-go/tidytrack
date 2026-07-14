@@ -8992,7 +8992,7 @@ function Header({ name, onSignOut, role, employee, onOpenMessages, onLogoClick, 
             <span className="text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-stone-700 text-stone-50">Manager</span>
           )}
         </div>
-        <div className="text-[10px] font-mono opacity-60">TidyTrack</div>
+        <div className="text-[10px] font-mono opacity-60">TidyTrack · {BUILD_TAG}</div>
       </div>
     </div>
   );

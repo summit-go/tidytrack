@@ -48,7 +48,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul14-fix310";
+const BUILD_TAG = "jul14-flow";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -3369,6 +3369,25 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   // Clock-in
   const startClockIn = () => setClockInFlow({ step: 'property' });
 
+  // When a cleaner taps a job from the signed-in home, we clock them into
+  // that job's property and then jump straight to its bedroom.
+  const [pendingJob, setPendingJob] = useState(null);
+  const startJob = async (job) => {
+    setPendingJob(job);
+    const { data: prop } = await supabase.from('customers').select('*').eq('id', job.customerId).single();
+    if (!prop) { setPendingJob(null); return; }
+    await onPickProperty(prop);
+  };
+
+  useEffect(() => {
+    if (!pendingJob || !shift) return;
+    if (shift.customer_id !== pendingJob.customerId) return;
+    const j = pendingJob;
+    setPendingJob(null);
+    goToBedroomForTarget({ unit_id: j.unitId, party_id: j.partyId });
+    /* eslint-disable-next-line */
+  }, [shift, pendingJob]);
+
   const onPickProperty = async (property) => {
     if (property === null) { await doClockIn({ customerId: null }); return; }
     if (property.property_type === 'multi_unit') {
@@ -4886,20 +4905,28 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       <div className="min-h-screen bg-stone-50 flex flex-col">
         <Header name={employee.name} onSignOut={signOutWithCleanup} role={employee.role}
           employee={employee} onOpenMessages={() => setShowMessages(true)} />
-        <div className="flex-1 flex flex-col justify-center items-center px-6">
-          <div className="text-center mb-12">
-            <div className="text-xs uppercase tracking-widest text-stone-400 font-mono mb-3">
+
+        {/* Signed in, not clocked in: land straight on the work list.
+           Tapping a job clocks them into that property and opens it. */}
+        <div className="px-1 pt-2">
+          <div className="px-4">
+            <div className="text-xs uppercase tracking-widest text-stone-400 font-mono mb-1">
               {new Date().toLocaleDateString('en-US', { weekday:'long', month:'long', day:'numeric' })}
             </div>
-            <h2 className="text-5xl font-light text-stone-900 tracking-tight mb-2">
-              Ready to <span className="font-serif italic text-amber-700">work?</span>
+            <h2 className="text-3xl font-light text-stone-900 tracking-tight mb-1">
+              Your <span className="font-serif italic text-amber-700">work</span>
             </h2>
-            <p className="text-stone-500">Clock in to start tracking your shift.</p>
+            <p className="text-xs text-stone-500">Tap a job to clock in and start.</p>
           </div>
+          <CleanerWorkList employee={employee} currentPropertyId={null}
+            onStartJob={startJob} onGoToBedroom={null} onSwitchProperty={null} />
+        </div>
+
+        <div className="flex-1 flex flex-col justify-center items-center px-6 pb-6">
           <button onClick={startClockIn} disabled={busy}
-            className="w-48 h-48 rounded-full bg-stone-900 text-stone-50 font-medium text-lg flex flex-col items-center justify-center gap-2 shadow-2xl active:scale-95 transition-transform disabled:opacity-50">
-            <Clock size={32} />
-            <span>Clock In</span>
+            className="w-full max-w-sm py-4 rounded-2xl bg-stone-900 text-stone-50 font-medium flex items-center justify-center gap-2 active:scale-98 transition-transform disabled:opacity-50">
+            <Clock size={18} />
+            <span>Clock in without a job</span>
           </button>
           <button onClick={startViewOnly} disabled={busy}
             className="mt-6 px-5 py-2.5 rounded-full bg-white border border-stone-300 hover:border-stone-500 text-stone-700 text-sm font-medium flex items-center gap-2 active:scale-95 transition-transform disabled:opacity-50">
@@ -5864,7 +5891,7 @@ function YourJobsCard({ propertyId, employeeId, onGoToBedroom }) {
 // across EVERY property, so they see their whole day. Same-property
 // jobs start the clean directly; other-property jobs offer to switch.
 // =================================================================
-function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchProperty }) {
+function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchProperty, onStartJob }) {
   const [sub, setSub] = useState('mine'); // 'mine' | 'all'
   const [jobs, setJobs] = useState([]);
   const [team, setTeam] = useState([]);
@@ -5955,6 +5982,8 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
       || naturalCompare(a.unitLabel, b.unitLabel));
   const fmtDue = (d) => !d ? 'No date' : d < todayKey ? `Overdue · ${fmtDueDate(d)}` : d === todayKey ? 'Today' : fmtDueDate(d);
   const openJob = (j) => {
+    // Not clocked in yet → tapping a job clocks into its property and opens it.
+    if (onStartJob) { onStartJob(j); return; }
     if (j.customerId === currentPropertyId) onGoToBedroom && onGoToBedroom({ unit_id: j.unitId, party_id: j.partyId });
     else onSwitchProperty && onSwitchProperty();
   };
@@ -6048,7 +6077,7 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
                         <Check size={15} />
                       </button>
                     )}
-                    <button onClick={() => openJob(j)} className="text-[11px] font-medium text-amber-700">{here ? 'Start →' : 'Switch →'}</button>
+                    <button onClick={() => openJob(j)} className="text-[11px] font-medium text-amber-700">{onStartJob ? 'Clock in & start →' : here ? 'Start →' : 'Switch →'}</button>
                   </div>
                 </div>
               </div>

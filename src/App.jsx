@@ -48,7 +48,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul14-pay";
+const BUILD_TAG = "jul14-pay3";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -9720,6 +9720,21 @@ function ManagerDashboard({ employee, onSignOut, onOpenMessages, onLogoClick }) 
     return true;
   });
 
+  // Keep the drill-down in sync with the cleaner filter. Without this you
+  // can be drilled into cleaner A while the filter only allows cleaner B,
+  // which shows an empty "Cleaner · 0 days" screen.
+  useEffect(() => {
+    if (!selectedCleanerId) {
+      // Filtering to exactly one cleaner drills straight into them.
+      if (filterCleaners.size === 1) setSelectedCleanerId(Array.from(filterCleaners)[0]);
+      return;
+    }
+    if (filterCleaners.size && !filterCleaners.has(selectedCleanerId)) {
+      setSelectedCleanerId(filterCleaners.size === 1 ? Array.from(filterCleaners)[0] : null);
+    }
+    /* eslint-disable-next-line */
+  }, [filterCleaners]);
+
   const isAllTime = !dateFrom && !dateTo;
   // The date is the scope (always shown in the header label), so it
   // doesn't inflate the "N active" badge — that counts the extra filters.
@@ -9988,7 +10003,8 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
   const [payDays, setPayDays] = useState({}); // `${empId}:${dateKey}` -> row
   const [payBusy, setPayBusy] = useState(null);
   const [adjusting, setAdjusting] = useState(null); // day key being edited
-  const [adjMins, setAdjMins] = useState('');
+  const [adjH, setAdjH] = useState('');
+  const [adjM, setAdjM] = useState('');
   const monthStart = (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-01`; })();
 
   const loadPay = async () => {
@@ -10024,15 +10040,30 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
     setPayBusy(null);
     await loadPay();
   };
-  const saveAdjust = async (dayShifts, minutes) => {
-    const mins = parseFloat(minutes);
-    if (isNaN(mins)) { setAdjusting(null); return; }
-    const target = dayShifts.filter(s => s.end_time)[0];
-    if (!target) { setAdjusting(null); return; }
+  // Set the TOTAL worked time for a whole day. manual_adjustment_seconds
+  // is an OFFSET added to raw clocked time, so to make the day total the
+  // target we solve for the offset instead of storing the target itself.
+  // The offset lands on the day's longest finished shift; any other
+  // shifts that day keep their own raw time, so the day sums to the target.
+  const saveAdjust = async (dayShifts, hours, mins) => {
+    const h = parseFloat(hours) || 0;
+    const m = parseFloat(mins) || 0;
+    if (hours === '' && mins === '') { setAdjusting(null); return; }
+    const targetSec = Math.round(h * 3600 + m * 60);
+    if (targetSec < 0) { setAdjusting(null); return; }
+    const finished = dayShifts.filter(s => s.end_time);
+    if (!finished.length) { setAdjusting(null); return; }
+    const anchor = finished.slice().sort((a, b) =>
+      (new Date(b.end_time) - new Date(b.start_time)) - (new Date(a.end_time) - new Date(a.start_time)))[0];
+    // Seconds the OTHER shifts already contribute (with their own adjustments).
+    const othersSec = finished.filter(s => s.id !== anchor.id)
+      .reduce((sum, s) => sum + shiftBillableMs(s) / 1000, 0);
+    const anchorRawSec = ((new Date(anchor.end_time) - new Date(anchor.start_time)) / 1000) - (anchor.idle_seconds || 0);
+    const neededOffset = Math.round(targetSec - othersSec - anchorRawSec);
     setPayBusy('adj');
     await supabase.from('shifts')
-      .update({ manual_adjustment_seconds: Math.round(mins * 60) })
-      .eq('id', target.id);
+      .update({ manual_adjustment_seconds: neededOffset })
+      .eq('id', anchor.id);
     setPayBusy(null); setAdjusting(null);
     onReload && onReload();
   };
@@ -10095,6 +10126,19 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
   // ---- Level 2: one cleaner's days ------------------------------------
   const cShifts = shifts.filter(s => s.employee?.id === selectedCleanerId);
   const name = cShifts[0]?.employee?.name || 'Cleaner';
+  if (cShifts.length === 0) {
+    return (
+      <div className="px-5">
+        <button onClick={() => onSelectCleaner(null)}
+          className="flex items-center gap-1.5 text-xs font-mono text-stone-500 hover:text-stone-800 mb-3">
+          <ArrowLeft size={14} /> All cleaners
+        </button>
+        <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
+          No shifts for this cleaner in the selected dates. Try widening the date range or “All time”.
+        </div>
+      </div>
+    );
+  }
   const byDay = new Map();
   cShifts.forEach(s => {
     const k = localDayKey(s.start_time);
@@ -10164,15 +10208,24 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
                     <div className="flex items-center gap-1.5">
                       {adjusting === d.key ? (
                         <span className="flex items-center gap-1">
-                          <input type="number" autoFocus value={adjMins} onChange={e => setAdjMins(e.target.value)}
-                            placeholder="± min"
-                            className="w-16 px-1.5 py-0.5 rounded border border-stone-300 text-xs font-mono" />
-                          <button onClick={() => saveAdjust(d.shifts, adjMins)} disabled={payBusy === 'adj'}
+                          <input type="number" min="0" autoFocus value={adjH} onChange={e => setAdjH(e.target.value)}
+                            placeholder="h"
+                            className="w-12 px-1.5 py-0.5 rounded border border-stone-300 text-xs font-mono" />
+                          <span className="text-[10px] text-stone-400">h</span>
+                          <input type="number" min="0" max="59" value={adjM} onChange={e => setAdjM(e.target.value)}
+                            placeholder="m"
+                            className="w-12 px-1.5 py-0.5 rounded border border-stone-300 text-xs font-mono" />
+                          <span className="text-[10px] text-stone-400">m</span>
+                          <button onClick={() => saveAdjust(d.shifts, adjH, adjM)} disabled={payBusy === 'adj'}
                             className="text-[11px] px-2 py-0.5 rounded bg-stone-900 text-white">Save</button>
                           <button onClick={() => setAdjusting(null)} className="text-[11px] px-1 text-stone-500">Cancel</button>
                         </span>
                       ) : (
-                        <button onClick={() => { setAdjusting(d.key); setAdjMins(''); }}
+                        <button onClick={() => {
+                            setAdjusting(d.key);
+                            const cur = Math.round(totalMs / 60000);
+                            setAdjH(String(Math.floor(cur / 60))); setAdjM(String(cur % 60));
+                          }}
                           className="text-[11px] font-mono px-2 py-0.5 rounded-full bg-stone-100 text-stone-600 flex items-center gap-1">
                           <Clock size={10} /> Adjust hours
                         </button>

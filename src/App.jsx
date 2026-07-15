@@ -48,7 +48,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul14-assign3";
+const BUILD_TAG = "jul14-assign4";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -5911,9 +5911,24 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
     ]);
     const allowed = new Set(visibleProps(propRows || [], employee).map(p => p.id));
     setTeam((emps || []).filter(e => e.role !== 'owner'));
-    const { data } = await supabase.from('assignment_targets')
-      .select('id, unit_id, party_id, status, unit:units(label), party:parties(label), assignment:assignments!inner(id, customer_id, active, deleted_at, assignment_type, scheduled_date, customer:customers(name, address))')
-      .not('status', 'in', '(done,blocked)');
+    // Paginated — this query is unscoped (every property, every open target),
+    // so a plain call stops at PostgREST's 1000-row cap and silently drops
+    // jobs. That made freshly-assigned work never show up under "Mine".
+    const fetchOpenTargets = async () => {
+      let rows = []; const PAGE = 1000;
+      for (let from = 0; ; from += PAGE) {
+        const { data: page, error } = await supabase.from('assignment_targets')
+          .select('id, unit_id, party_id, status, unit:units(label), party:parties(label), assignment:assignments!inner(id, customer_id, active, deleted_at, assignment_type, scheduled_date, customer:customers(name, address))')
+          .not('status', 'in', '(done,blocked)')
+          .range(from, from + PAGE - 1);
+        if (error || !page) break;
+        rows = rows.concat(page);
+        if (page.length < PAGE) break;
+        if (from > 100000) break;
+      }
+      return rows;
+    };
+    const data = await fetchOpenTargets();
     const byJob = {};
     (data || []).forEach(t => {
       const a = t.assignment;
@@ -5944,20 +5959,24 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
 
   const requestJob = async (j) => {
     setBusyId(j.id);
-    await supabase.from('assignment_assignees')
+    const { error } = await supabase.from('assignment_assignees')
       .upsert({ assignment_id: j.id, employee_id: employee.id, status: 'requested', created_by: employee.id }, { onConflict: 'assignment_id,employee_id' });
-    setBusyId(null); load();
+    setBusyId(null);
+    if (error) { alert('Could not ask for this job: ' + error.message); return; }
+    load();
   };
   const toggleAssignee = async (j, empId) => {
     const has = j.assignees.some(a => a.id === empId) || j.requested.some(a => a.id === empId);
     setBusyId(j.id);
-    if (has) {
-      await supabase.from('assignment_assignees').delete().eq('assignment_id', j.id).eq('employee_id', empId);
-    } else {
-      await supabase.from('assignment_assignees')
-        .insert({ assignment_id: j.id, employee_id: empId, status: 'assigned', created_by: employee.id });
-    }
-    setBusyId(null); load();
+    // upsert, not insert: a leftover row (e.g. an old "requested") makes a
+    // plain insert fail on the unique key and the tap does nothing.
+    const { error } = has
+      ? await supabase.from('assignment_assignees').delete().eq('assignment_id', j.id).eq('employee_id', empId)
+      : await supabase.from('assignment_assignees')
+          .upsert({ assignment_id: j.id, employee_id: empId, status: 'assigned', created_by: employee.id }, { onConflict: 'assignment_id,employee_id' });
+    setBusyId(null);
+    if (error) { alert('Could not update who\u2019s assigned: ' + error.message); return; }
+    load();
   };
   const approveRequest = async (j, empId) => {
     setBusyId(j.id);
@@ -14494,8 +14513,10 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
     if (!job.unitId) { setSizeJob(null); return; }
     setActioning(job.id);
     const { data: updated, error } = await supabase.from('units').update({
+      // parseFloat on baths: 2.5 is a real size and parseInt would silently
+      // save it as 2.
       bedrooms: br === '' ? null : parseInt(br, 10),
-      bathrooms: ba === '' ? null : parseInt(ba, 10),
+      bathrooms: ba === '' ? null : parseFloat(ba),
     }).eq('id', job.unitId).select('id, bedrooms, bathrooms');
     setActioning(null);
     if (error) { alert('Could not save size: ' + error.message); return; }
@@ -14607,8 +14628,8 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
                       <input type="number" min="0" autoFocus value={sizeBr} onChange={e => setSizeBr(e.target.value)}
                         className="w-10 px-1 py-0.5 rounded border border-stone-300 text-[10px] font-mono" placeholder="BR" />
                       <span className="text-[9px] text-stone-400">BR</span>
-                      <input type="number" min="0" value={sizeBa} onChange={e => setSizeBa(e.target.value)}
-                        className="w-10 px-1 py-0.5 rounded border border-stone-300 text-[10px] font-mono" placeholder="BA" />
+                      <input type="number" min="0" step="0.5" value={sizeBa} onChange={e => setSizeBa(e.target.value)}
+                        className="w-12 px-1 py-0.5 rounded border border-stone-300 text-[10px] font-mono" placeholder="BA" />
                       <span className="text-[9px] text-stone-400">BA</span>
                       <button onClick={() => saveJobSize(j, sizeBr, sizeBa)} className="text-[10px] px-1.5 py-0.5 rounded bg-stone-900 text-white">Save</button>
                       <button onClick={() => setSizeJob(null)} className="text-[10px] px-1 text-stone-500">×</button>
@@ -21002,7 +21023,7 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit }) {
   const [data, setData] = useState(null);
   // Open assignment per unit, so the same inline controls (done / size /
   // assign / due date) work straight from a Daily card.
-  const [unitAsg, setUnitAsg] = useState({}); // unitId -> {id, scheduledDate, bedrooms, bathrooms, assignees[]}
+  const [unitAsg, setUnitAsg] = useState({}); // unitId -> {id, scheduledDate, open, assignees[]} — NO size here, see unitSize
   const [dTeam, setDTeam] = useState([]);
   const [dBusy, setDBusy] = useState(null);
   const [dAssignFor, setDAssignFor] = useState(null);
@@ -21083,8 +21104,10 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit }) {
   const dSaveSize = async (unitId, br, ba) => {
     setDBusy(unitId);
     const payload = {
+      // parseFloat on baths: 2.5 is a real size and parseInt would silently
+      // save it as 2.
       bedrooms: br === '' ? null : parseInt(br, 10),
-      bathrooms: ba === '' ? null : parseInt(ba, 10),
+      bathrooms: ba === '' ? null : parseFloat(ba),
     };
     // .select() so we can tell a silent 0-row update (RLS) from a real save.
     const { data: updated, error } = await supabase.from('units')
@@ -21424,6 +21447,10 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit }) {
                     <div className="space-y-2">
                       {sortedUnits.map(u => {
                         const ua = unitAsg[u.unitId];
+                        // Size lives on the unit, NOT on the assignment. Read it
+                        // from unitSize so the pill is right even when this unit
+                        // has no open assignment (ua would be undefined).
+                        const us = unitSize[u.unitId];
                         return (
                         <div key={u.unitId}
                           className={`w-full text-left p-4 rounded-2xl border transition-colors ${
@@ -21459,16 +21486,16 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit }) {
                                 <input type="number" min="0" autoFocus value={dBr} onChange={e => setDBr(e.target.value)}
                                   className="w-10 px-1 py-0.5 rounded border border-stone-300 text-[10px] font-mono" placeholder="BR" />
                                 <span className="text-[9px] text-stone-400">BR</span>
-                                <input type="number" min="0" value={dBa} onChange={e => setDBa(e.target.value)}
-                                  className="w-10 px-1 py-0.5 rounded border border-stone-300 text-[10px] font-mono" placeholder="BA" />
+                                <input type="number" min="0" step="0.5" value={dBa} onChange={e => setDBa(e.target.value)}
+                                  className="w-12 px-1 py-0.5 rounded border border-stone-300 text-[10px] font-mono" placeholder="BA" />
                                 <span className="text-[9px] text-stone-400">BA</span>
                                 <button onClick={() => dSaveSize(u.unitId, dBr, dBa)} className="text-[10px] px-1.5 py-0.5 rounded bg-stone-900 text-white">Save</button>
                                 <button onClick={() => setDSizeFor(null)} className="text-[10px] px-1 text-stone-500">×</button>
                               </span>
                             ) : (
-                              <button onClick={() => { setDSizeFor(u.unitId); setDBr(ua?.bedrooms ?? ''); setDBa(ua?.bathrooms ?? ''); }}
+                              <button onClick={() => { setDSizeFor(u.unitId); setDBr(us?.bedrooms ?? ''); setDBa(us?.bathrooms ?? ''); }}
                                 className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-stone-200 text-stone-700">
-                                {(ua?.bedrooms || ua?.bathrooms) ? `${ua.bedrooms || 0}BR / ${ua.bathrooms || 0}BA` : 'Set size'}
+                                {(us?.bedrooms || us?.bathrooms) ? `${us.bedrooms || 0}BR / ${us.bathrooms || 0}BA` : 'Set size'}
                               </button>
                             )}
 

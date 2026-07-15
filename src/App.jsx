@@ -48,7 +48,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul14-daily2";
+const BUILD_TAG = "jul14-daily3";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -14337,11 +14337,25 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
   const [propSearch, setPropSearch] = useState('');
 
   const load = async () => {
+    // Paginated — a plain query hits PostgREST's 1000-row cap and silently
+    // drops jobs (cards then show missing/blank options).
+    const fetchOpenTargets = async () => {
+      let rows = []; const PAGE = 1000;
+      for (let from = 0; ; from += PAGE) {
+        const { data, error } = await supabase.from('assignment_targets')
+          .select('id, status, unit_id, party_id, template_section, unit:units(label, bedrooms, bathrooms), party:parties(label), assignment:assignments!inner(id, title, customer_id, active, deleted_at, scheduled_date, assignment_type, took_longer)')
+          .not('status', 'in', '(done,blocked)')
+          .range(from, from + PAGE - 1);
+        if (error || !data) break;
+        rows = rows.concat(data);
+        if (data.length < PAGE) break;
+        if (from > 100000) break;
+      }
+      return { data: rows };
+    };
     const [propsRes, targetsRes] = await Promise.all([
       supabase.from('customers').select('*').eq('active', true).order('name'),
-      supabase.from('assignment_targets')
-        .select('id, status, unit_id, party_id, template_section, unit:units(label, bedrooms, bathrooms), party:parties(label), assignment:assignments!inner(id, title, customer_id, active, deleted_at, scheduled_date, assignment_type, took_longer)')
-        .not('status', 'in', '(done,blocked)'),
+      fetchOpenTargets(),
     ]);
     const counts = {};
     const seenBedrooms = new Set();
@@ -14619,7 +14633,7 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
                   <div className="mt-2 p-2 rounded-xl bg-stone-50 border border-stone-200">
                     <div className="flex items-center justify-between mb-1.5">
                       <span className="text-[10px] uppercase tracking-wider font-mono text-stone-400">Tap to add or remove</span>
-                      <button onClick={() => setAssignJob(null)} className="text-[10px] text-stone-500 px-1">Done</button>
+                      <button onClick={() => setAssignJob(null)} className="text-[10px] font-medium px-2.5 py-1 rounded-full bg-stone-900 text-white">Done</button>
                     </div>
                     <div className="max-h-40 overflow-y-auto grid grid-cols-2 gap-1">
                       {team.map(m => {
@@ -20990,17 +21004,24 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit }) {
   const canDailyDone = can(employee, 'mark_assignments_done');
 
   const [unitSize, setUnitSize] = useState({}); // unitId -> {bedrooms, bathrooms} (always available)
-  const loadUnitAsg = async () => {
-    // Include DONE assignments too — a Daily card is usually work that's
-    // already finished, and we still want to edit/assign it after the fact.
+  const loadUnitAsg = async (unitIds) => {
+    // Scope to the units on this day. A global query hits PostgREST's
+    // 1000-row cap once there are thousands of done items, which silently
+    // drops assignments (units then look like they have none).
+    const ids = (unitIds || []).filter(Boolean);
+    if (!ids.length) { setUnitAsg({}); setUnitSize({}); return; }
     const { data: rows } = await supabase.from('assignment_targets')
       .select('unit_id, status, completed_at, unit:units(id, bedrooms, bathrooms), assignment:assignments!inner(id, active, deleted_at, scheduled_date)')
+      .in('unit_id', ids)
       .not('status', 'eq', 'blocked');
+    // Sizes come straight from units so they're always right, even for
+    // units with no assignment at all.
+    const { data: unitRows } = await supabase.from('units').select('id, bedrooms, bathrooms').in('id', ids);
     const m = {}; const sizes = {};
+    (unitRows || []).forEach(u => { sizes[u.id] = { bedrooms: u.bedrooms, bathrooms: u.bathrooms }; });
     (rows || []).forEach(t => {
       const a = t.assignment;
       if (!a || a.active === false || a.deleted_at || !t.unit_id) return;
-      if (t.unit) sizes[t.unit_id] = { bedrooms: t.unit.bedrooms, bathrooms: t.unit.bathrooms };
       const open = t.status !== 'done';
       const prev = m[t.unit_id];
       // Prefer an OPEN assignment; otherwise keep the most recent done one.
@@ -21023,12 +21044,21 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit }) {
     const { data: emps } = await supabase.from('employees').select('id, name, role').eq('active', true).order('name');
     setDTeam((emps || []).filter(e => e.role !== 'owner'));
   };
-  useEffect(() => { loadUnitAsg(); /* eslint-disable-next-line */ }, [date]);
+  // Unit ids present on this day (from the loaded work blocks).
+  const dayUnitIds = React.useMemo(() => {
+    const set = new Set();
+    Object.values(data?.groups || {}).forEach(pg => {
+      Object.values(pg.units || {}).forEach(u => { if (u.unitId) set.add(u.unitId); });
+    });
+    return Array.from(set);
+  }, [data]);
+  const refreshUnitAsg = () => loadUnitAsg(dayUnitIds);
+  useEffect(() => { if (dayUnitIds.length) loadUnitAsg(dayUnitIds); /* eslint-disable-next-line */ }, [dayUnitIds.join(',')]);
 
   const dSaveDue = async (asgId, val) => {
     setDDueFor(null); setDBusy(asgId);
     await supabase.from('assignments').update({ scheduled_date: val || null }).eq('id', asgId);
-    setDBusy(null); loadUnitAsg();
+    setDBusy(null); refreshUnitAsg();
   };
   const dToggleAssignee = async (asgId, empId, has) => {
     setDBusy(asgId);
@@ -21037,7 +21067,7 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit }) {
       : await supabase.from('assignment_assignees').upsert({ assignment_id: asgId, employee_id: empId, status: 'assigned', created_by: employee.id }, { onConflict: 'assignment_id,employee_id' });
     setDBusy(null);
     if (error) { alert('Could not update: ' + error.message); return; }
-    loadUnitAsg();
+    refreshUnitAsg();
   };
   const dSaveSize = async (unitId, br, ba) => {
     setDSizeFor(null); setDBusy(unitId);
@@ -21045,7 +21075,7 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit }) {
       bedrooms: br === '' ? null : parseInt(br, 10),
       bathrooms: ba === '' ? null : parseInt(ba, 10),
     }).eq('id', unitId);
-    setDBusy(null); loadUnitAsg();
+    setDBusy(null); refreshUnitAsg();
   };
   const dMarkDone = async (asgId, label) => {
     if (!confirm(`Mark ${label} completed?`)) return;
@@ -21053,7 +21083,7 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit }) {
     await supabase.from('assignment_targets')
       .update({ status: 'done', completed_at: new Date().toISOString(), completed_by: employee.id })
       .eq('assignment_id', asgId).neq('status', 'done');
-    setDBusy(null); loadUnitAsg();
+    setDBusy(null); refreshUnitAsg();
   };
   // Filters — multi-select for cleaners + properties so the owner can
   // zoom into a specific person or building's day. Empty Set = "no filter".
@@ -21465,7 +21495,7 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit }) {
                             <div className="mt-2 p-2 rounded-xl bg-stone-50 border border-stone-200">
                               <div className="flex items-center justify-between mb-1.5">
                                 <span className="text-[10px] uppercase tracking-wider font-mono text-stone-400">Tap to add or remove</span>
-                                <button onClick={() => setDAssignFor(null)} className="text-[10px] text-stone-500 px-1">Done</button>
+                                <button onClick={() => setDAssignFor(null)} className="text-[10px] font-medium px-2.5 py-1 rounded-full bg-stone-900 text-white">Done</button>
                               </div>
                               <div className="max-h-40 overflow-y-auto grid grid-cols-2 gap-1">
                                 {dTeam.map(m => {
@@ -22588,7 +22618,7 @@ function AssignmentList({ property, employee, onBack, onNew, onNewChecklist, onN
               <div onClick={(e) => e.stopPropagation()} className="mt-2 p-2 rounded-xl bg-stone-50 border border-stone-200">
                 <div className="flex items-center justify-between mb-1.5">
                   <span className="text-[10px] uppercase tracking-wider font-mono text-stone-400">Tap to add or remove</span>
-                  <button onClick={() => setAssignFor(null)} className="text-[10px] text-stone-500 px-1">Done</button>
+                  <button onClick={() => setAssignFor(null)} className="text-[10px] font-medium px-2.5 py-1 rounded-full bg-stone-900 text-white">Done</button>
                 </div>
                 <div className="max-h-40 overflow-y-auto grid grid-cols-2 gap-1">
                   {teamList.map(m => {

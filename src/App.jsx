@@ -48,7 +48,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul14-dates1";
+const BUILD_TAG = "jul14-extra1";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -15762,7 +15762,12 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
     targets.forEach(t => {
       if (t.assignment && t.assignment.deleted_at) return;  // skip soft-deleted assignments
       const aid = t.assignment_id || `${t.unit_id}:${t.party_id}`;
-      if (!byAssign.has(aid)) byAssign.set(aid, { aid, unit_id: t.unit_id, party_id: t.party_id, type: t.assignment?.assignment_type, partyLabel: t.party?.label || '', items: [], targetIds: [] });
+      if (!byAssign.has(aid)) byAssign.set(aid, { aid, unit_id: t.unit_id, party_id: t.party_id, type: t.assignment?.assignment_type, partyLabel: t.party?.label || '', tookLonger: false, items: [], targetIds: [] });
+      // The Extra flag lives on the ASSIGNMENT, so capture it here off the
+      // target's joined assignment. It used to be read off the item objects
+      // pushed below, which never carried an `assignment` key — so it was
+      // always undefined and no line was ever marked EXTRA.
+      if (t.assignment?.took_longer) byAssign.get(aid).tookLonger = true;
       const sec = (t.template_section || '').toLowerCase();
       const itemKey = t.template_item_key || '';
       const fullKey = itemKey
@@ -15786,8 +15791,11 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
       const brBa = (!brm && (meta.bedrooms || meta.bathrooms))
         ? ` · ${meta.bedrooms || 0}BR/${meta.bathrooms || 0}BA`
         : '';
-      const tookLonger = !!g.items.find(it => it.assignment?.took_longer);
-      const label = (brm ? `${apt} - ${brm}` : `${apt}${brBa}`) + (tookLonger ? ' · EXTRA' : '');
+      const tookLonger = !!g.tookLonger;
+      // NOTE: `label` prints on the client's invoice (see the print view), so
+      // the EXTRA flag deliberately does NOT go in here. It rides on the line
+      // as `tookLonger` and shows as an amber chip in the editor only.
+      const label = (brm ? `${apt} - ${brm}` : `${apt}${brBa}`);
       const subs = [];
       const seen = new Set();
       g.items.forEach(it => {
@@ -15835,7 +15843,7 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
         }
       }
       subs.sort((a, b) => a.label.localeCompare(b.label));
-      return { key: g.aid, unitId: g.unit_id, partyId: g.party_id, label, serviceType: g.type, description: INVOICE_DESCR[g.type] || '', subsections: subs, amountOverride: '', sourceTargetIds: g.targetIds };
+      return { key: g.aid, unitId: g.unit_id, partyId: g.party_id, label, serviceType: g.type, tookLonger, description: INVOICE_DESCR[g.type] || '', subsections: subs, amountOverride: '', sourceTargetIds: g.targetIds };
     }).filter(l => l.label && l.subsections.length > 0).sort((a, b) => a.label.localeCompare(b.label, undefined, { numeric: true }));
     setLines(built);
     // Diagnostics — surfaced in the empty state so we can see where it
@@ -16057,6 +16065,11 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
                       <ChevronRight size={15} className={`text-stone-400 transition-transform ${open ? 'rotate-90' : ''}`} />
                       <span className="font-mono text-sm font-medium text-stone-900">{l.label}</span>
                       {l.serviceType && <span className="text-[10px] px-2 py-0.5 rounded-full bg-stone-100 text-stone-600">{assignmentTypeLabel ? assignmentTypeLabel(l.serviceType) : l.serviceType}</span>}
+                      {l.tookLonger && (
+                        <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500 text-white inline-flex items-center gap-1 flex-shrink-0" title="Marked as taking longer — charge extra">
+                          <Clock size={9} /> EXTRA
+                        </span>
+                      )}
                     </button>
                     <span className={`font-mono text-sm ${overridden ? 'text-amber-700' : 'text-stone-900'}`}>${amt.toFixed(2)}</span>
                     <button onClick={() => removeLine(l.key)} className="p-1.5 rounded-lg text-stone-300 hover:text-red-600 hover:bg-red-50">

@@ -48,7 +48,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul14-home";
+const BUILD_TAG = "jul14-pay";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -1621,6 +1621,7 @@ const CAPABILITIES = [
   { key: 'manage_units',             label: 'Manage units & properties',  hint: 'Add or edit units, parties, properties, and bulk imports.' },
   { key: 'manage_assignments_admin', label: 'Reassign & delete assignments', hint: 'Move assignments between bedrooms or delete them entirely.' },
   { key: 'edit_due_dates',           label: 'Change due dates',           hint: 'Tap an assignment\u2019s date to reschedule when it\u2019s due.' },
+  { key: 'assign_cleaners',          label: 'Assign cleaners to jobs',    hint: 'Choose who works a cleaning, and approve cleaner requests.' },
 ];
 
 // Returns true if the employee has the given capability key.
@@ -5866,32 +5867,89 @@ function YourJobsCard({ propertyId, employeeId, onGoToBedroom }) {
 function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchProperty }) {
   const [sub, setSub] = useState('mine'); // 'mine' | 'all'
   const [jobs, setJobs] = useState([]);
+  const [team, setTeam] = useState([]);
   const [loaded, setLoaded] = useState(false);
+  const [assignOpen, setAssignOpen] = useState(null); // assignment id
+  const [busyId, setBusyId] = useState(null);
   const todayKey = localTodayKey();
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      const { data } = await supabase.from('assignment_targets')
-        .select('id, unit_id, party_id, status, assigned_to, unit:units(label), party:parties(label), assignment:assignments!inner(id, customer_id, active, deleted_at, assignment_type, scheduled_date, customer:customers(name))')
-        .not('status', 'in', '(done,blocked)');
-      const byJob = {};
-      (data || []).forEach(t => {
-        const a = t.assignment;
-        if (!a || a.active === false || a.deleted_at) return;
-        if (!byJob[a.id]) {
-          byJob[a.id] = { id: a.id, customerId: a.customer_id, propName: a.customer?.name || 'Property', type: a.assignment_type || '', scheduledDate: a.scheduled_date || null, unitLabel: t.unit?.label || '', partyLabel: t.party?.label || '', unitId: t.unit_id, partyId: t.party_id, mine: false };
-        }
-        if (t.assigned_to === employee?.id) byJob[a.id].mine = true;
+  const canAssign = can(employee, 'assign_cleaners');
+  const canDone = can(employee, 'mark_assignments_done');
+
+  const load = async () => {
+    // Only properties this cleaner is allowed to see (hides BETA
+    // properties unless they're a beta tester / owner).
+    const [{ data: propRows }, { data: emps }] = await Promise.all([
+      supabase.from('customers').select('*').eq('active', true),
+      supabase.from('employees').select('id, name, role').eq('active', true).order('name'),
+    ]);
+    const allowed = new Set(visibleProps(propRows || [], employee).map(p => p.id));
+    setTeam((emps || []).filter(e => e.role !== 'owner'));
+    const { data } = await supabase.from('assignment_targets')
+      .select('id, unit_id, party_id, status, unit:units(label), party:parties(label), assignment:assignments!inner(id, customer_id, active, deleted_at, assignment_type, scheduled_date, customer:customers(name, address))')
+      .not('status', 'in', '(done,blocked)');
+    const byJob = {};
+    (data || []).forEach(t => {
+      const a = t.assignment;
+      if (!a || a.active === false || a.deleted_at) return;
+      if (!allowed.has(a.customer_id)) return;
+      if (!byJob[a.id]) {
+        byJob[a.id] = { id: a.id, customerId: a.customer_id, propName: a.customer?.name || 'Property', propAddress: a.customer?.address || '', type: a.assignment_type || '', scheduledDate: a.scheduled_date || null, unitLabel: t.unit?.label || '', partyLabel: t.party?.label || '', unitId: t.unit_id, partyId: t.party_id, assignees: [], requested: [] };
+      }
+    });
+    const ids = Object.keys(byJob);
+    if (ids.length) {
+      const { data: rows } = await supabase.from('assignment_assignees')
+        .select('assignment_id, employee_id, status, employee:employees(id, name)')
+        .in('assignment_id', ids);
+      (rows || []).forEach(r => {
+        const j = byJob[r.assignment_id]; if (!j) return;
+        const entry = { id: r.employee_id, name: r.employee?.name || '' };
+        if (r.status === 'requested') j.requested.push(entry); else j.assignees.push(entry);
       });
-      if (!cancelled) { setJobs(Object.values(byJob)); setLoaded(true); }
-    })();
-    return () => { cancelled = true; };
-  }, [employee?.id]);
+    }
+    setJobs(Object.values(byJob));
+    setLoaded(true);
+  };
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, [employee?.id]);
+
+  const isMine = (j) => j.assignees.some(a => a.id === employee?.id);
+  const iRequested = (j) => j.requested.some(a => a.id === employee?.id);
+
+  const requestJob = async (j) => {
+    setBusyId(j.id);
+    await supabase.from('assignment_assignees')
+      .insert({ assignment_id: j.id, employee_id: employee.id, status: 'requested', created_by: employee.id });
+    setBusyId(null); load();
+  };
+  const toggleAssignee = async (j, empId) => {
+    const has = j.assignees.some(a => a.id === empId) || j.requested.some(a => a.id === empId);
+    setBusyId(j.id);
+    if (has) {
+      await supabase.from('assignment_assignees').delete().eq('assignment_id', j.id).eq('employee_id', empId);
+    } else {
+      await supabase.from('assignment_assignees')
+        .insert({ assignment_id: j.id, employee_id: empId, status: 'assigned', created_by: employee.id });
+    }
+    setBusyId(null); load();
+  };
+  const approveRequest = async (j, empId) => {
+    setBusyId(j.id);
+    await supabase.from('assignment_assignees').update({ status: 'assigned' }).eq('assignment_id', j.id).eq('employee_id', empId);
+    setBusyId(null); load();
+  };
+  const markDone = async (j) => {
+    if (!confirm(`Mark ${j.unitLabel || 'this job'} completed?`)) return;
+    setBusyId(j.id);
+    await supabase.from('assignment_targets')
+      .update({ status: 'done', completed_at: new Date().toISOString(), completed_by: employee.id })
+      .eq('assignment_id', j.id).neq('status', 'done');
+    setBusyId(null); load();
+  };
 
   const dueRank = (d) => !d ? 2 : (d < todayKey ? 0 : d === todayKey ? 1 : 3);
-  const list = (sub === 'mine' ? jobs.filter(j => j.mine) : jobs)
+  const list = (sub === 'mine' ? jobs.filter(j => isMine(j) || iRequested(j)) : jobs)
     .sort((a, b) =>
-      (sub === 'all' ? (b.mine - a.mine) : 0)
+      (sub === 'all' ? ((isMine(b) ? 1 : 0) - (isMine(a) ? 1 : 0)) : 0)
       || dueRank(a.scheduledDate) - dueRank(b.scheduledDate)
       || naturalCompare(a.propName, b.propName)
       || naturalCompare(a.unitLabel, b.unitLabel));
@@ -5915,21 +5973,85 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
         <div className="space-y-2 pb-4">
           {list.map(j => {
             const here = j.customerId === currentPropertyId;
+            const mine = isMine(j);
             return (
-              <button key={j.id} onClick={() => openJob(j)}
-                className="w-full text-left p-3.5 rounded-2xl bg-white border border-stone-200 active:scale-98">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="font-serif text-lg text-stone-900 truncate">{j.unitLabel || 'Job'}{j.partyLabel ? ` · ${j.partyLabel}` : ''}</span>
-                  {j.mine && <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700 flex-shrink-0">Yours</span>}
+              <div key={j.id} className="p-3.5 rounded-2xl bg-white border border-stone-200">
+                <button onClick={() => openJob(j)} className="w-full text-left">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-serif text-lg text-stone-900 truncate">{j.unitLabel || 'Job'}{j.partyLabel ? ` · ${j.partyLabel}` : ''}</span>
+                    {mine && <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700 flex-shrink-0">Yours</span>}
+                  </div>
+                  <div className="text-xs text-stone-500 font-mono mt-0.5 flex items-center gap-1">
+                    <Building2 size={11} /> {j.propName}{j.type ? ` · ${assignmentTypeLabel(j.type)}` : ''}
+                  </div>
+                </button>
+                {j.propAddress && (
+                  <div className="text-xs text-amber-700 font-mono mt-0.5">
+                    <AddressLink address={j.propAddress} />
+                  </div>
+                )}
+
+                {/* Who's on this job */}
+                <div className="flex items-center gap-1.5 flex-wrap mt-2">
+                  {j.assignees.map(a => (
+                    <span key={a.id} className={`text-[10px] font-mono px-2 py-0.5 rounded-full flex items-center gap-1 ${a.id === employee?.id ? 'bg-indigo-100 text-indigo-700' : 'bg-stone-100 text-stone-600'}`}>
+                      <User size={9} /> {a.name}
+                    </span>
+                  ))}
+                  {j.requested.map(a => (
+                    <span key={a.id} className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 flex items-center gap-1">
+                      <Clock size={9} /> {a.name} asked
+                      {canAssign && (
+                        <button onClick={() => approveRequest(j, a.id)} disabled={busyId === j.id}
+                          className="ml-1 underline">approve</button>
+                      )}
+                    </span>
+                  ))}
+                  {j.assignees.length === 0 && j.requested.length === 0 && (
+                    <span className="text-[10px] font-mono text-stone-400">Unassigned</span>
+                  )}
+                  {canAssign && (
+                    <button onClick={() => setAssignOpen(assignOpen === j.id ? null : j.id)}
+                      className="text-[10px] font-mono px-2 py-0.5 rounded-full border border-dashed border-stone-300 text-stone-500 flex items-center gap-1">
+                      <Plus size={9} /> Assign
+                    </button>
+                  )}
                 </div>
-                <div className="text-xs text-stone-500 font-mono mt-0.5 flex items-center gap-1">
-                  <Building2 size={11} /> {j.propName}{j.type ? ` · ${assignmentTypeLabel(j.type)}` : ''}
-                </div>
-                <div className="flex items-center justify-between mt-1.5">
+
+                {/* Assign picker */}
+                {canAssign && assignOpen === j.id && (
+                  <div className="mt-2 p-2 rounded-xl bg-stone-50 border border-stone-200 space-y-1">
+                    <div className="text-[10px] uppercase tracking-wider font-mono text-stone-400 mb-1">Tap to add or remove</div>
+                    {team.map(m => {
+                      const on = j.assignees.some(a => a.id === m.id) || j.requested.some(a => a.id === m.id);
+                      return (
+                        <button key={m.id} onClick={() => toggleAssignee(j, m.id)} disabled={busyId === j.id}
+                          className={`w-full text-left px-2.5 py-1.5 rounded-lg text-sm flex items-center justify-between ${on ? 'bg-indigo-100 text-indigo-800' : 'bg-white text-stone-700 border border-stone-200'}`}>
+                          {m.name}{on && <Check size={13} />}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+
+                <div className="flex items-center justify-between mt-2 gap-2">
                   <span className={`text-[11px] font-mono ${j.scheduledDate && j.scheduledDate < todayKey ? 'text-red-600' : j.scheduledDate === todayKey ? 'text-emerald-700' : 'text-stone-400'}`}>{fmtDue(j.scheduledDate)}</span>
-                  <span className="text-[11px] font-medium text-amber-700">{here ? 'Start cleaning →' : 'Switch here →'}</span>
+                  <div className="flex items-center gap-2">
+                    {!mine && !iRequested(j) && !canAssign && (
+                      <button onClick={() => requestJob(j)} disabled={busyId === j.id}
+                        className="text-[11px] font-medium px-2.5 py-1 rounded-full bg-stone-100 text-stone-700 disabled:opacity-50">Request</button>
+                    )}
+                    {iRequested(j) && <span className="text-[11px] font-mono text-amber-700">Requested</span>}
+                    {canDone && (
+                      <button onClick={() => markDone(j)} disabled={busyId === j.id}
+                        title="Mark completed" className="p-1 rounded-lg text-emerald-600 hover:bg-emerald-50 disabled:opacity-40">
+                        <Check size={15} />
+                      </button>
+                    )}
+                    <button onClick={() => openJob(j)} className="text-[11px] font-medium text-amber-700">{here ? 'Start →' : 'Switch →'}</button>
+                  </div>
                 </div>
-              </button>
+              </div>
             );
           })}
         </div>
@@ -5992,7 +6114,7 @@ function CleanerPropertiesList({ currentPropertyId, employee, onOpenCurrent, onS
 function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onClockOut, onSwitchProperty, onStartNew, onReopen, onEndBlock, onGoToBedroom, onOpenMessages, onOpenChangePin, onOpenBedroomHistory, onJoinBlock, onUndoBlock, onMoveBlock, cleanerTab: cleanerTabProp, setCleanerTab: setCleanerTabProp, busy }) {
   const [showMenu, setShowMenu] = useState(false);
   const [showAssignmentForm, setShowAssignmentForm] = useState(false);
-  const [homeMode, setHomeMode] = useState('assignments'); // 'assignments' | 'properties'
+  const [showProps, setShowProps] = useState(false); // Properties browser in More
   // Bottom nav tab — Home / Assignments / More. Parent (AuthedShift)
   // controls this when provided so the tab persists across BlockView
   // navigation. Falls back to local state for standalone use.
@@ -6122,25 +6244,29 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
       {/* === HOME TAB === */}
       {cleanerTab === 'home' && (
         <>
-          {/* Assignments / Properties toggle */}
-          <div className="px-4 pt-4">
-            <div className="flex gap-1 bg-stone-100 p-1 rounded-xl">
-              <button onClick={() => setHomeMode('assignments')}
-                className={`flex-1 py-2 rounded-lg text-sm font-medium ${homeMode === 'assignments' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>Assignments</button>
-              <button onClick={() => setHomeMode('properties')}
-                className={`flex-1 py-2 rounded-lg text-sm font-medium ${homeMode === 'properties' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>Properties</button>
+          {/* Paused / open work blocks — so a cleaner can always get back
+             into what they were doing. (An ACTIVE block takes over the
+             whole screen, so these are the paused/unfinished ones.) */}
+          {workBlocks.filter(b => !b.end_time).length > 0 && (
+            <div className="px-4 pt-4">
+              <div className="text-xs uppercase tracking-wider text-amber-800 font-mono mb-2">Working on now</div>
+              <div className="space-y-2">
+                {workBlocks.filter(b => !b.end_time).map(b => (
+                  <button key={b.id} onClick={() => onReopen && onReopen(b)} disabled={busy}
+                    className="w-full text-left p-3.5 rounded-2xl bg-amber-50 border border-amber-300 flex items-center justify-between gap-2 active:scale-98 disabled:opacity-50">
+                    <div className="min-w-0">
+                      <div className="font-serif text-lg text-stone-900 truncate">{b.unit?.label} · {b.party?.label}</div>
+                      <div className="text-xs text-stone-500 font-mono">Started {fmtClock(b.start_time)} · paused</div>
+                    </div>
+                    <span className="text-[11px] font-medium text-amber-800 flex items-center gap-1 flex-shrink-0"><Play size={11} /> Resume</span>
+                  </button>
+                ))}
+              </div>
             </div>
-          </div>
+          )}
 
-          {homeMode === 'assignments' && (
-            <CleanerWorkList employee={employee} currentPropertyId={shift.customer_id}
-              onGoToBedroom={onGoToBedroom} onSwitchProperty={onSwitchProperty} />
-          )}
-          {homeMode === 'properties' && (
-            <CleanerPropertiesList currentPropertyId={shift.customer_id} employee={employee}
-              onOpenCurrent={() => setCleanerTab('assignments')}
-              onSwitch={() => onSwitchProperty && onSwitchProperty()} />
-          )}
+          <CleanerWorkList employee={employee} currentPropertyId={shift.customer_id}
+            onGoToBedroom={onGoToBedroom} onSwitchProperty={onSwitchProperty} />
 
           {false && (<>
           {homeView === 'today' && (
@@ -6274,7 +6400,25 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
       {/* === MORE TAB === */}
       {cleanerTab === 'more' && (
         <div className="px-4 pt-4 space-y-2">
-          <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2">Account &amp; settings</div>
+          <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2">Properties</div>
+          <button onClick={() => setShowProps(s => !s)}
+            className="w-full px-4 py-3.5 rounded-2xl bg-white border border-stone-200 hover:border-stone-400 text-left flex items-center gap-3 active:scale-98">
+            <Building2 size={18} className="text-stone-700" />
+            <div className="flex-1">
+              <div className="text-sm font-medium text-stone-900">Browse properties</div>
+              <div className="text-xs text-stone-500">See every property and its open work</div>
+            </div>
+            <ChevronRight size={16} className={`text-stone-400 transition-transform ${showProps ? 'rotate-90' : ''}`} />
+          </button>
+          {showProps && (
+            <div className="-mx-4">
+              <CleanerPropertiesList currentPropertyId={shift.customer_id} employee={employee}
+                onOpenCurrent={() => setCleanerTab('assignments')}
+                onSwitch={() => onSwitchProperty && onSwitchProperty()} />
+            </div>
+          )}
+
+          <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 pt-3">Account &amp; settings</div>
           {onSwitchProperty && (
             <button onClick={onSwitchProperty}
               className="w-full px-4 py-3.5 rounded-2xl bg-white border border-stone-200 hover:border-stone-400 text-left flex items-center gap-3 active:scale-98">
@@ -9526,7 +9670,7 @@ function ManagerDashboard({ employee, onSignOut, onOpenMessages, onLogoClick }) 
     for (let from = 0; ; from += PAGE) {
       let q = supabase
         .from('shifts')
-        .select('*, employee:employees(id,name), customer:customers(id,name,property_type,bill_rate_hourly), work_blocks(id, end_time, start_time, bill_rate_at_work, unit:units(label), party:parties(label))')
+        .select('*, employee:employees(id,name,pay_rate_hourly), customer:customers(id,name,property_type,bill_rate_hourly), work_blocks(id, end_time, start_time, bill_rate_at_work, unit:units(label), party:parties(label))')
         .eq('is_preview', false)
         .order('start_time', { ascending: false })
         .range(from, from + PAGE - 1);
@@ -9658,19 +9802,13 @@ function ManagerDashboard({ employee, onSignOut, onOpenMessages, onLogoClick }) 
                     className={`px-3 py-1 rounded-full text-xs font-mono ${isAllTime ? 'bg-stone-900 text-stone-50' : 'bg-white border border-stone-300 text-stone-600'}`}>
                     All time
                   </button>
-                  <label className="flex items-center gap-1 text-xs font-mono text-stone-600">
-                    <span className="text-stone-400">From</span>
-                    <input type="date" value={dateFrom} max={dateTo || undefined} onChange={e => setDateFrom(e.target.value)}
-                      className="px-2 py-1 rounded-lg border border-stone-300 bg-white text-stone-700" />
-                  </label>
-                  <label className="flex items-center gap-1 text-xs font-mono text-stone-600">
-                    <span className="text-stone-400">To</span>
-                    <input type="date" value={dateTo} min={dateFrom || undefined} onChange={e => setDateTo(e.target.value)}
-                      className="px-2 py-1 rounded-lg border border-stone-300 bg-white text-stone-700" />
-                  </label>
+                  <div className="flex-1 min-w-[180px]">
+                    <DateRangePicker start={dateFrom} end={dateTo}
+                      onChange={(s2, e2) => { setDateFrom(s2); setDateTo(e2); }} />
+                  </div>
                 </div>
                 <div className="text-[10px] font-mono text-stone-400 mt-1">
-                  Pick a From/To range, or All time to show everything.
+                  Tap the range to pick start and end on one calendar, or All time for everything.
                 </div>
               </div>
 
@@ -9732,6 +9870,8 @@ function ManagerDashboard({ employee, onSignOut, onOpenMessages, onLogoClick }) 
         <ShiftsByCleanerView shifts={filteredShifts} showMoney={showMoney}
           selectedCleanerId={selectedCleanerId}
           onSelectCleaner={setSelectedCleanerId}
+          currentEmployee={employee}
+          onReload={load}
           onOpenShift={(s) => { setSelectedShift(s); setView('detail'); }} />
       ) : subView === 'today' ? (
         <GroupedByPartyView shifts={filteredShifts} showMoney={showMoney}
@@ -9838,11 +9978,69 @@ const localDayKey = (ts) => {
 // many shifts they logged). Drill in = that cleaner's work grouped BY DAY
 // (a day with two shifts is one row, not two). A day expands to its
 // shift(s); clicking a shift opens the full detail.
-function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCleaner, onOpenShift }) {
+function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCleaner, onOpenShift, currentEmployee, onReload }) {
   const [expandedDays, setExpandedDays] = useState(new Set());
   const toggleDay = (k) => setExpandedDays(prev => {
     const n = new Set(prev); n.has(k) ? n.delete(k) : n.add(k); return n;
   });
+
+  // Pay tracking (v47). One row per cleaner per work day.
+  const [payDays, setPayDays] = useState({}); // `${empId}:${dateKey}` -> row
+  const [payBusy, setPayBusy] = useState(null);
+  const [adjusting, setAdjusting] = useState(null); // day key being edited
+  const [adjMins, setAdjMins] = useState('');
+  const monthStart = (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-01`; })();
+
+  const loadPay = async () => {
+    const { data, error } = await supabase.from('employee_pay_days')
+      .select('*').gte('work_date', monthStart);
+    if (error) return; // table not created yet
+    const m = {};
+    (data || []).forEach(r => { m[`${r.employee_id}:${r.work_date}`] = r; });
+    setPayDays(m);
+  };
+  useEffect(() => { loadPay(); /* eslint-disable-next-line */ }, []);
+
+  const payOwed = (dayShifts) => {
+    const rate = Number(dayShifts[0]?.employee?.pay_rate_hourly) || 0;
+    if (!rate) return 0;
+    const ms = dayShifts.filter(s => s.end_time).reduce((sum, s) => sum + shiftBillableMs(s), 0);
+    return (ms / 3600000) * rate;
+  };
+  const togglePaid = async (empId, dateKey, amount) => {
+    const key = `${empId}:${dateKey}`;
+    const existing = payDays[key];
+    setPayBusy(key);
+    if (existing?.paid_at) {
+      await supabase.from('employee_pay_days').update({ paid_at: null }).eq('id', existing.id);
+    } else if (existing) {
+      await supabase.from('employee_pay_days').update({ paid_at: new Date().toISOString(), amount }).eq('id', existing.id);
+    } else {
+      await supabase.from('employee_pay_days').insert({
+        employee_id: empId, work_date: dateKey, paid_at: new Date().toISOString(),
+        amount, created_by: currentEmployee?.id || null,
+      });
+    }
+    setPayBusy(null);
+    await loadPay();
+  };
+  const saveAdjust = async (dayShifts, minutes) => {
+    const mins = parseFloat(minutes);
+    if (isNaN(mins)) { setAdjusting(null); return; }
+    const target = dayShifts.filter(s => s.end_time)[0];
+    if (!target) { setAdjusting(null); return; }
+    setPayBusy('adj');
+    await supabase.from('shifts')
+      .update({ manual_adjustment_seconds: Math.round(mins * 60) })
+      .eq('id', target.id);
+    setPayBusy(null); setAdjusting(null);
+    onReload && onReload();
+  };
+  const isUnpaidStale = (dateKey, paid) => {
+    if (paid) return false;
+    if (dateKey < monthStart) return false; // don't chase old history
+    return (Date.now() - new Date(dateKey + 'T00:00:00').getTime()) > 7 * 86400000;
+  };
 
   // ---- Level 1: cleaner cards -----------------------------------------
   if (!selectedCleanerId) {
@@ -9949,6 +10147,44 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
                   {showMoney && billable > 0 && <span className="text-emerald-700 font-medium">{fmtMoney(billable)}</span>}
                 </div>
               </button>
+              {showMoney && (() => {
+                const owed = payOwed(d.shifts);
+                const key = `${selectedCleanerId}:${d.key}`;
+                const row = payDays[key];
+                const paid = !!row?.paid_at;
+                const stale = isUnpaidStale(d.key, paid);
+                return (
+                  <div className={`px-4 py-2.5 border-t flex items-center justify-between gap-2 flex-wrap ${stale ? 'bg-amber-50 border-amber-200' : 'border-stone-100'}`}>
+                    <div className="text-xs font-mono">
+                      <span className="text-stone-500">You owe </span>
+                      <span className="text-stone-900 font-bold">{owed > 0 ? fmtMoney(owed) : '—'}</span>
+                      {owed === 0 && <span className="text-stone-400"> (set a pay rate)</span>}
+                      {stale && <span className="text-amber-700"> · unpaid 7+ days</span>}
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      {adjusting === d.key ? (
+                        <span className="flex items-center gap-1">
+                          <input type="number" autoFocus value={adjMins} onChange={e => setAdjMins(e.target.value)}
+                            placeholder="± min"
+                            className="w-16 px-1.5 py-0.5 rounded border border-stone-300 text-xs font-mono" />
+                          <button onClick={() => saveAdjust(d.shifts, adjMins)} disabled={payBusy === 'adj'}
+                            className="text-[11px] px-2 py-0.5 rounded bg-stone-900 text-white">Save</button>
+                          <button onClick={() => setAdjusting(null)} className="text-[11px] px-1 text-stone-500">Cancel</button>
+                        </span>
+                      ) : (
+                        <button onClick={() => { setAdjusting(d.key); setAdjMins(''); }}
+                          className="text-[11px] font-mono px-2 py-0.5 rounded-full bg-stone-100 text-stone-600 flex items-center gap-1">
+                          <Clock size={10} /> Adjust hours
+                        </button>
+                      )}
+                      <button onClick={() => togglePaid(selectedCleanerId, d.key, owed)} disabled={payBusy === key}
+                        className={`text-[11px] font-mono px-2.5 py-0.5 rounded-full flex items-center gap-1 disabled:opacity-50 ${paid ? 'bg-emerald-600 text-white' : 'bg-white border border-stone-300 text-stone-600'}`}>
+                        {paid ? <><Check size={10} /> Paid</> : 'Mark paid'}
+                      </button>
+                    </div>
+                  </div>
+                );
+              })()}
               {multi && expanded && (
                 <div className="border-t border-stone-100 divide-y divide-stone-100">
                   {d.shifts.slice().sort((a, b) => new Date(a.start_time) - new Date(b.start_time)).map(s => {
@@ -15826,13 +16062,15 @@ function InvoiceList({ property, onOpen, onNew }) {
     // (done targets with no invoiced_on and completed_at older than 7 days).
     try {
       const weekAgo = new Date(Date.now() - 7 * 86400 * 1000).toISOString();
+      // Don't chase history: only flag work from this month onward.
+      const mStart = (() => { const d = new Date(); return new Date(d.getFullYear(), d.getMonth(), 1).toISOString(); })();
       const { data: propUnits } = await supabase.from('units').select('id').eq('customer_id', property.id);
       const unitIds = (propUnits || []).map(u => u.id);
       if (unitIds.length) {
         const { data: needRows, error } = await supabase.from('assignment_targets')
           .select('assignment_id, unit_id, assignment:assignments!inner(deleted_at, active)')
           .eq('status', 'done').is('invoiced_on', null).in('unit_id', unitIds)
-          .lt('completed_at', weekAgo);
+          .lt('completed_at', weekAgo).gte('completed_at', mStart);
         if (!error) {
           const jobs = new Set();
           (needRows || []).forEach(t => {

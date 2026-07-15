@@ -48,7 +48,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul14-pay3";
+const BUILD_TAG = "jul14-fix310";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -9686,6 +9686,22 @@ function ManagerDashboard({ employee, onSignOut, onOpenMessages, onLogoClick }) 
   }, [dateFrom, dateTo]);
   useEffect(() => { load(); }, [load, view]);
 
+  // Keep the drill-down in sync with the cleaner filter. Without this you
+  // can be drilled into cleaner A while the filter only allows cleaner B,
+  // which shows an empty "Cleaner · 0 days" screen.
+  useEffect(() => {
+    if (!selectedCleanerId) {
+      // Filtering to exactly one cleaner drills straight into them.
+      if (filterCleaners.size === 1) setSelectedCleanerId(Array.from(filterCleaners)[0]);
+      return;
+    }
+    if (filterCleaners.size && !filterCleaners.has(selectedCleanerId)) {
+      setSelectedCleanerId(filterCleaners.size === 1 ? Array.from(filterCleaners)[0] : null);
+    }
+    /* eslint-disable-next-line */
+  }, [filterCleaners]);
+
+
   if (!loaded) return <Splash text="Loading shifts…" />;
   if (view === 'detail' && selectedShift) {
     return <ShiftDetail shiftId={selectedShift.id} viewerRole={employee.role} viewerEmployee={employee}
@@ -9719,21 +9735,6 @@ function ManagerDashboard({ employee, onSignOut, onOpenMessages, onLogoClick }) 
     if (filterStatuses.size && !filterStatuses.has(shiftStatus(s))) return false;
     return true;
   });
-
-  // Keep the drill-down in sync with the cleaner filter. Without this you
-  // can be drilled into cleaner A while the filter only allows cleaner B,
-  // which shows an empty "Cleaner · 0 days" screen.
-  useEffect(() => {
-    if (!selectedCleanerId) {
-      // Filtering to exactly one cleaner drills straight into them.
-      if (filterCleaners.size === 1) setSelectedCleanerId(Array.from(filterCleaners)[0]);
-      return;
-    }
-    if (filterCleaners.size && !filterCleaners.has(selectedCleanerId)) {
-      setSelectedCleanerId(filterCleaners.size === 1 ? Array.from(filterCleaners)[0] : null);
-    }
-    /* eslint-disable-next-line */
-  }, [filterCleaners]);
 
   const isAllTime = !dateFrom && !dateTo;
   // The date is the scope (always shown in the header label), so it

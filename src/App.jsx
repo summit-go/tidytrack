@@ -48,7 +48,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul14-extra1";
+const BUILD_TAG = "jul15-nav1";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -3308,6 +3308,12 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   useEffect(() => {
     if (activeBlock) setCleanerTab('home');
   }, [activeBlock?.id]);
+  // Not clocked in → always land on Home. Otherwise a cleaner who was last
+  // on More or Assignments clocks out and comes back to that tab instead of
+  // their work list.
+  useEffect(() => {
+    if (!shift) setCleanerTab('home');
+  }, [!shift]);
   // When the cleaner taps a different bedroom while one is open, we
   // surface a 3-button modal (Stay / Pause + switch / Finish + switch)
   // instead of a native confirm. Shape: { target, fromLabel, toLabel }.
@@ -4902,38 +4908,95 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
 
   if (!shift) {
     return withIdleModal(
-      <div className="min-h-screen bg-stone-50 flex flex-col">
+      <div className="min-h-screen bg-stone-50 flex flex-col pb-24">
         <Header name={employee.name} onSignOut={signOutWithCleanup} role={employee.role}
           employee={employee} onOpenMessages={() => setShowMessages(true)} />
 
-        {/* Signed in, not clocked in: land straight on the work list.
-           Tapping a job clocks them into that property and opens it. */}
-        <div className="px-1 pt-2">
-          <div className="px-4">
-            <div className="text-xs uppercase tracking-widest text-stone-400 font-mono mb-1">
-              {new Date().toLocaleDateString('en-US', { weekday:'long', month:'long', day:'numeric' })}
+        {/* NOT CLOCKED IN. This is its own screen — it is NOT PropertyHub's
+           Home tab, it just shares the same CleanerWorkList, which is why
+           the two look alike. The Assignments / More tabs in PropertyHub are
+           scoped to the property of the current shift, and there's no shift
+           yet, so those tabs get property-independent content here. */}
+        {cleanerTab === 'home' && (<>
+          <div className="px-1 pt-2">
+            <div className="px-4">
+              <div className="text-xs uppercase tracking-widest text-stone-400 font-mono mb-1">
+                {new Date().toLocaleDateString('en-US', { weekday:'long', month:'long', day:'numeric' })}
+              </div>
+              <h2 className="text-3xl font-light text-stone-900 tracking-tight mb-1">
+                Your <span className="font-serif italic text-amber-700">work</span>
+              </h2>
+              <p className="text-xs text-stone-500">Tap a job to clock in and start.</p>
             </div>
-            <h2 className="text-3xl font-light text-stone-900 tracking-tight mb-1">
-              Your <span className="font-serif italic text-amber-700">work</span>
-            </h2>
-            <p className="text-xs text-stone-500">Tap a job to clock in and start.</p>
+            <CleanerWorkList employee={employee} currentPropertyId={null}
+              onStartJob={startJob} onGoToBedroom={null} onSwitchProperty={null} />
           </div>
-          <CleanerWorkList employee={employee} currentPropertyId={null}
-            onStartJob={startJob} onGoToBedroom={null} onSwitchProperty={null} />
-        </div>
 
-        <div className="flex-1 flex flex-col justify-center items-center px-6 pb-6">
-          <button onClick={startClockIn} disabled={busy}
-            className="w-full max-w-sm py-4 rounded-2xl bg-stone-900 text-stone-50 font-medium flex items-center justify-center gap-2 active:scale-98 transition-transform disabled:opacity-50">
-            <Clock size={18} />
-            <span>Clock in without a job</span>
-          </button>
-          <button onClick={startViewOnly} disabled={busy}
-            className="mt-6 px-5 py-2.5 rounded-full bg-white border border-stone-300 hover:border-stone-500 text-stone-700 text-sm font-medium flex items-center gap-2 active:scale-95 transition-transform disabled:opacity-50">
-            <Eye size={14} /> Just look around (no clock-in)
-          </button>
-          <p className="text-[11px] text-stone-400 mt-2">View messages, properties & assignments without tracking time.</p>
-        </div>
+          <div className="flex-1 flex flex-col justify-center items-center px-6 pb-6">
+            <button onClick={startClockIn} disabled={busy}
+              className="w-full max-w-sm py-4 rounded-2xl bg-stone-900 text-stone-50 font-medium flex items-center justify-center gap-2 active:scale-98 transition-transform disabled:opacity-50">
+              <Clock size={18} />
+              <span>Clock in without a job</span>
+            </button>
+            <button onClick={startViewOnly} disabled={busy}
+              className="mt-6 px-5 py-2.5 rounded-full bg-white border border-stone-300 hover:border-stone-500 text-stone-700 text-sm font-medium flex items-center gap-2 active:scale-95 transition-transform disabled:opacity-50">
+              <Eye size={14} /> Just look around (no clock-in)
+            </button>
+            <p className="text-[11px] text-stone-400 mt-2">View messages, properties &amp; assignments without tracking time.</p>
+          </div>
+        </>)}
+
+        {/* Assignments, before a property is picked = where is the work.
+           Tapping a property starts the clock-in flow there. */}
+        {cleanerTab === 'assignments' && (
+          <div className="pt-4">
+            <div className="px-4 mb-1">
+              <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">Where the work is</div>
+              <p className="text-[11px] text-stone-400 mt-0.5">Open jobs by property. Tap one to clock in there.</p>
+            </div>
+            <CleanerPropertiesList currentPropertyId={null} employee={employee}
+              onOpenCurrent={startClockIn} onSwitch={startClockIn} />
+          </div>
+        )}
+
+        {cleanerTab === 'more' && (
+          <div className="px-4 pt-4 space-y-2">
+            <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2">Account &amp; settings</div>
+            <button onClick={() => setShowMessages(true)}
+              className="w-full px-4 py-3.5 rounded-2xl bg-white border border-stone-200 hover:border-stone-400 text-left flex items-center gap-3 active:scale-98">
+              <MessageSquare size={18} className="text-stone-700" />
+              <div className="flex-1">
+                <div className="text-sm font-medium text-stone-900">Messages</div>
+                <div className="text-xs text-stone-500">Read and reply to the team</div>
+              </div>
+            </button>
+            <button onClick={() => setShowChangePin(true)}
+              className="w-full px-4 py-3.5 rounded-2xl bg-white border border-stone-200 hover:border-stone-400 text-left flex items-center gap-3 active:scale-98">
+              <User size={18} className="text-stone-700" />
+              <div className="flex-1">
+                <div className="text-sm font-medium text-stone-900">Change PIN</div>
+                <div className="text-xs text-stone-500">Update your sign-in code</div>
+              </div>
+            </button>
+            <button onClick={startViewOnly} disabled={busy}
+              className="w-full px-4 py-3.5 rounded-2xl bg-white border border-stone-200 hover:border-stone-400 text-left flex items-center gap-3 active:scale-98 disabled:opacity-50">
+              <Eye size={18} className="text-stone-700" />
+              <div className="flex-1">
+                <div className="text-sm font-medium text-stone-900">Just look around</div>
+                <div className="text-xs text-stone-500">Browse without tracking time</div>
+              </div>
+            </button>
+            <button onClick={signOutWithCleanup}
+              className="w-full px-4 py-3.5 rounded-2xl bg-white border border-stone-200 hover:border-red-300 text-left flex items-center gap-3 active:scale-98">
+              <LogOut size={18} className="text-red-600" />
+              <div className="flex-1">
+                <div className="text-sm font-medium text-red-600">Sign out</div>
+              </div>
+            </button>
+          </div>
+        )}
+
+        <CleanerBottomNav active={cleanerTab} onChange={setCleanerTab} />
       </div>
     );
   }
@@ -4990,6 +5053,8 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       onLeaveBlock={leaveBlock}
       onJoinBlock={joinBlock}
       onDeletePhoto={deletePhoto}
+      onGoToBedroom={goToBedroomForTarget}
+      onSwitchProperty={switchProperty}
       cleanerTab={cleanerTab} setCleanerTab={setCleanerTab}
       previewMode={previewMode}
       busy={busy} />);
@@ -5887,6 +5952,81 @@ function YourJobsCard({ propertyId, employeeId, onGoToBedroom }) {
 }
 
 // =================================================================
+// ASSIGN PICKER — ONE shared picker for every "+ Assign" button in
+// the app (cleaner work list, assignment schedule, daily view, and
+// the assignments tab). There used to be four near-identical copies;
+// a change to one silently skipped the other three. Add new assign UI
+// here, not at the call sites.
+//
+// Nothing is written until Save is tapped. Taps only move a local
+// selection, so an accidental tap costs nothing and the owner can
+// back out with Cancel.
+// =================================================================
+function AssignPicker({ team, currentIds, busy, onSave, onCancel }) {
+  const [sel, setSel] = useState(() => new Set(currentIds || []));
+  const toggle = (id) => setSel(prev => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+  const base = new Set(currentIds || []);
+  const dirty = sel.size !== base.size || Array.from(sel).some(id => !base.has(id));
+  return (
+    <div className="mt-2 p-2 rounded-xl bg-stone-50 border border-stone-200">
+      <div className="flex items-center justify-between gap-2 mb-1.5">
+        <span className="text-[10px] uppercase tracking-wider font-mono text-stone-400">
+          {dirty ? 'Unsaved — tap Save' : 'Tap to add or remove'}
+        </span>
+        <div className="flex items-center gap-1 flex-shrink-0">
+          <button onClick={onCancel} disabled={busy}
+            className="text-[10px] font-medium px-2.5 py-1 rounded-full bg-white border border-stone-300 text-stone-600 disabled:opacity-50">
+            Cancel
+          </button>
+          <button onClick={() => onSave(Array.from(sel))} disabled={busy || !dirty}
+            className={`text-[10px] font-medium px-2.5 py-1 rounded-full disabled:opacity-40 ${dirty ? 'bg-indigo-600 text-white' : 'bg-stone-900 text-white'}`}>
+            {busy ? 'Saving…' : 'Save'}
+          </button>
+        </div>
+      </div>
+      <div className="max-h-40 overflow-y-auto grid grid-cols-2 gap-1">
+        {(team || []).map(m => {
+          const on = sel.has(m.id);
+          return (
+            <button key={m.id} onClick={() => toggle(m.id)} disabled={busy}
+              className={`text-left px-2 py-1.5 rounded-lg text-xs flex items-center justify-between gap-1 disabled:opacity-50 ${on ? 'bg-indigo-600 text-white font-medium' : 'bg-white text-stone-700 border border-stone-200'}`}>
+              <span className="truncate">{m.name}</span>{on && <Check size={12} className="flex-shrink-0" />}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// Commits an AssignPicker selection. Only writes the difference, so a
+// cleaner who ASKED for a job (status 'requested') and is left selected
+// keeps that status instead of being silently promoted to 'assigned'.
+// Returns an error object, or null on success.
+async function saveAssignees(assignmentId, currentIds, nextIds, actorId) {
+  const cur = new Set(currentIds || []);
+  const next = new Set(nextIds || []);
+  const toAdd = Array.from(next).filter(id => !cur.has(id));
+  const toRemove = Array.from(cur).filter(id => !next.has(id));
+  if (toRemove.length) {
+    const { error } = await supabase.from('assignment_assignees')
+      .delete().eq('assignment_id', assignmentId).in('employee_id', toRemove);
+    if (error) return error;
+  }
+  if (toAdd.length) {
+    const { error } = await supabase.from('assignment_assignees')
+      .upsert(toAdd.map(id => ({ assignment_id: assignmentId, employee_id: id, status: 'assigned', created_by: actorId })),
+        { onConflict: 'assignment_id,employee_id' });
+    if (error) return error;
+  }
+  return null;
+}
+
+// =================================================================
 // CLEANER WORK LIST — the cleaner's own jobs (and all pending jobs)
 // across EVERY property, so they see their whole day. Same-property
 // jobs start the clean directly; other-property jobs offer to switch.
@@ -5901,6 +6041,18 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
   const todayKey = localTodayKey();
   const canAssign = can(employee, 'assign_cleaners');
   const canDone = can(employee, 'mark_assignments_done');
+  // Same capability the owner-side cards use, so one toggle governs both.
+  const canEditDates = can(employee, 'edit_due_dates');
+  const [editDueId, setEditDueId] = useState(null);
+  const saveDue = async (j, date) => {
+    setEditDueId(null); setBusyId(j.id);
+    const { data, error } = await supabase.from('assignments')
+      .update({ scheduled_date: date || null }).eq('id', j.id).select('id, scheduled_date');
+    setBusyId(null);
+    if (error) { alert('Could not change the date: ' + error.message); return; }
+    if (!data || data.length === 0) { alert('Date did not save — the database rejected the change for this job.'); return; }
+    load();
+  };
 
   const load = async () => {
     // Only properties this cleaner is allowed to see (hides BETA
@@ -5968,17 +6120,12 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
     if (error) { alert('Could not ask for this job: ' + error.message); return; }
     load();
   };
-  const toggleAssignee = async (j, empId) => {
-    const has = j.assignees.some(a => a.id === empId) || j.requested.some(a => a.id === empId);
-    setBusyId(j.id);
-    // upsert, not insert: a leftover row (e.g. an old "requested") makes a
-    // plain insert fail on the unique key and the tap does nothing.
-    const { error } = has
-      ? await supabase.from('assignment_assignees').delete().eq('assignment_id', j.id).eq('employee_id', empId)
-      : await supabase.from('assignment_assignees')
-          .upsert({ assignment_id: j.id, employee_id: empId, status: 'assigned', created_by: employee.id }, { onConflict: 'assignment_id,employee_id' });
+  const commitAssignees = async (j, ids) => {    setBusyId(j.id);
+    const current = [...j.assignees.map(a => a.id), ...j.requested.map(a => a.id)];
+    const error = await saveAssignees(j.id, current, ids, employee.id);
     setBusyId(null);
     if (error) { alert('Could not update who\u2019s assigned: ' + error.message); return; }
+    setAssignOpen(null);
     load();
   };
   const approveRequest = async (j, empId) => {
@@ -6058,17 +6205,20 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
       ) : (
         <div className="pb-4">
           {dateSections.map(sec => (
-            <div key={sec.key} className="mb-4">
+            <div key={sec.key} className="mb-5">
               {/* Date header — the list is grouped soonest-first. */}
-              <div className="flex items-center gap-2 mb-2 px-0.5">
-                <Calendar size={11} className={sec.date && sec.date < todayKey ? 'text-red-600' : sec.date === todayKey ? 'text-emerald-700' : 'text-stone-400'} />
-                <span className={`text-[11px] uppercase tracking-wider font-mono font-medium ${sectionTone(sec.date)}`}>
+              <div className={`flex items-center gap-2 mb-2 px-3 py-1.5 rounded-lg border-l-4 ${
+                !sec.date ? 'border-stone-300 bg-stone-100'
+                : sec.date < todayKey ? 'border-red-500 bg-red-50'
+                : sec.date === todayKey ? 'border-emerald-500 bg-emerald-50'
+                : 'border-stone-400 bg-stone-100'}`}>
+                <Calendar size={13} className={sec.date && sec.date < todayKey ? 'text-red-600' : sec.date === todayKey ? 'text-emerald-700' : 'text-stone-500'} />
+                <span className={`text-xs uppercase tracking-wider font-mono font-bold ${sectionTone(sec.date)}`}>
                   {sectionLabel(sec.date)}
                 </span>
-                <span className="text-[10px] font-mono text-stone-400">
+                <span className="text-[10px] font-mono text-stone-500 ml-auto flex-shrink-0">
                   {sec.jobs.length} {sec.jobs.length === 1 ? 'job' : 'jobs'}
                 </span>
-                <div className="flex-1 h-px bg-stone-200" />
               </div>
               <div className="space-y-2">
           {sec.jobs.map(j => {
@@ -6086,8 +6236,8 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
                   </div>
                 </button>
                 {j.propAddress && (
-                  <div className="text-xs text-amber-700 font-mono mt-0.5">
-                    <AddressLink address={j.propAddress} />
+                  <div className="text-[10px] text-blue-600 font-mono mt-0.5 underline decoration-blue-300 underline-offset-2">
+                    <AddressLink address={j.propAddress} className="text-blue-600" />
                   </div>
                 )}
 
@@ -6118,30 +6268,32 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
                   )}
                 </div>
 
-                {/* Assign picker */}
+                {/* Assign picker — shared component; saves only on Save */}
                 {canAssign && assignOpen === j.id && (
-                  <div className="mt-2 p-2 rounded-xl bg-stone-50 border border-stone-200">
-                    <div className="flex items-center justify-between mb-1.5">
-                      <span className="text-[10px] uppercase tracking-wider font-mono text-stone-400">Tap to add or remove</span>
-                      <button onClick={() => setAssignOpen(null)}
-                        className="text-[10px] font-medium px-2.5 py-1 rounded-full bg-stone-900 text-white">Save</button>
-                    </div>
-                    <div className="max-h-40 overflow-y-auto grid grid-cols-2 gap-1">
-                      {team.map(m => {
-                        const on = j.assignees.some(a => a.id === m.id) || j.requested.some(a => a.id === m.id);
-                        return (
-                          <button key={m.id} onClick={() => toggleAssignee(j, m.id)} disabled={busyId === j.id}
-                            className={`text-left px-2 py-1.5 rounded-lg text-xs flex items-center justify-between gap-1 disabled:opacity-50 ${on ? 'bg-indigo-600 text-white font-medium' : 'bg-white text-stone-700 border border-stone-200'}`}>
-                            <span className="truncate">{m.name}</span>{on && <Check size={12} className="flex-shrink-0" />}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
+                  <AssignPicker key={j.id} team={team} busy={busyId === j.id}
+                    currentIds={[...j.assignees.map(a => a.id), ...j.requested.map(a => a.id)]}
+                    onCancel={() => setAssignOpen(null)}
+                    onSave={(ids) => commitAssignees(j, ids)} />
                 )}
 
                 <div className="flex items-center justify-between mt-2 gap-2">
-                  <span className={`text-[11px] font-mono ${j.scheduledDate && j.scheduledDate < todayKey ? 'text-red-600' : j.scheduledDate === todayKey ? 'text-emerald-700' : 'text-stone-400'}`}>{fmtDue(j.scheduledDate)}</span>
+                  {/* Due date — tappable when the employee has "Change due dates" */}
+                  {editDueId === j.id ? (
+                    <input type="date" autoFocus defaultValue={j.scheduledDate || ''}
+                      onChange={(e) => saveDue(j, e.target.value)} onBlur={() => setEditDueId(null)}
+                      className="text-[11px] font-mono px-1.5 py-0.5 rounded border border-stone-400 bg-white" />
+                  ) : canEditDates ? (
+                    <button onClick={() => setEditDueId(j.id)} disabled={busyId === j.id}
+                      className={`text-[11px] font-mono px-2 py-0.5 rounded-full border inline-flex items-center gap-1 disabled:opacity-50 ${j.scheduledDate
+                        ? (j.scheduledDate < todayKey ? 'bg-red-100 text-red-700 border-red-200'
+                           : j.scheduledDate === todayKey ? 'bg-emerald-100 text-emerald-800 border-emerald-200'
+                           : 'bg-stone-100 text-stone-600 border-stone-200')
+                        : 'bg-white text-stone-500 border-dashed border-stone-300'}`}>
+                      <Calendar size={9} /> {j.scheduledDate ? fmtDue(j.scheduledDate) : 'Set date'}
+                    </button>
+                  ) : (
+                    <span className={`text-[11px] font-mono ${j.scheduledDate && j.scheduledDate < todayKey ? 'text-red-600' : j.scheduledDate === todayKey ? 'text-emerald-700' : 'text-stone-400'}`}>{fmtDue(j.scheduledDate)}</span>
+                  )}
                   <div className="flex items-center gap-2">
                     {!mine && !iRequested(j) && !canAssign && (
                       <button onClick={() => requestJob(j)} disabled={busyId === j.id}
@@ -6178,12 +6330,28 @@ function CleanerPropertiesList({ currentPropertyId, employee, onOpenCurrent, onS
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const [pRes, tRes] = await Promise.all([
+      // Paginated: this counts open work across EVERY property, so a plain
+      // call stops at PostgREST's 1000-row cap and undercounts silently.
+      const fetchAllTargets = async () => {
+        let rows = []; const PAGE = 1000;
+        for (let from = 0; ; from += PAGE) {
+          const { data, error } = await supabase.from('assignment_targets')
+            .select('unit_id, party_id, status, assignment:assignments!inner(customer_id, active, deleted_at)')
+            .not('status', 'in', '(done,blocked)')
+            .range(from, from + PAGE - 1);
+          if (error || !data) break;
+          rows = rows.concat(data);
+          if (data.length < PAGE) break;
+          if (from > 100000) break;
+        }
+        return rows;
+      };
+      const [pRes, allTargets] = await Promise.all([
         supabase.from('customers').select('*').eq('active', true).order('name'),
-        supabase.from('assignment_targets').select('unit_id, party_id, status, assignment:assignments!inner(customer_id, active, deleted_at)').not('status', 'in', '(done,blocked)'),
+        fetchAllTargets(),
       ]);
       const c = {}; const seen = new Set();
-      (tRes.data || []).forEach(t => {
+      (allTargets || []).forEach(t => {
         const a = t.assignment; if (!a || a.active === false || a.deleted_at) return;
         const cid = a.customer_id; if (!cid) return;
         const k = `${cid}:${t.unit_id || ''}:${t.party_id || ''}`;
@@ -7221,7 +7389,7 @@ function UndoMoveMenu({ disabled, canUndo, canMove, onUndo, onMoveBedroom, onMov
 function BlockView({ shift, block, tasks, activeTask, employeeName, employee, onSignOut, onFinish, onPause, onUndo,
   newTaskName, setNewTaskName, onStartTask, onStartTasksFromPicker, onStartChecklistItems, onReleaseTargets, onStopTask, onResumeTask, onAddPhoto,
   photoModal, onClosePhotoModal, onUploadPhoto, onSavePhotoNote, onOpenMessages, onOpenBedroomHistory,
-  onMoveBlock, onMoveMultiple, onLeaveBlock, onJoinBlock, onDeletePhoto, cleanerTab, setCleanerTab, previewMode, busy }) {
+  onMoveBlock, onMoveMultiple, onLeaveBlock, onJoinBlock, onDeletePhoto, onGoToBedroom, onSwitchProperty, cleanerTab, setCleanerTab, previewMode, busy }) {
   useTick(true);
   const blockElapsed = Date.now() - new Date(block.start_time).getTime();
   const activeTaskObj = tasks.find(t => t.id === activeTask);
@@ -7250,6 +7418,10 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
   const totalActive = participants.length;
   // Task input mode toggle: structured picker (default) vs freeform typing
   const [taskInputMode, setTaskInputMode] = useState('picker'); // 'picker' | 'custom'
+  // "Your other jobs" — the Assigned to me / All pending list, shown at the
+  // bottom of the block so the cleaner can see what's next without pausing.
+  // Collapsed by default: the open block is still the point of this screen.
+  const [showWorkList, setShowWorkList] = useState(false);
   // "Move bedroom" modal — shown to owners/managers and in preview
   // mode. Cleaners typically don't see this so they don't accidentally
   // re-attach their work to the wrong bedroom; managers can fix
@@ -7573,6 +7745,29 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
          another cleaner has logged work at this bedroom earlier
          today. */}
       <OtherCleanersTasksPanel block={block} />
+
+      {/* The rest of the day, without leaving this block. The active
+         block still owns the top of the screen; this just means the
+         cleaner no longer has to finish or pause to see what's next.
+         Collapsed by default so it can't crowd out the work in hand.
+         Tapping another bedroom routes through onGoToBedroom, which
+         raises the switch-bedroom prompt rather than silently
+         abandoning the open block. */}
+      <div className="mx-4 mt-6 mb-2">
+        <button onClick={() => setShowWorkList(v => !v)}
+          className="w-full flex items-center justify-between gap-2 px-4 py-3 rounded-2xl bg-white border border-stone-200 active:scale-98 transition-transform">
+          <span className="text-xs uppercase tracking-wider font-mono text-stone-500 flex items-center gap-2">
+            <Layers size={13} /> Your other jobs
+          </span>
+          <ChevronRight size={15} className={`text-stone-400 transition-transform ${showWorkList ? 'rotate-90' : ''}`} />
+        </button>
+      </div>
+      {showWorkList && (
+        <div className="-mt-1">
+          <CleanerWorkList employee={employee} currentPropertyId={shift.customer_id}
+            onGoToBedroom={onGoToBedroom} onSwitchProperty={onSwitchProperty} />
+        </div>
+      )}
 
       {/* Persistent bottom nav — lets the cleaner peek at Assignments
          or More without finishing/pausing the workblock. The block
@@ -14561,14 +14756,12 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
     await supabase.from('assignments').update({ scheduled_date: date || null }).eq('id', job.id);
     setActioning(null); load();
   };
-  const toggleJobAssignee = async (job, empId) => {
-    const has = job.assignees.some(a => a.id === empId);
+  const commitJobAssignees = async (job, ids) => {
     setActioning(job.id);
-    const { error } = has
-      ? await supabase.from('assignment_assignees').delete().eq('assignment_id', job.id).eq('employee_id', empId)
-      : await supabase.from('assignment_assignees').upsert({ assignment_id: job.id, employee_id: empId, status: 'assigned', created_by: employee.id }, { onConflict: 'assignment_id,employee_id' });
+    const error = await saveAssignees(job.id, job.assignees.map(a => a.id), ids, employee.id);
     setActioning(null);
     if (error) { alert('Could not update who\u2019s assigned: ' + error.message); return; }
+    setAssignJob(null);
     load();
   };
   const saveJobSize = async (job, br, ba) => {
@@ -14724,23 +14917,10 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
                 </div>
 
                 {canAssignJobs && assignJob === j.id && (
-                  <div className="mt-2 p-2 rounded-xl bg-stone-50 border border-stone-200">
-                    <div className="flex items-center justify-between mb-1.5">
-                      <span className="text-[10px] uppercase tracking-wider font-mono text-stone-400">Tap to add or remove</span>
-                      <button onClick={() => setAssignJob(null)} className="text-[10px] font-medium px-2.5 py-1 rounded-full bg-stone-900 text-white">Done</button>
-                    </div>
-                    <div className="max-h-40 overflow-y-auto grid grid-cols-2 gap-1">
-                      {team.map(m => {
-                        const on = j.assignees.some(a => a.id === m.id);
-                        return (
-                          <button key={m.id} onClick={() => toggleJobAssignee(j, m.id)} disabled={actioning === j.id}
-                            className={`text-left px-2 py-1.5 rounded-lg text-xs flex items-center justify-between gap-1 disabled:opacity-50 ${on ? 'bg-indigo-600 text-white font-medium' : 'bg-white text-stone-700 border border-stone-200'}`}>
-                            <span className="truncate">{m.name}</span>{on && <Check size={12} className="flex-shrink-0" />}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
+                  <AssignPicker key={j.id} team={team} busy={actioning === j.id}
+                    currentIds={j.assignees.map(a => a.id)}
+                    onCancel={() => setAssignJob(null)}
+                    onSave={(ids) => commitJobAssignees(j, ids)} />
                 )}
                 <div className="flex items-center gap-1 flex-shrink-0">
                   {canDone && (
@@ -21170,13 +21350,12 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit }) {
     await supabase.from('assignments').update({ scheduled_date: val || null }).eq('id', asgId);
     setDBusy(null); refreshUnitAsg();
   };
-  const dToggleAssignee = async (asgId, empId, has) => {
-    setDBusy(asgId);
-    const { error } = has
-      ? await supabase.from('assignment_assignees').delete().eq('assignment_id', asgId).eq('employee_id', empId)
-      : await supabase.from('assignment_assignees').upsert({ assignment_id: asgId, employee_id: empId, status: 'assigned', created_by: employee.id }, { onConflict: 'assignment_id,employee_id' });
+  const dCommitAssignees = async (ua, ids) => {
+    setDBusy(ua.id);
+    const error = await saveAssignees(ua.id, ua.assignees.map(a => a.id), ids, employee.id);
     setDBusy(null);
-    if (error) { alert('Could not update: ' + error.message); return; }
+    if (error) { alert('Could not update who\u2019s assigned: ' + error.message); return; }
+    setDAssignFor(null);
     refreshUnitAsg();
   };
   const dSaveSize = async (unitId, br, ba) => {
@@ -21636,23 +21815,10 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit }) {
                           </div>
 
                           {ua && canDailyAssign && dAssignFor === ua.id && (
-                            <div className="mt-2 p-2 rounded-xl bg-stone-50 border border-stone-200">
-                              <div className="flex items-center justify-between mb-1.5">
-                                <span className="text-[10px] uppercase tracking-wider font-mono text-stone-400">Tap to add or remove</span>
-                                <button onClick={() => setDAssignFor(null)} className="text-[10px] font-medium px-2.5 py-1 rounded-full bg-stone-900 text-white">Done</button>
-                              </div>
-                              <div className="max-h-40 overflow-y-auto grid grid-cols-2 gap-1">
-                                {dTeam.map(m => {
-                                  const on = ua.assignees.some(a => a.id === m.id);
-                                  return (
-                                    <button key={m.id} onClick={() => dToggleAssignee(ua.id, m.id, on)} disabled={dBusy === ua.id}
-                                      className={`text-left px-2 py-1.5 rounded-lg text-xs flex items-center justify-between gap-1 disabled:opacity-50 ${on ? 'bg-indigo-600 text-white font-medium' : 'bg-white text-stone-700 border border-stone-200'}`}>
-                                      <span className="truncate">{m.name}</span>{on && <Check size={12} className="flex-shrink-0" />}
-                                    </button>
-                                  );
-                                })}
-                              </div>
-                            </div>
+                            <AssignPicker key={ua.id} team={dTeam} busy={dBusy === ua.id}
+                              currentIds={ua.assignees.map(a => a.id)}
+                              onCancel={() => setDAssignFor(null)}
+                              onSave={(ids) => dCommitAssignees(ua, ids)} />
                           )}
                         </div>
                         );
@@ -22514,12 +22680,14 @@ function AssignmentList({ property, employee, onBack, onNew, onNewChecklist, onN
       setRosterById(Object.fromEntries((data || []).map(e => [e.id, e.name])));
     })();
   }, []);
-  const toggleAssign = async (asgId, empId) => {
-    const has = (assigneeMap[asgId] || []).some(a => a.id === empId);
-    const { error } = has
-      ? await supabase.from('assignment_assignees').delete().eq('assignment_id', asgId).eq('employee_id', empId)
-      : await supabase.from('assignment_assignees').upsert({ assignment_id: asgId, employee_id: empId, status: 'assigned', created_by: employee.id }, { onConflict: 'assignment_id,employee_id' });
+  const [assignBusy, setAssignBusy] = useState(null);
+  const commitAssign = async (asgId, ids) => {
+    setAssignBusy(asgId);
+    const current = (assigneeMap[asgId] || []).map(a => a.id);
+    const error = await saveAssignees(asgId, current, ids, employee.id);
+    setAssignBusy(null);
     if (error) { alert('Could not update who\u2019s assigned: ' + error.message); return; }
+    setAssignFor(null);
     load();
   };
 
@@ -22762,22 +22930,11 @@ function AssignmentList({ property, employee, onBack, onNew, onNewChecklist, onN
               )}
             </div>
             {canAssignHere && assignFor === a.id && (
-              <div onClick={(e) => e.stopPropagation()} className="mt-2 p-2 rounded-xl bg-stone-50 border border-stone-200">
-                <div className="flex items-center justify-between mb-1.5">
-                  <span className="text-[10px] uppercase tracking-wider font-mono text-stone-400">Tap to add or remove</span>
-                  <button onClick={() => setAssignFor(null)} className="text-[10px] font-medium px-2.5 py-1 rounded-full bg-stone-900 text-white">Done</button>
-                </div>
-                <div className="max-h-40 overflow-y-auto grid grid-cols-2 gap-1">
-                  {teamList.map(m => {
-                    const on = (assigneeMap[a.id] || []).some(x => x.id === m.id);
-                    return (
-                      <button key={m.id} onClick={() => toggleAssign(a.id, m.id)}
-                        className={`text-left px-2 py-1.5 rounded-lg text-xs flex items-center justify-between gap-1 ${on ? 'bg-indigo-600 text-white font-medium' : 'bg-white text-stone-700 border border-stone-200'}`}>
-                        <span className="truncate">{m.name}</span>{on && <Check size={12} className="flex-shrink-0" />}
-                      </button>
-                    );
-                  })}
-                </div>
+              <div onClick={(e) => e.stopPropagation()}>
+                <AssignPicker key={a.id} team={teamList} busy={assignBusy === a.id}
+                  currentIds={(assigneeMap[a.id] || []).map(x => x.id)}
+                  onCancel={() => setAssignFor(null)}
+                  onSave={(ids) => commitAssign(a.id, ids)} />
               </div>
             )}
             {a.notes && <div className="text-xs text-stone-600 mt-1 line-clamp-1">{a.notes}</div>}

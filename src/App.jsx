@@ -48,7 +48,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul14-flow";
+const BUILD_TAG = "jul14-extra";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -14325,6 +14325,11 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
   const [adding, setAdding] = useState(false); // property picker for adding
   const [expanded, setExpanded] = useState(() => new Set()); // expanded card keys
   const [actioning, setActioning] = useState(null); // job id being marked done / deleted
+  const [team, setTeam] = useState([]);
+  const [editDueJob, setEditDueJob] = useState(null);
+  const [assignJob, setAssignJob] = useState(null);
+  const [sizeJob, setSizeJob] = useState(null);
+  const [sizeBr, setSizeBr] = useState(''); const [sizeBa, setSizeBa] = useState('');
   const [loaded, setLoaded] = useState(false);
   const [picked, setPicked] = useState(null); // selected property
   const [view, setView] = useState('open');   // 'open' | 'upload' | 'detail'
@@ -14335,7 +14340,7 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
     const [propsRes, targetsRes] = await Promise.all([
       supabase.from('customers').select('*').eq('active', true).order('name'),
       supabase.from('assignment_targets')
-        .select('id, status, unit_id, party_id, template_section, unit:units(label, bedrooms, bathrooms), party:parties(label), assignment:assignments!inner(id, title, customer_id, active, deleted_at, scheduled_date, assignment_type)')
+        .select('id, status, unit_id, party_id, template_section, unit:units(label, bedrooms, bathrooms), party:parties(label), assignment:assignments!inner(id, title, customer_id, active, deleted_at, scheduled_date, assignment_type, took_longer)')
         .not('status', 'in', '(done,blocked)'),
     ]);
     const counts = {};
@@ -14349,13 +14354,25 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
       const key = `${cid}::${t.unit_id || ''}::${t.party_id || ''}`;
       if (!seenBedrooms.has(key)) { seenBedrooms.add(key); counts[cid] = (counts[cid] || 0) + 1; }
       if (!jobsByAsg[a.id]) {
-        jobsByAsg[a.id] = { id: a.id, customerId: cid, title: a.title || '', scheduledDate: a.scheduled_date || null, type: a.assignment_type || '', unitLabel: t.unit?.label || '', partyLabel: t.party?.label || '', bedrooms: t.unit?.bedrooms, bathrooms: t.unit?.bathrooms, count: 0, sections: { bedroom: 0, vanity: 0, bathroom: 0, general: 0, other: 0 } };
+        jobsByAsg[a.id] = { id: a.id, customerId: cid, title: a.title || '', scheduledDate: a.scheduled_date || null, type: a.assignment_type || '', unitLabel: t.unit?.label || '', partyLabel: t.party?.label || '', unitId: t.unit_id, bedrooms: t.unit?.bedrooms, bathrooms: t.unit?.bathrooms, tookLonger: !!a.took_longer, assignees: [], count: 0, sections: { bedroom: 0, vanity: 0, bathroom: 0, general: 0, other: 0 } };
       }
       jobsByAsg[a.id].count++;
       const sec = (t.template_section || '').toLowerCase();
       if (sec === 'bedroom' || sec === 'vanity' || sec === 'bathroom' || sec === 'general') jobsByAsg[a.id].sections[sec]++;
       else jobsByAsg[a.id].sections.other++;
     });
+    const jobIds = Object.keys(jobsByAsg);
+    if (jobIds.length) {
+      const { data: asgn } = await supabase.from('assignment_assignees')
+        .select('assignment_id, employee_id, status, employee:employees(id, name)')
+        .in('assignment_id', jobIds);
+      (asgn || []).forEach(r => {
+        const j = jobsByAsg[r.assignment_id]; if (!j) return;
+        j.assignees.push({ id: r.employee_id, name: r.employee?.name || '', requested: r.status === 'requested' });
+      });
+    }
+    const { data: emps } = await supabase.from('employees').select('id, name, role').eq('active', true).order('name');
+    setTeam((emps || []).filter(e => e.role !== 'owner'));
     setProperties(visibleProps(propsRes.data || [], employee));
     setAssignmentCounts(counts);
     setJobs(Object.values(jobsByAsg));
@@ -14435,6 +14452,37 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
     setActioning(null);
     load();
   };
+  const canAssignJobs = can(employee, 'assign_cleaners');
+  const canEditJobDates = can(employee, 'edit_due_dates');
+  const todayK = localTodayKey();
+  const saveJobDue = async (job, date) => {
+    setEditDueJob(null); setActioning(job.id);
+    await supabase.from('assignments').update({ scheduled_date: date || null }).eq('id', job.id);
+    setActioning(null); load();
+  };
+  const toggleJobAssignee = async (job, empId) => {
+    const has = job.assignees.some(a => a.id === empId);
+    setActioning(job.id);
+    if (has) await supabase.from('assignment_assignees').delete().eq('assignment_id', job.id).eq('employee_id', empId);
+    else await supabase.from('assignment_assignees').insert({ assignment_id: job.id, employee_id: empId, status: 'assigned', created_by: employee.id });
+    setActioning(null); load();
+  };
+  const saveJobSize = async (job, br, ba) => {
+    setSizeJob(null);
+    if (!job.unitId) return;
+    setActioning(job.id);
+    await supabase.from('units').update({
+      bedrooms: br === '' ? null : parseInt(br, 10),
+      bathrooms: ba === '' ? null : parseInt(ba, 10),
+    }).eq('id', job.unitId);
+    setActioning(null); load();
+  };
+  const toggleTookLonger = async (job) => {
+    setActioning(job.id);
+    await supabase.from('assignments').update({ took_longer: !job.tookLonger }).eq('id', job.id);
+    setActioning(null); load();
+  };
+
   const canDelete = can(employee, 'manage_assignments_admin');
   const canDone = can(employee, 'mark_assignments_done');
   const fmtSched = (key) => {
@@ -14504,12 +14552,79 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
                         </div>
                       ))}
                     </div>
-                  ) : (j.bedrooms || j.bathrooms) ? (
-                    <div className="mt-1.5 inline-flex items-center gap-1 text-[10px] font-mono px-2 py-0.5 rounded-full bg-stone-200 text-stone-700">
-                      {j.bedrooms || 0}BR / {j.bathrooms || 0}BA
-                    </div>
                   ) : null}
                 </button>
+
+                {/* Inline controls — due date, size, who's on it, took longer */}
+                <div className="flex items-center gap-1.5 flex-wrap mt-2">
+                  {/* Due date */}
+                  {editDueJob === j.id ? (
+                    <input type="date" autoFocus defaultValue={j.scheduledDate || ''}
+                      onChange={(e) => saveJobDue(j, e.target.value)} onBlur={() => setEditDueJob(null)}
+                      className="text-[10px] font-mono px-1.5 py-0.5 rounded border border-stone-400 bg-white" />
+                  ) : canEditJobDates ? (
+                    <button onClick={() => setEditDueJob(j.id)}
+                      className={`text-[10px] font-mono px-2 py-0.5 rounded-full border inline-flex items-center gap-1 ${j.scheduledDate
+                        ? (j.scheduledDate < todayK ? 'bg-red-100 text-red-700 border-red-200'
+                           : j.scheduledDate === todayK ? 'bg-emerald-100 text-emerald-800 border-emerald-200'
+                           : 'bg-stone-100 text-stone-600 border-stone-200')
+                        : 'bg-white text-stone-500 border-dashed border-stone-300'}`}>
+                      <Calendar size={9} /> {j.scheduledDate ? fmtSched(j.scheduledDate) : 'Set due date'}
+                    </button>
+                  ) : null}
+
+                  {/* Size (BR/BA) — editable, e.g. after a 1x1 turns out to be 2x2 */}
+                  {sizeJob === j.id ? (
+                    <span className="inline-flex items-center gap-1">
+                      <input type="number" min="0" autoFocus value={sizeBr} onChange={e => setSizeBr(e.target.value)}
+                        className="w-10 px-1 py-0.5 rounded border border-stone-300 text-[10px] font-mono" placeholder="BR" />
+                      <span className="text-[9px] text-stone-400">BR</span>
+                      <input type="number" min="0" value={sizeBa} onChange={e => setSizeBa(e.target.value)}
+                        className="w-10 px-1 py-0.5 rounded border border-stone-300 text-[10px] font-mono" placeholder="BA" />
+                      <span className="text-[9px] text-stone-400">BA</span>
+                      <button onClick={() => saveJobSize(j, sizeBr, sizeBa)} className="text-[10px] px-1.5 py-0.5 rounded bg-stone-900 text-white">Save</button>
+                      <button onClick={() => setSizeJob(null)} className="text-[10px] px-1 text-stone-500">×</button>
+                    </span>
+                  ) : j.unitId ? (
+                    <button onClick={() => { setSizeJob(j.id); setSizeBr(j.bedrooms ?? ''); setSizeBa(j.bathrooms ?? ''); }}
+                      className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-stone-200 text-stone-700 inline-flex items-center gap-1">
+                      {(j.bedrooms || j.bathrooms) ? `${j.bedrooms || 0}BR / ${j.bathrooms || 0}BA` : 'Set size'}
+                    </button>
+                  ) : null}
+
+                  {/* Who's on it */}
+                  {j.assignees.map(a => (
+                    <span key={a.id} className={`text-[10px] font-mono px-2 py-0.5 rounded-full inline-flex items-center gap-1 ${a.requested ? 'bg-amber-100 text-amber-800' : 'bg-indigo-100 text-indigo-700'}`}>
+                      <User size={9} /> {a.name}{a.requested ? ' asked' : ''}
+                    </span>
+                  ))}
+                  {canAssignJobs && (
+                    <button onClick={() => setAssignJob(assignJob === j.id ? null : j.id)}
+                      className="text-[10px] font-mono px-2 py-0.5 rounded-full border border-dashed border-stone-300 text-stone-500 inline-flex items-center gap-1">
+                      <Plus size={9} /> Assign
+                    </button>
+                  )}
+
+                  {/* Took longer → charge extra on the invoice */}
+                  <button onClick={() => toggleTookLonger(j)} disabled={actioning === j.id}
+                    className={`text-[10px] font-mono px-2 py-0.5 rounded-full inline-flex items-center gap-1 disabled:opacity-50 ${j.tookLonger ? 'bg-amber-500 text-white' : 'bg-white border border-dashed border-stone-300 text-stone-500'}`}>
+                    <Clock size={9} /> {j.tookLonger ? 'Extra' : 'Mark extra'}
+                  </button>
+                </div>
+
+                {canAssignJobs && assignJob === j.id && (
+                  <div className="mt-2 p-2 rounded-xl bg-stone-50 border border-stone-200 space-y-1">
+                    {team.map(m => {
+                      const on = j.assignees.some(a => a.id === m.id);
+                      return (
+                        <button key={m.id} onClick={() => toggleJobAssignee(j, m.id)} disabled={actioning === j.id}
+                          className={`w-full text-left px-2.5 py-1.5 rounded-lg text-sm flex items-center justify-between ${on ? 'bg-indigo-100 text-indigo-800' : 'bg-white text-stone-700 border border-stone-200'}`}>
+                          {m.name}{on && <Check size={13} />}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
                 <div className="flex items-center gap-1 flex-shrink-0">
                   {canDone && (
                     <button onClick={() => markJobDone(j)} disabled={actioning === j.id}
@@ -15501,7 +15616,7 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
       const PAGE = 1000;
       for (let from = 0; ; from += PAGE) {
         let q = supabase.from('assignment_targets')
-          .select('id, unit_id, party_id, assignment_id, template_item_key, template_section, status_notes, completed_at, status, assignment:assignments(id, assignment_type, deleted_at), party:parties(id,label)')
+          .select('id, unit_id, party_id, assignment_id, template_item_key, template_section, status_notes, completed_at, status, assignment:assignments(id, assignment_type, deleted_at, took_longer), party:parties(id,label)')
           .eq('status', 'done')
           .in('unit_id', unitIds)
           .gte('completed_at', start + 'T00:00:00').lte('completed_at', end + 'T23:59:59')
@@ -15554,7 +15669,8 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
       const brBa = (!brm && (meta.bedrooms || meta.bathrooms))
         ? ` · ${meta.bedrooms || 0}BR/${meta.bathrooms || 0}BA`
         : '';
-      const label = brm ? `${apt} - ${brm}` : `${apt}${brBa}`;
+      const tookLonger = !!g.items.find(it => it.assignment?.took_longer);
+      const label = (brm ? `${apt} - ${brm}` : `${apt}${brBa}`) + (tookLonger ? ' · EXTRA' : '');
       const subs = [];
       const seen = new Set();
       g.items.forEach(it => {
@@ -22022,6 +22138,35 @@ function AssignmentList({ property, employee, onBack, onNew, onNewChecklist, onN
     await supabase.from('assignments').update({ scheduled_date: date || null }).eq('id', id);
     load();
   };
+  // Assigning cleaners straight from this list.
+  const canAssignHere = can(employee, 'assign_cleaners');
+  const [teamList, setTeamList] = useState([]);
+  const [assignFor, setAssignFor] = useState(null);
+  const [assigneeMap, setAssigneeMap] = useState({}); // assignment_id -> [{id,name,requested}]
+  const loadAssignees = async (asgIds) => {
+    if (!asgIds.length) { setAssigneeMap({}); return; }
+    const { data, error } = await supabase.from('assignment_assignees')
+      .select('assignment_id, employee_id, status, employee:employees(id, name)')
+      .in('assignment_id', asgIds);
+    if (error) return;
+    const m = {};
+    (data || []).forEach(r => {
+      (m[r.assignment_id] = m[r.assignment_id] || []).push({ id: r.employee_id, name: r.employee?.name || '', requested: r.status === 'requested' });
+    });
+    setAssigneeMap(m);
+  };
+  useEffect(() => {
+    (async () => {
+      const { data } = await supabase.from('employees').select('id, name, role').eq('active', true).order('name');
+      setTeamList((data || []).filter(e => e.role !== 'owner'));
+    })();
+  }, []);
+  const toggleAssign = async (asgId, empId) => {
+    const has = (assigneeMap[asgId] || []).some(a => a.id === empId);
+    if (has) await supabase.from('assignment_assignees').delete().eq('assignment_id', asgId).eq('employee_id', empId);
+    else await supabase.from('assignment_assignees').insert({ assignment_id: asgId, employee_id: empId, status: 'assigned', created_by: employee.id });
+    load();
+  };
 
   const load = async () => {
     // Pull targets so we can group by unit and surface priority/type
@@ -22032,6 +22177,7 @@ function AssignmentList({ property, employee, onBack, onNew, onNewChecklist, onN
       .is('deleted_at', null)
       .order('created_at', { ascending: false });
     setAssignments(data || []); setLoaded(true);
+    loadAssignees((data || []).map(a => a.id));
   };
   useEffect(() => { load(); }, [property.id]);
   useAssignmentSync(load, 'asgn-list');
@@ -22248,7 +22394,31 @@ function AssignmentList({ property, employee, onBack, onNew, onNewChecklist, onN
                 a.scheduled_date ? <span className="flex items-center gap-1"><Calendar size={9} /> Due {fmtDueDate(a.scheduled_date)}</span> : <span>{fmtDate(a.created_at)}</span>
               )}
               <span>{a.done}/{a.total} done{a.inProgress > 0 && `, ${a.inProgress} in progress`}</span>
+              {(assigneeMap[a.id] || []).map(p => (
+                <span key={p.id} className={`px-2 py-0.5 rounded-full inline-flex items-center gap-1 ${p.requested ? 'bg-amber-100 text-amber-800' : 'bg-indigo-100 text-indigo-700'}`}>
+                  <User size={9} /> {p.name}{p.requested ? ' asked' : ''}
+                </span>
+              ))}
+              {canAssignHere && (
+                <button onClick={(e) => { e.stopPropagation(); setAssignFor(assignFor === a.id ? null : a.id); }}
+                  className="px-2 py-0.5 rounded-full border border-dashed border-stone-300 text-stone-500 inline-flex items-center gap-1">
+                  <Plus size={9} /> Assign
+                </button>
+              )}
             </div>
+            {canAssignHere && assignFor === a.id && (
+              <div onClick={(e) => e.stopPropagation()} className="mt-2 p-2 rounded-xl bg-stone-50 border border-stone-200 space-y-1">
+                {teamList.map(m => {
+                  const on = (assigneeMap[a.id] || []).some(x => x.id === m.id);
+                  return (
+                    <button key={m.id} onClick={() => toggleAssign(a.id, m.id)}
+                      className={`w-full text-left px-2.5 py-1.5 rounded-lg text-sm flex items-center justify-between ${on ? 'bg-indigo-100 text-indigo-800' : 'bg-white text-stone-700 border border-stone-200'}`}>
+                      {m.name}{on && <Check size={13} />}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
             {a.notes && <div className="text-xs text-stone-600 mt-1 line-clamp-1">{a.notes}</div>}
           </div>
           {!bulkMode && <ChevronRight size={14} className="text-stone-400 flex-shrink-0 mt-1" />}

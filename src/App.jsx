@@ -48,7 +48,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul14-daily4";
+const BUILD_TAG = "jul14-assign3";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -6049,17 +6049,23 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
 
                 {/* Assign picker */}
                 {canAssign && assignOpen === j.id && (
-                  <div className="mt-2 p-2 rounded-xl bg-stone-50 border border-stone-200 space-y-1">
-                    <div className="text-[10px] uppercase tracking-wider font-mono text-stone-400 mb-1">Tap to add or remove</div>
-                    {team.map(m => {
-                      const on = j.assignees.some(a => a.id === m.id) || j.requested.some(a => a.id === m.id);
-                      return (
-                        <button key={m.id} onClick={() => toggleAssignee(j, m.id)} disabled={busyId === j.id}
-                          className={`w-full text-left px-2.5 py-1.5 rounded-lg text-sm flex items-center justify-between ${on ? 'bg-indigo-100 text-indigo-800' : 'bg-white text-stone-700 border border-stone-200'}`}>
-                          {m.name}{on && <Check size={13} />}
-                        </button>
-                      );
-                    })}
+                  <div className="mt-2 p-2 rounded-xl bg-stone-50 border border-stone-200">
+                    <div className="flex items-center justify-between mb-1.5">
+                      <span className="text-[10px] uppercase tracking-wider font-mono text-stone-400">Tap to add or remove</span>
+                      <button onClick={() => setAssignOpen(null)}
+                        className="text-[10px] font-medium px-2.5 py-1 rounded-full bg-stone-900 text-white">Save</button>
+                    </div>
+                    <div className="max-h-40 overflow-y-auto grid grid-cols-2 gap-1">
+                      {team.map(m => {
+                        const on = j.assignees.some(a => a.id === m.id) || j.requested.some(a => a.id === m.id);
+                        return (
+                          <button key={m.id} onClick={() => toggleAssignee(j, m.id)} disabled={busyId === j.id}
+                            className={`text-left px-2 py-1.5 rounded-lg text-xs flex items-center justify-between gap-1 disabled:opacity-50 ${on ? 'bg-indigo-600 text-white font-medium' : 'bg-white text-stone-700 border border-stone-200'}`}>
+                            <span className="truncate">{m.name}</span>{on && <Check size={12} className="flex-shrink-0" />}
+                          </button>
+                        );
+                      })}
+                    </div>
                   </div>
                 )}
 
@@ -14485,14 +14491,19 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
     load();
   };
   const saveJobSize = async (job, br, ba) => {
-    setSizeJob(null);
-    if (!job.unitId) return;
+    if (!job.unitId) { setSizeJob(null); return; }
     setActioning(job.id);
-    await supabase.from('units').update({
+    const { data: updated, error } = await supabase.from('units').update({
       bedrooms: br === '' ? null : parseInt(br, 10),
       bathrooms: ba === '' ? null : parseInt(ba, 10),
-    }).eq('id', job.unitId);
-    setActioning(null); load();
+    }).eq('id', job.unitId).select('id, bedrooms, bathrooms');
+    setActioning(null);
+    if (error) { alert('Could not save size: ' + error.message); return; }
+    if (!updated || updated.length === 0) {
+      alert('Size did not save — the database rejected the update for this apartment.');
+      return;
+    }
+    setSizeJob(null); load();
   };
   const toggleTookLonger = async (job) => {
     setActioning(job.id);
@@ -14640,7 +14651,7 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
                         const on = j.assignees.some(a => a.id === m.id);
                         return (
                           <button key={m.id} onClick={() => toggleJobAssignee(j, m.id)} disabled={actioning === j.id}
-                            className={`text-left px-2 py-1.5 rounded-lg text-xs flex items-center justify-between gap-1 disabled:opacity-50 ${on ? 'bg-indigo-100 text-indigo-800 font-medium' : 'bg-white text-stone-700 border border-stone-200'}`}>
+                            className={`text-left px-2 py-1.5 rounded-lg text-xs flex items-center justify-between gap-1 disabled:opacity-50 ${on ? 'bg-indigo-600 text-white font-medium' : 'bg-white text-stone-700 border border-stone-200'}`}>
                             <span className="truncate">{m.name}</span>{on && <Check size={12} className="flex-shrink-0" />}
                           </button>
                         );
@@ -21070,12 +21081,24 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit }) {
     refreshUnitAsg();
   };
   const dSaveSize = async (unitId, br, ba) => {
-    setDSizeFor(null); setDBusy(unitId);
-    await supabase.from('units').update({
+    setDBusy(unitId);
+    const payload = {
       bedrooms: br === '' ? null : parseInt(br, 10),
       bathrooms: ba === '' ? null : parseInt(ba, 10),
-    }).eq('id', unitId);
-    setDBusy(null); refreshUnitAsg();
+    };
+    // .select() so we can tell a silent 0-row update (RLS) from a real save.
+    const { data: updated, error } = await supabase.from('units')
+      .update(payload).eq('id', unitId).select('id, bedrooms, bathrooms');
+    setDBusy(null);
+    if (error) { alert('Could not save size: ' + error.message); return; }
+    if (!updated || updated.length === 0) {
+      alert('Size did not save — the database rejected the update for this apartment.');
+      return;
+    }
+    // Optimistic: reflect the saved values right away.
+    setUnitSize(prev => ({ ...prev, [unitId]: { bedrooms: updated[0].bedrooms, bathrooms: updated[0].bathrooms } }));
+    setDSizeFor(null);
+    refreshUnitAsg();
   };
   const dMarkDone = async (asgId, label) => {
     if (!confirm(`Mark ${label} completed?`)) return;
@@ -21502,7 +21525,7 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit }) {
                                   const on = ua.assignees.some(a => a.id === m.id);
                                   return (
                                     <button key={m.id} onClick={() => dToggleAssignee(ua.id, m.id, on)} disabled={dBusy === ua.id}
-                                      className={`text-left px-2 py-1.5 rounded-lg text-xs flex items-center justify-between gap-1 disabled:opacity-50 ${on ? 'bg-indigo-100 text-indigo-800 font-medium' : 'bg-white text-stone-700 border border-stone-200'}`}>
+                                      className={`text-left px-2 py-1.5 rounded-lg text-xs flex items-center justify-between gap-1 disabled:opacity-50 ${on ? 'bg-indigo-600 text-white font-medium' : 'bg-white text-stone-700 border border-stone-200'}`}>
                                       <span className="truncate">{m.name}</span>{on && <Check size={12} className="flex-shrink-0" />}
                                     </button>
                                   );
@@ -22625,7 +22648,7 @@ function AssignmentList({ property, employee, onBack, onNew, onNewChecklist, onN
                     const on = (assigneeMap[a.id] || []).some(x => x.id === m.id);
                     return (
                       <button key={m.id} onClick={() => toggleAssign(a.id, m.id)}
-                        className={`text-left px-2 py-1.5 rounded-lg text-xs flex items-center justify-between gap-1 ${on ? 'bg-indigo-100 text-indigo-800 font-medium' : 'bg-white text-stone-700 border border-stone-200'}`}>
+                        className={`text-left px-2 py-1.5 rounded-lg text-xs flex items-center justify-between gap-1 ${on ? 'bg-indigo-600 text-white font-medium' : 'bg-white text-stone-700 border border-stone-200'}`}>
                         <span className="truncate">{m.name}</span>{on && <Check size={12} className="flex-shrink-0" />}
                       </button>
                     );

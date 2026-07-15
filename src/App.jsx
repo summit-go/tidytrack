@@ -48,7 +48,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul14-extra";
+const BUILD_TAG = "jul14-daily";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -14463,9 +14463,12 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
   const toggleJobAssignee = async (job, empId) => {
     const has = job.assignees.some(a => a.id === empId);
     setActioning(job.id);
-    if (has) await supabase.from('assignment_assignees').delete().eq('assignment_id', job.id).eq('employee_id', empId);
-    else await supabase.from('assignment_assignees').insert({ assignment_id: job.id, employee_id: empId, status: 'assigned', created_by: employee.id });
-    setActioning(null); load();
+    const { error } = has
+      ? await supabase.from('assignment_assignees').delete().eq('assignment_id', job.id).eq('employee_id', empId)
+      : await supabase.from('assignment_assignees').insert({ assignment_id: job.id, employee_id: empId, status: 'assigned', created_by: employee.id });
+    setActioning(null);
+    if (error) { alert('Could not update who\u2019s assigned: ' + error.message); return; }
+    load();
   };
   const saveJobSize = async (job, br, ba) => {
     setSizeJob(null);
@@ -14613,16 +14616,22 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
                 </div>
 
                 {canAssignJobs && assignJob === j.id && (
-                  <div className="mt-2 p-2 rounded-xl bg-stone-50 border border-stone-200 space-y-1">
-                    {team.map(m => {
-                      const on = j.assignees.some(a => a.id === m.id);
-                      return (
-                        <button key={m.id} onClick={() => toggleJobAssignee(j, m.id)} disabled={actioning === j.id}
-                          className={`w-full text-left px-2.5 py-1.5 rounded-lg text-sm flex items-center justify-between ${on ? 'bg-indigo-100 text-indigo-800' : 'bg-white text-stone-700 border border-stone-200'}`}>
-                          {m.name}{on && <Check size={13} />}
-                        </button>
-                      );
-                    })}
+                  <div className="mt-2 p-2 rounded-xl bg-stone-50 border border-stone-200">
+                    <div className="flex items-center justify-between mb-1.5">
+                      <span className="text-[10px] uppercase tracking-wider font-mono text-stone-400">Tap to add or remove</span>
+                      <button onClick={() => setAssignJob(null)} className="text-[10px] text-stone-500 px-1">Done</button>
+                    </div>
+                    <div className="max-h-40 overflow-y-auto grid grid-cols-2 gap-1">
+                      {team.map(m => {
+                        const on = j.assignees.some(a => a.id === m.id);
+                        return (
+                          <button key={m.id} onClick={() => toggleJobAssignee(j, m.id)} disabled={actioning === j.id}
+                            className={`text-left px-2 py-1.5 rounded-lg text-xs flex items-center justify-between gap-1 disabled:opacity-50 ${on ? 'bg-indigo-100 text-indigo-800 font-medium' : 'bg-white text-stone-700 border border-stone-200'}`}>
+                            <span className="truncate">{m.name}</span>{on && <Check size={12} className="flex-shrink-0" />}
+                          </button>
+                        );
+                      })}
+                    </div>
                   </div>
                 )}
                 <div className="flex items-center gap-1 flex-shrink-0">
@@ -20966,6 +20975,76 @@ function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenAssi
 // Day detail: shows all properties + units cleaned on this date
 function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit }) {
   const [data, setData] = useState(null);
+  // Open assignment per unit, so the same inline controls (done / size /
+  // assign / due date) work straight from a Daily card.
+  const [unitAsg, setUnitAsg] = useState({}); // unitId -> {id, scheduledDate, bedrooms, bathrooms, assignees[]}
+  const [dTeam, setDTeam] = useState([]);
+  const [dBusy, setDBusy] = useState(null);
+  const [dAssignFor, setDAssignFor] = useState(null);
+  const [dDueFor, setDDueFor] = useState(null);
+  const [dSizeFor, setDSizeFor] = useState(null);
+  const [dBr, setDBr] = useState(''); const [dBa, setDBa] = useState('');
+  const dToday = localTodayKey();
+  const canDailyAssign = can(employee, 'assign_cleaners');
+  const canDailyDates = can(employee, 'edit_due_dates');
+  const canDailyDone = can(employee, 'mark_assignments_done');
+
+  const loadUnitAsg = async () => {
+    const { data: rows } = await supabase.from('assignment_targets')
+      .select('unit_id, status, unit:units(id, bedrooms, bathrooms), assignment:assignments!inner(id, active, deleted_at, scheduled_date)')
+      .not('status', 'in', '(done,blocked)');
+    const m = {};
+    (rows || []).forEach(t => {
+      const a = t.assignment;
+      if (!a || a.active === false || a.deleted_at || !t.unit_id) return;
+      if (!m[t.unit_id]) m[t.unit_id] = { id: a.id, scheduledDate: a.scheduled_date || null, bedrooms: t.unit?.bedrooms, bathrooms: t.unit?.bathrooms, assignees: [] };
+    });
+    const ids = Object.values(m).map(v => v.id);
+    if (ids.length) {
+      const { data: asg } = await supabase.from('assignment_assignees')
+        .select('assignment_id, employee_id, status, employee:employees(name)').in('assignment_id', ids);
+      (asg || []).forEach(r => {
+        Object.values(m).forEach(v => {
+          if (v.id === r.assignment_id) v.assignees.push({ id: r.employee_id, name: r.employee?.name || '', requested: r.status === 'requested' });
+        });
+      });
+    }
+    setUnitAsg(m);
+    const { data: emps } = await supabase.from('employees').select('id, name, role').eq('active', true).order('name');
+    setDTeam((emps || []).filter(e => e.role !== 'owner'));
+  };
+  useEffect(() => { loadUnitAsg(); /* eslint-disable-next-line */ }, [date]);
+
+  const dSaveDue = async (asgId, val) => {
+    setDDueFor(null); setDBusy(asgId);
+    await supabase.from('assignments').update({ scheduled_date: val || null }).eq('id', asgId);
+    setDBusy(null); loadUnitAsg();
+  };
+  const dToggleAssignee = async (asgId, empId, has) => {
+    setDBusy(asgId);
+    const { error } = has
+      ? await supabase.from('assignment_assignees').delete().eq('assignment_id', asgId).eq('employee_id', empId)
+      : await supabase.from('assignment_assignees').insert({ assignment_id: asgId, employee_id: empId, status: 'assigned', created_by: employee.id });
+    setDBusy(null);
+    if (error) { alert('Could not update: ' + error.message); return; }
+    loadUnitAsg();
+  };
+  const dSaveSize = async (unitId, br, ba) => {
+    setDSizeFor(null); setDBusy(unitId);
+    await supabase.from('units').update({
+      bedrooms: br === '' ? null : parseInt(br, 10),
+      bathrooms: ba === '' ? null : parseInt(ba, 10),
+    }).eq('id', unitId);
+    setDBusy(null); loadUnitAsg();
+  };
+  const dMarkDone = async (asgId, label) => {
+    if (!confirm(`Mark ${label} completed?`)) return;
+    setDBusy(asgId);
+    await supabase.from('assignment_targets')
+      .update({ status: 'done', completed_at: new Date().toISOString(), completed_by: employee.id })
+      .eq('assignment_id', asgId).neq('status', 'done');
+    setDBusy(null); loadUnitAsg();
+  };
   // Filters — multi-select for cleaners + properties so the owner can
   // zoom into a specific person or building's day. Empty Set = "no filter".
   const [filtersOpen, setFiltersOpen] = useState(false);
@@ -21280,33 +21359,116 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit }) {
                   {/* Multi-unit: list of units */}
                   {sortedUnits.length > 0 && (
                     <div className="space-y-2">
-                      {sortedUnits.map(u => (
-                        <button key={u.unitId}
-                          onClick={() => onOpenUnit(propId, u.unitId, u.unitLabel, pg.property.name)}
+                      {sortedUnits.map(u => {
+                        const ua = unitAsg[u.unitId];
+                        return (
+                        <div key={u.unitId}
                           className={`w-full text-left p-4 rounded-2xl border transition-colors ${
-                            u.hasDamage ? 'bg-red-50/50 border-red-200 hover:border-red-400' : 'bg-white border-stone-200 hover:border-stone-400'
+                            u.hasDamage ? 'bg-red-50/50 border-red-200' : 'bg-white border-stone-200'
                           }`}>
-                          <div className="flex items-center justify-between">
-                            <div className="flex-1 min-w-0">
-                              <div className="flex items-center gap-2 flex-wrap mb-1">
-                                <span className="font-serif text-lg text-stone-900">{u.unitLabel}</span>
-                                {u.hasDamage && (
-                                  <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-red-100 text-red-700">
-                                    ⚠ Damage
-                                  </span>
-                                )}
+                          <button onClick={() => onOpenUnit(propId, u.unitId, u.unitLabel, pg.property.name)}
+                            className="w-full text-left">
+                            <div className="flex items-center justify-between">
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-2 flex-wrap mb-1">
+                                  <span className="font-serif text-lg text-stone-900">{u.unitLabel}</span>
+                                  {u.hasDamage && (
+                                    <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-red-100 text-red-700">
+                                      ⚠ Damage
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="text-xs text-stone-500 font-mono">
+                                  {fmtTimeShort(u.totalMs)} total · {u.employees.size} {u.employees.size === 1 ? 'cleaner' : 'cleaners'} · {u.photoCount} {u.photoCount === 1 ? 'photo' : 'photos'}
+                                </div>
+                                <div className="text-xs text-stone-600 mt-1">
+                                  {[...u.employees].join(', ')}
+                                </div>
                               </div>
-                              <div className="text-xs text-stone-500 font-mono">
-                                {fmtTimeShort(u.totalMs)} total · {u.employees.size} {u.employees.size === 1 ? 'cleaner' : 'cleaners'} · {u.photoCount} {u.photoCount === 1 ? 'photo' : 'photos'}
+                              <ChevronRight size={16} className="text-stone-400 flex-shrink-0 ml-2" />
+                            </div>
+                          </button>
+
+                          {/* Inline controls for this unit's open assignment */}
+                          <div className="flex items-center gap-1.5 flex-wrap mt-2">
+                            {dSizeFor === u.unitId ? (
+                              <span className="inline-flex items-center gap-1">
+                                <input type="number" min="0" autoFocus value={dBr} onChange={e => setDBr(e.target.value)}
+                                  className="w-10 px-1 py-0.5 rounded border border-stone-300 text-[10px] font-mono" placeholder="BR" />
+                                <span className="text-[9px] text-stone-400">BR</span>
+                                <input type="number" min="0" value={dBa} onChange={e => setDBa(e.target.value)}
+                                  className="w-10 px-1 py-0.5 rounded border border-stone-300 text-[10px] font-mono" placeholder="BA" />
+                                <span className="text-[9px] text-stone-400">BA</span>
+                                <button onClick={() => dSaveSize(u.unitId, dBr, dBa)} className="text-[10px] px-1.5 py-0.5 rounded bg-stone-900 text-white">Save</button>
+                                <button onClick={() => setDSizeFor(null)} className="text-[10px] px-1 text-stone-500">×</button>
+                              </span>
+                            ) : (
+                              <button onClick={() => { setDSizeFor(u.unitId); setDBr(ua?.bedrooms ?? ''); setDBa(ua?.bathrooms ?? ''); }}
+                                className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-stone-200 text-stone-700">
+                                {(ua?.bedrooms || ua?.bathrooms) ? `${ua.bedrooms || 0}BR / ${ua.bathrooms || 0}BA` : 'Set size'}
+                              </button>
+                            )}
+
+                            {ua ? (<>
+                              {dDueFor === ua.id ? (
+                                <input type="date" autoFocus defaultValue={ua.scheduledDate || ''}
+                                  onChange={(e) => dSaveDue(ua.id, e.target.value)} onBlur={() => setDDueFor(null)}
+                                  className="text-[10px] font-mono px-1.5 py-0.5 rounded border border-stone-400 bg-white" />
+                              ) : canDailyDates ? (
+                                <button onClick={() => setDDueFor(ua.id)}
+                                  className={`text-[10px] font-mono px-2 py-0.5 rounded-full border inline-flex items-center gap-1 ${ua.scheduledDate
+                                    ? (ua.scheduledDate < dToday ? 'bg-red-100 text-red-700 border-red-200'
+                                       : ua.scheduledDate === dToday ? 'bg-emerald-100 text-emerald-800 border-emerald-200'
+                                       : 'bg-stone-100 text-stone-600 border-stone-200')
+                                    : 'bg-white text-stone-500 border-dashed border-stone-300'}`}>
+                                  <Calendar size={9} /> {ua.scheduledDate ? fmtDueDate(ua.scheduledDate) : 'Set due date'}
+                                </button>
+                              ) : null}
+
+                              {ua.assignees.map(a => (
+                                <span key={a.id} className={`text-[10px] font-mono px-2 py-0.5 rounded-full inline-flex items-center gap-1 ${a.requested ? 'bg-amber-100 text-amber-800' : 'bg-indigo-100 text-indigo-700'}`}>
+                                  <User size={9} /> {a.name}{a.requested ? ' asked' : ''}
+                                </span>
+                              ))}
+                              {canDailyAssign && (
+                                <button onClick={() => setDAssignFor(dAssignFor === ua.id ? null : ua.id)}
+                                  className="text-[10px] font-mono px-2 py-0.5 rounded-full border border-dashed border-stone-300 text-stone-500 inline-flex items-center gap-1">
+                                  <Plus size={9} /> Assign
+                                </button>
+                              )}
+                              {canDailyDone && (
+                                <button onClick={() => dMarkDone(ua.id, u.unitLabel)} disabled={dBusy === ua.id}
+                                  className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-600 text-white inline-flex items-center gap-1 disabled:opacity-50">
+                                  <Check size={9} /> Mark done
+                                </button>
+                              )}
+                            </>) : (
+                              <span className="text-[10px] font-mono text-stone-400">No open assignment</span>
+                            )}
+                          </div>
+
+                          {ua && canDailyAssign && dAssignFor === ua.id && (
+                            <div className="mt-2 p-2 rounded-xl bg-stone-50 border border-stone-200">
+                              <div className="flex items-center justify-between mb-1.5">
+                                <span className="text-[10px] uppercase tracking-wider font-mono text-stone-400">Tap to add or remove</span>
+                                <button onClick={() => setDAssignFor(null)} className="text-[10px] text-stone-500 px-1">Done</button>
                               </div>
-                              <div className="text-xs text-stone-600 mt-1">
-                                {[...u.employees].join(', ')}
+                              <div className="max-h-40 overflow-y-auto grid grid-cols-2 gap-1">
+                                {dTeam.map(m => {
+                                  const on = ua.assignees.some(a => a.id === m.id);
+                                  return (
+                                    <button key={m.id} onClick={() => dToggleAssignee(ua.id, m.id, on)} disabled={dBusy === ua.id}
+                                      className={`text-left px-2 py-1.5 rounded-lg text-xs flex items-center justify-between gap-1 disabled:opacity-50 ${on ? 'bg-indigo-100 text-indigo-800 font-medium' : 'bg-white text-stone-700 border border-stone-200'}`}>
+                                      <span className="truncate">{m.name}</span>{on && <Check size={12} className="flex-shrink-0" />}
+                                    </button>
+                                  );
+                                })}
                               </div>
                             </div>
-                            <ChevronRight size={16} className="text-stone-400 flex-shrink-0 ml-2" />
-                          </div>
-                        </button>
-                      ))}
+                          )}
+                        </div>
+                        );
+                      })}
                     </div>
                   )}
 
@@ -22163,8 +22325,10 @@ function AssignmentList({ property, employee, onBack, onNew, onNewChecklist, onN
   }, []);
   const toggleAssign = async (asgId, empId) => {
     const has = (assigneeMap[asgId] || []).some(a => a.id === empId);
-    if (has) await supabase.from('assignment_assignees').delete().eq('assignment_id', asgId).eq('employee_id', empId);
-    else await supabase.from('assignment_assignees').insert({ assignment_id: asgId, employee_id: empId, status: 'assigned', created_by: employee.id });
+    const { error } = has
+      ? await supabase.from('assignment_assignees').delete().eq('assignment_id', asgId).eq('employee_id', empId)
+      : await supabase.from('assignment_assignees').insert({ assignment_id: asgId, employee_id: empId, status: 'assigned', created_by: employee.id });
+    if (error) { alert('Could not update who\u2019s assigned: ' + error.message); return; }
     load();
   };
 
@@ -22407,16 +22571,22 @@ function AssignmentList({ property, employee, onBack, onNew, onNewChecklist, onN
               )}
             </div>
             {canAssignHere && assignFor === a.id && (
-              <div onClick={(e) => e.stopPropagation()} className="mt-2 p-2 rounded-xl bg-stone-50 border border-stone-200 space-y-1">
-                {teamList.map(m => {
-                  const on = (assigneeMap[a.id] || []).some(x => x.id === m.id);
-                  return (
-                    <button key={m.id} onClick={() => toggleAssign(a.id, m.id)}
-                      className={`w-full text-left px-2.5 py-1.5 rounded-lg text-sm flex items-center justify-between ${on ? 'bg-indigo-100 text-indigo-800' : 'bg-white text-stone-700 border border-stone-200'}`}>
-                      {m.name}{on && <Check size={13} />}
-                    </button>
-                  );
-                })}
+              <div onClick={(e) => e.stopPropagation()} className="mt-2 p-2 rounded-xl bg-stone-50 border border-stone-200">
+                <div className="flex items-center justify-between mb-1.5">
+                  <span className="text-[10px] uppercase tracking-wider font-mono text-stone-400">Tap to add or remove</span>
+                  <button onClick={() => setAssignFor(null)} className="text-[10px] text-stone-500 px-1">Done</button>
+                </div>
+                <div className="max-h-40 overflow-y-auto grid grid-cols-2 gap-1">
+                  {teamList.map(m => {
+                    const on = (assigneeMap[a.id] || []).some(x => x.id === m.id);
+                    return (
+                      <button key={m.id} onClick={() => toggleAssign(a.id, m.id)}
+                        className={`text-left px-2 py-1.5 rounded-lg text-xs flex items-center justify-between gap-1 ${on ? 'bg-indigo-100 text-indigo-800 font-medium' : 'bg-white text-stone-700 border border-stone-200'}`}>
+                        <span className="truncate">{m.name}</span>{on && <Check size={12} className="flex-shrink-0" />}
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
             )}
             {a.notes && <div className="text-xs text-stone-600 mt-1 line-clamp-1">{a.notes}</div>}

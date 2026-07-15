@@ -48,7 +48,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul14-cards";
+const BUILD_TAG = "jul14-home";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -813,8 +813,12 @@ function naturalCompare(a, b) {
 // Falls back to first non-numeric prefix, or null if no match.
 function buildingFromLabel(label) {
   if (!label) return null;
-  const m = String(label).match(/^([A-Za-z]+\d+)/);
-  return m ? m[1] : null;
+  const s = String(label);
+  const dash = s.match(/^([A-Za-z]+\d+)-/);
+  if (dash) return dash[1];
+  const letter = s.match(/^([A-Za-z]+)\d/);
+  if (letter) return letter[1].toUpperCase();
+  return null;
 }
 
 // Pull the floor number out of an apartment label. The first digit of
@@ -5803,10 +5807,192 @@ function TodayApartmentsCard({ propertyId, onGoToBedroom, full = false }) {
   );
 }
 
+// =================================================================
+// ASSIGNED TO YOU — jobs specifically assigned to this cleaner at the
+// property they're clocked into. Surfaces on their Home so a job
+// assigned to them lands right in their queue.
+// =================================================================
+function YourJobsCard({ propertyId, employeeId, onGoToBedroom }) {
+  const [jobs, setJobs] = useState([]);
+  const [loaded, setLoaded] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const { data } = await supabase.from('assignment_targets')
+        .select('id, unit_id, party_id, status, unit:units(label), party:parties(label), assignment:assignments!inner(customer_id, active, deleted_at, assignment_type)')
+        .eq('assigned_to', employeeId)
+        .not('status', 'in', '(done,blocked)');
+      const rows = (data || []).filter(t => t.assignment?.customer_id === propertyId && t.assignment?.active !== false && !t.assignment?.deleted_at);
+      const byBed = {};
+      rows.forEach(t => {
+        const k = `${t.unit_id}:${t.party_id}`;
+        if (!byBed[k]) byBed[k] = { unitId: t.unit_id, partyId: t.party_id, unitLabel: t.unit?.label || '', partyLabel: t.party?.label || '', type: t.assignment?.assignment_type || '' };
+      });
+      if (!cancelled) {
+        setJobs(Object.values(byBed).sort((a, b) => naturalCompare(a.unitLabel, b.unitLabel)));
+        setLoaded(true);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [propertyId, employeeId]);
+
+  if (!loaded || jobs.length === 0) return null;
+  return (
+    <div className="mx-4 mt-4 p-4 rounded-2xl bg-indigo-50 border border-indigo-200">
+      <div className="text-xs uppercase tracking-wider text-indigo-800 font-mono mb-2.5 flex items-center gap-1.5">
+        <User size={12} /> Assigned to you · {jobs.length}
+      </div>
+      <div className="space-y-1.5">
+        {jobs.map(j => (
+          <button key={`${j.unitId}:${j.partyId}`} onClick={() => onGoToBedroom && onGoToBedroom({ unit_id: j.unitId, party_id: j.partyId })}
+            className="w-full text-left px-3 py-2 rounded-lg bg-white border border-indigo-200 flex items-center justify-between gap-2 active:scale-98">
+            <div className="min-w-0">
+              <div className="text-sm text-stone-800 truncate">{j.unitLabel}{j.partyLabel ? ` · ${j.partyLabel}` : ''}</div>
+              {j.type && <div className="text-[11px] text-stone-500 font-mono">{assignmentTypeLabel(j.type)}</div>}
+            </div>
+            <ChevronRight size={14} className="text-indigo-400 flex-shrink-0" />
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// =================================================================
+// CLEANER WORK LIST — the cleaner's own jobs (and all pending jobs)
+// across EVERY property, so they see their whole day. Same-property
+// jobs start the clean directly; other-property jobs offer to switch.
+// =================================================================
+function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchProperty }) {
+  const [sub, setSub] = useState('mine'); // 'mine' | 'all'
+  const [jobs, setJobs] = useState([]);
+  const [loaded, setLoaded] = useState(false);
+  const todayKey = localTodayKey();
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const { data } = await supabase.from('assignment_targets')
+        .select('id, unit_id, party_id, status, assigned_to, unit:units(label), party:parties(label), assignment:assignments!inner(id, customer_id, active, deleted_at, assignment_type, scheduled_date, customer:customers(name))')
+        .not('status', 'in', '(done,blocked)');
+      const byJob = {};
+      (data || []).forEach(t => {
+        const a = t.assignment;
+        if (!a || a.active === false || a.deleted_at) return;
+        if (!byJob[a.id]) {
+          byJob[a.id] = { id: a.id, customerId: a.customer_id, propName: a.customer?.name || 'Property', type: a.assignment_type || '', scheduledDate: a.scheduled_date || null, unitLabel: t.unit?.label || '', partyLabel: t.party?.label || '', unitId: t.unit_id, partyId: t.party_id, mine: false };
+        }
+        if (t.assigned_to === employee?.id) byJob[a.id].mine = true;
+      });
+      if (!cancelled) { setJobs(Object.values(byJob)); setLoaded(true); }
+    })();
+    return () => { cancelled = true; };
+  }, [employee?.id]);
+
+  const dueRank = (d) => !d ? 2 : (d < todayKey ? 0 : d === todayKey ? 1 : 3);
+  const list = (sub === 'mine' ? jobs.filter(j => j.mine) : jobs)
+    .sort((a, b) =>
+      (sub === 'all' ? (b.mine - a.mine) : 0)
+      || dueRank(a.scheduledDate) - dueRank(b.scheduledDate)
+      || naturalCompare(a.propName, b.propName)
+      || naturalCompare(a.unitLabel, b.unitLabel));
+  const fmtDue = (d) => !d ? 'No date' : d < todayKey ? `Overdue · ${fmtDueDate(d)}` : d === todayKey ? 'Today' : fmtDueDate(d);
+  const openJob = (j) => {
+    if (j.customerId === currentPropertyId) onGoToBedroom && onGoToBedroom({ unit_id: j.unitId, party_id: j.partyId });
+    else onSwitchProperty && onSwitchProperty();
+  };
+
+  return (
+    <div className="px-4">
+      <div className="flex gap-1 bg-stone-100 p-1 rounded-xl mb-4 mt-4">
+        <button onClick={() => setSub('mine')} className={`flex-1 py-2 rounded-lg text-xs font-medium ${sub === 'mine' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>Assigned to me</button>
+        <button onClick={() => setSub('all')} className={`flex-1 py-2 rounded-lg text-xs font-medium ${sub === 'all' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>All pending</button>
+      </div>
+      {!loaded ? (
+        <div className="text-center py-8 text-stone-400 text-sm">Loading…</div>
+      ) : list.length === 0 ? (
+        <div className="text-center py-10 text-stone-400 text-sm">{sub === 'mine' ? 'Nothing assigned to you right now. 🎉' : 'No open assignments.'}</div>
+      ) : (
+        <div className="space-y-2 pb-4">
+          {list.map(j => {
+            const here = j.customerId === currentPropertyId;
+            return (
+              <button key={j.id} onClick={() => openJob(j)}
+                className="w-full text-left p-3.5 rounded-2xl bg-white border border-stone-200 active:scale-98">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-serif text-lg text-stone-900 truncate">{j.unitLabel || 'Job'}{j.partyLabel ? ` · ${j.partyLabel}` : ''}</span>
+                  {j.mine && <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700 flex-shrink-0">Yours</span>}
+                </div>
+                <div className="text-xs text-stone-500 font-mono mt-0.5 flex items-center gap-1">
+                  <Building2 size={11} /> {j.propName}{j.type ? ` · ${assignmentTypeLabel(j.type)}` : ''}
+                </div>
+                <div className="flex items-center justify-between mt-1.5">
+                  <span className={`text-[11px] font-mono ${j.scheduledDate && j.scheduledDate < todayKey ? 'text-red-600' : j.scheduledDate === todayKey ? 'text-emerald-700' : 'text-stone-400'}`}>{fmtDue(j.scheduledDate)}</span>
+                  <span className="text-[11px] font-medium text-amber-700">{here ? 'Start cleaning →' : 'Switch here →'}</span>
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Cleaner "Properties" tab — every property with its open count. Tap the
+// one you're in to work it; tap another to switch (clock out + pick).
+function CleanerPropertiesList({ currentPropertyId, employee, onOpenCurrent, onSwitch }) {
+  const [props, setProps] = useState([]);
+  const [counts, setCounts] = useState({});
+  const [loaded, setLoaded] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const [pRes, tRes] = await Promise.all([
+        supabase.from('customers').select('*').eq('active', true).order('name'),
+        supabase.from('assignment_targets').select('unit_id, party_id, status, assignment:assignments!inner(customer_id, active, deleted_at)').not('status', 'in', '(done,blocked)'),
+      ]);
+      const c = {}; const seen = new Set();
+      (tRes.data || []).forEach(t => {
+        const a = t.assignment; if (!a || a.active === false || a.deleted_at) return;
+        const cid = a.customer_id; if (!cid) return;
+        const k = `${cid}:${t.unit_id || ''}:${t.party_id || ''}`;
+        if (!seen.has(k)) { seen.add(k); c[cid] = (c[cid] || 0) + 1; }
+      });
+      if (!cancelled) { setProps(visibleProps(pRes.data || [], employee)); setCounts(c); setLoaded(true); }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+  if (!loaded) return <div className="text-center py-8 text-stone-400 text-sm">Loading…</div>;
+  const sorted = [...props].sort((a, b) =>
+    (a.id === currentPropertyId ? -1 : b.id === currentPropertyId ? 1 : 0)
+    || (counts[b.id] || 0) - (counts[a.id] || 0)
+    || (a.name || '').localeCompare(b.name || ''));
+  return (
+    <div className="px-4 pt-4 pb-4 space-y-2">
+      {sorted.map(p => {
+        const here = p.id === currentPropertyId;
+        return (
+          <button key={p.id} onClick={() => here ? onOpenCurrent() : onSwitch()}
+            className={`w-full text-left p-4 rounded-2xl border active:scale-98 ${here ? 'bg-amber-50 border-amber-300' : 'bg-white border-stone-200'}`}>
+            <div className="flex items-center justify-between gap-2">
+              <span className="font-serif text-lg text-stone-900 truncate">{p.name}</span>
+              <div className="flex items-center gap-2 flex-shrink-0">
+                {here && <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-amber-600 text-white">You're here</span>}
+                {(counts[p.id] || 0) > 0 && <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-stone-100 text-stone-600">{counts[p.id]} open</span>}
+              </div>
+            </div>
+            {p.address && <div className="text-xs text-stone-500 font-mono mt-1 truncate">{p.address}</div>}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onClockOut, onSwitchProperty, onStartNew, onReopen, onEndBlock, onGoToBedroom, onOpenMessages, onOpenChangePin, onOpenBedroomHistory, onJoinBlock, onUndoBlock, onMoveBlock, cleanerTab: cleanerTabProp, setCleanerTab: setCleanerTabProp, busy }) {
   const [showMenu, setShowMenu] = useState(false);
   const [showAssignmentForm, setShowAssignmentForm] = useState(false);
-  const [homeView, setHomeView] = useState('now'); // 'now' | 'today'
+  const [homeMode, setHomeMode] = useState('assignments'); // 'assignments' | 'properties'
   // Bottom nav tab — Home / Assignments / More. Parent (AuthedShift)
   // controls this when provided so the tab persists across BlockView
   // navigation. Falls back to local state for standalone use.
@@ -5936,19 +6122,32 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
       {/* === HOME TAB === */}
       {cleanerTab === 'home' && (
         <>
-          {/* Now / Today toggle */}
+          {/* Assignments / Properties toggle */}
           <div className="px-4 pt-4">
             <div className="flex gap-1 bg-stone-100 p-1 rounded-xl">
-              <button onClick={() => setHomeView('now')}
-                className={`flex-1 py-2 rounded-lg text-sm font-medium ${homeView === 'now' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>Now</button>
-              <button onClick={() => setHomeView('today')}
-                className={`flex-1 py-2 rounded-lg text-sm font-medium ${homeView === 'today' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>Today</button>
+              <button onClick={() => setHomeMode('assignments')}
+                className={`flex-1 py-2 rounded-lg text-sm font-medium ${homeMode === 'assignments' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>Assignments</button>
+              <button onClick={() => setHomeMode('properties')}
+                className={`flex-1 py-2 rounded-lg text-sm font-medium ${homeMode === 'properties' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>Properties</button>
             </div>
           </div>
 
+          {homeMode === 'assignments' && (
+            <CleanerWorkList employee={employee} currentPropertyId={shift.customer_id}
+              onGoToBedroom={onGoToBedroom} onSwitchProperty={onSwitchProperty} />
+          )}
+          {homeMode === 'properties' && (
+            <CleanerPropertiesList currentPropertyId={shift.customer_id} employee={employee}
+              onOpenCurrent={() => setCleanerTab('assignments')}
+              onSwitch={() => onSwitchProperty && onSwitchProperty()} />
+          )}
+
+          {false && (<>
           {homeView === 'today' && (
             <TodayApartmentsCard full propertyId={shift.customer_id} onGoToBedroom={onGoToBedroom} />
           )}
+
+          <YourJobsCard propertyId={shift.customer_id} employeeId={employee?.id} onGoToBedroom={onGoToBedroom} />
 
           {homeView === 'now' && (<>
           {/* Today's stats card — quick summary of what the cleaner
@@ -6052,6 +6251,7 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
               <OthersActivityToday propertyId={shift.customer_id} myEmployeeId={employee.id} onOpenBedroomHistory={onOpenBedroomHistory} />
             )}
           </div>
+          </>)}
           </>)}
         </>
       )}
@@ -19206,7 +19406,9 @@ function AssignedVsCleanedView({ employee, onBack, onOpenBedroomHistory, persist
   const buildingFromLabel = (unitLabel) => {
     if (!unitLabel) return '—';
     const idx = unitLabel.indexOf('-');
-    return idx > 0 ? unitLabel.slice(0, idx) : unitLabel;
+    if (idx > 0) return unitLabel.slice(0, idx);
+    const m = unitLabel.match(/^([A-Za-z]+)\d/);
+    return m ? m[1].toUpperCase() : unitLabel;
   };
   // Status bucket for a row (matches the top summary chips).
   const statusOfRow = (r) => {
@@ -22099,8 +22301,17 @@ function QuickAssignmentForm({ property, employee, onCancel, onSaved }) {
   const [scheduledDate, setScheduledDate] = useState('');
   const [priority, setPriority] = useState(false);
   const [notes, setNotes] = useState('');
+  const [assignedTo, setAssignedTo] = useState('');
+  const [cleaners, setCleaners] = useState([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+
+  useEffect(() => {
+    (async () => {
+      const { data } = await supabase.from('employees').select('id, name, role').eq('active', true).order('name');
+      setCleaners((data || []).filter(e => e.role !== 'owner'));
+    })();
+  }, []);
 
   const step = (setter, val, delta, min = 0, max = 12) =>
     setter(Math.max(min, Math.min(max, (parseInt(val, 10) || 0) + delta)));
@@ -22157,6 +22368,7 @@ function QuickAssignmentForm({ property, employee, onCancel, onSaved }) {
       const { error: te } = await supabase.from('assignment_targets').insert({
         assignment_id: asg.id, unit_id: unit.id, party_id: party.id,
         status: 'pending', priority: !!priority,
+        assigned_to: assignedTo || null,
       });
       if (te) throw te;
       setBusy(false);
@@ -22220,6 +22432,16 @@ function QuickAssignmentForm({ property, employee, onCancel, onSaved }) {
           <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Target date (optional)</label>
           <input type="date" value={scheduledDate} onChange={e => setScheduledDate(e.target.value)}
             className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white text-stone-900" />
+        </div>
+
+        <div>
+          <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Assign to (optional)</label>
+          <select value={assignedTo} onChange={e => setAssignedTo(e.target.value)}
+            className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white text-stone-900 text-sm">
+            <option value="">Anyone (unassigned)</option>
+            {cleaners.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+          </select>
+          <div className="text-[11px] text-stone-500 mt-1 font-mono">Assign it to a specific cleaner — it shows up in their list.</div>
         </div>
 
         <button onClick={() => setPriority(p => !p)}
@@ -26128,8 +26350,12 @@ function SuggestedTabContent({ propertyId, employee, onGoToBedroom, onOpenBedroo
   // Label parsers — same as NextUpModal
   const buildingFromLabel = (label) => {
     if (!label) return null;
-    const m = label.match(/^B(\d+)/i);
-    return m ? m[1] : null;
+    const s = String(label);
+    const dash = s.match(/^B(\d+)-/i);
+    if (dash) return dash[1];
+    const letter = s.match(/^([A-Za-z]+)\d/);
+    if (letter) return letter[1].toUpperCase();
+    return null;
   };
   const unitNumberFromLabel = (label) => {
     if (!label) return null;
@@ -28073,8 +28299,12 @@ function NextUpModal({ from, employeeId, onPick, onClose }) {
   // for floor, and a tiny inline regex for building.
   const buildingFromLabel = (label) => {
     if (!label) return null;
-    const m = label.match(/^B(\d+)/i);
-    return m ? m[1] : null;
+    const s = String(label);
+    const dash = s.match(/^B(\d+)-/i);
+    if (dash) return dash[1];
+    const letter = s.match(/^([A-Za-z]+)\d/);
+    if (letter) return letter[1].toUpperCase();
+    return null;
   };
   const unitNumberFromLabel = (label) => {
     if (!label) return null;

@@ -48,7 +48,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul14-assign4";
+const BUILD_TAG = "jul14-assign5";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -5940,12 +5940,15 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
     });
     const ids = Object.keys(byJob);
     if (ids.length) {
-      const { data: rows } = await supabase.from('assignment_assignees')
-        .select('assignment_id, employee_id, status, employee:employees(id, name)')
+      // No employees embed — see the note in the assignment schedule load().
+      const nameById = Object.fromEntries((emps || []).map(e => [e.id, e.name]));
+      const { data: rows, error: rowsErr } = await supabase.from('assignment_assignees')
+        .select('assignment_id, employee_id, status')
         .in('assignment_id', ids);
+      if (rowsErr) alert('Could not load who\u2019s assigned: ' + rowsErr.message);
       (rows || []).forEach(r => {
         const j = byJob[r.assignment_id]; if (!j) return;
-        const entry = { id: r.employee_id, name: r.employee?.name || '' };
+        const entry = { id: r.employee_id, name: nameById[r.employee_id] || '' };
         if (r.status === 'requested') j.requested.push(entry); else j.assignees.push(entry);
       });
     }
@@ -14400,17 +14403,24 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
       if (sec === 'bedroom' || sec === 'vanity' || sec === 'bathroom' || sec === 'general') jobsByAsg[a.id].sections[sec]++;
       else jobsByAsg[a.id].sections.other++;
     });
+    // Load the roster FIRST so we can resolve assignee names ourselves.
+    // Note: no `employee:employees(...)` embed on assignment_assignees below.
+    // That embed needs a foreign key PostgREST can see; without one the whole
+    // read fails and (because the error used to be discarded) assignees just
+    // silently vanished. Joining by hand here can't fail that way.
+    const { data: emps } = await supabase.from('employees').select('id, name, role').eq('active', true).order('name');
+    const nameById = Object.fromEntries((emps || []).map(e => [e.id, e.name]));
     const jobIds = Object.keys(jobsByAsg);
     if (jobIds.length) {
-      const { data: asgn } = await supabase.from('assignment_assignees')
-        .select('assignment_id, employee_id, status, employee:employees(id, name)')
+      const { data: asgn, error: asgnErr } = await supabase.from('assignment_assignees')
+        .select('assignment_id, employee_id, status')
         .in('assignment_id', jobIds);
+      if (asgnErr) alert('Could not load who\u2019s assigned: ' + asgnErr.message);
       (asgn || []).forEach(r => {
         const j = jobsByAsg[r.assignment_id]; if (!j) return;
-        j.assignees.push({ id: r.employee_id, name: r.employee?.name || '', requested: r.status === 'requested' });
+        j.assignees.push({ id: r.employee_id, name: nameById[r.employee_id] || '', requested: r.status === 'requested' });
       });
     }
-    const { data: emps } = await supabase.from('employees').select('id, name, role').eq('active', true).order('name');
     setTeam((emps || []).filter(e => e.role !== 'owner'));
     setProperties(visibleProps(propsRes.data || [], employee));
     setAssignmentCounts(counts);
@@ -21023,7 +21033,7 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit }) {
   const [data, setData] = useState(null);
   // Open assignment per unit, so the same inline controls (done / size /
   // assign / due date) work straight from a Daily card.
-  const [unitAsg, setUnitAsg] = useState({}); // unitId -> {id, scheduledDate, open, assignees[]} — NO size here, see unitSize
+  const [unitAsg, setUnitAsg] = useState({}); // unitId -> {id, scheduledDate, tookLonger, open, assignees[]} — NO size here, see unitSize
   const [dTeam, setDTeam] = useState([]);
   const [dBusy, setDBusy] = useState(null);
   const [dAssignFor, setDAssignFor] = useState(null);
@@ -21043,7 +21053,7 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit }) {
     const ids = (unitIds || []).filter(Boolean);
     if (!ids.length) { setUnitAsg({}); setUnitSize({}); return; }
     const { data: rows } = await supabase.from('assignment_targets')
-      .select('unit_id, status, completed_at, unit:units(id, bedrooms, bathrooms), assignment:assignments!inner(id, active, deleted_at, scheduled_date)')
+      .select('unit_id, status, completed_at, unit:units(id, bedrooms, bathrooms), assignment:assignments!inner(id, active, deleted_at, scheduled_date, took_longer)')
       .in('unit_id', ids)
       .not('status', 'eq', 'blocked');
     // Sizes come straight from units so they're always right, even for
@@ -21058,22 +21068,25 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit }) {
       const prev = m[t.unit_id];
       // Prefer an OPEN assignment; otherwise keep the most recent done one.
       if (!prev || (open && !prev.open)) {
-        m[t.unit_id] = { id: a.id, scheduledDate: a.scheduled_date || null, open, assignees: [] };
+        m[t.unit_id] = { id: a.id, scheduledDate: a.scheduled_date || null, tookLonger: !!a.took_longer, open, assignees: [] };
       }
     });
     setUnitSize(sizes);
+    // Roster first, so assignee names resolve without a PostgREST embed.
+    const { data: emps } = await supabase.from('employees').select('id, name, role').eq('active', true).order('name');
+    const nameById = Object.fromEntries((emps || []).map(e => [e.id, e.name]));
     const asgIds = Object.values(m).map(v => v.id);
     if (asgIds.length) {
-      const { data: asg } = await supabase.from('assignment_assignees')
-        .select('assignment_id, employee_id, status, employee:employees(name)').in('assignment_id', asgIds);
+      const { data: asg, error: asgErr } = await supabase.from('assignment_assignees')
+        .select('assignment_id, employee_id, status').in('assignment_id', asgIds);
+      if (asgErr) alert('Could not load who\u2019s assigned: ' + asgErr.message);
       (asg || []).forEach(r => {
         Object.values(m).forEach(v => {
-          if (v.id === r.assignment_id) v.assignees.push({ id: r.employee_id, name: r.employee?.name || '', requested: r.status === 'requested' });
+          if (v.id === r.assignment_id) v.assignees.push({ id: r.employee_id, name: nameById[r.employee_id] || '', requested: r.status === 'requested' });
         });
       });
     }
     setUnitAsg(m);
-    const { data: emps } = await supabase.from('employees').select('id, name, role').eq('active', true).order('name');
     setDTeam((emps || []).filter(e => e.role !== 'owner'));
   };
   // Unit ids present on this day (from the loaded work blocks).
@@ -21121,6 +21134,15 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit }) {
     // Optimistic: reflect the saved values right away.
     setUnitSize(prev => ({ ...prev, [unitId]: { bedrooms: updated[0].bedrooms, bathrooms: updated[0].bathrooms } }));
     setDSizeFor(null);
+    refreshUnitAsg();
+  };
+  const dToggleExtra = async (asgId, current) => {
+    setDBusy(asgId);
+    const { data, error } = await supabase.from('assignments')
+      .update({ took_longer: !current }).eq('id', asgId).select('id, took_longer');
+    setDBusy(null);
+    if (error) { alert('Could not update the Extra flag: ' + error.message); return; }
+    if (!data || data.length === 0) { alert('Extra did not save — the database rejected the update for this job.'); return; }
     refreshUnitAsg();
   };
   const dMarkDone = async (asgId, label) => {
@@ -21526,6 +21548,13 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit }) {
                                   <Plus size={9} /> Assign
                                 </button>
                               )}
+
+                              {/* Took longer → charge extra on the invoice */}
+                              <button onClick={() => dToggleExtra(ua.id, ua.tookLonger)} disabled={dBusy === ua.id}
+                                className={`text-[10px] font-mono px-2 py-0.5 rounded-full inline-flex items-center gap-1 disabled:opacity-50 ${ua.tookLonger ? 'bg-amber-500 text-white' : 'bg-white border border-dashed border-stone-300 text-stone-500'}`}>
+                                <Clock size={9} /> {ua.tookLonger ? 'Extra' : 'Mark extra'}
+                              </button>
+
                               {canDailyDone && (ua.open ? (
                                 <button onClick={() => dMarkDone(ua.id, u.unitLabel)} disabled={dBusy === ua.id}
                                   className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-600 text-white inline-flex items-center gap-1 disabled:opacity-50">
@@ -22401,20 +22430,23 @@ function AssignmentList({ property, employee, onBack, onNew, onNewChecklist, onN
   const [assigneeMap, setAssigneeMap] = useState({}); // assignment_id -> [{id,name,requested}]
   const loadAssignees = async (asgIds) => {
     if (!asgIds.length) { setAssigneeMap({}); return; }
+    // No employees embed — see the note in the assignment schedule load().
     const { data, error } = await supabase.from('assignment_assignees')
-      .select('assignment_id, employee_id, status, employee:employees(id, name)')
+      .select('assignment_id, employee_id, status')
       .in('assignment_id', asgIds);
-    if (error) return;
+    if (error) { alert('Could not load who\u2019s assigned: ' + error.message); return; }
     const m = {};
     (data || []).forEach(r => {
-      (m[r.assignment_id] = m[r.assignment_id] || []).push({ id: r.employee_id, name: r.employee?.name || '', requested: r.status === 'requested' });
+      (m[r.assignment_id] = m[r.assignment_id] || []).push({ id: r.employee_id, name: rosterById[r.employee_id] || '', requested: r.status === 'requested' });
     });
     setAssigneeMap(m);
   };
+  const [rosterById, setRosterById] = useState({}); // every active employee, owners included
   useEffect(() => {
     (async () => {
       const { data } = await supabase.from('employees').select('id, name, role').eq('active', true).order('name');
       setTeamList((data || []).filter(e => e.role !== 'owner'));
+      setRosterById(Object.fromEntries((data || []).map(e => [e.id, e.name])));
     })();
   }, []);
   const toggleAssign = async (asgId, empId) => {

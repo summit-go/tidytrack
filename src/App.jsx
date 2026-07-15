@@ -48,7 +48,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul14-daily";
+const BUILD_TAG = "jul14-daily2";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -5945,7 +5945,7 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
   const requestJob = async (j) => {
     setBusyId(j.id);
     await supabase.from('assignment_assignees')
-      .insert({ assignment_id: j.id, employee_id: employee.id, status: 'requested', created_by: employee.id });
+      .upsert({ assignment_id: j.id, employee_id: employee.id, status: 'requested', created_by: employee.id }, { onConflict: 'assignment_id,employee_id' });
     setBusyId(null); load();
   };
   const toggleAssignee = async (j, empId) => {
@@ -14465,7 +14465,7 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
     setActioning(job.id);
     const { error } = has
       ? await supabase.from('assignment_assignees').delete().eq('assignment_id', job.id).eq('employee_id', empId)
-      : await supabase.from('assignment_assignees').insert({ assignment_id: job.id, employee_id: empId, status: 'assigned', created_by: employee.id });
+      : await supabase.from('assignment_assignees').upsert({ assignment_id: job.id, employee_id: empId, status: 'assigned', created_by: employee.id }, { onConflict: 'assignment_id,employee_id' });
     setActioning(null);
     if (error) { alert('Could not update who\u2019s assigned: ' + error.message); return; }
     load();
@@ -20989,16 +20989,26 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit }) {
   const canDailyDates = can(employee, 'edit_due_dates');
   const canDailyDone = can(employee, 'mark_assignments_done');
 
+  const [unitSize, setUnitSize] = useState({}); // unitId -> {bedrooms, bathrooms} (always available)
   const loadUnitAsg = async () => {
+    // Include DONE assignments too — a Daily card is usually work that's
+    // already finished, and we still want to edit/assign it after the fact.
     const { data: rows } = await supabase.from('assignment_targets')
-      .select('unit_id, status, unit:units(id, bedrooms, bathrooms), assignment:assignments!inner(id, active, deleted_at, scheduled_date)')
-      .not('status', 'in', '(done,blocked)');
-    const m = {};
+      .select('unit_id, status, completed_at, unit:units(id, bedrooms, bathrooms), assignment:assignments!inner(id, active, deleted_at, scheduled_date)')
+      .not('status', 'eq', 'blocked');
+    const m = {}; const sizes = {};
     (rows || []).forEach(t => {
       const a = t.assignment;
       if (!a || a.active === false || a.deleted_at || !t.unit_id) return;
-      if (!m[t.unit_id]) m[t.unit_id] = { id: a.id, scheduledDate: a.scheduled_date || null, bedrooms: t.unit?.bedrooms, bathrooms: t.unit?.bathrooms, assignees: [] };
+      if (t.unit) sizes[t.unit_id] = { bedrooms: t.unit.bedrooms, bathrooms: t.unit.bathrooms };
+      const open = t.status !== 'done';
+      const prev = m[t.unit_id];
+      // Prefer an OPEN assignment; otherwise keep the most recent done one.
+      if (!prev || (open && !prev.open)) {
+        m[t.unit_id] = { id: a.id, scheduledDate: a.scheduled_date || null, open, assignees: [] };
+      }
     });
+    setUnitSize(sizes);
     const ids = Object.values(m).map(v => v.id);
     if (ids.length) {
       const { data: asg } = await supabase.from('assignment_assignees')
@@ -21024,7 +21034,7 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit }) {
     setDBusy(asgId);
     const { error } = has
       ? await supabase.from('assignment_assignees').delete().eq('assignment_id', asgId).eq('employee_id', empId)
-      : await supabase.from('assignment_assignees').insert({ assignment_id: asgId, employee_id: empId, status: 'assigned', created_by: employee.id });
+      : await supabase.from('assignment_assignees').upsert({ assignment_id: asgId, employee_id: empId, status: 'assigned', created_by: employee.id }, { onConflict: 'assignment_id,employee_id' });
     setDBusy(null);
     if (error) { alert('Could not update: ' + error.message); return; }
     loadUnitAsg();
@@ -21436,12 +21446,16 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit }) {
                                   <Plus size={9} /> Assign
                                 </button>
                               )}
-                              {canDailyDone && (
+                              {canDailyDone && (ua.open ? (
                                 <button onClick={() => dMarkDone(ua.id, u.unitLabel)} disabled={dBusy === ua.id}
                                   className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-600 text-white inline-flex items-center gap-1 disabled:opacity-50">
                                   <Check size={9} /> Mark done
                                 </button>
-                              )}
+                              ) : (
+                                <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 inline-flex items-center gap-1">
+                                  <Check size={9} /> Done
+                                </span>
+                              ))}
                             </>) : (
                               <span className="text-[10px] font-mono text-stone-400">No open assignment</span>
                             )}
@@ -22327,7 +22341,7 @@ function AssignmentList({ property, employee, onBack, onNew, onNewChecklist, onN
     const has = (assigneeMap[asgId] || []).some(a => a.id === empId);
     const { error } = has
       ? await supabase.from('assignment_assignees').delete().eq('assignment_id', asgId).eq('employee_id', empId)
-      : await supabase.from('assignment_assignees').insert({ assignment_id: asgId, employee_id: empId, status: 'assigned', created_by: employee.id });
+      : await supabase.from('assignment_assignees').upsert({ assignment_id: asgId, employee_id: empId, status: 'assigned', created_by: employee.id }, { onConflict: 'assignment_id,employee_id' });
     if (error) { alert('Could not update who\u2019s assigned: ' + error.message); return; }
     load();
   };

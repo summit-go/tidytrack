@@ -48,7 +48,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul14-assign5";
+const BUILD_TAG = "jul14-dates1";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -5995,13 +5995,48 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
     setBusyId(null); load();
   };
 
-  const dueRank = (d) => !d ? 2 : (d < todayKey ? 0 : d === todayKey ? 1 : 3);
+  // Date buckets, soonest first. The old ranking put EVERY future date in a
+  // single bucket, so Jul 15 and Jul 17 tied and fell through to sorting by
+  // unit label — which is why A403 (Jul 17) sat above C404 (Jul 15). It also
+  // ranked "no date" above future work; undated jobs now sort last.
+  const dueRank = (d) => !d ? 3 : (d < todayKey ? 0 : d === todayKey ? 1 : 2);
+  const tomorrowKey = (() => {
+    const t = new Date(); t.setDate(t.getDate() + 1);
+    return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`;
+  })();
   const list = (sub === 'mine' ? jobs.filter(j => isMine(j) || iRequested(j)) : jobs)
+    .slice()
     .sort((a, b) =>
-      (sub === 'all' ? ((isMine(b) ? 1 : 0) - (isMine(a) ? 1 : 0)) : 0)
-      || dueRank(a.scheduledDate) - dueRank(b.scheduledDate)
+      dueRank(a.scheduledDate) - dueRank(b.scheduledDate)
+      // Real chronological order within a bucket. scheduled_date is
+      // 'YYYY-MM-DD', so a plain string compare is already date order.
+      || (a.scheduledDate || '').localeCompare(b.scheduledDate || '')
+      || (sub === 'all' ? ((isMine(b) ? 1 : 0) - (isMine(a) ? 1 : 0)) : 0)
       || naturalCompare(a.propName, b.propName)
       || naturalCompare(a.unitLabel, b.unitLabel));
+  // Group the sorted list into date sections so the date is impossible to miss.
+  const dateSections = (() => {
+    const out = []; let cur = null;
+    list.forEach(j => {
+      const key = j.scheduledDate || 'none';
+      if (!cur || cur.key !== key) { cur = { key, date: j.scheduledDate || null, jobs: [] }; out.push(cur); }
+      cur.jobs.push(j);
+    });
+    return out;
+  })();
+  const sectionLabel = (d) => {
+    if (!d) return 'No date set';
+    if (d < todayKey) return `Overdue · ${fmtDueDate(d)}`;
+    if (d === todayKey) return `Today · ${fmtDueDate(d)}`;
+    if (d === tomorrowKey) return `Tomorrow · ${fmtDueDate(d)}`;
+    return fmtDueDate(d);
+  };
+  const sectionTone = (d) => {
+    if (!d) return 'text-stone-400';
+    if (d < todayKey) return 'text-red-600';
+    if (d === todayKey) return 'text-emerald-700';
+    return 'text-stone-500';
+  };
   const fmtDue = (d) => !d ? 'No date' : d < todayKey ? `Overdue · ${fmtDueDate(d)}` : d === todayKey ? 'Today' : fmtDueDate(d);
   const openJob = (j) => {
     // Not clocked in yet → tapping a job clocks into its property and opens it.
@@ -6021,8 +6056,22 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
       ) : list.length === 0 ? (
         <div className="text-center py-10 text-stone-400 text-sm">{sub === 'mine' ? 'Nothing assigned to you right now. 🎉' : 'No open assignments.'}</div>
       ) : (
-        <div className="space-y-2 pb-4">
-          {list.map(j => {
+        <div className="pb-4">
+          {dateSections.map(sec => (
+            <div key={sec.key} className="mb-4">
+              {/* Date header — the list is grouped soonest-first. */}
+              <div className="flex items-center gap-2 mb-2 px-0.5">
+                <Calendar size={11} className={sec.date && sec.date < todayKey ? 'text-red-600' : sec.date === todayKey ? 'text-emerald-700' : 'text-stone-400'} />
+                <span className={`text-[11px] uppercase tracking-wider font-mono font-medium ${sectionTone(sec.date)}`}>
+                  {sectionLabel(sec.date)}
+                </span>
+                <span className="text-[10px] font-mono text-stone-400">
+                  {sec.jobs.length} {sec.jobs.length === 1 ? 'job' : 'jobs'}
+                </span>
+                <div className="flex-1 h-px bg-stone-200" />
+              </div>
+              <div className="space-y-2">
+          {sec.jobs.map(j => {
             const here = j.customerId === currentPropertyId;
             const mine = isMine(j);
             return (
@@ -6111,6 +6160,9 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
               </div>
             );
           })}
+              </div>
+            </div>
+          ))}
         </div>
       )}
     </div>

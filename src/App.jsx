@@ -48,7 +48,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul14-daily3";
+const BUILD_TAG = "jul14-daily4";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -21030,10 +21030,10 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit }) {
       }
     });
     setUnitSize(sizes);
-    const ids = Object.values(m).map(v => v.id);
-    if (ids.length) {
+    const asgIds = Object.values(m).map(v => v.id);
+    if (asgIds.length) {
       const { data: asg } = await supabase.from('assignment_assignees')
-        .select('assignment_id, employee_id, status, employee:employees(name)').in('assignment_id', ids);
+        .select('assignment_id, employee_id, status, employee:employees(name)').in('assignment_id', asgIds);
       (asg || []).forEach(r => {
         Object.values(m).forEach(v => {
           if (v.id === r.assignment_id) v.assignees.push({ id: r.employee_id, name: r.employee?.name || '', requested: r.status === 'requested' });

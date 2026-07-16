@@ -48,7 +48,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul16-profit2";
+const BUILD_TAG = "jul16-recon1";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -16017,6 +16017,8 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
   const [billTo, setBillTo] = useState({ org: '', contact: '', email: '', phone: '', address: '' });
   const [billOpen, setBillOpen] = useState(false);
   const [diag, setDiag] = useState(null);
+  // Done work in this window that an earlier invoice already claimed.
+  const [billedElsewhere, setBilledElsewhere] = useState({ bedrooms: 0, invoices: [] });
   const [defaultRate, setDefaultRate] = useState(0);
   const [previewing, setPreviewing] = useState(false);
 
@@ -16062,6 +16064,39 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
       }
       targets = res.rows; fetchErr = res.err;
     }
+    // 3b) The gap. `invoiced_on IS NULL` above is the ONLY filter this
+    //     draft applies that the property's Done tab does not — so a
+    //     bedroom finished in this window that an earlier invoice already
+    //     stamped is done, in range, and still absent here with no
+    //     explanation. That silence is what makes the two screens look
+    //     like they disagree. Count it and say so.
+    let alreadyBilled = { bedrooms: 0, invoices: [] };
+    if (unitIds.length) {
+      let billed = []; const PAGE = 1000;
+      for (let from = 0; ; from += PAGE) {
+        const { data, error } = await supabase.from('assignment_targets')
+          .select('unit_id, party_id, invoiced_on')
+          .eq('status', 'done')
+          .in('unit_id', unitIds)
+          .gte('completed_at', start + 'T00:00:00').lte('completed_at', end + 'T23:59:59')
+          .not('invoiced_on', 'is', null)
+          .range(from, from + PAGE - 1);
+        if (error || !data) break;
+        billed = billed.concat(data);
+        if (data.length < PAGE) break;
+        if (from > 100000) break;
+      }
+      const beds = new Set(billed.map(b => `${b.unit_id}:${b.party_id}`));
+      const invIds = [...new Set(billed.map(b => b.invoiced_on).filter(Boolean))];
+      let invMeta = [];
+      if (invIds.length) {
+        const { data: im } = await supabase.from('invoices')
+          .select('id, invoice_number, invoice_date, status').in('id', invIds);
+        invMeta = im || [];
+      }
+      alreadyBilled = { bedrooms: beds.size, invoices: invMeta };
+    }
+    setBilledElsewhere(alreadyBilled);
     // 4) Group by assignment (= one bedroom clean).
     const byAssign = new Map();
     const sampleItems = [];
@@ -16338,8 +16373,35 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
           )}
         </div>
 
+        {/* Reconciliation. The Done tab on the property side counts every
+           finished bedroom in this window; this draft drops the ones an
+           earlier invoice already claimed. Without this line the two
+           screens disagree for no visible reason. */}
+        {billedElsewhere.bedrooms > 0 && (
+          <div className="mb-3 p-3 rounded-2xl bg-amber-50 border border-amber-200">
+            <div className="text-xs text-amber-900 font-medium">
+              {billedElsewhere.bedrooms} more {billedElsewhere.bedrooms === 1 ? 'cleaning was' : 'cleanings were'} finished in this window but {billedElsewhere.bedrooms === 1 ? 'is' : 'are'} already billed — not shown below.
+            </div>
+            {billedElsewhere.invoices.length > 0 && (
+              <div className="text-[11px] font-mono text-amber-800/80 mt-1">
+                On {billedElsewhere.invoices.map(i => `#${i.invoice_number || '—'} (${i.status})`).join(', ')}
+              </div>
+            )}
+            <div className="text-[11px] text-amber-800/70 mt-1">
+              This is why the property's Done list can show more than this draft. To re-bill them, reopen that invoice with “Edit / add cleanings”.
+            </div>
+          </div>
+        )}
+
         {/* Lines */}
-        <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2">Line items ({lines.length})</div>
+        <div className="flex items-center justify-between mb-2">
+          <span className="text-xs uppercase tracking-wider text-stone-500 font-mono">Line items ({lines.length})</span>
+          {diag && lines.length > 0 && (
+            <span className="text-[10px] font-mono text-stone-400">
+              {diag.bedrooms} {diag.bedrooms === 1 ? 'bedroom' : 'bedrooms'} billable · {diag.doneItems} cleaned items
+            </span>
+          )}
+        </div>
         {lines.length === 0 ? (
           <div className="py-6 px-4 border-2 border-dashed border-stone-200 rounded-2xl text-sm">
             <div className="text-stone-500 mb-3 text-center">Nothing to bill in this range yet.</div>
@@ -16811,6 +16873,7 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
   const [unbilled, setUnbilled] = useState(0);
   const [unbilledDetail, setUnbilledDetail] = useState([]); // per-property uninvoiced labor
   const [invoiceHint, setInvoiceHint] = useState([]);       // what ranges DO have invoices
+  const [runaway, setRunaway] = useState({ count: 0, pay: 0, hours: 0 }); // forgotten clock-outs
 
   const num = (v) => { const n = Number(v); return isNaN(n) ? 0 : n; };
 
@@ -16850,15 +16913,30 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
         if (hrs <= 0) return { hrs: 0, pay: 0 };
         return { hrs, pay: hrs * num(b.shift.employee?.pay_rate_hourly) };
       };
+      // Split off the forgotten clock-outs before any money is added up.
+      // A block longer than MAX_BLOCK_HOURS isn't a long clean, it's a
+      // block nobody closed — counting it as labor turns a normal week
+      // into a fake five-figure loss.
+      const runawayOf = (list) => list.filter(b => blockPay(b).hrs > MAX_BLOCK_HOURS);
+      const sensibleOf = (list) => list.filter(b => {
+        const h = blockPay(b).hrs;
+        return h > 0 && h <= MAX_BLOCK_HOURS;
+      });
 
       if (invoices.length === 0) {
         // Nothing bills this range. Show the labor that's sitting
         // uninvoiced, and tell them which ranges DO have invoices, so the
         // fix is "pick the right dates" not "guess".
         const loose = await fetchBlocks(start, end);
+        const runaways = runawayOf(loose);
+        setRunaway({
+          count: runaways.length,
+          pay: runaways.reduce((s, b) => s + blockPay(b).pay, 0),
+          hours: runaways.reduce((s, b) => s + blockPay(b).hrs, 0),
+        });
         const byProp = {};
         let sum = 0;
-        loose.forEach(b => {
+        sensibleOf(loose).forEach(b => {
           const { hrs, pay } = blockPay(b); if (hrs <= 0) return;
           sum += pay;
           const cid = b.shift.customer_id || 'none';
@@ -16913,7 +16991,19 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
         const e = i.period_end || i.invoice_date || end;
         return e > m ? e : m;
       }, end);
-      const liveBlocks = await fetchBlocks(winStart, winEnd);
+      const allBlocks = await fetchBlocks(winStart, winEnd);
+      {
+        // Same guard on the invoiced path. Restricted to the report's own
+        // range so the count matches what's on screen.
+        const inRange = allBlocks.filter(b => { const d = String(b.start_time).slice(0, 10); return d >= start && d <= end; });
+        const runaways = runawayOf(inRange);
+        setRunaway({
+          count: runaways.length,
+          pay: runaways.reduce((s, b) => s + blockPay(b).pay, 0),
+          hours: runaways.reduce((s, b) => s + blockPay(b).hrs, 0),
+        });
+      }
+      const liveBlocks = sensibleOf(allBlocks);
 
       // 5. Build a row per invoice line.
       const invById = Object.fromEntries(invoices.map(i => [i.id, i]));
@@ -17067,6 +17157,17 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
               <div><div className="text-[10px] uppercase text-stone-400 font-mono">Paid</div><div className="text-lg font-mono text-stone-900">{fmtMoney(totals.pay)}</div></div>
               <div><div className="text-[10px] uppercase text-stone-400 font-mono">Profit</div><div className={`text-lg font-mono ${profitTotal >= 0 ? 'text-emerald-700' : 'text-red-600'}`}>{fmtMoney(profitTotal)}</div></div>
             </div>
+
+            {runaway.count > 0 && (
+              <div className="p-3 rounded-2xl bg-red-50 border border-red-200 text-[11px] text-red-900">
+                <div className="font-medium">
+                  {runaway.count} work {runaway.count === 1 ? 'block' : 'blocks'} in this range {runaway.count === 1 ? 'is' : 'are'} longer than {MAX_BLOCK_HOURS}h — {runaway.hours.toFixed(0)}h total, {fmtMoney(runaway.pay)} of "labor".
+                </div>
+                <div className="mt-1 text-red-800/80">
+                  Almost certainly someone forgot to clock out. Left in, they'd swamp every number on this page, so they're excluded above. Fix them in the timesheet and re-run.
+                </div>
+              </div>
+            )}
 
             {unbilled > 0.005 && (
               <div className="p-3 rounded-2xl bg-amber-50 border border-amber-200 text-[11px] text-amber-900 font-mono">
@@ -20314,6 +20415,15 @@ const toDateKey = (d) => {
 //     past the soft pass (no last_activity_at recorded, etc).
 const STALE_IDLE_MIN = 90;   // soft auto-clockout threshold (minutes)
 const STALE_FORCE_MIN = 120; // hard force-close threshold (minutes)
+// Sanity ceiling for a SINGLE finished work block, used by the money
+// reports. The two thresholds above only fire while a block is still
+// open, and only when someone loads the owner's Daily view — so a block
+// that nobody force-closed for a week ends up stored with end_time set
+// days after start_time. Those rows are not labor, they're forgotten
+// clock-outs, and left alone they quietly wreck any profit number.
+// Eight hours is longer than any real bedroom clean but short enough to
+// catch the runaways.
+const MAX_BLOCK_HOURS = 8;
 function WhosWherePanel({ employee }) {
   const [rows, setRows] = useState([]);
   const [loaded, setLoaded] = useState(false);

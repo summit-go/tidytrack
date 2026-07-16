@@ -48,7 +48,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul16-profit1";
+const BUILD_TAG = "jul16-profit2";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -16809,6 +16809,8 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
   const [draft, setDraft] = useState({ charged: '', paid: '', note: '' });
   const [savingId, setSavingId] = useState(null);
   const [unbilled, setUnbilled] = useState(0);
+  const [unbilledDetail, setUnbilledDetail] = useState([]); // per-property uninvoiced labor
+  const [invoiceHint, setInvoiceHint] = useState([]);       // what ranges DO have invoices
 
   const num = (v) => { const n = Number(v); return isNaN(n) ? 0 : n; };
 
@@ -16824,7 +16826,54 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
         .or(`and(period_start.lte.${end},period_end.gte.${start}),and(period_start.is.null,invoice_date.gte.${start},invoice_date.lte.${end})`);
       if (invErr) throw invErr;
       const invoices = invs || [];
-      if (invoices.length === 0) { setGroups([]); setTotals({ charge: 0, pay: 0 }); setUnbilled(0); setLoading(false); return; }
+
+      // Labor fetch, reused below. Always runs, even with zero invoices —
+      // "no invoices cover this range" and "nobody worked this range" are
+      // very different answers and the screen has to tell them apart.
+      const fetchBlocks = async (winStart, winEnd) => {
+        let out = []; const PAGE = 1000;
+        for (let from = 0; ; from += PAGE) {
+          const { data, error } = await supabase.from('work_blocks')
+            .select('id, unit_id, party_id, start_time, end_time, unit:units(label), shift:shifts!inner(customer_id, is_preview, employee:employees(id, name, pay_rate_hourly), customer:customers(id, name))')
+            .gte('start_time', winStart + 'T00:00:00').lte('start_time', winEnd + 'T23:59:59')
+            .not('end_time', 'is', null)
+            .range(from, from + PAGE - 1);
+          if (error || !data) break;
+          out = out.concat(data);
+          if (data.length < PAGE) break;
+          if (from > 100000) break;
+        }
+        return out.filter(b => b.shift && !b.shift.is_preview && b.unit_id);
+      };
+      const blockPay = (b) => {
+        const hrs = (new Date(b.end_time) - new Date(b.start_time)) / 3600000;
+        if (hrs <= 0) return { hrs: 0, pay: 0 };
+        return { hrs, pay: hrs * num(b.shift.employee?.pay_rate_hourly) };
+      };
+
+      if (invoices.length === 0) {
+        // Nothing bills this range. Show the labor that's sitting
+        // uninvoiced, and tell them which ranges DO have invoices, so the
+        // fix is "pick the right dates" not "guess".
+        const loose = await fetchBlocks(start, end);
+        const byProp = {};
+        let sum = 0;
+        loose.forEach(b => {
+          const { hrs, pay } = blockPay(b); if (hrs <= 0) return;
+          sum += pay;
+          const cid = b.shift.customer_id || 'none';
+          byProp[cid] = byProp[cid] || { name: b.shift.customer?.name || 'No property', hours: 0, pay: 0 };
+          byProp[cid].hours += hrs; byProp[cid].pay += pay;
+        });
+        const { data: recent } = await supabase.from('invoices')
+          .select('invoice_number, invoice_date, period_start, period_end, customer:customers(name)')
+          .order('invoice_date', { ascending: false }).limit(5);
+        setUnbilledDetail(Object.values(byProp).sort((a, b) => b.pay - a.pay));
+        setInvoiceHint(recent || []);
+        setGroups([]); setTotals({ charge: 0, pay: 0 }); setUnbilled(sum);
+        setLoading(false); return;
+      }
+      setInvoiceHint([]); setUnbilledDetail([]);
 
       // 2. Their lines. Paginated — a busy month easily clears 1000 lines.
       const invIds = invoices.map(i => i.id);
@@ -16864,22 +16913,7 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
         const e = i.period_end || i.invoice_date || end;
         return e > m ? e : m;
       }, end);
-      let blocks = [];
-      {
-        const PAGE = 1000;
-        for (let from = 0; ; from += PAGE) {
-          const { data, error } = await supabase.from('work_blocks')
-            .select('id, unit_id, party_id, start_time, end_time, shift:shifts!inner(customer_id, is_preview, employee:employees(id, name, pay_rate_hourly))')
-            .gte('start_time', winStart + 'T00:00:00').lte('start_time', winEnd + 'T23:59:59')
-            .not('end_time', 'is', null)
-            .range(from, from + PAGE - 1);
-          if (error || !data) break;
-          blocks = blocks.concat(data);
-          if (data.length < PAGE) break;
-          if (from > 100000) break;
-        }
-      }
-      const liveBlocks = blocks.filter(b => b.shift && !b.shift.is_preview && b.unit_id);
+      const liveBlocks = await fetchBlocks(winStart, winEnd);
 
       // 5. Build a row per invoice line.
       const invById = Object.fromEntries(invoices.map(i => [i.id, i]));
@@ -17041,7 +17075,54 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
             )}
 
             {groups.length === 0 ? (
-              <div className="text-center py-8 text-stone-400 text-sm">No invoices cover work in this range.</div>
+              <div className="space-y-3">
+                <div className="p-4 rounded-2xl bg-white border border-stone-200 text-center">
+                  <div className="text-sm text-stone-600">No invoices cover work in this range.</div>
+                  <div className="text-xs text-stone-400 mt-1">
+                    {unbilled > 0.005
+                      ? 'The cleaning happened — it just hasn\u2019t been billed yet, so there\u2019s nothing to compare it against.'
+                      : 'No finished cleanings in this range either.'}
+                  </div>
+                </div>
+                {unbilledDetail.length > 0 && (
+                  <div className="p-4 rounded-2xl bg-white border border-stone-200">
+                    <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2">Uninvoiced labor in this range</div>
+                    {unbilledDetail.map((u, i) => (
+                      <div key={i} className="flex items-center justify-between gap-2 py-1 text-xs font-mono">
+                        <span className="text-stone-700 truncate">{u.name}</span>
+                        <span className="text-stone-500 flex-shrink-0">{u.hours.toFixed(1)}h · {fmtMoney(u.pay)}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {invoiceHint.length > 0 && (
+                  <div className="p-4 rounded-2xl bg-white border border-stone-200">
+                    <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2">Your most recent invoices cover</div>
+                    {invoiceHint.map((h, i) => (
+                      <button key={i}
+                        onClick={() => {
+                          const s = h.period_start || h.invoice_date;
+                          const e = h.period_end || h.invoice_date;
+                          if (s && e) { setStart(s); setEnd(e); }
+                        }}
+                        className="w-full flex items-center justify-between gap-2 py-1.5 text-xs font-mono hover:bg-stone-50 rounded-lg px-1 text-left">
+                        <span className="text-stone-700 truncate">
+                          {h.invoice_number ? `#${h.invoice_number} · ` : ''}{h.customer?.name || 'Property'}
+                        </span>
+                        <span className="text-amber-700 flex-shrink-0">
+                          {h.period_start && h.period_end ? `${h.period_start} → ${h.period_end}` : fmtInvoiceDate(h.invoice_date)}
+                        </span>
+                      </button>
+                    ))}
+                    <p className="text-[10px] text-stone-400 mt-2">Tap one to jump the date range to it.</p>
+                  </div>
+                )}
+                {invoiceHint.length === 0 && (
+                  <div className="p-4 rounded-2xl bg-amber-50 border border-amber-200 text-xs text-amber-900">
+                    You have no saved invoices at all yet. A draft you never saved doesn&rsquo;t count — this report reads saved invoices only.
+                  </div>
+                )}
+              </div>
             ) : groups.map(g => {
               const gp = g.charge - g.pay;
               return (

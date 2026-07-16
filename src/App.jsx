@@ -48,7 +48,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul15-nav1";
+const BUILD_TAG = "jul16-profit1";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -749,12 +749,18 @@ const assignmentDueKind = (scheduledDate) => {
   return 'upcoming';
 };
 // Sort rank: overdue first, then today, then undated, then upcoming.
+// Sort bucket for a due date. Anything WITH a date outranks anything
+// without one, so scheduled work rises to the top; undated work falls to
+// the bottom and keeps its natural (building) order. Note upcoming is a
+// single bucket on purpose — callers must tie-break on the actual date,
+// or every future date compares equal and the sort silently falls
+// through to building order.
 const assignmentDueRank = (scheduledDate) => {
   const k = assignmentDueKind(scheduledDate);
   if (k === 'overdue') return 0;
   if (k === 'today') return 1;
-  if (!k) return 2;
-  return 3;
+  if (!k) return 3;  // no date → last
+  return 2;          // upcoming
 };
 const fmtClock = (ts) => new Date(ts).toLocaleTimeString('en-US', { hour:'numeric', minute:'2-digit' });
 
@@ -3299,6 +3305,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   const [busy, setBusy] = useState(false);
   const [showMessages, setShowMessages] = useState(false);
   const [showChangePin, setShowChangePin] = useState(false);
+  const [whosWorkingOpen, setWhosWorkingOpen] = useState(false); // read-only "where is everyone"
   const [bedroomHistory, setBedroomHistory] = useState(null); // params for BedroomHistoryView
   // Whenever an activeBlock transitions from null → set (cleaner just
   // started a workblock), snap the bottom-nav tab back to Home so they
@@ -3833,7 +3840,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     if (!confirm(msg)) return;
     setBusy(true);
     try {
-      // 1) Revert assignment_targets the cleaner advanced during this
+      // 1. Revert assignment_targets the cleaner advanced during this
       //    block. Scope to (unit_id, party_id, started_by=employee.id,
       //    status='in_progress'). Reset status to pending and clear
       //    the started_at / started_by stamps.
@@ -3845,11 +3852,11 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
           .eq('started_by', employee.id)
           .eq('status', 'in_progress');
       }
-      // 2) Delete tasks belonging to this block (cascades photos via FK).
+      // 2. Delete tasks belonging to this block (cascades photos via FK).
       await supabase.from('tasks').delete().eq('work_block_id', activeBlock.id);
-      // 3) Delete the work_block itself.
+      // 3. Delete the work_block itself.
       await supabase.from('work_blocks').delete().eq('id', activeBlock.id);
-      // 4) Reset local state — drop from list, clear active.
+      // 4. Reset local state — drop from list, clear active.
       setWorkBlocks(prev => prev.filter(b => b.id !== activeBlock.id));
       setActiveBlock(null); setTasks([]); setActiveTask(null);
     } catch (e) {
@@ -4910,7 +4917,11 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     return withIdleModal(
       <div className="min-h-screen bg-stone-50 flex flex-col pb-24">
         <Header name={employee.name} onSignOut={signOutWithCleanup} role={employee.role}
-          employee={employee} onOpenMessages={() => setShowMessages(true)} />
+          employee={employee} onOpenMessages={() => setShowMessages(true)}
+          onOpenWhosHere={() => setWhosWorkingOpen(true)} />
+        {whosWorkingOpen && (
+          <WhosWorkingNowModal employee={employee} onClose={() => setWhosWorkingOpen(false)} />
+        )}
 
         {/* NOT CLOCKED IN. This is its own screen — it is NOT PropertyHub's
            Home tab, it just shares the same CleanerWorkList, which is why
@@ -4954,8 +4965,11 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
               <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">Where the work is</div>
               <p className="text-[11px] text-stone-400 mt-0.5">Open jobs by property. Tap one to clock in there.</p>
             </div>
+            {/* Tapping a property clocks straight in there. It used to call
+               startClockIn, which reopened the generic picker and made you
+               choose the same property a second time. */}
             <CleanerPropertiesList currentPropertyId={null} employee={employee}
-              onOpenCurrent={startClockIn} onSwitch={startClockIn} />
+              onOpenCurrent={startClockIn} onSwitch={(p) => onPickProperty(p)} />
           </div>
         )}
 
@@ -6027,6 +6041,120 @@ async function saveAssignees(assignmentId, currentIds, nextIds, actorId) {
 }
 
 // =================================================================
+// WHOS WORKING NOW — read-only "where is everyone right now", safe to
+// show to cleaners. Deliberately NOT WhosWherePanel: that one is the
+// owner widget and force-closes stale shifts as a side effect of
+// loading. A cleaner peeking at the board must never write to anyone
+// else's shift, so this one only reads. It applies the same 2h cutoff
+// client-side so a stale session never shows as active.
+// =================================================================
+function WhosWorkingNowModal({ employee, onClose }) {
+  const [rows, setRows] = useState([]);
+  const [loaded, setLoaded] = useState(false);
+  useTick(true);
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      const cutoffMs = Date.now() - STALE_FORCE_MIN * 60 * 1000;
+      const [blocksRes, shiftsRes] = await Promise.all([
+        supabase.from('work_blocks')
+          .select('id, start_time, unit:units(label), party:parties(label), shift:shifts!inner(id, is_preview, employee:employees(id, name), customer:customers(id, name))')
+          .is('end_time', null).order('start_time', { ascending: true }),
+        supabase.from('shifts')
+          .select('id, start_time, is_preview, employee:employees(id, name), customer:customers(id, name)')
+          .is('end_time', null),
+      ]);
+      const blocks = (blocksRes.data || []).filter(b => !b.shift?.is_preview);
+      const blockedShiftIds = new Set(blocks.map(b => b.shift?.id).filter(Boolean));
+      const standby = (shiftsRes.data || []).filter(s => !s.is_preview && !blockedShiftIds.has(s.id));
+      const out = [
+        ...blocks.filter(b => new Date(b.start_time).getTime() > cutoffMs).map(b => ({
+          kind: 'block', id: b.id,
+          cleanerName: b.shift?.employee?.name || '?',
+          isMe: b.shift?.employee?.id === employee?.id,
+          propertyName: b.shift?.customer?.name || '',
+          where: [b.unit?.label, b.party?.label].filter(Boolean).join(' · '),
+          startTime: b.start_time,
+        })),
+        ...standby.filter(s => new Date(s.start_time).getTime() > cutoffMs).map(s => ({
+          kind: 'standby', id: s.id,
+          cleanerName: s.employee?.name || '?',
+          isMe: s.employee?.id === employee?.id,
+          propertyName: s.customer?.name || '',
+          where: '',
+          startTime: s.start_time,
+        })),
+      ];
+      if (!cancelled) { setRows(out); setLoaded(true); }
+    };
+    load();
+    const iv = setInterval(load, 30000);
+    return () => { cancelled = true; clearInterval(iv); };
+  }, [employee?.id]);
+
+  const working = rows.filter(r => r.kind === 'block');
+  const standby = rows.filter(r => r.kind === 'standby');
+  return (
+    <div onClick={onClose} className="fixed inset-0 bg-stone-900/80 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
+      <div onClick={(e) => e.stopPropagation()}
+        className="bg-stone-50 w-full sm:max-w-md sm:rounded-3xl rounded-t-3xl flex flex-col max-h-[80vh]">
+        <div className="flex items-center justify-between p-5 border-b border-stone-200">
+          <div className="min-w-0 flex-1">
+            <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">Right now</div>
+            <div className="font-serif text-lg text-stone-900">Who's working</div>
+          </div>
+          <button onClick={onClose} className="p-2 rounded-full hover:bg-stone-100 flex-shrink-0">
+            <X size={20} className="text-stone-600" />
+          </button>
+        </div>
+        <div className="flex-1 overflow-y-auto p-4 space-y-2">
+          {!loaded ? (
+            <div className="text-center py-8 text-stone-400 text-sm">Loading…</div>
+          ) : rows.length === 0 ? (
+            <div className="text-center py-10 text-stone-400 text-sm">Nobody's on the clock right now.</div>
+          ) : (<>
+            {working.map(r => (
+              <div key={r.id} className="p-3 rounded-2xl bg-white border border-stone-200">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium text-stone-900 truncate">
+                      {r.cleanerName}{r.isMe && <span className="ml-1.5 text-[10px] font-mono text-stone-400">(you)</span>}
+                    </div>
+                    <div className="text-xs text-stone-500 font-mono truncate">
+                      {r.propertyName}{r.where ? ` · ${r.where}` : ''}
+                    </div>
+                  </div>
+                  <div className="text-right flex-shrink-0">
+                    <div className="text-xs font-mono text-emerald-700">{fmtTimeShort(Date.now() - new Date(r.startTime).getTime())}</div>
+                    <div className="text-[10px] font-mono text-stone-400">since {fmtClock(r.startTime)}</div>
+                  </div>
+                </div>
+              </div>
+            ))}
+            {standby.length > 0 && (
+              <div className="text-[10px] uppercase tracking-wider font-mono text-stone-400 pt-2">Clocked in, not started</div>
+            )}
+            {standby.map(r => (
+              <div key={r.id} className="p-3 rounded-2xl bg-stone-100 border border-stone-200">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium text-stone-700 truncate">
+                      {r.cleanerName}{r.isMe && <span className="ml-1.5 text-[10px] font-mono text-stone-400">(you)</span>}
+                    </div>
+                    <div className="text-xs text-stone-500 font-mono truncate">{r.propertyName || 'No property'}</div>
+                  </div>
+                  <div className="text-[10px] font-mono text-stone-400 flex-shrink-0">since {fmtClock(r.startTime)}</div>
+                </div>
+              </div>
+            ))}
+          </>)}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// =================================================================
 // CLEANER WORK LIST — the cleaner's own jobs (and all pending jobs)
 // across EVERY property, so they see their whole day. Same-property
 // jobs start the clean directly; other-property jobs offer to switch.
@@ -6371,7 +6499,7 @@ function CleanerPropertiesList({ currentPropertyId, employee, onOpenCurrent, onS
       {sorted.map(p => {
         const here = p.id === currentPropertyId;
         return (
-          <button key={p.id} onClick={() => here ? onOpenCurrent() : onSwitch()}
+          <button key={p.id} onClick={() => here ? onOpenCurrent() : onSwitch(p)}
             className={`w-full text-left p-4 rounded-2xl border active:scale-98 ${here ? 'bg-amber-50 border-amber-300' : 'bg-white border-stone-200'}`}>
             <div className="flex items-center justify-between gap-2">
               <span className="font-serif text-lg text-stone-900 truncate">{p.name}</span>
@@ -16650,105 +16778,247 @@ function InvoiceList({ property, onOpen, onNew }) {
 }
 
 // =================================================================
-// PROFIT / LOSS REPORT — invoiced charge vs labor pay, sliced by
-// property or by person. Owner-only (lives under Money).
+// PROFIT / LOSS REPORT — one row per invoiced apartment. Owner-only.
+//
+// Reads INVOICES, not raw work blocks. Each invoice line already IS an
+// apartment we billed (unit + size + service type + amount), so a line
+// is the natural unit of profit: "F101, 2BR/2BA, charged $X".
+//
+// The pay side is matched to the SAME apartment over the SAME window
+// the invoice covers (its period_start → period_end), so charge and pay
+// always describe the same work. The old report compared invoices DATED
+// in the range against labor WORKED in the range — two different
+// windows — so invoicing at month end put the charge in one bucket and
+// the pay in another, and every week looked like a loss.
+//
+// The date range filters by the work the invoice covers (its period),
+// not by when the invoice was typed up.
+//
+// Any figure can be corrected inline. Corrections live in
+// profit_line_reviews and NEVER touch the invoice itself — an invoice
+// you already sent must not change because you fixed a number here.
 // =================================================================
 function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, topToggle }) {
   const iso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   const [start, setStart] = useState(iso(new Date(Date.now() - 29 * 86400000)));
   const [end, setEnd] = useState(iso(new Date()));
-  const [slice, setSlice] = useState('property'); // 'property' | 'person'
   const [loading, setLoading] = useState(false);
-  const [rows, setRows] = useState(null);
+  const [groups, setGroups] = useState(null);
   const [totals, setTotals] = useState({ charge: 0, pay: 0 });
+  const [editing, setEditing] = useState(null);   // invoice_line id
+  const [draft, setDraft] = useState({ charged: '', paid: '', note: '' });
+  const [savingId, setSavingId] = useState(null);
+  const [unbilled, setUnbilled] = useState(0);
+
+  const num = (v) => { const n = Number(v); return isNaN(n) ? 0 : n; };
 
   const run = async () => {
     if (!start || !end) return;
-    setLoading(true);
+    setLoading(true); setEditing(null);
     try {
-      const { data: blocks } = await supabase.from('work_blocks')
-        .select('start_time, end_time, shift:shifts!inner(customer_id, is_preview, employee:employees(id, name, pay_rate_hourly), customer:customers(name))')
-        .gte('start_time', start + 'T00:00:00').lte('start_time', end + 'T23:59:59')
-        .not('end_time', 'is', null);
-      const { data: invs } = await supabase.from('invoices')
-        .select('customer_id, total, invoice_date, customer:customers(name)')
-        .gte('invoice_date', start).lte('invoice_date', end);
+      // 1. Invoices whose covered period overlaps the range. Older
+      //    invoices predate period_start/period_end, so fall back to
+      //    invoice_date for those.
+      const { data: invs, error: invErr } = await supabase.from('invoices')
+        .select('id, customer_id, invoice_date, period_start, period_end, invoice_number, status, customer:customers(id, name)')
+        .or(`and(period_start.lte.${end},period_end.gte.${start}),and(period_start.is.null,invoice_date.gte.${start},invoice_date.lte.${end})`);
+      if (invErr) throw invErr;
+      const invoices = invs || [];
+      if (invoices.length === 0) { setGroups([]); setTotals({ charge: 0, pay: 0 }); setUnbilled(0); setLoading(false); return; }
 
-      const persons = {}; // id -> {name, rate}
-      const props = {};   // id -> name
-      const hoursPP = {}; // personId -> propId -> hours
-      (blocks || []).forEach(b => {
-        const sh = b.shift; if (!sh || sh.is_preview) return;
-        const emp = sh.employee; const pid = emp?.id; const cid = sh.customer_id;
-        if (!pid || !cid || !b.end_time) return;
-        const hrs = (new Date(b.end_time) - new Date(b.start_time)) / 3600000;
-        if (hrs <= 0) return;
-        persons[pid] = persons[pid] || { name: emp.name, rate: Number(emp.pay_rate_hourly) || 0 };
-        props[cid] = props[cid] || (sh.customer?.name || 'Property');
-        hoursPP[pid] = hoursPP[pid] || {};
-        hoursPP[pid][cid] = (hoursPP[pid][cid] || 0) + hrs;
-      });
-
-      const chargeByProp = {};
-      (invs || []).forEach(v => {
-        const cid = v.customer_id; if (!cid) return;
-        props[cid] = props[cid] || (v.customer?.name || 'Property');
-        chargeByProp[cid] = (chargeByProp[cid] || 0) + (Number(v.total) || 0);
-      });
-
-      const hoursByProp = {};
-      Object.keys(hoursPP).forEach(pid => Object.entries(hoursPP[pid]).forEach(([cid, h]) => { hoursByProp[cid] = (hoursByProp[cid] || 0) + h; }));
-
-      const out = [];
-      let tCharge = 0, tPay = 0;
-      if (slice === 'property') {
-        Object.keys(props).forEach(cid => {
-          const charge = chargeByProp[cid] || 0;
-          let pay = 0;
-          Object.keys(hoursPP).forEach(pid => { const h = hoursPP[pid][cid]; if (h) pay += h * persons[pid].rate; });
-          out.push({ id: cid, name: props[cid], charge, pay });
-          tCharge += charge; tPay += pay;
-        });
-      } else {
-        Object.keys(persons).forEach(pid => {
-          let pay = 0, charge = 0;
-          Object.entries(hoursPP[pid] || {}).forEach(([cid, h]) => {
-            pay += h * persons[pid].rate;
-            const ph = hoursByProp[cid] || 0;
-            if (ph > 0) charge += (chargeByProp[cid] || 0) * (h / ph);
-          });
-          out.push({ id: pid, name: persons[pid].name, charge, pay });
-          tCharge += charge; tPay += pay;
-        });
+      // 2. Their lines. Paginated — a busy month easily clears 1000 lines.
+      const invIds = invoices.map(i => i.id);
+      let lines = [];
+      for (let i = 0; i < invIds.length; i += 50) {
+        const chunk = invIds.slice(i, i + 50);
+        const PAGE = 1000;
+        for (let from = 0; ; from += PAGE) {
+          const { data, error } = await supabase.from('invoice_lines')
+            .select('id, invoice_id, unit_id, party_id, label, service_type, description, amount')
+            .in('invoice_id', chunk).range(from, from + PAGE - 1);
+          if (error || !data) break;
+          lines = lines.concat(data);
+          if (data.length < PAGE) break;
+          if (from > 100000) break;
+        }
       }
+
+      // 3. Corrections. No PostgREST embed — plain read, joined in JS.
+      let reviews = [];
+      const lineIds = lines.map(l => l.id);
+      for (let i = 0; i < lineIds.length; i += 200) {
+        const { data } = await supabase.from('profit_line_reviews')
+          .select('invoice_line_id, charged_override, paid_override, note')
+          .in('invoice_line_id', lineIds.slice(i, i + 200));
+        reviews = reviews.concat(data || []);
+      }
+      const reviewByLine = Object.fromEntries(reviews.map(r => [r.invoice_line_id, r]));
+
+      // 4. Labor. One window wide enough to cover every invoice period
+      //    touched, then matched per line to that invoice's own period.
+      const winStart = invoices.reduce((m, i) => {
+        const s = i.period_start || i.invoice_date || start;
+        return s < m ? s : m;
+      }, start);
+      const winEnd = invoices.reduce((m, i) => {
+        const e = i.period_end || i.invoice_date || end;
+        return e > m ? e : m;
+      }, end);
+      let blocks = [];
+      {
+        const PAGE = 1000;
+        for (let from = 0; ; from += PAGE) {
+          const { data, error } = await supabase.from('work_blocks')
+            .select('id, unit_id, party_id, start_time, end_time, shift:shifts!inner(customer_id, is_preview, employee:employees(id, name, pay_rate_hourly))')
+            .gte('start_time', winStart + 'T00:00:00').lte('start_time', winEnd + 'T23:59:59')
+            .not('end_time', 'is', null)
+            .range(from, from + PAGE - 1);
+          if (error || !data) break;
+          blocks = blocks.concat(data);
+          if (data.length < PAGE) break;
+          if (from > 100000) break;
+        }
+      }
+      const liveBlocks = blocks.filter(b => b.shift && !b.shift.is_preview && b.unit_id);
+
+      // 5. Build a row per invoice line.
+      const invById = Object.fromEntries(invoices.map(i => [i.id, i]));
+      const usedBlockIds = new Set();
+      const rows = lines.map(l => {
+        const inv = invById[l.invoice_id];
+        const pStart = inv?.period_start || inv?.invoice_date || start;
+        const pEnd = inv?.period_end || inv?.invoice_date || end;
+        // Match blocks at the SAME apartment inside the invoice's own
+        // period. Match on party too when the line names one, so two
+        // bedrooms billed separately don't both absorb the same labor.
+        const mine = liveBlocks.filter(b => {
+          if (b.unit_id !== l.unit_id) return false;
+          if (l.party_id && b.party_id && b.party_id !== l.party_id) return false;
+          const d = String(b.start_time).slice(0, 10);
+          return d >= pStart && d <= pEnd;
+        });
+        const byPerson = {};
+        let pay = 0, hours = 0;
+        mine.forEach(b => {
+          usedBlockIds.add(b.id);
+          const hrs = (new Date(b.end_time) - new Date(b.start_time)) / 3600000;
+          if (hrs <= 0) return;
+          const emp = b.shift.employee; if (!emp) return;
+          const rate = num(emp.pay_rate_hourly);
+          hours += hrs; pay += hrs * rate;
+          byPerson[emp.id] = byPerson[emp.id] || { name: emp.name, hours: 0, pay: 0 };
+          byPerson[emp.id].hours += hrs;
+          byPerson[emp.id].pay += hrs * rate;
+        });
+        const rev = reviewByLine[l.id];
+        const baseCharge = num(l.amount);
+        const charge = rev && rev.charged_override != null ? num(rev.charged_override) : baseCharge;
+        const paid = rev && rev.paid_override != null ? num(rev.paid_override) : pay;
+        return {
+          id: l.id,
+          propertyId: inv?.customer_id,
+          propertyName: inv?.customer?.name || 'Property',
+          invoiceNumber: inv?.invoice_number,
+          invoiceStatus: inv?.status,
+          periodLabel: inv?.period_start && inv?.period_end ? `${inv.period_start} → ${inv.period_end}` : fmtInvoiceDate(inv?.invoice_date),
+          label: l.label || 'Line',
+          serviceType: l.service_type,
+          cleaners: Object.values(byPerson).sort((a, b) => b.hours - a.hours),
+          hours,
+          baseCharge, basePay: pay,
+          charge, paid,
+          edited: !!rev && (rev.charged_override != null || rev.paid_override != null),
+          note: rev?.note || '',
+        };
+      });
+
+      // Labor in range that no invoice line claimed — usually work that
+      // hasn't been billed yet. Surfaced so a big "loss" isn't a mystery.
+      const unclaimed = liveBlocks
+        .filter(b => !usedBlockIds.has(b.id))
+        .filter(b => { const d = String(b.start_time).slice(0, 10); return d >= start && d <= end; })
+        .reduce((sum, b) => {
+          const hrs = (new Date(b.end_time) - new Date(b.start_time)) / 3600000;
+          if (hrs <= 0) return sum;
+          return sum + hrs * num(b.shift.employee?.pay_rate_hourly);
+        }, 0);
+      setUnbilled(unclaimed);
+
+      const byProp = {};
+      rows.forEach(r => {
+        byProp[r.propertyId] = byProp[r.propertyId] || { id: r.propertyId, name: r.propertyName, rows: [], charge: 0, pay: 0 };
+        byProp[r.propertyId].rows.push(r);
+        byProp[r.propertyId].charge += r.charge;
+        byProp[r.propertyId].pay += r.paid;
+      });
+      const out = Object.values(byProp);
+      out.forEach(g => g.rows.sort((a, b) => (b.charge - b.paid) - (a.charge - a.paid)));
       out.sort((a, b) => (b.charge - b.pay) - (a.charge - a.pay));
-      setRows(out);
-      setTotals({ charge: tCharge, pay: tPay });
+      setGroups(out);
+      setTotals({
+        charge: rows.reduce((s, r) => s + r.charge, 0),
+        pay: rows.reduce((s, r) => s + r.paid, 0),
+      });
     } catch (e) {
-      setRows([]);
+      alert('Could not run the report: ' + (e?.message || e));
+      setGroups([]);
     }
     setLoading(false);
   };
+
+  const openEdit = (r) => {
+    setEditing(r.id);
+    setDraft({
+      charged: r.charge === r.baseCharge ? '' : String(r.charge),
+      paid: r.paid === r.basePay ? '' : String(r.paid),
+      note: r.note || '',
+    });
+  };
+
+  const saveEdit = async (r) => {
+    setSavingId(r.id);
+    const payload = {
+      invoice_line_id: r.id,
+      charged_override: draft.charged === '' ? null : num(draft.charged),
+      paid_override: draft.paid === '' ? null : num(draft.paid),
+      note: draft.note || null,
+      reviewed_by: employee?.id || null,
+      reviewed_at: new Date().toISOString(),
+    };
+    const { error } = await supabase.from('profit_line_reviews')
+      .upsert(payload, { onConflict: 'invoice_line_id' });
+    setSavingId(null);
+    if (error) { alert('Could not save that correction: ' + error.message); return; }
+    setEditing(null);
+    run();
+  };
+
+  const clearEdit = async (r) => {
+    setSavingId(r.id);
+    const { error } = await supabase.from('profit_line_reviews').delete().eq('invoice_line_id', r.id);
+    setSavingId(null);
+    if (error) { alert('Could not reset that line: ' + error.message); return; }
+    setEditing(null);
+    run();
+  };
+
+  const profitTotal = totals.charge - totals.pay;
 
   return (
     <div className="min-h-screen bg-stone-50 pb-24">
       <Header name={employee.name} onSignOut={onSignOut} role={employee.role} employee={employee} onOpenMessages={onOpenMessages} onLogoClick={onLogoClick} />
       {topToggle}
-      <div className="px-5 pt-6 space-y-5 max-w-md mx-auto">
+      <div className="px-5 pt-6 space-y-5 max-w-2xl mx-auto">
         <div>
           <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">Report</div>
           <h1 className="font-serif text-3xl text-stone-900">Profit / loss</h1>
-          <p className="text-sm text-stone-500 mt-1">What you invoiced vs. what you paid in labor.</p>
-        </div>
-
-        <div className="flex gap-1 bg-stone-100 p-1 rounded-xl">
-          <button onClick={() => { setSlice('property'); setRows(null); }} className={`flex-1 py-2 rounded-lg text-xs font-medium ${slice === 'property' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>By property</button>
-          <button onClick={() => { setSlice('person'); setRows(null); }} className={`flex-1 py-2 rounded-lg text-xs font-medium ${slice === 'person' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>By person</button>
+          <p className="text-sm text-stone-500 mt-1">Every invoiced apartment: what you charged, who cleaned it, what they cost.</p>
         </div>
 
         <div>
           <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2">Date range</div>
           <DateRangePicker start={start} end={end} onChange={(s, e) => { setStart(s); setEnd(e); }} />
+          <p className="text-[11px] text-stone-400 mt-1.5">Matches the work an invoice covers, not the date it was written.</p>
         </div>
 
         <button onClick={run} disabled={loading || !start || !end}
@@ -16756,35 +17026,116 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
           {loading ? 'Crunching…' : 'Run report'}
         </button>
 
-        {rows && (
-          <div className="space-y-3">
+        {groups && (
+          <div className="space-y-4">
             <div className="p-4 rounded-2xl bg-white border border-stone-200 grid grid-cols-3 gap-2 text-center">
-              <div><div className="text-[10px] uppercase text-stone-400 font-mono">Charged</div><div className="text-lg font-mono text-stone-900">${totals.charge.toFixed(0)}</div></div>
-              <div><div className="text-[10px] uppercase text-stone-400 font-mono">Paid</div><div className="text-lg font-mono text-stone-900">${totals.pay.toFixed(0)}</div></div>
-              <div><div className="text-[10px] uppercase text-stone-400 font-mono">Profit</div><div className={`text-lg font-mono ${totals.charge - totals.pay >= 0 ? 'text-emerald-700' : 'text-red-600'}`}>${(totals.charge - totals.pay).toFixed(0)}</div></div>
+              <div><div className="text-[10px] uppercase text-stone-400 font-mono">Charged</div><div className="text-lg font-mono text-stone-900">{fmtMoney(totals.charge)}</div></div>
+              <div><div className="text-[10px] uppercase text-stone-400 font-mono">Paid</div><div className="text-lg font-mono text-stone-900">{fmtMoney(totals.pay)}</div></div>
+              <div><div className="text-[10px] uppercase text-stone-400 font-mono">Profit</div><div className={`text-lg font-mono ${profitTotal >= 0 ? 'text-emerald-700' : 'text-red-600'}`}>{fmtMoney(profitTotal)}</div></div>
             </div>
-            {rows.length === 0 ? (
-              <div className="text-center py-8 text-stone-400 text-sm">No data in this range.</div>
-            ) : rows.map(r => {
-              const profit = r.charge - r.pay;
-              const margin = r.charge > 0 ? (profit / r.charge) * 100 : null;
+
+            {unbilled > 0.005 && (
+              <div className="p-3 rounded-2xl bg-amber-50 border border-amber-200 text-[11px] text-amber-900 font-mono">
+                {fmtMoney(unbilled)} of labor in this range isn't on any invoice yet — not counted above.
+              </div>
+            )}
+
+            {groups.length === 0 ? (
+              <div className="text-center py-8 text-stone-400 text-sm">No invoices cover work in this range.</div>
+            ) : groups.map(g => {
+              const gp = g.charge - g.pay;
               return (
-                <div key={r.id} className="p-4 rounded-2xl bg-white border border-stone-200">
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="font-serif text-lg text-stone-900">{r.name}</span>
-                    <span className={`text-sm font-mono font-bold ${profit >= 0 ? 'text-emerald-700' : 'text-red-600'}`}>{profit >= 0 ? '+' : ''}${profit.toFixed(2)}</span>
+                <div key={g.id} className="space-y-2">
+                  <div className="flex items-center justify-between gap-2 px-1">
+                    <span className="font-serif text-lg text-stone-900">{g.name}</span>
+                    <span className={`text-sm font-mono font-bold ${gp >= 0 ? 'text-emerald-700' : 'text-red-600'}`}>{gp >= 0 ? '+' : ''}{fmtMoney(gp)}</span>
                   </div>
-                  <div className="flex items-center gap-4 text-xs font-mono text-stone-600 flex-wrap">
-                    <span>Charged ${r.charge.toFixed(2)}</span>
-                    <span>Paid ${r.pay.toFixed(2)}</span>
-                    {margin != null && <span className={profit >= 0 ? 'text-emerald-700' : 'text-red-600'}>{margin.toFixed(0)}% margin</span>}
-                  </div>
+                  {g.rows.map(r => {
+                    const p = r.charge - r.paid;
+                    const margin = r.charge > 0 ? (p / r.charge) * 100 : null;
+                    const isEditing = editing === r.id;
+                    return (
+                      <div key={r.id} className="p-4 rounded-2xl bg-white border border-stone-200">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="font-mono text-sm font-medium text-stone-900">{r.label}</span>
+                              {r.serviceType && <span className="text-[10px] px-2 py-0.5 rounded-full bg-stone-100 text-stone-600">{assignmentTypeLabel ? assignmentTypeLabel(r.serviceType) : r.serviceType}</span>}
+                              {r.edited && <span className="text-[10px] px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-800 font-mono">edited</span>}
+                            </div>
+                            <div className="text-[10px] font-mono text-stone-400 mt-0.5">
+                              {r.invoiceNumber ? `Inv #${r.invoiceNumber} · ` : ''}{r.periodLabel}
+                            </div>
+                          </div>
+                          <span className={`text-sm font-mono font-bold flex-shrink-0 ${p >= 0 ? 'text-emerald-700' : 'text-red-600'}`}>{p >= 0 ? '+' : ''}{fmtMoney(p)}</span>
+                        </div>
+
+                        {/* Who cleaned it */}
+                        <div className="mt-2 flex items-center gap-1.5 flex-wrap">
+                          {r.cleaners.length === 0 ? (
+                            <span className="text-[10px] font-mono text-stone-400">No clocked work matched this apartment</span>
+                          ) : r.cleaners.map(c => (
+                            <span key={c.name} className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-stone-100 text-stone-700">
+                              {c.name} · {c.hours.toFixed(1)}h · {fmtMoney(c.pay)}
+                            </span>
+                          ))}
+                        </div>
+
+                        <div className="mt-2 flex items-center gap-4 text-xs font-mono text-stone-600 flex-wrap">
+                          <span>Charged {fmtMoney(r.charge)}</span>
+                          <span>Paid {fmtMoney(r.paid)}</span>
+                          {margin != null && <span className={p >= 0 ? 'text-emerald-700' : 'text-red-600'}>{margin.toFixed(0)}% margin</span>}
+                          {!isEditing && (
+                            <button onClick={() => openEdit(r)} className="ml-auto text-[11px] font-medium text-amber-700">Correct →</button>
+                          )}
+                        </div>
+                        {r.note && !isEditing && (
+                          <div className="mt-1.5 text-[11px] text-stone-500 italic">{r.note}</div>
+                        )}
+
+                        {isEditing && (
+                          <div className="mt-3 p-3 rounded-xl bg-stone-50 border border-stone-200 space-y-2">
+                            <div className="text-[10px] uppercase tracking-wider font-mono text-stone-400">
+                              What it really was — leave blank to keep the invoice figure
+                            </div>
+                            <div className="grid grid-cols-2 gap-2">
+                              <div>
+                                <label className="block text-[10px] font-mono text-stone-500 mb-1">Charged (invoice {fmtMoney(r.baseCharge)})</label>
+                                <input type="number" step="0.01" value={draft.charged} placeholder={r.baseCharge.toFixed(2)}
+                                  onChange={(e) => setDraft(d => ({ ...d, charged: e.target.value }))}
+                                  className="w-full px-2 py-1.5 rounded-lg border border-stone-300 text-xs font-mono" />
+                              </div>
+                              <div>
+                                <label className="block text-[10px] font-mono text-stone-500 mb-1">Paid (clocked {fmtMoney(r.basePay)})</label>
+                                <input type="number" step="0.01" value={draft.paid} placeholder={r.basePay.toFixed(2)}
+                                  onChange={(e) => setDraft(d => ({ ...d, paid: e.target.value }))}
+                                  className="w-full px-2 py-1.5 rounded-lg border border-stone-300 text-xs font-mono" />
+                              </div>
+                            </div>
+                            <input type="text" value={draft.note} placeholder="Note (optional) — why the change?"
+                              onChange={(e) => setDraft(d => ({ ...d, note: e.target.value }))}
+                              className="w-full px-2 py-1.5 rounded-lg border border-stone-300 text-xs" />
+                            <div className="flex items-center gap-2">
+                              <button onClick={() => setEditing(null)} disabled={savingId === r.id}
+                                className="text-[11px] font-medium px-3 py-1.5 rounded-full bg-white border border-stone-300 text-stone-600 disabled:opacity-50">Cancel</button>
+                              {r.edited && (
+                                <button onClick={() => clearEdit(r)} disabled={savingId === r.id}
+                                  className="text-[11px] font-medium px-3 py-1.5 rounded-full bg-white border border-stone-300 text-red-600 disabled:opacity-50">Reset</button>
+                              )}
+                              <button onClick={() => saveEdit(r)} disabled={savingId === r.id}
+                                className="ml-auto text-[11px] font-medium px-3 py-1.5 rounded-full bg-stone-900 text-white disabled:opacity-50">
+                                {savingId === r.id ? 'Saving…' : 'Save'}
+                              </button>
+                            </div>
+                            <p className="text-[10px] text-stone-400">Only changes this report. The invoice itself is untouched.</p>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
               );
             })}
-            {slice === 'person' && rows.length > 0 && (
-              <p className="text-[11px] text-stone-400 font-mono">Per-person "charged" splits each property's invoiced total by that person's share of hours worked there.</p>
-            )}
           </div>
         )}
       </div>
@@ -19905,7 +20256,7 @@ function WhosWherePanel({ employee }) {
     const idleCutoffISO = new Date(now - STALE_IDLE_MIN * 60 * 1000).toISOString();
     const forceCutoffISO = new Date(now - STALE_FORCE_MIN * 60 * 1000).toISOString();
     try {
-      // 1) Soft auto-clockout — pull shifts past the idle cutoff and
+      // 1. Soft auto-clockout — pull shifts past the idle cutoff and
       //    set end_time per-row to their last_activity_at. We can't
       //    do this in a single UPDATE (Supabase JS doesn't support
       //    column-to-column updates) so we fetch then patch.
@@ -19924,7 +20275,7 @@ function WhosWherePanel({ employee }) {
           .eq('shift_id', s.id)
           .is('end_time', null);
       }
-      // 2) Hard force close — catch-all for anything still open beyond
+      // 2. Hard force close — catch-all for anything still open beyond
       //    the 2-hour cutoff (e.g. shift with no last_activity_at, or
       //    a work_block whose parent shift is somehow already closed).
       await supabase.from('shifts')
@@ -27376,7 +27727,7 @@ function SuggestedTabContent({ propertyId, employee, onGoToBedroom, onOpenBedroo
     if (!propertyId || !employee?.id) return;
     (async () => {
       setLoaded(false);
-      // 1) Anchor — cleaner's most recent block at this property
+      // 1. Anchor — cleaner's most recent block at this property
       const { data: myBlocks } = await supabase
         .from('work_blocks')
         .select('id, unit_id, party_id, end_time, start_time, unit:units(label), party:parties(label), shift:shifts!inner(customer_id, employee_id)')
@@ -27397,7 +27748,7 @@ function SuggestedTabContent({ propertyId, employee, onGoToBedroom, onOpenBedroo
         wasOpen: !recent.end_time,
       } : null;
 
-      // 2) Units + parties + full target detail + open work blocks
+      // 2. Units + parties + full target detail + open work blocks
       const [unitsRes, partiesRes, targetsRes, blocksRes] = await Promise.all([
         supabase.from('units').select('id, label, active').eq('customer_id', propertyId).eq('active', true),
         supabase.from('parties').select('id, label, unit_id, sort_order, active'),
@@ -27408,9 +27759,13 @@ function SuggestedTabContent({ propertyId, employee, onGoToBedroom, onOpenBedroo
         // main_section is pulled so each chip can label which section
         // the cleaner is working — relevant once cleaners split a
         // bedroom across sections.
+        // Scoped to this property server-side — an app-wide open-block
+        // query silently truncates at the 1000-row cap and the "is here"
+        // chips go missing on arbitrary cards.
         supabase.from('work_blocks')
           .select('id, unit_id, party_id, main_section, shift:shifts!inner(customer_id, employee:employees(id, name))')
-          .is('end_time', null),
+          .is('end_time', null)
+          .eq('shift.customer_id', propertyId),
       ]);
       const units = unitsRes.data || [];
       const parties = (partiesRes.data || []).filter(p => p.active !== false);
@@ -27897,11 +28252,25 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
   // every viewer's bedroom cards reflect it within a second or two.
   const [whosHereByParty, setWhosHereByParty] = useState(new Map());
   const loadWhosHere = async () => {
-    const { data } = await supabase.from('work_blocks')
-      .select('id, party_id, main_section, shift:shifts!inner(customer_id, employee:employees(id, name))')
-      .is('end_time', null);
+    // Scoped server-side to THIS property and paginated. This used to
+    // pull EVERY open work block app-wide and filter in JS, so once open
+    // blocks passed PostgREST's 1000-row cap an arbitrary subset came
+    // back — which is why the "X is here" chip appeared on some bedroom
+    // cards and not others.
+    let rows = []; const PAGE = 1000;
+    for (let from = 0; ; from += PAGE) {
+      const { data, error } = await supabase.from('work_blocks')
+        .select('id, party_id, main_section, shift:shifts!inner(customer_id, employee:employees(id, name))')
+        .is('end_time', null)
+        .eq('shift.customer_id', propertyId)
+        .range(from, from + PAGE - 1);
+      if (error || !data) break;
+      rows = rows.concat(data);
+      if (data.length < PAGE) break;
+      if (from > 100000) break;
+    }
     const m = new Map();
-    (data || []).forEach(b => {
+    rows.forEach(b => {
       if (b.shift?.customer_id !== propertyId) return;
       if (!b.party_id) return;
       // Exclude the viewing cleaner's own workblock — they don't need
@@ -28050,10 +28419,20 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
     } else {
       // Overdue → today → undated → upcoming, then priority, then
       // natural unit/party order, so cleaners see today's work first.
+      // Due date first, THEN building order. Anything with a date sits
+      // above anything without; undated work keeps its old natural order
+      // at the bottom.
       filtered.sort((a, b) => {
-        const ra = assignmentDueRank(a.assignment?.scheduled_date);
-        const rb = assignmentDueRank(b.assignment?.scheduled_date);
+        const da = a.assignment?.scheduled_date || '';
+        const db = b.assignment?.scheduled_date || '';
+        const ra = assignmentDueRank(da || null);
+        const rb = assignmentDueRank(db || null);
         if (ra !== rb) return ra - rb;
+        // Real chronological order inside a bucket. scheduled_date is
+        // 'YYYY-MM-DD', so a string compare is already date order.
+        // Without this every future date ties and the sort collapses
+        // straight to building order.
+        if (da !== db) return da.localeCompare(db);
         const ap = a.priority ? 1 : 0;
         const bp = b.priority ? 1 : 0;
         if (ap !== bp) return bp - ap;
@@ -29328,7 +29707,7 @@ function NextUpModal({ from, employeeId, onPick, onClose }) {
   useEffect(() => {
     if (!from?.propertyId) return;
     (async () => {
-      // 1) Load every unit + party for the property so we can compute
+      // 1. Load every unit + party for the property so we can compute
       //    which bedrooms still have open targets and where they live.
       const [unitsRes, partiesRes, targetsRes, blocksRes] = await Promise.all([
         supabase.from('units')
@@ -32267,7 +32646,7 @@ function RecheckRequestModal({ assignment, property, portalUser, onClose, onSave
     if (selected.size === 0) { setError('Pick at least one item the tenant passed.'); return; }
     setError(''); setBusy(true);
     try {
-      // 1) Find the portal_user id from the URL/session — passed in
+      // 1. Find the portal_user id from the URL/session — passed in
       //    via assignment for this build we'll read from the property
       //    metadata. Simpler: leave created_by null; the owner inbox
       //    will still show the assignment + property which is enough
@@ -32279,7 +32658,7 @@ function RecheckRequestModal({ assignment, property, portalUser, onClose, onSave
         notes: notes.trim() || null,
       }).select('id').single();
       if (e1) throw e1;
-      // 2) Insert the item rows
+      // 2. Insert the item rows
       const itemRows = Array.from(selected).map(tid => ({
         recheck_request_id: req.id,
         assignment_target_id: tid,
@@ -32575,7 +32954,7 @@ function ReviewRecheckModal({ recheck, employee, onDone, onClose }) {
     try {
       const nowISO = new Date().toISOString();
       const targetIds = items.map(i => i.target?.id).filter(Boolean);
-      // 1) Mark every listed target as done + recheck_passed.
+      // 1. Mark every listed target as done + recheck_passed.
       //    completed_by stays null (no cleaner did this work) — the
       //    recheck_passed_at column distinguishes from a normal close.
       if (targetIds.length > 0) {
@@ -32589,7 +32968,7 @@ function ReviewRecheckModal({ recheck, employee, onDone, onClose }) {
           .in('id', targetIds);
         if (e1) throw e1;
       }
-      // 2) Stamp the recheck request as approved
+      // 2. Stamp the recheck request as approved
       const { error: e2 } = await supabase.from('recheck_requests')
         .update({
           pm_status: 'approved',

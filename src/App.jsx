@@ -25,6 +25,7 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 // =================================================================
 const GOOGLE_TRANSLATE_API_KEY = "AIzaSyD7ceHPryMzs45hWJOyFNBxtOzQOEmJcSA";
 
+
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 const PHOTO_BUCKET = 'task-photos';
 const ASSIGNMENT_BUCKET = 'assignments';
@@ -48,7 +49,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul17-when1";
+const BUILD_TAG = "jul17-when2";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -17259,8 +17260,15 @@ function InvoiceList({ property, onOpen, onNew }) {
 // =================================================================
 function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, topToggle }) {
   const iso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-  const [start, setStart] = useState(iso(new Date(Date.now() - 29 * 86400000)));
-  const [end, setEnd] = useState(iso(new Date()));
+  // Remember the range across refreshes. Re-picking dates and hitting Run
+  // again after every reload is pure friction — the report is derived
+  // data, so it can just rebuild itself.
+  const SAVED_RANGE_KEY = 'tidytrack_profit_range';
+  const savedRange = (() => {
+    try { return JSON.parse(localStorage.getItem(SAVED_RANGE_KEY) || 'null'); } catch { return null; }
+  })();
+  const [start, setStart] = useState(savedRange?.start || iso(new Date(Date.now() - 29 * 86400000)));
+  const [end, setEnd] = useState(savedRange?.end || iso(new Date()));
   const [loading, setLoading] = useState(false);
   const [groups, setGroups] = useState(null);
   const [totals, setTotals] = useState({ charge: 0, pay: 0 });
@@ -17276,6 +17284,7 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
 
   const run = async () => {
     if (!start || !end) return;
+    try { localStorage.setItem(SAVED_RANGE_KEY, JSON.stringify({ start, end })); } catch { /* private mode */ }
     setLoading(true); setEditing(null);
     try {
       // 1. Invoices whose covered period overlaps the range. Older
@@ -17367,6 +17376,24 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
         }
       }
 
+      // 2b. Real unit + bedroom labels. invoice_lines.label is cosmetic —
+      //     the draft builder strips the building prefix off it (B2-233
+      //     becomes "233"), which is fine on a bill to one property but
+      //     useless in a report spanning several. Join to units/parties
+      //     for the real thing.
+      const lineUnitIds = [...new Set(lines.map(l => l.unit_id).filter(Boolean))];
+      const linePartyIds = [...new Set(lines.map(l => l.party_id).filter(Boolean))];
+      const unitLabelById = {};
+      for (let i = 0; i < lineUnitIds.length; i += 200) {
+        const { data } = await supabase.from('units').select('id, label').in('id', lineUnitIds.slice(i, i + 200));
+        (data || []).forEach(u => { unitLabelById[u.id] = u.label; });
+      }
+      const partyLabelById = {};
+      for (let i = 0; i < linePartyIds.length; i += 200) {
+        const { data } = await supabase.from('parties').select('id, label').in('id', linePartyIds.slice(i, i + 200));
+        (data || []).forEach(pt => { partyLabelById[pt.id] = pt.label; });
+      }
+
       // 3. Corrections. No PostgREST embed — plain read, joined in JS.
       let reviews = [];
       const lineIds = lines.map(l => l.id);
@@ -17446,7 +17473,10 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
           invoiceNumber: inv?.invoice_number,
           invoiceStatus: inv?.status,
           periodLabel: inv?.period_start && inv?.period_end ? `${inv.period_start} → ${inv.period_end}` : fmtInvoiceDate(inv?.invoice_date),
-          label: l.label || 'Line',
+          // Prefer the real unit/bedroom labels; fall back to whatever the
+          // invoice printed if this line isn't tied to a unit.
+          label: [unitLabelById[l.unit_id], partyLabelById[l.party_id]].filter(Boolean).join(' · ') || l.label || 'Line',
+          invoiceLabel: l.label || '',
           serviceType: l.service_type,
           cleaners: Object.values(byPerson).sort((a, b) => b.hours - a.hours),
           cleanedDays,
@@ -17491,6 +17521,13 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
     }
     setLoading(false);
   };
+
+  // Rebuild on load if we already know the range, so a refresh lands you
+  // back on the report instead of a blank form.
+  useEffect(() => {
+    if (savedRange?.start && savedRange?.end) run();
+    /* eslint-disable-next-line */
+  }, []);
 
   const openEdit = (r) => {
     setEditing(r.id);
@@ -17630,7 +17667,9 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
               const gp = g.charge - g.pay;
               return (
                 <div key={g.id} className="space-y-2">
-                  <div className="flex items-center justify-between gap-2 px-1">
+                  {/* Sticky: scroll far enough into a property and you lose
+                     the header, which is the only thing naming the property. */}
+                  <div className="flex items-center justify-between gap-2 px-3 py-2 rounded-xl bg-stone-100 border border-stone-200 sticky top-0 z-10">
                     <span className="font-serif text-lg text-stone-900">{g.name}</span>
                     <span className={`text-sm font-mono font-bold ${gp >= 0 ? 'text-emerald-700' : 'text-red-600'}`}>{gp >= 0 ? '+' : ''}{fmtMoney(gp)}</span>
                   </div>
@@ -17647,8 +17686,12 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
                               {r.serviceType && <span className="text-[10px] px-2 py-0.5 rounded-full bg-stone-100 text-stone-600">{assignmentTypeLabel ? assignmentTypeLabel(r.serviceType) : r.serviceType}</span>}
                               {r.edited && <span className="text-[10px] px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-800 font-mono">edited</span>}
                             </div>
-                            <div className="text-[10px] font-mono text-stone-400 mt-0.5">
-                              {r.invoiceNumber ? `Inv #${r.invoiceNumber} · ` : ''}{r.periodLabel}
+                            <div className="text-[10px] font-mono text-stone-400 mt-0.5 flex items-center gap-1">
+                              <Building2 size={9} className="flex-shrink-0" />
+                              {r.propertyName}{r.invoiceNumber ? ` · Inv #${r.invoiceNumber}` : ''}
+                            </div>
+                            <div className="text-[10px] font-mono text-stone-400">
+                              Billing period {r.periodLabel}
                             </div>
                             {/* When it was actually cleaned, not just billed. */}
                             <div className="text-[11px] font-mono text-stone-600 mt-0.5 flex items-center gap-1">

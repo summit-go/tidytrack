@@ -48,7 +48,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul17-extra3";
+const BUILD_TAG = "jul17-pend1";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -16544,6 +16544,8 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
   const [expanded, setExpanded] = useState(new Set());
   const [invoiceNumber, setInvoiceNumber] = useState('');
   const [takenNumbers, setTakenNumbers] = useState(new Set()); // numbers already used
+  const [unfinished, setUnfinished] = useState([]);   // scheduled in range, not finished
+  const [dismissed, setDismissed] = useState(new Set()); // ones you've waved off
   const [title, setTitle] = useState('');
   const today = new Date().toISOString().split('T')[0];
   const [invoiceDate, setInvoiceDate] = useState(today);
@@ -16598,6 +16600,45 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
       }
       targets = res.rows; fetchErr = res.err;
     }
+    // 3a2) Work in this range that ISN'T finished. It has no completed_at
+    //      (only done targets get stamped), so "in this range" can only
+    //      mean the assignment's SCHEDULED date. Never billed — you can't
+    //      charge for a clean that hasn't happened — but it's listed so
+    //      you can see what the range was expecting and chase it.
+    let notDone = [];
+    if (unitIds.length) {
+      const PAGE = 1000;
+      for (let from = 0; ; from += PAGE) {
+        const { data, error } = await supabase.from('assignment_targets')
+          .select('id, unit_id, party_id, assignment_id, status, assignment:assignments!inner(id, assignment_type, deleted_at, scheduled_date), unit:units(label), party:parties(label)')
+          .not('status', 'in', '(done)')
+          .in('unit_id', unitIds)
+          .gte('assignment.scheduled_date', start).lte('assignment.scheduled_date', end)
+          .range(from, from + PAGE - 1);
+        if (error || !data) break;
+        notDone = notDone.concat(data);
+        if (data.length < PAGE) break;
+        if (from > 100000) break;
+      }
+    }
+    {
+      const byJob = new Map();
+      notDone.filter(t => t.assignment && !t.assignment.deleted_at).forEach(t => {
+        const k = t.assignment_id;
+        if (!byJob.has(k)) byJob.set(k, {
+          id: k,
+          label: unitPartyLabel(t.unit?.label, t.party?.label) || 'Job',
+          type: t.assignment?.assignment_type || '',
+          scheduled: t.assignment?.scheduled_date || null,
+          total: 0, started: 0,
+        });
+        const r = byJob.get(k);
+        r.total++;
+        if (t.status === 'in_progress' || t.status === 'paused') r.started++;
+      });
+      setUnfinished(Array.from(byJob.values()).sort((a, b) => String(a.label).localeCompare(String(b.label), undefined, { numeric: true })));
+    }
+
     // 3b) The gap. `invoiced_on IS NULL` above is the ONLY filter this
     //     draft applies that the property's Done tab does not — so a
     //     bedroom finished in this window that an earlier invoice already
@@ -16639,12 +16680,15 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
     targets.forEach(t => {
       if (t.assignment && t.assignment.deleted_at) return;  // skip soft-deleted assignments
       const aid = t.assignment_id || `${t.unit_id}:${t.party_id}`;
-      if (!byAssign.has(aid)) byAssign.set(aid, { aid, unit_id: t.unit_id, party_id: t.party_id, type: t.assignment?.assignment_type, partyLabel: t.party?.label || '', tookLonger: false, items: [], targetIds: [] });
+      if (!byAssign.has(aid)) byAssign.set(aid, { aid, unit_id: t.unit_id, party_id: t.party_id, type: t.assignment?.assignment_type, partyLabel: t.party?.label || '', tookLonger: false, days: new Set(), items: [], targetIds: [] });
       // The Extra flag lives on the ASSIGNMENT, so capture it here off the
       // target's joined assignment. It used to be read off the item objects
       // pushed below, which never carried an `assignment` key — so it was
       // always undefined and no line was ever marked EXTRA.
       if (t.assignment?.took_longer) byAssign.get(aid).tookLonger = true;
+      // When the work actually happened. Every target carries completed_at
+      // (the draft only takes status='done'), so collect the distinct days.
+      if (t.completed_at) byAssign.get(aid).days.add(String(t.completed_at).slice(0, 10));
       const sec = (t.template_section || '').toLowerCase();
       const itemKey = t.template_item_key || '';
       const fullKey = itemKey
@@ -16723,7 +16767,7 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
       // extraOn defaults to whatever the cleaner flagged on the job, so a
       // job marked Extra in the field arrives here pre-armed and the owner
       // only has to type the amount.
-      return { key: g.aid, unitId: g.unit_id, partyId: g.party_id, label, serviceType: g.type, tookLonger, description: INVOICE_DESCR[g.type] || '', subsections: subs, amountOverride: '', extraOn: tookLonger, extraMode: 'fixed', extraAmount: '', extraMinutes: '', extraRate: '', extraNote: '', sourceTargetIds: g.targetIds };
+      return { key: g.aid, unitId: g.unit_id, partyId: g.party_id, label, serviceType: g.type, tookLonger, cleanedDays: Array.from(g.days).sort(), description: INVOICE_DESCR[g.type] || '', subsections: subs, amountOverride: '', extraOn: tookLonger, extraMode: 'fixed', extraAmount: '', extraMinutes: '', extraRate: '', extraNote: '', sourceTargetIds: g.targetIds };
     }).filter(l => l.label && l.subsections.length > 0).sort((a, b) => a.label.localeCompare(b.label, undefined, { numeric: true }));
     setLines(built);
     // Diagnostics — surfaced in the empty state so we can see where it
@@ -16973,6 +17017,41 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
           </div>
         )}
 
+        {/* Scheduled in this range but not finished. Deliberately NOT
+           billable lines: an invoice is a claim that work happened, and
+           nothing here has. Listed so the range can't quietly hide a job,
+           and dismissible so a known no-show stops nagging. */}
+        {unfinished.filter(u => !dismissed.has(u.id)).length > 0 && (
+          <div className="mb-4 rounded-2xl border-2 border-red-300 bg-red-50 overflow-hidden">
+            <div className="px-4 py-2.5 border-b border-red-200">
+              <div className="text-xs font-medium text-red-900">
+                {unfinished.filter(u => !dismissed.has(u.id)).length} cleaning{unfinished.filter(u => !dismissed.has(u.id)).length === 1 ? '' : 's'} scheduled in this range {unfinished.filter(u => !dismissed.has(u.id)).length === 1 ? 'is' : 'are'} not finished — not billed below.
+              </div>
+              <div className="text-[11px] text-red-800/70 mt-0.5">
+                Finish them in Operations and regenerate to bill them, or dismiss to hide.
+              </div>
+            </div>
+            {unfinished.filter(u => !dismissed.has(u.id)).map(u => (
+              <div key={u.id} className="px-4 py-2 flex items-center gap-2 border-b border-red-100 last:border-0">
+                <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full flex-shrink-0 ${
+                  u.started > 0 ? 'bg-amber-500 text-white' : 'bg-white border border-red-300 text-red-700'}`}>
+                  {u.started > 0 ? 'In progress' : 'Not started'}
+                </span>
+                <span className="font-mono text-sm text-stone-900 truncate">{u.label}</span>
+                {u.type && <span className="text-[10px] px-2 py-0.5 rounded-full bg-white text-stone-600 flex-shrink-0">{assignmentTypeLabel(u.type)}</span>}
+                <span className="text-[10px] font-mono text-stone-500 flex-shrink-0">
+                  {u.scheduled ? fmtDueDate(u.scheduled) : 'no date'} · {u.started}/{u.total} items started
+                </span>
+                <button onClick={() => setDismissed(prev => new Set([...prev, u.id]))}
+                  title="Hide this — doesn't change the job"
+                  className="ml-auto p-1 rounded-lg text-red-400 hover:text-red-700 hover:bg-red-100 flex-shrink-0">
+                  <X size={14} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
         {/* Lines */}
         <div className="flex items-center justify-between mb-2">
           <span className="text-xs uppercase tracking-wider text-stone-500 font-mono">Line items ({lines.length})</span>
@@ -17038,6 +17117,17 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
                         </span>
                       )}
                     </button>
+                    {/* When this bedroom was actually cleaned. The invoice
+                       only bills finished work, so every line has a date —
+                       and you shouldn't have to trust the range blindly. */}
+                    {l.cleanedDays?.length > 0 && (
+                      <span className="text-[10px] font-mono text-stone-500 flex-shrink-0 inline-flex items-center gap-1 whitespace-nowrap">
+                        <Calendar size={9} className="text-stone-400" />
+                        {l.cleanedDays.length === 1
+                          ? fmtDueDate(l.cleanedDays[0])
+                          : `${fmtDueDate(l.cleanedDays[0])} → ${fmtDueDate(l.cleanedDays[l.cleanedDays.length - 1])}`}
+                      </span>
+                    )}
                     <span className="text-right flex-shrink-0">
                       <span className={`font-mono text-sm block ${overridden ? 'text-amber-700' : 'text-stone-900'}`}>${amt.toFixed(2)}</span>
                       {xtra > 0 && (

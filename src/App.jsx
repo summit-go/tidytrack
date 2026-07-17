@@ -48,7 +48,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul16-recon2";
+const BUILD_TAG = "jul16-extra2";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -15996,12 +15996,25 @@ function subAmount(s) {
     ? ((parseFloat(s.rate) || 0) * (parseFloat(s.minutes) || 0) / 60)
     : (parseFloat(s.amount) || 0);
 }
-function lineAmount(l) {
+// The line BEFORE any extra. "Override line total" replaces this figure;
+// it does not replace the extra.
+function baseAmount(l) {
   if (l.overrideMode === 'time') {
     return ((parseFloat(l.overrideRate) || 0) * (parseFloat(l.overrideMinutes) || 0)) / 60;
   }
   if (l.amountOverride !== '' && l.amountOverride != null) return parseFloat(l.amountOverride) || 0;
   return (l.subsections || []).filter(s => s.included).reduce((sum, s) => sum + subAmount(s), 0);
+}
+// The extra ADDS to the base — that's the whole point of it being separate.
+// Entered either as a flat dollar amount or as minutes × rate.
+function extraAmount(l) {
+  if (!l.extraOn) return 0;
+  return l.extraMode === 'time'
+    ? ((parseFloat(l.extraRate) || 0) * (parseFloat(l.extraMinutes) || 0)) / 60
+    : (parseFloat(l.extraAmount) || 0);
+}
+function lineAmount(l) {
+  return baseAmount(l) + extraAmount(l);
 }
 
 function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved }) {
@@ -16186,7 +16199,10 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
         }
       }
       subs.sort((a, b) => a.label.localeCompare(b.label));
-      return { key: g.aid, unitId: g.unit_id, partyId: g.party_id, label, serviceType: g.type, tookLonger, description: INVOICE_DESCR[g.type] || '', subsections: subs, amountOverride: '', sourceTargetIds: g.targetIds };
+      // extraOn defaults to whatever the cleaner flagged on the job, so a
+      // job marked Extra in the field arrives here pre-armed and the owner
+      // only has to type the amount.
+      return { key: g.aid, unitId: g.unit_id, partyId: g.party_id, label, serviceType: g.type, tookLonger, description: INVOICE_DESCR[g.type] || '', subsections: subs, amountOverride: '', extraOn: tookLonger, extraMode: 'fixed', extraAmount: '', extraMinutes: '', extraRate: '', extraNote: '', sourceTargetIds: g.targetIds };
     }).filter(l => l.label && l.subsections.length > 0).sort((a, b) => a.label.localeCompare(b.label, undefined, { numeric: true }));
     setLines(built);
     // Diagnostics — surfaced in the empty state so we can see where it
@@ -16250,6 +16266,12 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
       label: l.label, service_type: l.serviceType || null, description: l.description || null,
       subsections: l.subsections.filter(s => s.included).map(s => ({ key: s.key, label: s.label, mode: s.mode, amount: subAmount(s), minutes: s.minutes, rate: s.rate })),
       amount: lineAmount(l), amount_overridden: l.amountOverride !== '' && l.amountOverride != null,
+      base_amount: baseAmount(l),
+      extra_amount: extraAmount(l),
+      extra_note: (l.extraOn && l.extraNote) ? l.extraNote : null,
+      extra_mode: l.extraOn ? (l.extraMode || 'fixed') : null,
+      extra_minutes: (l.extraOn && l.extraMode === 'time') ? (parseFloat(l.extraMinutes) || 0) : null,
+      extra_rate: (l.extraOn && l.extraMode === 'time') ? (parseFloat(l.extraRate) || 0) : null,
       qty: 1, sort_order: i, source_unit_id: l.unitId || null, source_party_id: l.partyId || null,
     }));
     if (lineRows.length) {
@@ -16426,6 +16448,8 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
             {lines.map((l, idx) => {
               const open = expanded.has(l.key);
               const amt = lineAmount(l);
+              const base = baseAmount(l);
+              const xtra = extraAmount(l);
               const overridden = l.overrideMode === 'time'
                 || (l.amountOverride !== '' && l.amountOverride != null);
               return (
@@ -16441,7 +16465,12 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
                         </span>
                       )}
                     </button>
-                    <span className={`font-mono text-sm ${overridden ? 'text-amber-700' : 'text-stone-900'}`}>${amt.toFixed(2)}</span>
+                    <span className="text-right flex-shrink-0">
+                      <span className={`font-mono text-sm block ${overridden ? 'text-amber-700' : 'text-stone-900'}`}>${amt.toFixed(2)}</span>
+                      {xtra > 0 && (
+                        <span className="text-[10px] font-mono text-amber-700 block">${base.toFixed(2)} + ${xtra.toFixed(2)} extra</span>
+                      )}
+                    </span>
                     <button onClick={() => removeLine(l.key)} className="p-1.5 rounded-lg text-stone-300 hover:text-red-600 hover:bg-red-50">
                       <Trash2 size={14} />
                     </button>
@@ -16530,7 +16559,7 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
                               placeholder="min"
                               className="w-16 px-2 py-1 rounded-lg border border-stone-300 bg-white text-right" />
                             <span className="text-stone-400 text-xs">min =</span>
-                            <span className="text-emerald-700 font-medium min-w-[56px] text-right">${amt.toFixed(2)}</span>
+                            <span className="text-emerald-700 font-medium min-w-[56px] text-right">${base.toFixed(2)}</span>
                           </div>
                         ) : (
                           <div className="flex items-center justify-end">
@@ -16543,6 +16572,66 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
                             </span>
                           </div>
                         )}
+                      </div>
+
+                      {/* EXTRA — adds on top of the base, unlike the override
+                         above which replaces it. Pre-armed when the cleaner
+                         flagged the job Extra in the field. */}
+                      <div className="pt-2 border-t border-stone-100">
+                        <div className="flex items-center justify-between mb-2 gap-2">
+                          <button onClick={() => updateLine(l.key, { extraOn: !l.extraOn, extraRate: (!l.extraOn && !l.extraRate) ? (defaultRate || '') : l.extraRate })}
+                            className={`text-[10px] font-mono px-2.5 py-1 rounded-full inline-flex items-center gap-1 ${l.extraOn ? 'bg-amber-500 text-white' : 'bg-white border border-dashed border-stone-300 text-stone-500'}`}>
+                            <Plus size={10} /> {l.extraOn ? 'Extra charge' : 'Add extra charge'}
+                          </button>
+                          {l.extraOn && (
+                            <div className="flex p-0.5 bg-stone-100 rounded-lg">
+                              <button onClick={() => updateLine(l.key, { extraMode: 'fixed' })}
+                                className={`px-2 py-1 rounded-md text-[10px] font-mono flex items-center gap-0.5 ${l.extraMode !== 'time' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+                                <DollarSign size={10} /> Amount
+                              </button>
+                              <button onClick={() => updateLine(l.key, { extraMode: 'time', extraRate: (parseFloat(l.extraRate) > 0 ? l.extraRate : (defaultRate || 0)) })}
+                                className={`px-2 py-1 rounded-md text-[10px] font-mono flex items-center gap-0.5 ${l.extraMode === 'time' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+                                <Clock size={10} /> Time × rate
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                        {l.extraOn && (<>
+                          {l.extraMode === 'time' ? (
+                            <div className="flex items-center justify-end gap-1 text-sm font-mono text-stone-600 flex-wrap">
+                              <span className="text-stone-400">$</span>
+                              <input type="number" step="0.01" value={l.extraRate || ''}
+                                onChange={e => updateLine(l.key, { extraRate: e.target.value })}
+                                placeholder={defaultRate ? String(defaultRate) : '0.00'}
+                                className="w-16 px-2 py-1 rounded-lg border border-stone-300 bg-white text-right" />
+                              <span className="text-stone-400 text-xs">/hr ×</span>
+                              <input type="number" step="1" value={l.extraMinutes || ''}
+                                onChange={e => updateLine(l.key, { extraMinutes: e.target.value })}
+                                placeholder="min"
+                                className="w-16 px-2 py-1 rounded-lg border border-stone-300 bg-white text-right" />
+                              <span className="text-stone-400 text-xs">min =</span>
+                              <span className="text-amber-700 font-medium min-w-[56px] text-right">${xtra.toFixed(2)}</span>
+                            </div>
+                          ) : (
+                            <div className="flex items-center justify-end">
+                              <span className="flex items-center gap-1 text-sm font-mono">
+                                <span className="text-stone-400">$</span>
+                                <input type="number" step="0.01" value={l.extraAmount}
+                                  onChange={e => updateLine(l.key, { extraAmount: e.target.value })}
+                                  placeholder="0.00"
+                                  className="w-24 px-2 py-1 rounded-lg border border-amber-300 bg-white text-right" />
+                              </span>
+                            </div>
+                          )}
+                          <input value={l.extraNote || ''} onChange={e => updateLine(l.key, { extraNote: e.target.value })}
+                            placeholder="Why? Prints under the extra, e.g. “Heavy soil — 45 min over”"
+                            className="w-full mt-2 px-3 py-2 rounded-lg border border-stone-300 bg-white text-sm text-stone-700" />
+                          <div className="flex items-center justify-end gap-3 mt-2 text-[11px] font-mono">
+                            <span className="text-stone-500">Base ${base.toFixed(2)}</span>
+                            <span className="text-amber-700">Extra ${xtra.toFixed(2)}</span>
+                            <span className="text-stone-900 font-medium">Total ${amt.toFixed(2)}</span>
+                          </div>
+                        </>)}
                       </div>
                     </div>
                   )}
@@ -16633,6 +16722,12 @@ function InvoiceDocument({ invoiceId, data, preview, onBack, onChanged, onEditDr
   );
 
   const total = lines.reduce((s, l) => s + (parseFloat(l.amount) || 0), 0);
+  const extraTotal = lines.reduce((s, l) => s + (parseFloat(l.extra_amount) || 0), 0);
+  const baseTotal = lines.reduce((s, l) => {
+    const amt = parseFloat(l.amount) || 0;
+    const x = parseFloat(l.extra_amount) || 0;
+    return s + (l.base_amount != null ? (parseFloat(l.base_amount) || 0) : (amt - x));
+  }, 0);
 
   return (
     <div className="pb-28 bg-stone-100 min-h-screen">
@@ -16703,6 +16798,10 @@ function InvoiceDocument({ invoiceId, data, preview, onBack, onChanged, onEditDr
           </div>
           {lines.map((l, i) => {
             const amount = parseFloat(l.amount) || 0;
+            const xtra = parseFloat(l.extra_amount) || 0;
+            // base_amount is backfilled by v58; fall back for any line
+            // written before that migration ran.
+            const base = l.base_amount != null ? (parseFloat(l.base_amount) || 0) : (amount - xtra);
             const n = i + 1;
             return (
               <div key={l.id}>
@@ -16714,6 +16813,20 @@ function InvoiceDocument({ invoiceId, data, preview, onBack, onChanged, onEditDr
                       <div className="font-semibold text-stone-800">{INVOICE_TYPE_LABEL[l.service_type] || 'Cleaning'}</div>
                       <div className="text-stone-700">{l.label}</div>
                       {l.description && <div className="text-stone-500">{l.description}</div>}
+                      {/* Show the PM what they're paying for rather than one
+                         lump sum they have to take on faith. */}
+                      {xtra > 0 && (
+                        <div className="mt-1 text-stone-600" style={{ fontSize: 11 }}>
+                          <div>Base clean — ${base.toFixed(2)}</div>
+                          <div>
+                            Additional work — ${xtra.toFixed(2)}
+                            {l.extra_mode === 'time' && parseFloat(l.extra_minutes) > 0 && (
+                              <span className="text-stone-500"> ({parseFloat(l.extra_minutes)} min @ ${(parseFloat(l.extra_rate) || 0).toFixed(2)}/hr)</span>
+                            )}
+                          </div>
+                          {l.extra_note && <div className="text-stone-500 italic">{l.extra_note}</div>}
+                        </div>
+                      )}
                     </div>
                   </div>
                   <div className="text-right align-top" style={{ width: 110 }}>${amount.toFixed(2)}</div>
@@ -16732,10 +16845,15 @@ function InvoiceDocument({ invoiceId, data, preview, onBack, onChanged, onEditDr
           })}
         </div>
 
-        {/* Totals */}
+        {/* Totals — Base / Extra / Total when anything on this invoice
+           carries an extra, otherwise just the total as before. */}
         <div className="flex justify-end mt-4">
           <div className="w-64 text-sm">
-            <div className="flex justify-between py-2 border-t border-stone-300"><span className="text-stone-600">Total:</span><span className="font-medium text-stone-900">${total.toFixed(2)}</span></div>
+            {extraTotal > 0 && (<>
+              <div className="flex justify-between py-1 border-t border-stone-300"><span className="text-stone-600">Base cleaning:</span><span className="text-stone-800">${baseTotal.toFixed(2)}</span></div>
+              <div className="flex justify-between py-1"><span className="text-stone-600">Additional work:</span><span className="text-stone-800">${extraTotal.toFixed(2)}</span></div>
+            </>)}
+            <div className={`flex justify-between py-2 ${extraTotal > 0 ? 'border-t border-stone-300' : 'border-t border-stone-300'}`}><span className="text-stone-600">Total:</span><span className="font-medium text-stone-900">${total.toFixed(2)}</span></div>
             <div className="flex justify-between py-2 px-2 bg-stone-100 rounded"><span className="text-stone-700 font-medium">Amount Due (USD):</span><span className="font-bold text-stone-900">${total.toFixed(2)}</span></div>
           </div>
         </div>

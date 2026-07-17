@@ -48,7 +48,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul17-cards1";
+const BUILD_TAG = "jul17-extra3";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -16862,9 +16862,19 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
       bill_to_org: billTo.org, bill_to_contact: billTo.contact, bill_to_email: billTo.email,
       bill_to_phone: billTo.phone, bill_to_address: billTo.address,
     };
+    // Must mirror what save() writes, or the preview lies about the bill.
+    // InvoiceDocument reads the DB column names (extra_amount etc.), and
+    // this mapper used to drop them — so an extra charge was invisible in
+    // the preview and only appeared once the invoice was saved.
     const previewLines = lines.map(l => ({
       id: l.key, label: l.label, service_type: l.serviceType,
       description: l.description, qty: 1, amount: lineAmount(l),
+      base_amount: baseAmount(l),
+      extra_amount: extraAmount(l),
+      extra_note: (l.extraOn && l.extraNote) ? l.extraNote : null,
+      extra_mode: l.extraOn ? (l.extraMode || 'fixed') : null,
+      extra_minutes: (l.extraOn && l.extraMode === 'time') ? (parseFloat(l.extraMinutes) || 0) : null,
+      extra_rate: (l.extraOn && l.extraMode === 'time') ? (parseFloat(l.extraRate) || 0) : null,
     }));
     return <InvoiceDocument data={{ inv: previewInv, lines: previewLines }} preview
       onBack={() => setPreviewing(false)} />;
@@ -17016,9 +17026,15 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
                       <ChevronRight size={15} className={`text-stone-400 transition-transform ${open ? 'rotate-90' : ''}`} />
                       <span className="font-mono text-sm font-medium text-stone-900">{l.label}</span>
                       {l.serviceType && <span className="text-[10px] px-2 py-0.5 rounded-full bg-stone-100 text-stone-600">{assignmentTypeLabel ? assignmentTypeLabel(l.serviceType) : l.serviceType}</span>}
-                      {l.tookLonger && (
-                        <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500 text-white inline-flex items-center gap-1 flex-shrink-0" title="Marked as taking longer — charge extra">
-                          <Clock size={9} /> EXTRA
+                      {/* Two ways a line becomes "extra": the cleaner flagged
+                         it in the field (tookLonger), or you priced one here.
+                         Either way the chip should say so — a $30 extra with
+                         no chip is exactly the thing you'd miss scanning
+                         seven lines. */}
+                      {(l.tookLonger || xtra > 0) && (
+                        <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500 text-white inline-flex items-center gap-1 flex-shrink-0"
+                          title={xtra > 0 ? `Extra charge of $${xtra.toFixed(2)} on this line` : 'Cleaner marked this as taking longer — charge extra'}>
+                          <Clock size={9} /> EXTRA{xtra > 0 ? ` +$${xtra.toFixed(2)}` : ''}
                         </span>
                       )}
                     </button>

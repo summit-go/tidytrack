@@ -24,6 +24,7 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 // If empty, the Translate button is hidden.
 // =================================================================
 const GOOGLE_TRANSLATE_API_KEY = "AIzaSyD7ceHPryMzs45hWJOyFNBxtOzQOEmJcSA";
+
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 const PHOTO_BUCKET = 'task-photos';
 const ASSIGNMENT_BUCKET = 'assignments';
@@ -47,7 +48,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul17-here1";
+const BUILD_TAG = "jul17-peek1";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -6193,6 +6194,135 @@ async function fetchLivePresence() {
 }
 
 // =================================================================
+// QUICK GLANCE — read-only peek at a job. Tapping a card on the work
+// list clocks you in and starts the clean, which is a heavy commitment
+// for "what's actually in there?". This answers that question and
+// writes nothing: no shift, no work block, no status changes.
+// =================================================================
+function JobPeekModal({ job, employee, onClose }) {
+  const { locale } = useLocale();
+  const { overrides } = useItemLabelOverrides(job.customerId, locale, employee);
+  const [items, setItems] = useState([]);
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      // Scoped to this one bedroom, so no pagination needed — but keep
+      // the assignment filter tight so a second job at the same bedroom
+      // doesn't bleed in.
+      let q = supabase.from('assignment_targets')
+        .select('id, status, template_item_key, template_section, status_notes, completed_at')
+        .eq('assignment_id', job.id);
+      if (job.unitId) q = q.eq('unit_id', job.unitId);
+      if (job.partyId) q = q.eq('party_id', job.partyId);
+      const { data, error } = await q;
+      if (cancelled) return;
+      if (error) { alert('Could not load this job: ' + error.message); setLoaded(true); return; }
+      setItems(data || []);
+      setLoaded(true);
+    })();
+    return () => { cancelled = true; };
+  }, [job.id, job.unitId, job.partyId]);
+
+  const labelFor = (t) => {
+    if (t.status_notes && (t.template_item_key?.startsWith?.('requested:') || t.template_item_key?.startsWith?.('custom_'))) return t.status_notes;
+    const key = t.template_item_key || '';
+    const fallback = key.replace(/^[a-z]+:/, '').replace(/_/g, ' ').replace(/^./, c => c.toUpperCase());
+    return resolveItemLabel(key, locale, overrides, fallback);
+  };
+
+  const SECTIONS = ['bedroom', 'vanity', 'bathroom', 'general'];
+  const bySection = {};
+  items.forEach(t => {
+    const sec = (t.template_section || 'other').toLowerCase();
+    (bySection[sec] = bySection[sec] || []).push(t);
+  });
+  const order = [...SECTIONS.filter(s => bySection[s]), ...Object.keys(bySection).filter(s => !SECTIONS.includes(s))];
+  const done = items.filter(t => t.status === 'done').length;
+  const size = (job.bedrooms || job.bathrooms) ? `${job.bedrooms || 0}BR / ${job.bathrooms || 0}BA` : null;
+
+  return (
+    <div onClick={onClose} className="fixed inset-0 bg-stone-900/80 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
+      <div onClick={(e) => e.stopPropagation()}
+        className="bg-stone-50 w-full sm:max-w-lg sm:rounded-3xl rounded-t-3xl flex flex-col max-h-[85vh]">
+        <div className="p-5 border-b border-stone-200">
+          <div className="flex items-start justify-between gap-2">
+            <div className="min-w-0 flex-1">
+              <div className="text-[10px] uppercase tracking-wider text-stone-400 font-mono">Quick glance — nothing is started</div>
+              <div className="font-serif text-xl text-stone-900 truncate">
+                {job.unitLabel || 'Job'}{job.partyLabel ? ` · ${job.partyLabel}` : ''}
+              </div>
+              <div className="text-xs text-stone-500 font-mono mt-0.5 truncate">
+                {job.propName}{job.type ? ` · ${assignmentTypeLabel(job.type)}` : ''}
+              </div>
+            </div>
+            <button onClick={onClose} className="p-2 rounded-full hover:bg-stone-100 flex-shrink-0">
+              <X size={20} className="text-stone-600" />
+            </button>
+          </div>
+          <div className="flex items-center gap-1.5 flex-wrap mt-2">
+            {size && <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-stone-200 text-stone-700">{size}</span>}
+            <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-stone-100 text-stone-600">
+              {done} of {items.length} done
+            </span>
+            {job.hereNow?.map((h, i) => (
+              <span key={i} className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 flex items-center gap-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" /> {h.name} is here
+              </span>
+            ))}
+            {job.assignees?.map(a => (
+              <span key={a.id} className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700 flex items-center gap-1">
+                <User size={9} /> {a.name}
+              </span>
+            ))}
+          </div>
+          {job.propAddress && (
+            <div className="text-[10px] text-blue-600 font-mono mt-2 underline decoration-blue-300 underline-offset-2">
+              <AddressLink address={job.propAddress} className="text-blue-600" />
+            </div>
+          )}
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-4 space-y-3">
+          {!loaded ? (
+            <div className="text-center py-8 text-stone-400 text-sm">Loading…</div>
+          ) : items.length === 0 ? (
+            <div className="text-center py-8 text-stone-400 text-sm">No items on this job.</div>
+          ) : order.map(sec => (
+            <div key={sec}>
+              <div className="text-[10px] uppercase tracking-wider font-mono text-stone-400 mb-1.5">
+                {sec} ({bySection[sec].length})
+              </div>
+              <div className="space-y-1">
+                {bySection[sec].map(t => (
+                  <div key={t.id} className="flex items-center gap-2 px-3 py-2 rounded-xl bg-white border border-stone-200">
+                    <span className={`w-2 h-2 rounded-full flex-shrink-0 ${
+                      t.status === 'done' ? 'bg-emerald-500'
+                      : t.status === 'in_progress' ? 'bg-amber-500'
+                      : t.status === 'blocked' ? 'bg-red-500'
+                      : 'bg-stone-300'}`} />
+                    <span className={`text-sm flex-1 ${t.status === 'done' ? 'text-stone-400 line-through' : 'text-stone-700'}`}>
+                      {labelFor(t)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div className="p-4 border-t border-stone-200">
+          <button onClick={onClose} className="w-full py-3 rounded-2xl bg-white border border-stone-300 text-stone-700 text-sm font-medium">
+            Close
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// =================================================================
 // CLEANER WORK LIST — the cleaner's own jobs (and all pending jobs)
 // across EVERY property, so they see their whole day. Same-property
 // jobs start the clean directly; other-property jobs offer to switch.
@@ -6210,6 +6340,7 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
   // Same capability the owner-side cards use, so one toggle governs both.
   const canEditDates = can(employee, 'edit_due_dates');
   const [editDueId, setEditDueId] = useState(null);
+  const [peekJob, setPeekJob] = useState(null); // read-only quick glance
   const saveDue = async (j, date) => {
     setEditDueId(null); setBusyId(j.id);
     const { data, error } = await supabase.from('assignments')
@@ -6399,7 +6530,8 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
             const mine = isMine(j);
             return (
               <div key={j.id} className="p-3.5 rounded-2xl bg-white border border-stone-200">
-                <button onClick={() => openJob(j)} className="w-full text-left">
+                <div className="flex items-start gap-2">
+                <button onClick={() => openJob(j)} className="flex-1 min-w-0 text-left">
                   <div className="flex items-center justify-between gap-2">
                     <span className="font-serif text-lg text-stone-900 truncate">{j.unitLabel || 'Job'}{j.partyLabel ? ` · ${j.partyLabel}` : ''}</span>
                     <span className="flex items-center gap-1 flex-shrink-0">
@@ -6418,6 +6550,14 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
                     {j.items > 0 && ` · ${j.items} ${j.items === 1 ? 'item' : 'items'}`}
                   </div>
                 </button>
+                {/* Quick glance. Sits OUTSIDE the card button on purpose —
+                   tapping the card clocks you in, and peeking shouldn't. */}
+                <button onClick={(e) => { e.stopPropagation(); setPeekJob(j); }}
+                  title="Peek inside — doesn't clock you in"
+                  className="p-2 rounded-xl border border-stone-200 text-stone-500 hover:text-stone-900 hover:border-stone-400 active:scale-95 flex-shrink-0">
+                  <Eye size={16} />
+                </button>
+                </div>
                 {j.propAddress && (
                   <div className="text-[10px] text-blue-600 font-mono mt-0.5 underline decoration-blue-300 underline-offset-2">
                     <AddressLink address={j.propAddress} className="text-blue-600" />
@@ -6508,6 +6648,9 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
             </div>
           ))}
         </div>
+      )}
+      {peekJob && (
+        <JobPeekModal job={peekJob} employee={employee} onClose={() => setPeekJob(null)} />
       )}
     </div>
   );

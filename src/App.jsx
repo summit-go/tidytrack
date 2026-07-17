@@ -48,7 +48,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul17-peek1";
+const BUILD_TAG = "jul17-peek2";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -6204,6 +6204,7 @@ function JobPeekModal({ job, employee, onClose }) {
   const { overrides } = useItemLabelOverrides(job.customerId, locale, employee);
   const [items, setItems] = useState([]);
   const [loaded, setLoaded] = useState(false);
+  const [secFilter, setSecFilter] = useState('all'); // 'all' | section key
 
   useEffect(() => {
     let cancelled = false;
@@ -6241,6 +6242,9 @@ function JobPeekModal({ job, employee, onClose }) {
   const order = [...SECTIONS.filter(s => bySection[s]), ...Object.keys(bySection).filter(s => !SECTIONS.includes(s))];
   const done = items.filter(t => t.status === 'done').length;
   const size = (job.bedrooms || job.bathrooms) ? `${job.bedrooms || 0}BR / ${job.bathrooms || 0}BA` : null;
+  // Same chip pattern as the real working screen, so switching between
+  // peek and work doesn't feel like two different apps.
+  const shown = secFilter === 'all' ? order : order.filter(s => s === secFilter);
 
   return (
     <div onClick={onClose} className="fixed inset-0 bg-stone-900/80 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
@@ -6284,16 +6288,36 @@ function JobPeekModal({ job, employee, onClose }) {
           )}
         </div>
 
+        {/* Section tabs. Sticky under the header so they stay reachable
+           on a 74-item job. */}
+        {loaded && items.length > 0 && (
+          <div className="px-4 pt-3 pb-2 border-b border-stone-200 bg-stone-50 flex items-center gap-1.5 overflow-x-auto">
+            <button onClick={() => setSecFilter('all')}
+              className={`text-[11px] font-mono px-2.5 py-1 rounded-full flex-shrink-0 ${secFilter === 'all' ? 'bg-stone-900 text-white' : 'bg-stone-200 text-stone-600'}`}>
+              All ({items.length})
+            </button>
+            {order.map(sec => (
+              <button key={sec} onClick={() => setSecFilter(sec)}
+                className={`text-[11px] font-mono px-2.5 py-1 rounded-full flex-shrink-0 capitalize ${secFilter === sec ? 'bg-stone-900 text-white' : 'bg-stone-200 text-stone-600'}`}>
+                {sec} ({bySection[sec].length})
+              </button>
+            ))}
+          </div>
+        )}
+
         <div className="flex-1 overflow-y-auto p-4 space-y-3">
           {!loaded ? (
             <div className="text-center py-8 text-stone-400 text-sm">Loading…</div>
           ) : items.length === 0 ? (
             <div className="text-center py-8 text-stone-400 text-sm">No items on this job.</div>
-          ) : order.map(sec => (
+          ) : shown.map(sec => (
             <div key={sec}>
-              <div className="text-[10px] uppercase tracking-wider font-mono text-stone-400 mb-1.5">
-                {sec} ({bySection[sec].length})
-              </div>
+              {/* The heading is redundant once a single tab is picked. */}
+              {secFilter === 'all' && (
+                <div className="text-[10px] uppercase tracking-wider font-mono text-stone-400 mb-1.5">
+                  {sec} ({bySection[sec].length})
+                </div>
+              )}
               <div className="space-y-1">
                 {bySection[sec].map(t => (
                   <div key={t.id} className="flex items-center gap-2 px-3 py-2 rounded-xl bg-white border border-stone-200">

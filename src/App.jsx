@@ -48,7 +48,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul17-hist1";
+const BUILD_TAG = "jul17-lines1";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -6436,6 +6436,39 @@ function AssignmentWorkHistory({ propertyId, unitId, partyId, employee, defaultO
   }, [show, unitId, partyId, propertyId]);
 
   const photosOf = (b) => (b.tasks || []).flatMap(t => (t.photos || []).filter(p => !p.deleted_at));
+  // Photos already carry kind = before | after | damage. Dumping them in
+  // one grid throws that away — and before/after IS the point when you're
+  // deciding whether a bedroom needs redoing.
+  const PHOTO_GROUPS = [
+    { key: 'before', label: 'Before', cls: 'bg-stone-200 text-stone-700' },
+    { key: 'after',  label: 'After',  cls: 'bg-emerald-100 text-emerald-800' },
+    { key: 'damage', label: 'Damage', cls: 'bg-red-100 text-red-700' },
+  ];
+  const photoGrid = (pics) => {
+    const groups = PHOTO_GROUPS
+      .map(g => ({ ...g, items: pics.filter(p => p.kind === g.key) }))
+      .filter(g => g.items.length > 0);
+    const tagged = groups.reduce((n, g) => n + g.items.length, 0);
+    const untagged = pics.filter(p => !PHOTO_GROUPS.some(g => g.key === p.kind));
+    if (untagged.length) groups.push({ key: 'other', label: 'Untagged', cls: 'bg-stone-100 text-stone-500', items: untagged });
+    return groups.map(g => (
+      <div key={g.key} className="mt-2">
+        <div className="flex items-center gap-1.5 mb-1">
+          <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full ${g.cls}`}>{g.label}</span>
+          <span className="text-[10px] font-mono text-stone-400">{g.items.length}</span>
+        </div>
+        <div className="grid grid-cols-4 sm:grid-cols-6 gap-1">
+          {g.items.map(p => (
+            <a key={p.id} href={p.public_url} target="_blank" rel="noopener noreferrer"
+              className="aspect-square rounded-lg overflow-hidden bg-stone-200 block relative">
+              <img loading="lazy" src={p.public_url} alt={g.label} className="w-full h-full object-cover" />
+              <span className={`absolute top-0.5 left-0.5 text-[8px] font-mono px-1 rounded ${g.cls}`}>{g.label[0]}</span>
+            </a>
+          ))}
+        </div>
+      </div>
+    ));
+  };
   const peopleOf = (r) => [...new Set(r.blocks.map(b => b.shift?.employee?.name).filter(Boolean))];
 
   const renderBlocks = (blocks) => blocks.map(b => {
@@ -6456,17 +6489,13 @@ function AssignmentWorkHistory({ propertyId, unitId, partyId, employee, defaultO
         </div>
         <div className="text-[10px] font-mono text-stone-400 mt-1">
           {(b.tasks || []).length} {(b.tasks || []).length === 1 ? 'task' : 'tasks'} · {pics.length} {pics.length === 1 ? 'photo' : 'photos'}
+          {(() => {
+            const bef = pics.filter(p => p.kind === 'before').length;
+            const aft = pics.filter(p => p.kind === 'after').length;
+            return (bef || aft) ? ` · ${bef} before, ${aft} after` : '';
+          })()}
         </div>
-        {pics.length > 0 && (
-          <div className="grid grid-cols-4 sm:grid-cols-6 gap-1 mt-2">
-            {pics.map(p => (
-              <a key={p.id} href={p.public_url} target="_blank" rel="noopener noreferrer"
-                className="aspect-square rounded-lg overflow-hidden bg-stone-200 block">
-                <img loading="lazy" src={p.public_url} alt="" className="w-full h-full object-cover" />
-              </a>
-            ))}
-          </div>
-        )}
+        {pics.length > 0 && photoGrid(pics)}
         {(b.tasks || []).length > 0 && (
           <div className="mt-2 flex flex-wrap gap-1">
             {(b.tasks || []).map(t => (
@@ -16941,6 +16970,10 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
               const amt = lineAmount(l);
               const base = baseAmount(l);
               const xtra = extraAmount(l);
+              // What the ticked items come to, before any override replaces
+              // it — shown next to the "Standard" header so the override is
+              // visibly a replacement rather than a mystery.
+              const baseItemsTotal = (l.subsections || []).filter(x => x.included).reduce((sum, x) => sum + subAmount(x), 0);
               const overridden = l.overrideMode === 'time'
                 || (l.amountOverride !== '' && l.amountOverride != null);
               return (
@@ -16968,6 +17001,17 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
                   </div>
                   {open && (
                     <div className="border-t border-stone-100 p-4 space-y-3">
+                      {/* Three stages, in the order they apply:
+                         1. STANDARD — the priced items
+                         2. EXTRA    — added on top
+                         3. OVERRIDE — replaces the standard total, so it
+                                       goes last where it can't be missed. */}
+                      <div className="flex items-center gap-2 mb-2">
+                        <span className="text-[10px] uppercase tracking-wider font-mono text-stone-500">1 · Standard</span>
+                        <span className="text-[10px] font-mono text-stone-400">what the items come to</span>
+                        <div className="flex-1 h-px bg-stone-200" />
+                        <span className="text-[11px] font-mono text-stone-700">${baseItemsTotal.toFixed(2)}</span>
+                      </div>
                       {l.subsections.length === 0 ? (
                         <div className="text-xs text-stone-400 font-mono">No priced items detected for this bedroom. Set a line total below, or price its items in the price book.</div>
                       ) : (() => {
@@ -16976,8 +17020,11 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
                           const sec = String(s.key || '').split(':')[0] || 'other';
                           (bySection[sec] = bySection[sec] || []).push({ s, si });
                         });
-                        const order = ['bedroom', 'vanity', 'bathroom', 'general', 'other'];
-                        const secLabel = { bedroom: 'Bedroom', vanity: 'Vanity', bathroom: 'Bathroom', general: 'General', other: 'Other' };
+                        const order = ['bedroom', 'vanity', 'bathroom', 'general', '__flat__', 'other'];
+                        // '__flat__' is the synthetic key for a whole-bedroom
+                        // line (nothing itemised failed). It was printing raw
+                        // as "__FLAT__", which means nothing to anyone.
+                        const secLabel = { bedroom: 'Bedroom', vanity: 'Vanity', bathroom: 'Bathroom', general: 'General', __flat__: 'Whole bedroom', other: 'Other' };
                         const secs = Object.keys(bySection).sort((a, b) => {
                           const ia = order.indexOf(a), ib = order.indexOf(b);
                           return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
@@ -16988,7 +17035,7 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
                               <React.Fragment key={sec}>
                                 <div className="col-span-full text-[10px] uppercase tracking-wider font-mono text-stone-400 border-b border-stone-100 pb-1 mt-1">{secLabel[sec] || sec}</div>
                                 {bySection[sec].map(({ s, si }) => (
-                                  <div key={s.key} className="flex items-center gap-1.5 min-w-0">
+                                  <div key={s.key} className="flex items-center gap-1.5 min-w-0 max-w-[340px]">
                                     <button onClick={() => updateSub(l.key, si, { included: !s.included })}
                                       className={`w-4 h-4 rounded flex items-center justify-center flex-shrink-0 ${s.included ? 'bg-stone-900 text-white' : 'border border-stone-300 text-transparent'}`}>
                                       <Check size={10} />
@@ -16999,10 +17046,16 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
                                       <Clock size={11} />
                                     </button>
                                     {s.mode === 'time' ? (
-                                      <span className="flex items-center gap-0.5 text-[11px] font-mono flex-shrink-0">
-                                        <input type="number" step="0.01" value={s.rate} onChange={e => updateSub(l.key, si, { rate: e.target.value })} placeholder={defaultRate ? String(defaultRate) : '0'} className="w-9 px-1 py-0.5 rounded border border-stone-300 bg-white text-right" />
-                                        <span className="text-stone-400">×</span>
-                                        <input type="number" value={s.minutes} onChange={e => updateSub(l.key, si, { minutes: e.target.value })} placeholder="m" className="w-7 px-1 py-0.5 rounded border border-stone-300 bg-white text-right" />
+                                      /* Was "47 × 2" with no units — unreadable.
+                                         It's an hourly RATE times MINUTES, so say
+                                         so, and show what it works out to. */
+                                      <span className="flex items-center gap-0.5 text-[11px] font-mono flex-shrink-0" title="Hourly rate × minutes">
+                                        <span className="text-stone-400">$</span>
+                                        <input type="number" step="0.01" value={s.rate} onChange={e => updateSub(l.key, si, { rate: e.target.value })} placeholder={defaultRate ? String(defaultRate) : '0'} className="w-10 px-1 py-0.5 rounded border border-stone-300 bg-white text-right" />
+                                        <span className="text-stone-400">/hr ×</span>
+                                        <input type="number" value={s.minutes} onChange={e => updateSub(l.key, si, { minutes: e.target.value })} placeholder="0" className="w-8 px-1 py-0.5 rounded border border-stone-300 bg-white text-right" />
+                                        <span className="text-stone-400">m =</span>
+                                        <span className="text-emerald-700 font-medium w-12 text-right">${subAmount(s).toFixed(2)}</span>
                                       </span>
                                     ) : (
                                       <span className="flex items-center gap-0.5 text-[11px] font-mono flex-shrink-0">
@@ -17023,52 +17076,14 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
                         <input value={l.description} onChange={e => updateLine(l.key, { description: e.target.value })}
                           className="w-full px-3 py-2 rounded-lg border border-stone-300 bg-white text-sm text-stone-700" />
                       </div>
-                      <div className="pt-2 border-t border-stone-100">
-                        <div className="flex items-center justify-between mb-2">
-                          <span className="text-[11px] font-mono text-stone-500">Override line total</span>
-                          <div className="flex p-0.5 bg-stone-100 rounded-lg">
-                            <button onClick={() => updateLine(l.key, { overrideMode: 'fixed' })}
-                              className={`px-2 py-1 rounded-md text-[10px] font-mono flex items-center gap-0.5 ${l.overrideMode !== 'time' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
-                              <DollarSign size={10} /> Amount
-                            </button>
-                            <button onClick={() => updateLine(l.key, { overrideMode: 'time', overrideRate: (parseFloat(l.overrideRate) > 0 ? l.overrideRate : (defaultRate || 0)) })}
-                              className={`px-2 py-1 rounded-md text-[10px] font-mono flex items-center gap-0.5 ${l.overrideMode === 'time' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
-                              <Clock size={10} /> Time × rate
-                            </button>
-                          </div>
+                      {/* EXTRA — adds on top of the standard total. */}
+                      <div className="pt-3 mt-2 border-t-2 border-amber-200">
+                        <div className="flex items-center gap-2 mb-2">
+                          <span className="text-[10px] uppercase tracking-wider font-mono text-amber-700">2 · Extra charge</span>
+                          <span className="text-[10px] font-mono text-stone-400">added on top</span>
+                          <div className="flex-1 h-px bg-amber-100" />
+                          <span className="text-[11px] font-mono text-amber-700">+${xtra.toFixed(2)}</span>
                         </div>
-                        {l.overrideMode === 'time' ? (
-                          <div className="flex items-center justify-end gap-1 text-sm font-mono text-stone-600 flex-wrap">
-                            <span className="text-stone-400">$</span>
-                            <input type="number" step="0.01" value={l.overrideRate || ''}
-                              onChange={e => updateLine(l.key, { overrideRate: e.target.value })}
-                              placeholder={defaultRate ? String(defaultRate) : '0.00'}
-                              className="w-16 px-2 py-1 rounded-lg border border-stone-300 bg-white text-right" />
-                            <span className="text-stone-400 text-xs">/hr ×</span>
-                            <input type="number" step="1" value={l.overrideMinutes || ''}
-                              onChange={e => updateLine(l.key, { overrideMinutes: e.target.value })}
-                              placeholder="min"
-                              className="w-16 px-2 py-1 rounded-lg border border-stone-300 bg-white text-right" />
-                            <span className="text-stone-400 text-xs">min =</span>
-                            <span className="text-emerald-700 font-medium min-w-[56px] text-right">${base.toFixed(2)}</span>
-                          </div>
-                        ) : (
-                          <div className="flex items-center justify-end">
-                            <span className="flex items-center gap-1 text-sm font-mono">
-                              <span className="text-stone-400">$</span>
-                              <input type="number" step="0.01" value={l.amountOverride}
-                                onChange={e => updateLine(l.key, { amountOverride: e.target.value })}
-                                placeholder={l.subsections.filter(s => s.included).reduce((sum, s) => sum + subAmount(s), 0).toFixed(2)}
-                                className="w-24 px-2 py-1 rounded-lg border border-stone-300 bg-white text-right" />
-                            </span>
-                          </div>
-                        )}
-                      </div>
-
-                      {/* EXTRA — adds on top of the base, unlike the override
-                         above which replaces it. Pre-armed when the cleaner
-                         flagged the job Extra in the field. */}
-                      <div className="pt-2 border-t border-stone-100">
                         <div className="flex items-center justify-between mb-2 gap-2">
                           <button onClick={() => updateLine(l.key, { extraOn: !l.extraOn, extraRate: (!l.extraOn && !l.extraRate) ? (defaultRate || '') : l.extraRate })}
                             className={`text-[10px] font-mono px-2.5 py-1 rounded-full inline-flex items-center gap-1 ${l.extraOn ? 'bg-amber-500 text-white' : 'bg-white border border-dashed border-stone-300 text-stone-500'}`}>
@@ -17124,6 +17139,53 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
                           </div>
                         </>)}
                       </div>
+                      <div className="pt-3 mt-2 border-t-2 border-stone-300">
+                        <div className="flex items-center gap-2 mb-2">
+                          <span className="text-[10px] uppercase tracking-wider font-mono text-stone-500">3 · Override line total</span>
+                          <span className="text-[10px] font-mono text-stone-400">replaces the standard total — the extra still applies</span>
+                          <div className="flex-1 h-px bg-stone-200" />
+                        </div>
+                        <div className="flex items-center justify-between mb-2">
+                          <span className="text-[11px] font-mono text-stone-500">Set a flat total</span>
+                          <div className="flex p-0.5 bg-stone-100 rounded-lg">
+                            <button onClick={() => updateLine(l.key, { overrideMode: 'fixed' })}
+                              className={`px-2 py-1 rounded-md text-[10px] font-mono flex items-center gap-0.5 ${l.overrideMode !== 'time' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+                              <DollarSign size={10} /> Amount
+                            </button>
+                            <button onClick={() => updateLine(l.key, { overrideMode: 'time', overrideRate: (parseFloat(l.overrideRate) > 0 ? l.overrideRate : (defaultRate || 0)) })}
+                              className={`px-2 py-1 rounded-md text-[10px] font-mono flex items-center gap-0.5 ${l.overrideMode === 'time' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+                              <Clock size={10} /> Time × rate
+                            </button>
+                          </div>
+                        </div>
+                        {l.overrideMode === 'time' ? (
+                          <div className="flex items-center justify-end gap-1 text-sm font-mono text-stone-600 flex-wrap">
+                            <span className="text-stone-400">$</span>
+                            <input type="number" step="0.01" value={l.overrideRate || ''}
+                              onChange={e => updateLine(l.key, { overrideRate: e.target.value })}
+                              placeholder={defaultRate ? String(defaultRate) : '0.00'}
+                              className="w-16 px-2 py-1 rounded-lg border border-stone-300 bg-white text-right" />
+                            <span className="text-stone-400 text-xs">/hr ×</span>
+                            <input type="number" step="1" value={l.overrideMinutes || ''}
+                              onChange={e => updateLine(l.key, { overrideMinutes: e.target.value })}
+                              placeholder="min"
+                              className="w-16 px-2 py-1 rounded-lg border border-stone-300 bg-white text-right" />
+                            <span className="text-stone-400 text-xs">min =</span>
+                            <span className="text-emerald-700 font-medium min-w-[56px] text-right">${base.toFixed(2)}</span>
+                          </div>
+                        ) : (
+                          <div className="flex items-center justify-end">
+                            <span className="flex items-center gap-1 text-sm font-mono">
+                              <span className="text-stone-400">$</span>
+                              <input type="number" step="0.01" value={l.amountOverride}
+                                onChange={e => updateLine(l.key, { amountOverride: e.target.value })}
+                                placeholder={l.subsections.filter(s => s.included).reduce((sum, s) => sum + subAmount(s), 0).toFixed(2)}
+                                className="w-24 px-2 py-1 rounded-lg border border-stone-300 bg-white text-right" />
+                            </span>
+                          </div>
+                        )}
+                      </div>
+
                     </div>
                   )}
                 </div>
@@ -17486,6 +17548,7 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
   const [savingId, setSavingId] = useState(null);
   const [cell, setCell] = useState(null);      // { id, field } being edited
   const [cellVal, setCellVal] = useState('');
+  const [openRow, setOpenRow] = useState(null); // row showing its item breakdown
   const [unbilled, setUnbilled] = useState(0);
   const [unbilledDetail, setUnbilledDetail] = useState([]); // per-property uninvoiced labor
   const [invoiceHint, setInvoiceHint] = useState([]);       // what ranges DO have invoices
@@ -17578,7 +17641,7 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
         const PAGE = 1000;
         for (let from = 0; ; from += PAGE) {
           const { data, error } = await supabase.from('invoice_lines')
-            .select('id, invoice_id, unit_id, party_id, label, service_type, description, amount')
+            .select('id, invoice_id, unit_id, party_id, label, service_type, description, amount, base_amount, extra_amount, extra_note, subsections')
             .in('invoice_id', chunk).range(from, from + PAGE - 1);
           if (error || !data) break;
           lines = lines.concat(data);
@@ -17690,6 +17753,12 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
           label: unitPartyLabel(unitLabelById[l.unit_id], partyLabelById[l.party_id]) || l.label || 'Line',
           invoiceLabel: l.label || '',
           serviceType: l.service_type,
+          // The saved item breakdown, so the grid can drop down and show
+          // exactly what made up the charge — same detail as the invoice.
+          subsections: Array.isArray(l.subsections) ? l.subsections : [],
+          description: l.description || '',
+          extraAmount: num(l.extra_amount),
+          extraNote: l.extra_note || '',
           cleaners: Object.values(byPerson).sort((a, b) => b.hours - a.hours),
           cleanedDays,
           baseHours: hours,
@@ -17989,9 +18058,15 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
                             )}
                             <tr className="border-t border-stone-100 align-top">
                               <td className="px-3 py-2">
-                                <div className="font-mono text-stone-900">{r.label}</div>
-                                {r.serviceType && <div className="text-[10px] text-stone-400">{assignmentTypeLabel ? assignmentTypeLabel(r.serviceType) : r.serviceType}</div>}
-                                {r.note && <div className="text-[10px] text-stone-500 italic mt-0.5">{r.note}</div>}
+                                <button onClick={() => setOpenRow(openRow === r.id ? null : r.id)}
+                                  className="text-left hover:underline" title="Show what made up this charge">
+                                  <div className="font-mono text-stone-900 flex items-center gap-1">
+                                    <ChevronRight size={11} className={`text-stone-400 transition-transform ${openRow === r.id ? 'rotate-90' : ''}`} />
+                                    {r.label}
+                                  </div>
+                                </button>
+                                {r.serviceType && <div className="text-[10px] text-stone-400 ml-4">{assignmentTypeLabel ? assignmentTypeLabel(r.serviceType) : r.serviceType}</div>}
+                                {r.note && <div className="text-[10px] text-stone-500 italic mt-0.5 ml-4">{r.note}</div>}
                               </td>
                               <td className="px-3 py-2 font-mono text-stone-600 whitespace-nowrap">
                                 {r.cleanedDays.length === 0 ? <span className="text-stone-400">—</span>
@@ -18018,6 +18093,41 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
                                 )}
                               </td>
                             </tr>
+                            {openRow === r.id && (
+                              <tr className="bg-stone-50">
+                                <td colSpan={8} className="px-6 py-3">
+                                  {/* Read-only — this is what the invoice
+                                     billed. Change it on the invoice, not here. */}
+                                  <div className="text-[10px] uppercase tracking-wider font-mono text-stone-400 mb-2">
+                                    What made up the {fmtMoney(r.baseCharge)} charge
+                                  </div>
+                                  {r.subsections.length === 0 ? (
+                                    <div className="text-[11px] font-mono text-stone-400">No item breakdown saved on this line.</div>
+                                  ) : (
+                                    <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-x-6 gap-y-1">
+                                      {r.subsections.map((sub, si) => (
+                                        <div key={si} className="flex items-center justify-between gap-2 text-[11px] font-mono border-b border-stone-200 pb-0.5">
+                                          <span className="text-stone-700 truncate" title={sub.label}>{sub.label}</span>
+                                          <span className="text-stone-500 flex-shrink-0">
+                                            {sub.mode === 'time' && sub.minutes
+                                              ? `${sub.minutes}m · ${fmtMoney(sub.amount)}`
+                                              : fmtMoney(sub.amount)}
+                                          </span>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  )}
+                                  {r.extraAmount > 0 && (
+                                    <div className="mt-2 text-[11px] font-mono text-amber-700">
+                                      + Extra charge {fmtMoney(r.extraAmount)}{r.extraNote ? ` — ${r.extraNote}` : ''}
+                                    </div>
+                                  )}
+                                  {r.description && (
+                                    <div className="mt-2 text-[11px] text-stone-500 italic">Prints as: “{r.description}”</div>
+                                  )}
+                                </td>
+                              </tr>
+                            )}
                           </React.Fragment>
                         );
                       })}
@@ -28212,20 +28322,20 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
               <button onClick={onGoToBedroom} disabled={busy}
                 className="block text-left w-full font-serif text-lg text-stone-900 leading-tight break-words hover:underline disabled:opacity-50">
                 <span className="font-bold">{t.unit?.label || 'No unit'}</span>
-                {t.party?.label && (
+                {partyDisplay(t.party?.label) && (
                   <>
                     <span className="text-stone-400 mx-1.5">·</span>
-                    <span className="italic">{t.party.label}</span>
+                    <span className="italic">{partyDisplay(t.party?.label)}</span>
                   </>
                 )}
               </button>
             ) : (
               <div className="font-serif text-lg text-stone-900 leading-tight break-words">
                 <span className="font-bold">{t.unit?.label || 'No unit'}</span>
-                {t.party?.label && (
+                {partyDisplay(t.party?.label) && (
                   <>
                     <span className="text-stone-400 mx-1.5">·</span>
-                    <span className="italic">{t.party.label}</span>
+                    <span className="italic">{partyDisplay(t.party?.label)}</span>
                   </>
                 )}
               </div>

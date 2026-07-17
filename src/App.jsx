@@ -48,7 +48,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul17-peek2";
+const BUILD_TAG = "jul17-when1";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -10850,6 +10850,38 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
                     <Building2 size={11} /> {props.join(' · ')}
                   </div>
                 )}
+                {/* What they actually cleaned, and when. The blocks were
+                   already loaded with their unit/party labels — the card
+                   just never showed them, so "3 blocks" was all you got. */}
+                {(() => {
+                  const blocksList = d.shifts.flatMap(s => (s.work_blocks || []).map(b => ({ ...b, propName: s.customer?.name || '' })))
+                    .filter(b => b.start_time)
+                    .sort((a, b) => new Date(a.start_time) - new Date(b.start_time));
+                  if (blocksList.length === 0) return null;
+                  const show = blocksList.slice(0, 5);
+                  return (
+                    <div className="mb-1.5 space-y-0.5">
+                      {show.map(b => {
+                        const label = [b.unit?.label, b.party?.label].filter(Boolean).join(' · ') || 'No bedroom set';
+                        const ms = b.end_time ? (new Date(b.end_time) - new Date(b.start_time)) : 0;
+                        return (
+                          <div key={b.id} className="flex items-center justify-between gap-2 text-[11px] font-mono">
+                            <span className="text-stone-700 truncate">{label}</span>
+                            <span className="text-stone-400 flex-shrink-0">
+                              {fmtClock(b.start_time)}{b.end_time ? `–${fmtClock(b.end_time)}` : ' · running'}
+                              {b.end_time && ms > 0 ? ` · ${fmtTimeShort(ms)}` : ''}
+                            </span>
+                          </div>
+                        );
+                      })}
+                      {blocksList.length > show.length && (
+                        <div className="text-[10px] font-mono text-stone-400">
+                          +{blocksList.length - show.length} more — open the day to see them
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
                 <div className="flex items-center justify-between text-xs text-stone-500 font-mono">
                   <span>{d.shifts.length} {d.shifts.length === 1 ? 'shift' : 'shifts'} · {blocks} {blocks === 1 ? 'block' : 'blocks'} · {fmtTimeShort(totalMs)}</span>
                   {showMoney && billable > 0 && <span className="text-emerald-700 font-medium">{fmtMoney(billable)}</span>}
@@ -17387,6 +17419,10 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
           return d >= pStart && d <= pEnd;
         });
         const byPerson = {};
+        // The dates the work actually happened. The invoice PERIOD is a
+        // billing window, not a clean date — showing only the period made
+        // it impossible to tell when this apartment was done.
+        const cleanedDays = [...new Set(mine.map(b => String(b.start_time).slice(0, 10)))].sort();
         let pay = 0, hours = 0;
         mine.forEach(b => {
           usedBlockIds.add(b.id);
@@ -17413,6 +17449,7 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
           label: l.label || 'Line',
           serviceType: l.service_type,
           cleaners: Object.values(byPerson).sort((a, b) => b.hours - a.hours),
+          cleanedDays,
           hours,
           baseCharge, basePay: pay,
           charge, paid,
@@ -17612,6 +17649,17 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
                             </div>
                             <div className="text-[10px] font-mono text-stone-400 mt-0.5">
                               {r.invoiceNumber ? `Inv #${r.invoiceNumber} · ` : ''}{r.periodLabel}
+                            </div>
+                            {/* When it was actually cleaned, not just billed. */}
+                            <div className="text-[11px] font-mono text-stone-600 mt-0.5 flex items-center gap-1">
+                              <Calendar size={10} className="text-stone-400 flex-shrink-0" />
+                              {r.cleanedDays.length === 0 ? (
+                                <span className="text-stone-400">No clocked clean</span>
+                              ) : r.cleanedDays.length === 1 ? (
+                                <span>Cleaned {fmtDueDate(r.cleanedDays[0])}</span>
+                              ) : (
+                                <span>Cleaned {fmtDueDate(r.cleanedDays[0])} → {fmtDueDate(r.cleanedDays[r.cleanedDays.length - 1])} ({r.cleanedDays.length} days)</span>
+                              )}
                             </div>
                           </div>
                           <span className={`text-sm font-mono font-bold flex-shrink-0 ${p >= 0 ? 'text-emerald-700' : 'text-red-600'}`}>{p >= 0 ? '+' : ''}{fmtMoney(p)}</span>

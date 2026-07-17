@@ -25,7 +25,6 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 // =================================================================
 const GOOGLE_TRANSLATE_API_KEY = "AIzaSyD7ceHPryMzs45hWJOyFNBxtOzQOEmJcSA";
 
-
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 const PHOTO_BUCKET = 'task-photos';
 const ASSIGNMENT_BUCKET = 'assignments';
@@ -49,7 +48,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul17-when2";
+const BUILD_TAG = "jul17-grid1";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -17272,9 +17271,9 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
   const [loading, setLoading] = useState(false);
   const [groups, setGroups] = useState(null);
   const [totals, setTotals] = useState({ charge: 0, pay: 0 });
-  const [editing, setEditing] = useState(null);   // invoice_line id
-  const [draft, setDraft] = useState({ charged: '', paid: '', note: '' });
   const [savingId, setSavingId] = useState(null);
+  const [cell, setCell] = useState(null);      // { id, field } being edited
+  const [cellVal, setCellVal] = useState('');
   const [unbilled, setUnbilled] = useState(0);
   const [unbilledDetail, setUnbilledDetail] = useState([]); // per-property uninvoiced labor
   const [invoiceHint, setInvoiceHint] = useState([]);       // what ranges DO have invoices
@@ -17285,7 +17284,7 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
   const run = async () => {
     if (!start || !end) return;
     try { localStorage.setItem(SAVED_RANGE_KEY, JSON.stringify({ start, end })); } catch { /* private mode */ }
-    setLoading(true); setEditing(null);
+    setLoading(true); setCell(null);
     try {
       // 1. Invoices whose covered period overlaps the range. Older
       //    invoices predate period_start/period_end, so fall back to
@@ -17399,7 +17398,7 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
       const lineIds = lines.map(l => l.id);
       for (let i = 0; i < lineIds.length; i += 200) {
         const { data } = await supabase.from('profit_line_reviews')
-          .select('invoice_line_id, charged_override, paid_override, note')
+          .select('invoice_line_id, charged_override, paid_override, hours_override, note')
           .in('invoice_line_id', lineIds.slice(i, i + 200));
         reviews = reviews.concat(data || []);
       }
@@ -17466,6 +17465,7 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
         const baseCharge = num(l.amount);
         const charge = rev && rev.charged_override != null ? num(rev.charged_override) : baseCharge;
         const paid = rev && rev.paid_override != null ? num(rev.paid_override) : pay;
+        const hoursEff = rev && rev.hours_override != null ? num(rev.hours_override) : hours;
         return {
           id: l.id,
           propertyId: inv?.customer_id,
@@ -17480,10 +17480,14 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
           serviceType: l.service_type,
           cleaners: Object.values(byPerson).sort((a, b) => b.hours - a.hours),
           cleanedDays,
-          hours,
+          baseHours: hours,
+          hours: hoursEff,
           baseCharge, basePay: pay,
           charge, paid,
-          edited: !!rev && (rev.charged_override != null || rev.paid_override != null),
+          editedCharge: !!rev && rev.charged_override != null,
+          editedPaid: !!rev && rev.paid_override != null,
+          editedHours: !!rev && rev.hours_override != null,
+          edited: !!rev && (rev.charged_override != null || rev.paid_override != null || rev.hours_override != null),
           note: rev?.note || '',
         };
       });
@@ -17529,40 +17533,90 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
     /* eslint-disable-next-line */
   }, []);
 
-  const openEdit = (r) => {
-    setEditing(r.id);
-    setDraft({
-      charged: r.charge === r.baseCharge ? '' : String(r.charge),
-      paid: r.paid === r.basePay ? '' : String(r.paid),
-      note: r.note || '',
-    });
+  // Cell editing. One cell at a time, saved on Enter or blur — the point
+  // of a grid is that you can tab through numbers without opening a panel
+  // for each one.
+  const beginEdit = (r, field) => {
+    setCell({ id: r.id, field });
+    const cur = field === 'charge' ? r.charge : field === 'paid' ? r.paid : r.hours;
+    setCellVal(String(Number(cur).toFixed(field === 'hours' ? 2 : 2)));
   };
 
-  const saveEdit = async (r) => {
-    setSavingId(r.id);
-    const payload = {
+  const commitCell = async (r, field) => {
+    const raw = cellVal.trim();
+    setCell(null);
+    const base = field === 'charge' ? r.baseCharge : field === 'paid' ? r.basePay : r.baseHours;
+    // Blank, or back to the original figure, clears the override rather
+    // than storing a redundant one.
+    const next = raw === '' ? null : num(raw);
+    const isSame = next != null && Math.abs(next - base) < 0.005;
+    const existing = {
+      charge: r.editedCharge ? r.charge : null,
+      paid: r.editedPaid ? r.paid : null,
+      hours: r.editedHours ? r.hours : null,
+    };
+    const patch = {
       invoice_line_id: r.id,
-      charged_override: draft.charged === '' ? null : num(draft.charged),
-      paid_override: draft.paid === '' ? null : num(draft.paid),
-      note: draft.note || null,
+      charged_override: field === 'charge' ? (next == null || isSame ? null : next) : existing.charge,
+      paid_override:    field === 'paid'   ? (next == null || isSame ? null : next) : existing.paid,
+      hours_override:   field === 'hours'  ? (next == null || isSame ? null : next) : existing.hours,
+      note: r.note || null,
       reviewed_by: employee?.id || null,
       reviewed_at: new Date().toISOString(),
     };
-    const { error } = await supabase.from('profit_line_reviews')
-      .upsert(payload, { onConflict: 'invoice_line_id' });
+    const allClear = patch.charged_override == null && patch.paid_override == null && patch.hours_override == null && !patch.note;
+    setSavingId(r.id);
+    const { error } = allClear
+      ? await supabase.from('profit_line_reviews').delete().eq('invoice_line_id', r.id)
+      : await supabase.from('profit_line_reviews').upsert(patch, { onConflict: 'invoice_line_id' });
     setSavingId(null);
-    if (error) { alert('Could not save that correction: ' + error.message); return; }
-    setEditing(null);
+    if (error) { alert('Could not save that cell: ' + error.message); return; }
     run();
   };
 
-  const clearEdit = async (r) => {
+  const saveNote = async (r, text) => {
+    setSavingId(r.id);
+    const { error } = await supabase.from('profit_line_reviews').upsert({
+      invoice_line_id: r.id,
+      charged_override: r.editedCharge ? r.charge : null,
+      paid_override: r.editedPaid ? r.paid : null,
+      hours_override: r.editedHours ? r.hours : null,
+      note: text || null,
+      reviewed_by: employee?.id || null,
+      reviewed_at: new Date().toISOString(),
+    }, { onConflict: 'invoice_line_id' });
+    setSavingId(null);
+    if (error) { alert('Could not save that note: ' + error.message); return; }
+    run();
+  };
+
+  const resetRow = async (r) => {
     setSavingId(r.id);
     const { error } = await supabase.from('profit_line_reviews').delete().eq('invoice_line_id', r.id);
     setSavingId(null);
-    if (error) { alert('Could not reset that line: ' + error.message); return; }
-    setEditing(null);
+    if (error) { alert('Could not reset that row: ' + error.message); return; }
     run();
+  };
+
+  // Every row, flat — a grid, not cards per property.
+  const allRows = (groups || []).flatMap(g => g.rows);
+
+  // Copy as TSV. Pastes straight into Excel or Sheets as real columns.
+  const copyForExcel = async () => {
+    const head = ['Property', 'Apartment', 'Type', 'Cleaned', 'Cleaners', 'Hours', 'Paid', 'Charged', 'Profit', 'Note'];
+    const body = allRows.map(r => [
+      r.propertyName, r.label, r.serviceType || '',
+      r.cleanedDays.join(' '), r.cleaners.map(c => c.name).join(', '),
+      r.hours.toFixed(2), r.paid.toFixed(2), r.charge.toFixed(2),
+      (r.charge - r.paid).toFixed(2), (r.note || '').replace(/\t|\n/g, ' '),
+    ]);
+    const tsv = [head, ...body].map(row => row.join('\t')).join('\n');
+    try {
+      await navigator.clipboard.writeText(tsv);
+      alert('Copied ' + allRows.length + ' rows. Paste straight into Excel or Sheets.');
+    } catch {
+      alert('Could not copy automatically — your browser blocked clipboard access.');
+    }
   };
 
   const profitTotal = totals.charge - totals.pay;
@@ -17641,139 +17695,137 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
                     {invoiceHint.map((h, i) => (
                       <button key={i}
                         onClick={() => {
-                          const s = h.period_start || h.invoice_date;
-                          const e = h.period_end || h.invoice_date;
-                          if (s && e) { setStart(s); setEnd(e); }
+                          const s2 = h.period_start || h.invoice_date;
+                          const e2 = h.period_end || h.invoice_date;
+                          if (s2 && e2) { setStart(s2); setEnd(e2); }
                         }}
                         className="w-full flex items-center justify-between gap-2 py-1.5 text-xs font-mono hover:bg-stone-50 rounded-lg px-1 text-left">
                         <span className="text-stone-700 truncate">
                           {h.invoice_number ? `#${h.invoice_number} · ` : ''}{h.customer?.name || 'Property'}
                         </span>
                         <span className="text-amber-700 flex-shrink-0">
-                          {h.period_start && h.period_end ? `${h.period_start} → ${h.period_end}` : fmtInvoiceDate(h.invoice_date)}
+                          {h.period_start && h.period_end ? `${h.period_start} \u2192 ${h.period_end}` : fmtInvoiceDate(h.invoice_date)}
                         </span>
                       </button>
                     ))}
                     <p className="text-[10px] text-stone-400 mt-2">Tap one to jump the date range to it.</p>
                   </div>
                 )}
-                {invoiceHint.length === 0 && (
-                  <div className="p-4 rounded-2xl bg-amber-50 border border-amber-200 text-xs text-amber-900">
-                    You have no saved invoices at all yet. A draft you never saved doesn&rsquo;t count — this report reads saved invoices only.
-                  </div>
-                )}
               </div>
-            ) : groups.map(g => {
-              const gp = g.charge - g.pay;
-              return (
-                <div key={g.id} className="space-y-2">
-                  {/* Sticky: scroll far enough into a property and you lose
-                     the header, which is the only thing naming the property. */}
-                  <div className="flex items-center justify-between gap-2 px-3 py-2 rounded-xl bg-stone-100 border border-stone-200 sticky top-0 z-10">
-                    <span className="font-serif text-lg text-stone-900">{g.name}</span>
-                    <span className={`text-sm font-mono font-bold ${gp >= 0 ? 'text-emerald-700' : 'text-red-600'}`}>{gp >= 0 ? '+' : ''}{fmtMoney(gp)}</span>
-                  </div>
-                  {g.rows.map(r => {
-                    const p = r.charge - r.paid;
-                    const margin = r.charge > 0 ? (p / r.charge) * 100 : null;
-                    const isEditing = editing === r.id;
-                    return (
-                      <div key={r.id} className="p-4 rounded-2xl bg-white border border-stone-200">
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="min-w-0 flex-1">
-                            <div className="flex items-center gap-2 flex-wrap">
-                              <span className="font-mono text-sm font-medium text-stone-900">{r.label}</span>
-                              {r.serviceType && <span className="text-[10px] px-2 py-0.5 rounded-full bg-stone-100 text-stone-600">{assignmentTypeLabel ? assignmentTypeLabel(r.serviceType) : r.serviceType}</span>}
-                              {r.edited && <span className="text-[10px] px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-800 font-mono">edited</span>}
-                            </div>
-                            <div className="text-[10px] font-mono text-stone-400 mt-0.5 flex items-center gap-1">
-                              <Building2 size={9} className="flex-shrink-0" />
-                              {r.propertyName}{r.invoiceNumber ? ` · Inv #${r.invoiceNumber}` : ''}
-                            </div>
-                            <div className="text-[10px] font-mono text-stone-400">
-                              Billing period {r.periodLabel}
-                            </div>
-                            {/* When it was actually cleaned, not just billed. */}
-                            <div className="text-[11px] font-mono text-stone-600 mt-0.5 flex items-center gap-1">
-                              <Calendar size={10} className="text-stone-400 flex-shrink-0" />
-                              {r.cleanedDays.length === 0 ? (
-                                <span className="text-stone-400">No clocked clean</span>
-                              ) : r.cleanedDays.length === 1 ? (
-                                <span>Cleaned {fmtDueDate(r.cleanedDays[0])}</span>
-                              ) : (
-                                <span>Cleaned {fmtDueDate(r.cleanedDays[0])} → {fmtDueDate(r.cleanedDays[r.cleanedDays.length - 1])} ({r.cleanedDays.length} days)</span>
-                              )}
-                            </div>
-                          </div>
-                          <span className={`text-sm font-mono font-bold flex-shrink-0 ${p >= 0 ? 'text-emerald-700' : 'text-red-600'}`}>{p >= 0 ? '+' : ''}{fmtMoney(p)}</span>
-                        </div>
-
-                        {/* Who cleaned it */}
-                        <div className="mt-2 flex items-center gap-1.5 flex-wrap">
-                          {r.cleaners.length === 0 ? (
-                            <span className="text-[10px] font-mono text-stone-400">No clocked work matched this apartment</span>
-                          ) : r.cleaners.map(c => (
-                            <span key={c.name} className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-stone-100 text-stone-700">
-                              {c.name} · {c.hours.toFixed(1)}h · {fmtMoney(c.pay)}
-                            </span>
-                          ))}
-                        </div>
-
-                        <div className="mt-2 flex items-center gap-4 text-xs font-mono text-stone-600 flex-wrap">
-                          <span>Charged {fmtMoney(r.charge)}</span>
-                          <span>Paid {fmtMoney(r.paid)}</span>
-                          {margin != null && <span className={p >= 0 ? 'text-emerald-700' : 'text-red-600'}>{margin.toFixed(0)}% margin</span>}
-                          {!isEditing && (
-                            <button onClick={() => openEdit(r)} className="ml-auto text-[11px] font-medium text-amber-700">Correct →</button>
-                          )}
-                        </div>
-                        {r.note && !isEditing && (
-                          <div className="mt-1.5 text-[11px] text-stone-500 italic">{r.note}</div>
-                        )}
-
-                        {isEditing && (
-                          <div className="mt-3 p-3 rounded-xl bg-stone-50 border border-stone-200 space-y-2">
-                            <div className="text-[10px] uppercase tracking-wider font-mono text-stone-400">
-                              What it really was — leave blank to keep the invoice figure
-                            </div>
-                            <div className="grid grid-cols-2 gap-2">
-                              <div>
-                                <label className="block text-[10px] font-mono text-stone-500 mb-1">Charged (invoice {fmtMoney(r.baseCharge)})</label>
-                                <input type="number" step="0.01" value={draft.charged} placeholder={r.baseCharge.toFixed(2)}
-                                  onChange={(e) => setDraft(d => ({ ...d, charged: e.target.value }))}
-                                  className="w-full px-2 py-1.5 rounded-lg border border-stone-300 text-xs font-mono" />
-                              </div>
-                              <div>
-                                <label className="block text-[10px] font-mono text-stone-500 mb-1">Paid (clocked {fmtMoney(r.basePay)})</label>
-                                <input type="number" step="0.01" value={draft.paid} placeholder={r.basePay.toFixed(2)}
-                                  onChange={(e) => setDraft(d => ({ ...d, paid: e.target.value }))}
-                                  className="w-full px-2 py-1.5 rounded-lg border border-stone-300 text-xs font-mono" />
-                              </div>
-                            </div>
-                            <input type="text" value={draft.note} placeholder="Note (optional) — why the change?"
-                              onChange={(e) => setDraft(d => ({ ...d, note: e.target.value }))}
-                              className="w-full px-2 py-1.5 rounded-lg border border-stone-300 text-xs" />
-                            <div className="flex items-center gap-2">
-                              <button onClick={() => setEditing(null)} disabled={savingId === r.id}
-                                className="text-[11px] font-medium px-3 py-1.5 rounded-full bg-white border border-stone-300 text-stone-600 disabled:opacity-50">Cancel</button>
-                              {r.edited && (
-                                <button onClick={() => clearEdit(r)} disabled={savingId === r.id}
-                                  className="text-[11px] font-medium px-3 py-1.5 rounded-full bg-white border border-stone-300 text-red-600 disabled:opacity-50">Reset</button>
-                              )}
-                              <button onClick={() => saveEdit(r)} disabled={savingId === r.id}
-                                className="ml-auto text-[11px] font-medium px-3 py-1.5 rounded-full bg-stone-900 text-white disabled:opacity-50">
-                                {savingId === r.id ? 'Saving…' : 'Save'}
-                              </button>
-                            </div>
-                            <p className="text-[10px] text-stone-400">Only changes this report. The invoice itself is untouched.</p>
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
+            ) : (
+              /* THE GRID. Every invoiced apartment as a row. Hours, Paid and
+                 Charged are click-to-edit; Profit is always computed so it
+                 can never disagree with the two columns beside it. */
+              <div>
+                <div className="flex items-center justify-between gap-2 mb-2">
+                  <span className="text-xs uppercase tracking-wider text-stone-500 font-mono">
+                    {allRows.length} {allRows.length === 1 ? 'apartment' : 'apartments'}
+                  </span>
+                  <button onClick={copyForExcel}
+                    className="text-[11px] font-medium px-3 py-1.5 rounded-full bg-white border border-stone-300 text-stone-700 inline-flex items-center gap-1">
+                    <Copy size={11} /> Copy for Excel
+                  </button>
                 </div>
-              );
-            })}
+                <div className="rounded-2xl border border-stone-200 bg-white overflow-x-auto">
+                  <table className="w-full text-xs" style={{ minWidth: 860 }}>
+                    <thead>
+                      <tr className="bg-stone-100 text-stone-500 font-mono text-[10px] uppercase tracking-wider">
+                        <th className="text-left px-3 py-2 font-medium">Apartment</th>
+                        <th className="text-left px-3 py-2 font-medium">Cleaned</th>
+                        <th className="text-left px-3 py-2 font-medium">Cleaner(s)</th>
+                        <th className="text-right px-3 py-2 font-medium">Hours</th>
+                        <th className="text-right px-3 py-2 font-medium">Paid</th>
+                        <th className="text-right px-3 py-2 font-medium">Charged</th>
+                        <th className="text-right px-3 py-2 font-medium">Profit</th>
+                        <th className="px-2 py-2" />
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {allRows.map((r, idx) => {
+                        const p = r.charge - r.paid;
+                        const prev = idx > 0 ? allRows[idx - 1] : null;
+                        const newProp = !prev || prev.propertyId !== r.propertyId;
+                        const editCell = (field, val, edited) => cell && cell.id === r.id && cell.field === field ? (
+                          <input autoFocus type="number" step="0.01" value={cellVal}
+                            onChange={e => setCellVal(e.target.value)}
+                            onBlur={() => commitCell(r, field)}
+                            onKeyDown={e => {
+                              if (e.key === 'Enter') commitCell(r, field);
+                              if (e.key === 'Escape') setCell(null);
+                            }}
+                            className="w-20 px-1.5 py-1 rounded border border-indigo-400 text-right font-mono text-xs" />
+                        ) : (
+                          <button onClick={() => beginEdit(r, field)} disabled={savingId === r.id}
+                            title="Click to change"
+                            className={`w-full text-right px-1.5 py-1 rounded font-mono hover:bg-indigo-50 hover:ring-1 hover:ring-indigo-200 ${edited ? 'bg-indigo-50 text-indigo-800 font-medium' : 'text-stone-700'}`}>
+                            {val}
+                          </button>
+                        );
+                        return (
+                          <React.Fragment key={r.id}>
+                            {newProp && (
+                              <tr>
+                                <td colSpan={8} className="px-3 pt-3 pb-1 bg-stone-50 border-t border-stone-200">
+                                  <span className="font-serif text-sm text-stone-900">{r.propertyName}</span>
+                                  {r.invoiceNumber && <span className="text-[10px] font-mono text-stone-400 ml-2">Inv #{r.invoiceNumber}</span>}
+                                </td>
+                              </tr>
+                            )}
+                            <tr className="border-t border-stone-100 align-top">
+                              <td className="px-3 py-2">
+                                <div className="font-mono text-stone-900">{r.label}</div>
+                                {r.serviceType && <div className="text-[10px] text-stone-400">{assignmentTypeLabel ? assignmentTypeLabel(r.serviceType) : r.serviceType}</div>}
+                                {r.note && <div className="text-[10px] text-stone-500 italic mt-0.5">{r.note}</div>}
+                              </td>
+                              <td className="px-3 py-2 font-mono text-stone-600 whitespace-nowrap">
+                                {r.cleanedDays.length === 0 ? <span className="text-stone-400">—</span>
+                                  : r.cleanedDays.length === 1 ? fmtDueDate(r.cleanedDays[0])
+                                  : `${fmtDueDate(r.cleanedDays[0])} +${r.cleanedDays.length - 1}`}
+                              </td>
+                              <td className="px-3 py-2">
+                                {r.cleaners.length === 0 ? <span className="text-stone-400">No clocked clean</span>
+                                  : r.cleaners.map(c => (
+                                      <div key={c.name} className="font-mono text-stone-700 whitespace-nowrap">{c.name}</div>
+                                    ))}
+                              </td>
+                              <td className="px-1 py-2">{editCell('hours', r.hours.toFixed(2), r.editedHours)}</td>
+                              <td className="px-1 py-2">{editCell('paid', r.paid.toFixed(2), r.editedPaid)}</td>
+                              <td className="px-1 py-2">{editCell('charge', r.charge.toFixed(2), r.editedCharge)}</td>
+                              <td className={`px-3 py-2 text-right font-mono font-medium whitespace-nowrap ${p >= 0 ? 'text-emerald-700' : 'text-red-600'}`}>
+                                {p >= 0 ? '+' : ''}{p.toFixed(2)}
+                              </td>
+                              <td className="px-2 py-2 text-right">
+                                {r.edited && (
+                                  <button onClick={() => resetRow(r)} disabled={savingId === r.id}
+                                    title="Undo my changes to this row"
+                                    className="text-[10px] font-mono text-stone-400 hover:text-red-600">reset</button>
+                                )}
+                              </td>
+                            </tr>
+                          </React.Fragment>
+                        );
+                      })}
+                      <tr className="border-t-2 border-stone-300 bg-stone-50 font-medium">
+                        <td className="px-3 py-2 font-serif text-stone-900" colSpan={3}>Total</td>
+                        <td className="px-3 py-2 text-right font-mono text-stone-700">
+                          {allRows.reduce((s2, r) => s2 + r.hours, 0).toFixed(2)}
+                        </td>
+                        <td className="px-3 py-2 text-right font-mono text-stone-900">{totals.pay.toFixed(2)}</td>
+                        <td className="px-3 py-2 text-right font-mono text-stone-900">{totals.charge.toFixed(2)}</td>
+                        <td className={`px-3 py-2 text-right font-mono font-bold ${profitTotal >= 0 ? 'text-emerald-700' : 'text-red-600'}`}>
+                          {profitTotal >= 0 ? '+' : ''}{profitTotal.toFixed(2)}
+                        </td>
+                        <td />
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                <p className="text-[10px] text-stone-400 mt-2">
+                  Click any Hours, Paid or Charged cell to change it. Enter saves, Esc cancels, blank restores the original.
+                  Edits only change this report — the invoice itself is untouched.
+                </p>
+              </div>
+            )}
           </div>
         )}
       </div>

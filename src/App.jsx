@@ -48,7 +48,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul17-lines1";
+const BUILD_TAG = "jul17-invnum1";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -16543,6 +16543,7 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
   const [lines, setLines] = useState([]);
   const [expanded, setExpanded] = useState(new Set());
   const [invoiceNumber, setInvoiceNumber] = useState('');
+  const [takenNumbers, setTakenNumbers] = useState(new Set()); // numbers already used
   const [title, setTitle] = useState('');
   const today = new Date().toISOString().split('T')[0];
   const [invoiceDate, setInvoiceDate] = useState(today);
@@ -16738,10 +16739,29 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
       sampleItems, sampleSecs,
       err: fetchErr ? (fetchErr.message || String(fetchErr)) : null,
     });
-    // 6) Next invoice number (last numeric + 1).
-    const { data: lastInv } = await supabase.from('invoices').select('invoice_number').order('created_at', { ascending: false }).limit(1);
-    const lastNum = parseInt((lastInv && lastInv[0] && lastInv[0].invoice_number) || '', 10);
-    setInvoiceNumber(Number.isFinite(lastNum) ? String(lastNum + 1) : '');
+    // 6) Next invoice number = HIGHEST existing number + 1.
+    //    This used to take the most recently CREATED row and add one,
+    //    which is only the same thing if invoices are always made in
+    //    order. Reopen an old invoice, or save one late, and the "last
+    //    created" row is a low number — so the next draft would reuse a
+    //    number you've already sent. Scan them all and take the max.
+    //    Ordering in SQL can't help here: invoice_number is text, so the
+    //    database sorts "99" above "472".
+    let allNums = [];
+    for (let from = 0; ; from += 1000) {
+      const { data, error } = await supabase.from('invoices')
+        .select('invoice_number').range(from, from + 999);
+      if (error || !data) break;
+      allNums = allNums.concat(data);
+      if (data.length < 1000) break;
+      if (from > 100000) break;
+    }
+    const maxNum = allNums
+      .map(r => parseInt(String(r.invoice_number || '').replace(/[^0-9]/g, ''), 10))
+      .filter(n => Number.isFinite(n))
+      .reduce((m, n) => Math.max(m, n), 0);
+    setInvoiceNumber(maxNum > 0 ? String(maxNum + 1) : '1');
+    setTakenNumbers(new Set(allNums.map(r => String(r.invoice_number || '').trim()).filter(Boolean)));
     // 7) Bill-to defaults from the property.
     setBillTo({
       org: property.name || '', contact: property.billing_contact_name || '',
@@ -16879,7 +16899,15 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
         <div className="grid grid-cols-2 gap-3 mb-3">
           <label className="text-xs font-mono text-stone-500">Invoice #
             <input value={invoiceNumber} onChange={e => setInvoiceNumber(e.target.value)}
-              className="mt-1 w-full px-3 py-2 rounded-lg border border-stone-300 bg-white text-sm text-stone-900" />
+              className={`mt-1 w-full px-3 py-2 rounded-lg border bg-white text-sm text-stone-900 ${
+                takenNumbers.has(String(invoiceNumber).trim()) ? 'border-red-400' : 'border-stone-300'}`} />
+            {/* Auto-filled with the next number, but it's a free text field —
+               so say something if you land on one that's already out there. */}
+            {takenNumbers.has(String(invoiceNumber).trim()) && (
+              <span className="block mt-1 text-[10px] text-red-600 normal-case">
+                #{invoiceNumber} is already used by another invoice.
+              </span>
+            )}
           </label>
           <label className="text-xs font-mono text-stone-500">Invoice date
             <input type="date" value={invoiceDate} onChange={e => setInvoiceDate(e.target.value)}

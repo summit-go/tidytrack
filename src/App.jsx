@@ -48,7 +48,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul17-grid1";
+const BUILD_TAG = "jul17-hist1";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -5343,7 +5343,7 @@ function OthersActivityToday({ propertyId, myEmployeeId, onOpenBedroomHistory })
                   {name}{isDone ? '' : ' · working now'}
                 </div>
                 <div className="font-serif text-base text-stone-900 truncate">
-                  {b.unit?.label} · {b.party?.label}
+                  {unitPartyLabel(b.unit?.label, b.party?.label)}
                 </div>
                 <div className="text-xs text-stone-500 font-mono mt-0.5">
                   {fmtClock(b.start_time)}{b.end_time && ` — ${fmtClock(b.end_time)}`} · {fmtTimeShort(dur)}
@@ -5954,7 +5954,7 @@ function YourJobsCard({ propertyId, employeeId, onGoToBedroom }) {
           <button key={`${j.unitId}:${j.partyId}`} onClick={() => onGoToBedroom && onGoToBedroom({ unit_id: j.unitId, party_id: j.partyId })}
             className="w-full text-left px-3 py-2 rounded-lg bg-white border border-indigo-200 flex items-center justify-between gap-2 active:scale-98">
             <div className="min-w-0">
-              <div className="text-sm text-stone-800 truncate">{j.unitLabel}{j.partyLabel ? ` · ${j.partyLabel}` : ''}</div>
+              <div className="text-sm text-stone-800 truncate">{unitPartyLabel(j.unitLabel, j.partyLabel)}</div>
               {j.type && <div className="text-[11px] text-stone-500 font-mono">{assignmentTypeLabel(j.type)}</div>}
             </div>
             <ChevronRight size={14} className="text-indigo-400 flex-shrink-0" />
@@ -6073,7 +6073,7 @@ function WhosWorkingNowModal({ employee, onClose }) {
           cleanerName: b.shift?.employee?.name || '?',
           isMe: b.shift?.employee?.id === employee?.id,
           propertyName: b.shift?.customer?.name || '',
-          where: [b.unit?.label, b.party?.label].filter(Boolean).join(' · '),
+          where: unitPartyLabel(b.unit?.label, b.party?.label),
           startTime: b.start_time,
         })),
         ...standby.filter(s => new Date(s.start_time).getTime() > cutoffMs).map(s => ({
@@ -6255,7 +6255,7 @@ function JobPeekModal({ job, employee, onClose }) {
             <div className="min-w-0 flex-1">
               <div className="text-[10px] uppercase tracking-wider text-stone-400 font-mono">Quick glance — nothing is started</div>
               <div className="font-serif text-xl text-stone-900 truncate">
-                {job.unitLabel || 'Job'}{job.partyLabel ? ` · ${job.partyLabel}` : ''}
+                {unitPartyLabel(job.unitLabel, job.partyLabel) || 'Job'}
               </div>
               <div className="text-xs text-stone-500 font-mono mt-0.5 truncate">
                 {job.propName}{job.type ? ` · ${assignmentTypeLabel(job.type)}` : ''}
@@ -6342,6 +6342,210 @@ function JobPeekModal({ job, employee, onClose }) {
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+// "Main" is the auto-created whole-apartment party. It exists so a job
+// has something to hang on when the apartment is cleaned as one unit —
+// it is bookkeeping, not information. "A106 · Main" tells a cleaner
+// nothing, so it's hidden everywhere it would print.
+const partyDisplay = (label) => {
+  const l = String(label || '').trim();
+  return l.toLowerCase() === 'main' ? '' : l;
+};
+const unitPartyLabel = (unitLabel, partyLabel) =>
+  [String(unitLabel || '').trim(), partyDisplay(partyLabel)].filter(Boolean).join(' · ');
+
+// =================================================================
+// ASSIGNMENT WORK HISTORY — every assignment ever run at ONE bedroom,
+// newest first, each with the sessions and photos that belong to it.
+//
+// This is NOT the History button (BedroomHistoryView) — that one is a
+// day-by-day browser and stays exactly as it is. This answers a
+// different question: "what happened on THIS job, and what did it look
+// like when they finished?" — the thing you need before re-opening a
+// clean someone else already did.
+//
+// Work blocks carry unit_id/party_id but NOT assignment_id, so a
+// session is matched to an assignment by time: any block that started
+// between the assignment being created and it being completed (or now,
+// if it's still open) belongs to it. Anything that matches nothing is
+// listed separately rather than silently dropped.
+// =================================================================
+function AssignmentWorkHistory({ propertyId, unitId, partyId, employee, defaultOpen = false }) {
+  const [rows, setRows] = useState([]);
+  const [loose, setLoose] = useState([]);
+  const [loaded, setLoaded] = useState(false);
+  const [openId, setOpenId] = useState(null);
+  const [show, setShow] = useState(defaultOpen);
+
+  useEffect(() => {
+    if (!show || !unitId) return;
+    let cancelled = false;
+    (async () => {
+      const [tRes, bRes] = await Promise.all([
+        supabase.from('assignment_targets')
+          .select('id, status, completed_at, assignment_id, assignment:assignments(id, assignment_type, title, created_at, deleted_at)')
+          .eq('unit_id', unitId).eq('party_id', partyId),
+        supabase.from('work_blocks')
+          .select('id, start_time, end_time, unit_id, party_id, shift:shifts!inner(customer_id, employee:employees(id, name)), tasks(*, photos(*))')
+          .eq('unit_id', unitId).eq('party_id', partyId)
+          .order('start_time', { ascending: false }),
+      ]);
+      if (cancelled) return;
+      const targets = (tRes.data || []).filter(t => t.assignment && !t.assignment.deleted_at);
+      const blocks = (bRes.data || []).filter(b => b.shift?.customer_id === propertyId);
+
+      // One row per assignment.
+      const byAsg = new Map();
+      targets.forEach(t => {
+        const a = t.assignment;
+        if (!byAsg.has(a.id)) {
+          byAsg.set(a.id, {
+            id: a.id, type: a.assignment_type || '', title: a.title || '',
+            createdAt: a.created_at, total: 0, done: 0, lastDone: null, blocks: [],
+          });
+        }
+        const r = byAsg.get(a.id);
+        r.total++;
+        if (t.status === 'done') {
+          r.done++;
+          if (t.completed_at && (!r.lastDone || t.completed_at > r.lastDone)) r.lastDone = t.completed_at;
+        }
+      });
+      const list = Array.from(byAsg.values());
+
+      // Match sessions to assignments by time window.
+      const unmatched = [];
+      blocks.forEach(b => {
+        const t = new Date(b.start_time).getTime();
+        const hit = list.find(r => {
+          const from = new Date(r.createdAt).getTime();
+          // +1 day of slack: work often finishes just after the last item
+          // is ticked, and we'd rather over-attribute than lose a session.
+          const to = r.lastDone ? new Date(r.lastDone).getTime() + 86400000 : Date.now();
+          return t >= from && t <= to;
+        });
+        if (hit) hit.blocks.push(b); else unmatched.push(b);
+      });
+      list.sort((a, b) => new Date(b.lastDone || b.createdAt) - new Date(a.lastDone || a.createdAt));
+      setRows(list); setLoose(unmatched); setLoaded(true);
+    })();
+    return () => { cancelled = true; };
+  }, [show, unitId, partyId, propertyId]);
+
+  const photosOf = (b) => (b.tasks || []).flatMap(t => (t.photos || []).filter(p => !p.deleted_at));
+  const peopleOf = (r) => [...new Set(r.blocks.map(b => b.shift?.employee?.name).filter(Boolean))];
+
+  const renderBlocks = (blocks) => blocks.map(b => {
+    const pics = photosOf(b);
+    const running = !b.end_time;
+    const ms = b.end_time ? (new Date(b.end_time) - new Date(b.start_time)) : (Date.now() - new Date(b.start_time));
+    return (
+      <div key={b.id} className="mt-2 p-3 rounded-xl bg-stone-50 border border-stone-200">
+        <div className="flex items-center justify-between gap-2 flex-wrap">
+          <span className="text-xs font-mono text-stone-700 flex items-center gap-1.5">
+            {running && <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />}
+            {b.shift?.employee?.name || '?'}
+          </span>
+          <span className="text-[10px] font-mono text-stone-400">
+            {fmtDateWithDay(b.start_time)} · {fmtClock(b.start_time)}
+            {b.end_time ? `–${fmtClock(b.end_time)}` : ' · running'} · {fmtTimeShort(ms)}
+          </span>
+        </div>
+        <div className="text-[10px] font-mono text-stone-400 mt-1">
+          {(b.tasks || []).length} {(b.tasks || []).length === 1 ? 'task' : 'tasks'} · {pics.length} {pics.length === 1 ? 'photo' : 'photos'}
+        </div>
+        {pics.length > 0 && (
+          <div className="grid grid-cols-4 sm:grid-cols-6 gap-1 mt-2">
+            {pics.map(p => (
+              <a key={p.id} href={p.public_url} target="_blank" rel="noopener noreferrer"
+                className="aspect-square rounded-lg overflow-hidden bg-stone-200 block">
+                <img loading="lazy" src={p.public_url} alt="" className="w-full h-full object-cover" />
+              </a>
+            ))}
+          </div>
+        )}
+        {(b.tasks || []).length > 0 && (
+          <div className="mt-2 flex flex-wrap gap-1">
+            {(b.tasks || []).map(t => (
+              <span key={t.id} className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-white border border-stone-200 text-stone-600">
+                {t.name || t.template_item_key || 'Task'}
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  });
+
+  return (
+    <div className="mt-4">
+      <button onClick={() => setShow(v => !v)}
+        className="w-full flex items-center justify-between gap-2 px-4 py-3 rounded-2xl bg-white border border-stone-200 active:scale-98 transition-transform">
+        <span className="text-xs uppercase tracking-wider font-mono text-stone-500 flex items-center gap-2">
+          <Camera size={13} /> What's been done here
+        </span>
+        <ChevronRight size={15} className={`text-stone-400 transition-transform ${show ? 'rotate-90' : ''}`} />
+      </button>
+
+      {show && (
+        <div className="mt-2 space-y-2">
+          {!loaded ? (
+            <div className="text-center py-6 text-stone-400 text-sm">Loading…</div>
+          ) : rows.length === 0 && loose.length === 0 ? (
+            <div className="text-center py-6 text-stone-400 text-sm">Nothing has been cleaned here yet.</div>
+          ) : (<>
+            {rows.map(r => {
+              const open = openId === r.id;
+              const people = peopleOf(r);
+              const pics = r.blocks.flatMap(photosOf).length;
+              const running = r.blocks.some(b => !b.end_time);
+              const isDone = r.total > 0 && r.done >= r.total;
+              return (
+                <div key={r.id} className="rounded-2xl bg-white border border-stone-200 overflow-hidden">
+                  <button onClick={() => setOpenId(open ? null : r.id)} className="w-full text-left p-3.5 hover:bg-stone-50">
+                    <div className="flex items-center justify-between gap-2 flex-wrap">
+                      <span className="flex items-center gap-1.5 flex-wrap">
+                        <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full ${
+                          running ? 'bg-emerald-100 text-emerald-800'
+                          : isDone ? 'bg-stone-900 text-white'
+                          : 'bg-amber-100 text-amber-800'}`}>
+                          {running ? 'In progress' : isDone ? 'Done' : 'Not finished'}
+                        </span>
+                        {r.type && <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-stone-100 text-stone-600">{assignmentTypeLabel(r.type)}</span>}
+                      </span>
+                      <ChevronRight size={14} className={`text-stone-400 transition-transform ${open ? 'rotate-90' : ''}`} />
+                    </div>
+                    <div className="text-xs font-mono text-stone-600 mt-1.5">
+                      {isDone && r.lastDone ? `Completed ${fmtDateWithDay(r.lastDone)}` : running ? 'Being cleaned right now' : `Started ${fmtDateWithDay(r.createdAt)}`}
+                    </div>
+                    <div className="text-[10px] font-mono text-stone-400 mt-0.5">
+                      {people.length > 0 ? people.join(', ') : 'Nobody clocked in'} · {r.done}/{r.total} items · {pics} {pics === 1 ? 'photo' : 'photos'}
+                    </div>
+                  </button>
+                  {open && (
+                    <div className="px-3.5 pb-3.5 border-t border-stone-100">
+                      {r.blocks.length === 0
+                        ? <div className="text-[11px] text-stone-400 mt-2">No clocked sessions on this one.</div>
+                        : renderBlocks(r.blocks)}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+            {loose.length > 0 && (
+              <div className="rounded-2xl bg-white border border-stone-200 p-3.5">
+                <div className="text-[10px] uppercase tracking-wider font-mono text-stone-400">
+                  Other sessions at this bedroom
+                </div>
+                {renderBlocks(loose)}
+              </div>
+            )}
+          </>)}
+        </div>
+      )}
     </div>
   );
 }
@@ -6557,7 +6761,7 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
                 <div className="flex items-start gap-2">
                 <button onClick={() => openJob(j)} className="flex-1 min-w-0 text-left">
                   <div className="flex items-center justify-between gap-2">
-                    <span className="font-serif text-lg text-stone-900 truncate">{j.unitLabel || 'Job'}{j.partyLabel ? ` · ${j.partyLabel}` : ''}</span>
+                    <span className="font-serif text-lg text-stone-900 truncate">{unitPartyLabel(j.unitLabel, j.partyLabel) || 'Job'}</span>
                     <span className="flex items-center gap-1 flex-shrink-0">
                       {/* Size — a cleaner needs to know if it's a 1x1 or a 3x2
                          BEFORE they drive there, same as the owner cards show. */}
@@ -6891,7 +7095,7 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
                   <button key={b.id} onClick={() => onReopen && onReopen(b)} disabled={busy}
                     className="w-full text-left p-3.5 rounded-2xl bg-amber-50 border border-amber-300 flex items-center justify-between gap-2 active:scale-98 disabled:opacity-50">
                     <div className="min-w-0">
-                      <div className="font-serif text-lg text-stone-900 truncate">{b.unit?.label} · {b.party?.label}</div>
+                      <div className="font-serif text-lg text-stone-900 truncate">{unitPartyLabel(b.unit?.label, b.party?.label)}</div>
                       <div className="text-xs text-stone-500 font-mono">Started {fmtClock(b.start_time)} · paused</div>
                     </div>
                     <span className="text-[11px] font-medium text-amber-800 flex items-center gap-1 flex-shrink-0"><Play size={11} /> Resume</span>
@@ -6968,7 +7172,7 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
                             <div className="flex items-center gap-2 mb-0.5 flex-wrap">
                               {isDone && <Check size={14} className="text-emerald-600 flex-shrink-0" />}
                               <span className="font-serif text-lg text-stone-900 truncate">
-                                {b.unit?.label} · {b.party?.label}
+                                {unitPartyLabel(b.unit?.label, b.party?.label)}
                               </span>
                             </div>
                             <div className="text-xs text-stone-500 font-mono">
@@ -7619,7 +7823,8 @@ function PreparingBlockView({ shift, pendingStart, employeeName, employee,
         </div>
         <div className="text-xs uppercase tracking-widest text-amber-400 font-mono">Ready to start</div>
         <div className="font-serif text-2xl text-stone-50 leading-tight">
-          {pendingStart.unitLabel} · <span className="italic text-amber-400">{pendingStart.partyLabel}</span>
+          {pendingStart.unitLabel}
+          {partyDisplay(pendingStart.partyLabel) && <> · <span className="italic text-amber-400">{partyDisplay(pendingStart.partyLabel)}</span></>}
         </div>
         {(bedroomContext.priority || bedroomContext.types.length > 0) && (
           <div className="mt-2 flex items-center gap-1.5 flex-wrap">
@@ -7644,7 +7849,7 @@ function PreparingBlockView({ shift, pendingStart, employeeName, employee,
 
         <div className="p-4 rounded-2xl bg-amber-50 border-2 border-amber-300 mb-4">
           <div className="text-xs text-stone-700 leading-relaxed">
-            You're heading to <strong>{pendingStart.unitLabel} · {pendingStart.partyLabel}</strong>.
+            You're heading to <strong>{unitPartyLabel(pendingStart.unitLabel, pendingStart.partyLabel)}</strong>.
             Take your time getting ready — supplies, walking over, double-checking the bedroom. Your clock only
             starts when you tap the button below.
           </div>
@@ -7664,6 +7869,13 @@ function PreparingBlockView({ shift, pendingStart, employeeName, employee,
            the instructions BEFORE starting the clock. Read-only here —
            status changes happen once they're in the real BlockView. */}
         <AssignmentBanner propertyId={shift.customer_id}
+          unitId={pendingStart.unitId} partyId={pendingStart.partyId}
+          employee={employee} />
+
+        {/* What's already happened here — including anyone working it
+           right now, with their photos. You should never have to start a
+           clock just to find out whether a bedroom is half done. */}
+        <AssignmentWorkHistory propertyId={shift.customer_id}
           unitId={pendingStart.unitId} partyId={pendingStart.partyId}
           employee={employee} />
       </div>
@@ -10862,7 +11074,7 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
                   return (
                     <div className="mb-1.5 space-y-0.5">
                       {show.map(b => {
-                        const label = [b.unit?.label, b.party?.label].filter(Boolean).join(' · ') || 'No bedroom set';
+                        const label = unitPartyLabel(b.unit?.label, b.party?.label) || 'No bedroom set';
                         const ms = b.end_time ? (new Date(b.end_time) - new Date(b.start_time)) : 0;
                         return (
                           <div key={b.id} className="flex items-center justify-between gap-2 text-[11px] font-mono">
@@ -15240,7 +15452,7 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
               return (
               <div key={j.id} className="px-3 py-2.5 rounded-lg bg-stone-50 flex items-start justify-between gap-2">
                 <button onClick={() => { setPicked(property); setView('open'); }} className="min-w-0 flex-1 text-left">
-                  <div className="text-sm text-stone-800 truncate">{j.unitLabel || 'Job'}{j.partyLabel ? ` · ${j.partyLabel}` : ''}</div>
+                  <div className="text-sm text-stone-800 truncate">{unitPartyLabel(j.unitLabel, j.partyLabel) || 'Job'}</div>
                   <div className="text-[11px] text-stone-500 font-mono truncate">
                     {j.type ? assignmentTypeLabel(j.type) : 'Clean'}{j.scheduledDate ? ` · ${fmtSched(j.scheduledDate)}` : ' · no date'} · {j.count} item{j.count === 1 ? '' : 's'}
                   </div>
@@ -17475,7 +17687,7 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
           periodLabel: inv?.period_start && inv?.period_end ? `${inv.period_start} → ${inv.period_end}` : fmtInvoiceDate(inv?.invoice_date),
           // Prefer the real unit/bedroom labels; fall back to whatever the
           // invoice printed if this line isn't tied to a unit.
-          label: [unitLabelById[l.unit_id], partyLabelById[l.party_id]].filter(Boolean).join(' · ') || l.label || 'Line',
+          label: unitPartyLabel(unitLabelById[l.unit_id], partyLabelById[l.party_id]) || l.label || 'Line',
           invoiceLabel: l.label || '',
           serviceType: l.service_type,
           cleaners: Object.values(byPerson).sort((a, b) => b.hours - a.hours),
@@ -17625,23 +17837,27 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
     <div className="min-h-screen bg-stone-50 pb-24">
       <Header name={employee.name} onSignOut={onSignOut} role={employee.role} employee={employee} onOpenMessages={onOpenMessages} onLogoClick={onLogoClick} />
       {topToggle}
-      <div className="px-5 pt-6 space-y-5 max-w-2xl mx-auto">
-        <div>
-          <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">Report</div>
-          <h1 className="font-serif text-3xl text-stone-900">Profit / loss</h1>
-          <p className="text-sm text-stone-500 mt-1">Every invoiced apartment: what you charged, who cleaned it, what they cost.</p>
-        </div>
+      {/* The controls stay narrow — a full-width date picker looks silly.
+         The grid gets the whole screen, because that's what a grid is for. */}
+      <div className="px-5 pt-6 space-y-5 max-w-7xl mx-auto">
+        <div className="max-w-2xl space-y-5">
+          <div>
+            <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">Report</div>
+            <h1 className="font-serif text-3xl text-stone-900">Profit / loss</h1>
+            <p className="text-sm text-stone-500 mt-1">Every invoiced apartment: what you charged, who cleaned it, what they cost.</p>
+          </div>
 
-        <div>
-          <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2">Date range</div>
-          <DateRangePicker start={start} end={end} onChange={(s, e) => { setStart(s); setEnd(e); }} />
-          <p className="text-[11px] text-stone-400 mt-1.5">Matches the work an invoice covers, not the date it was written.</p>
-        </div>
+          <div>
+            <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2">Date range</div>
+            <DateRangePicker start={start} end={end} onChange={(s, e) => { setStart(s); setEnd(e); }} />
+            <p className="text-[11px] text-stone-400 mt-1.5">Matches the work an invoice covers, not the date it was written.</p>
+          </div>
 
-        <button onClick={run} disabled={loading || !start || !end}
-          className="w-full py-4 rounded-2xl bg-stone-900 text-stone-50 font-medium disabled:opacity-50">
-          {loading ? 'Crunching…' : 'Run report'}
-        </button>
+          <button onClick={run} disabled={loading || !start || !end}
+            className="w-full py-4 rounded-2xl bg-stone-900 text-stone-50 font-medium disabled:opacity-50">
+            {loading ? 'Crunching…' : 'Run report'}
+          </button>
+        </div>
 
         {groups && (
           <div className="space-y-4">

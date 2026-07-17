@@ -24,7 +24,6 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 // If empty, the Translate button is hidden.
 // =================================================================
 const GOOGLE_TRANSLATE_API_KEY = "AIzaSyD7ceHPryMzs45hWJOyFNBxtOzQOEmJcSA";
-
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 const PHOTO_BUCKET = 'task-photos';
 const ASSIGNMENT_BUCKET = 'assignments';
@@ -48,7 +47,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul16-extra2";
+const BUILD_TAG = "jul17-here1";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -6155,6 +6154,45 @@ function WhosWorkingNowModal({ employee, onClose }) {
 }
 
 // =================================================================
+// LIVE PRESENCE — who is physically in a bedroom RIGHT NOW, keyed
+// "unitId:partyId". Work blocks carry unit_id/party_id, not
+// assignment_id, so that pair is the only thing that lines a live
+// block up with a job card.
+//
+// Shared on purpose: the "X is here" chip was previously reinvented at
+// each call site, which is why it showed on some cards and not others.
+// Stale blocks are dropped using the same 2h rule the rest of the app
+// uses — someone who forgot to clock out three days ago is not "here".
+// =================================================================
+async function fetchLivePresence() {
+  let rows = []; const PAGE = 1000;
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await supabase.from('work_blocks')
+      .select('id, unit_id, party_id, start_time, shift:shifts!inner(is_preview, employee:employees(id, name))')
+      .is('end_time', null)
+      .range(from, from + PAGE - 1);
+    if (error || !data) break;
+    rows = rows.concat(data);
+    if (data.length < PAGE) break;
+    if (from > 100000) break;
+  }
+  const cutoff = Date.now() - STALE_FORCE_MIN * 60 * 1000;
+  const m = {};
+  rows.forEach(b => {
+    if (b.shift?.is_preview) return;
+    if (!b.unit_id) return;
+    if (new Date(b.start_time).getTime() <= cutoff) return;
+    const k = `${b.unit_id}:${b.party_id || ''}`;
+    (m[k] = m[k] || []).push({
+      id: b.shift?.employee?.id,
+      name: b.shift?.employee?.name || '?',
+      since: b.start_time,
+    });
+  });
+  return m;
+}
+
+// =================================================================
 // CLEANER WORK LIST — the cleaner's own jobs (and all pending jobs)
 // across EVERY property, so they see their whole day. Same-property
 // jobs start the clean directly; other-property jobs offer to switch.
@@ -6198,7 +6236,7 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
       let rows = []; const PAGE = 1000;
       for (let from = 0; ; from += PAGE) {
         const { data: page, error } = await supabase.from('assignment_targets')
-          .select('id, unit_id, party_id, status, unit:units(label), party:parties(label), assignment:assignments!inner(id, customer_id, active, deleted_at, assignment_type, scheduled_date, customer:customers(name, address))')
+          .select('id, unit_id, party_id, status, unit:units(label, bedrooms, bathrooms), party:parties(label), assignment:assignments!inner(id, customer_id, active, deleted_at, assignment_type, scheduled_date, customer:customers(name, address))')
           .not('status', 'in', '(done,blocked)')
           .range(from, from + PAGE - 1);
         if (error || !page) break;
@@ -6215,8 +6253,9 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
       if (!a || a.active === false || a.deleted_at) return;
       if (!allowed.has(a.customer_id)) return;
       if (!byJob[a.id]) {
-        byJob[a.id] = { id: a.id, customerId: a.customer_id, propName: a.customer?.name || 'Property', propAddress: a.customer?.address || '', type: a.assignment_type || '', scheduledDate: a.scheduled_date || null, unitLabel: t.unit?.label || '', partyLabel: t.party?.label || '', unitId: t.unit_id, partyId: t.party_id, assignees: [], requested: [] };
+        byJob[a.id] = { id: a.id, customerId: a.customer_id, propName: a.customer?.name || 'Property', propAddress: a.customer?.address || '', type: a.assignment_type || '', scheduledDate: a.scheduled_date || null, unitLabel: t.unit?.label || '', partyLabel: t.party?.label || '', unitId: t.unit_id, partyId: t.party_id, bedrooms: t.unit?.bedrooms, bathrooms: t.unit?.bathrooms, items: 0, hereNow: [], assignees: [], requested: [] };
       }
+      byJob[a.id].items++;
     });
     const ids = Object.keys(byJob);
     if (ids.length) {
@@ -6232,6 +6271,12 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
         if (r.status === 'requested') j.requested.push(entry); else j.assignees.push(entry);
       });
     }
+    // Who's already physically in each bedroom. Excludes the viewer —
+    // a cleaner doesn't need telling they're in the room they're in.
+    const here = await fetchLivePresence();
+    Object.values(byJob).forEach(j => {
+      j.hereNow = (here[`${j.unitId}:${j.partyId || ''}`] || []).filter(h => h.id !== employee?.id);
+    });
     setJobs(Object.values(byJob));
     setLoaded(true);
   };
@@ -6357,10 +6402,20 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
                 <button onClick={() => openJob(j)} className="w-full text-left">
                   <div className="flex items-center justify-between gap-2">
                     <span className="font-serif text-lg text-stone-900 truncate">{j.unitLabel || 'Job'}{j.partyLabel ? ` · ${j.partyLabel}` : ''}</span>
-                    {mine && <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700 flex-shrink-0">Yours</span>}
+                    <span className="flex items-center gap-1 flex-shrink-0">
+                      {/* Size — a cleaner needs to know if it's a 1x1 or a 3x2
+                         BEFORE they drive there, same as the owner cards show. */}
+                      {(j.bedrooms || j.bathrooms) && (
+                        <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-stone-200 text-stone-700">
+                          {j.bedrooms || 0}BR / {j.bathrooms || 0}BA
+                        </span>
+                      )}
+                      {mine && <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700">Yours</span>}
+                    </span>
                   </div>
                   <div className="text-xs text-stone-500 font-mono mt-0.5 flex items-center gap-1">
                     <Building2 size={11} /> {j.propName}{j.type ? ` · ${assignmentTypeLabel(j.type)}` : ''}
+                    {j.items > 0 && ` · ${j.items} ${j.items === 1 ? 'item' : 'items'}`}
                   </div>
                 </button>
                 {j.propAddress && (
@@ -6371,6 +6426,15 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
 
                 {/* Who's on this job */}
                 <div className="flex items-center gap-1.5 flex-wrap mt-2">
+                  {/* Someone is physically in there right now — worth knowing
+                     before you drive over or start a second block on it. */}
+                  {j.hereNow.map((h, hi) => (
+                    <span key={`${h.id}-${hi}`} className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 flex items-center gap-1"
+                      title={`Working here since ${fmtClock(h.since)}`}>
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                      {h.name} is here
+                    </span>
+                  ))}
                   {j.assignees.map(a => (
                     <span key={a.id} className={`text-[10px] font-mono px-2 py-0.5 rounded-full flex items-center gap-1 ${a.id === employee?.id ? 'bg-indigo-100 text-indigo-700' : 'bg-stone-100 text-stone-600'}`}>
                       <User size={9} /> {a.name}
@@ -14771,7 +14835,7 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
       const key = `${cid}::${t.unit_id || ''}::${t.party_id || ''}`;
       if (!seenBedrooms.has(key)) { seenBedrooms.add(key); counts[cid] = (counts[cid] || 0) + 1; }
       if (!jobsByAsg[a.id]) {
-        jobsByAsg[a.id] = { id: a.id, customerId: cid, title: a.title || '', scheduledDate: a.scheduled_date || null, type: a.assignment_type || '', unitLabel: t.unit?.label || '', partyLabel: t.party?.label || '', unitId: t.unit_id, bedrooms: t.unit?.bedrooms, bathrooms: t.unit?.bathrooms, tookLonger: !!a.took_longer, assignees: [], count: 0, sections: { bedroom: 0, vanity: 0, bathroom: 0, general: 0, other: 0 } };
+        jobsByAsg[a.id] = { id: a.id, customerId: cid, title: a.title || '', scheduledDate: a.scheduled_date || null, type: a.assignment_type || '', unitLabel: t.unit?.label || '', partyLabel: t.party?.label || '', unitId: t.unit_id, partyId: t.party_id, bedrooms: t.unit?.bedrooms, bathrooms: t.unit?.bathrooms, tookLonger: !!a.took_longer, assignees: [], hereNow: [], count: 0, sections: { bedroom: 0, vanity: 0, bathroom: 0, general: 0, other: 0 } };
       }
       jobsByAsg[a.id].count++;
       const sec = (t.template_section || '').toLowerCase();
@@ -14797,6 +14861,12 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
       });
     }
     setTeam((emps || []).filter(e => e.role !== 'owner'));
+    // Who's physically in each bedroom right now. Matched on unit:party
+    // because that's all a work block records.
+    const here = await fetchLivePresence();
+    Object.values(jobsByAsg).forEach(j => {
+      j.hereNow = here[`${j.unitId}:${j.partyId || ''}`] || [];
+    });
     setProperties(visibleProps(propsRes.data || [], employee));
     setAssignmentCounts(counts);
     setJobs(Object.values(jobsByAsg));
@@ -15023,6 +15093,16 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
                       {(j.bedrooms || j.bathrooms) ? `${j.bedrooms || 0}BR / ${j.bathrooms || 0}BA` : 'Set size'}
                     </button>
                   ) : null}
+
+                  {/* Who's physically in there RIGHT NOW — distinct from the
+                     indigo "assigned to" pills, which are only a plan. */}
+                  {j.hereNow.map((h, hi) => (
+                    <span key={`${h.id}-${hi}`} className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 inline-flex items-center gap-1"
+                      title={`Working here since ${fmtClock(h.since)}`}>
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                      {h.name} is here
+                    </span>
+                  ))}
 
                   {/* Who's on it */}
                   {j.assignees.map(a => (

@@ -48,7 +48,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul17-invnum1";
+const BUILD_TAG = "jul17-cards1";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -16992,7 +16992,7 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
             )}
           </div>
         ) : (
-          <div className="space-y-2">
+          <div className="space-y-4">
             {lines.map((l, idx) => {
               const open = expanded.has(l.key);
               const amt = lineAmount(l);
@@ -17005,8 +17005,13 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
               const overridden = l.overrideMode === 'time'
                 || (l.amountOverride !== '' && l.amountOverride != null);
               return (
-                <div key={l.key} className={`rounded-2xl border border-stone-200 overflow-hidden ${idx % 2 === 0 ? 'bg-white' : 'bg-stone-50'}`}>
-                  <div className="flex items-center gap-2 px-4 py-3">
+                /* Heavy border + shadow: expanded lines run long, and a 1px
+                   hairline made it impossible to see where one apartment
+                   ended and the next began. Open lines get an amber edge so
+                   the one you're editing is unmistakable. */
+                <div key={l.key} className={`rounded-2xl overflow-hidden bg-white shadow-sm ${
+                  open ? 'border-2 border-amber-400 shadow-md' : 'border-2 border-stone-300'}`}>
+                  <div className={`flex items-center gap-2 px-4 py-3 ${open ? 'bg-amber-50 border-b-2 border-amber-200' : ''}`}>
                     <button onClick={() => toggleExpand(l.key)} className="flex-1 flex items-center gap-2 text-left">
                       <ChevronRight size={15} className={`text-stone-400 transition-transform ${open ? 'rotate-90' : ''}`} />
                       <span className="font-mono text-sm font-medium text-stone-900">{l.label}</span>

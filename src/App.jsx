@@ -48,7 +48,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul18-overdue2";
+const BUILD_TAG = "jul18-overdue3";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -9208,9 +9208,9 @@ function ViewOnlyAssignmentsPanel({ propertyId, employee, onOpenBedroomHistory }
                 <div className="flex items-start justify-between gap-2 mb-2">
                   <div className="flex-1 min-w-0">
                     <div className="font-serif text-base text-stone-900 truncate">{a.title}</div>
-                    {(t.unit?.label || t.party?.label) && (
+                    {unitPartyLabel(t.unit?.label, t.party?.label) && (
                       <div className="text-xs font-mono text-stone-500 mt-0.5">
-                        {t.unit?.label}{t.party?.label && ` · ${t.party.label}`}
+                        {unitPartyLabel(t.unit?.label, t.party?.label)}
                       </div>
                     )}
                     {a.notes && (
@@ -9225,7 +9225,11 @@ function ViewOnlyAssignmentsPanel({ propertyId, employee, onOpenBedroomHistory }
                           {assignmentTypeLabel(a.assignment_type)}
                         </span>
                       )}
-                      {editDateId === a.id ? (
+                      {t.status === 'done' ? (
+                        <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-stone-900 text-white flex items-center gap-1">
+                          <Check size={9} /> {t.completed_at ? `Done ${fmtDueDate(String(t.completed_at).slice(0,10))}` : 'Done'}
+                        </span>
+                      ) : editDateId === a.id ? (
                         <input type="date" autoFocus value={a.scheduled_date || ''}
                           onChange={(e) => saveDue(a.id, e.target.value)}
                           onBlur={() => setEditDateId(null)}

@@ -48,7 +48,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul17-fixes1";
+const BUILD_TAG = "jul18-done2";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -27287,14 +27287,17 @@ function ChecklistAssignmentWizard({ property, employee, actorKind = null, porta
     // 'all' = the whole bathroom: pull items from EVERY bathroom variant,
     // deduped by item_key so a shared item (e.g. floor) isn't listed twice.
     let items;
+    let hasVariant;
     if (sectionKey === 'bathroom' && variantKey === 'all') {
       const seen = new Set();
       items = variantsBySection('bathroom')
         .flatMap(v => itemsForVariant(v.id))
         .filter(it => { if (seen.has(it.item_key)) return false; seen.add(it.item_key); return true; });
+      hasVariant = true; // "Entire bathroom" is a valid selection
     } else {
       const variant = variantKey ? variantBySectionKey(sectionKey, variantKey) : null;
       items = variant ? itemsForVariant(variant.id) : [];
+      hasVariant = !!variant;
     }
 
     return (
@@ -27431,7 +27434,7 @@ function ChecklistAssignmentWizard({ property, employee, actorKind = null, porta
         {/* Items checklist — only shown when section isn't passed AND
            variant is picked (for bathroom/general). */}
         {!passed && (
-          variant ? (
+          hasVariant ? (
             <div className="rounded-xl bg-white border-2 border-stone-200">
               <div className="px-3 py-2 border-b border-stone-200 bg-stone-50 flex items-center justify-between">
                 <div className="font-serif text-sm text-stone-900 font-bold">{section.label} items</div>
@@ -29450,7 +29453,8 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
   // find today's was the complaint. 'all' widens it.
   const [doneWindow, setDoneWindow] = useState('recent'); // 'recent' | 'all'
   const recentCutoff = (() => {
-    const d = new Date(); d.setDate(d.getDate() - 2);
+    // "Last 2 days" = today and yesterday. -1 gives a 2-calendar-day span.
+    const d = new Date(); d.setDate(d.getDate() - 1);
     return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
   })();
   const [filterCategories, setFilterCategories] = useState(new Set()); // task categories like 'bedroom'
@@ -30313,13 +30317,13 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                             <div className="flex-1 min-w-0">
                               {canGoToBedroom ? (
                                 <button onClick={() => startAndGo(firstTarget)} disabled={busy}
-                                  className="block text-left w-full font-serif text-base text-stone-900 leading-tight break-words hover:underline disabled:opacity-50">
+                                  className="block text-left w-full font-serif text-sm text-stone-900 leading-tight break-words hover:underline disabled:opacity-50">
                                   <span className="font-bold">{group.unit?.label || unitLabel}</span>
                                   <span className="text-stone-400 mx-1.5">·</span>
                                   <span className="italic">{bedLabel}</span>
                                 </button>
                               ) : (
-                                <div className="font-serif text-base text-stone-900 leading-tight break-words">
+                                <div className="font-serif text-sm text-stone-900 leading-tight break-words">
                                   <span className="font-bold">{group.unit?.label || unitLabel}</span>
                                   <span className="text-stone-400 mx-1.5">·</span>
                                   <span className="italic">{bedLabel}</span>
@@ -30619,6 +30623,29 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
         </div>
       );
     }
+    // On the "Last 2 days" view, split Today / Yesterday so the day you
+    // almost always want is visually first. All time / a manual range
+    // renders as one flat list — sub-day headers there would be noise.
+    if (doneWindow === 'recent' && !dateFrom && !dateTo) {
+      const { dayOf, last3 } = bucketByAge(items);
+      const yesterday = last3; // within the 2-day window this is just yesterday
+      return (
+        <div className="space-y-3">
+          {dayOf.length > 0 && (
+            <div>
+              <div className="text-[10px] uppercase tracking-wider font-mono text-emerald-700 mb-1.5 px-1">Today ({countBedrooms(dayOf)})</div>
+              {renderAssignmentList(dayOf)}
+            </div>
+          )}
+          {yesterday.length > 0 && (
+            <div>
+              <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1.5 px-1">Yesterday ({countBedrooms(yesterday)})</div>
+              {renderAssignmentList(yesterday)}
+            </div>
+          )}
+        </div>
+      );
+    }
     return renderAssignmentList(items);
   };
 
@@ -30664,7 +30691,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
               {/* Cleaner — dropdown (was a wall of chips) */}
               {availableCleaners.length > 0 && (
                 <div>
-                  <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1">Cleaner (started or completed)</div>
+                  <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1">Cleaner</div>
                   <select
                     value={filterCleaners.size === 1 ? [...filterCleaners][0] : (filterCleaners.size === 0 ? '' : '__multi__')}
                     onChange={(e) => {
@@ -30685,7 +30712,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
               {availableCategories.length > 0 && (
                 <div>
                   <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1">
-                    Task category (where work was logged)
+                    Task category
                   </div>
                   <div className="flex gap-1.5 flex-wrap">
                     {availableCategories.map(c => {
@@ -30707,13 +30734,13 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
               {isDoneView && (
                 <div>
                   <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1">Show</div>
-                  <div className="flex gap-1.5 mb-2">
+                  <div className="flex p-0.5 bg-stone-100 rounded-lg mb-2">
                     <button onClick={() => { setDoneWindow('recent'); setDateFrom(''); setDateTo(''); }}
-                      className={`px-2.5 py-1 rounded-full text-xs font-mono ${doneWindow === 'recent' && !dateFrom && !dateTo ? 'bg-stone-900 text-stone-50' : 'bg-white border border-stone-300 text-stone-600'}`}>
+                      className={`flex-1 py-1.5 rounded-md text-[11px] font-mono ${doneWindow === 'recent' && !dateFrom && !dateTo ? 'bg-white shadow-sm text-stone-900 font-medium' : 'text-stone-500'}`}>
                       Last 2 days
                     </button>
                     <button onClick={() => { setDoneWindow('all'); setDateFrom(''); setDateTo(''); }}
-                      className={`px-2.5 py-1 rounded-full text-xs font-mono ${doneWindow === 'all' && !dateFrom && !dateTo ? 'bg-stone-900 text-stone-50' : 'bg-white border border-stone-300 text-stone-600'}`}>
+                      className={`flex-1 py-1.5 rounded-md text-[11px] font-mono ${doneWindow === 'all' && !dateFrom && !dateTo ? 'bg-white shadow-sm text-stone-900 font-medium' : 'text-stone-500'}`}>
                       All time
                     </button>
                   </div>
@@ -30847,11 +30874,11 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                 <button onClick={() => toggleCollapse(b)}
                   className="w-full flex items-center justify-between mb-2 px-1 py-2 hover:bg-stone-50 rounded">
                   <div className="flex items-center gap-2">
-                    <Building2 size={18} className="text-stone-700" />
-                    <span className="font-serif text-base text-stone-900 font-bold">
+                    <Building2 size={15} className="text-stone-700" />
+                    <span className="font-serif text-sm text-stone-900 font-bold">
                       {b === '—' ? 'No unit' : `Building ${b.replace(/^B/i, '')}`}
                     </span>
-                    <span className="text-xs font-mono text-stone-500">({countBedrooms(itemsForBuilding)})</span>
+                    <span className="text-[10px] font-mono text-stone-500">({countBedrooms(itemsForBuilding)})</span>
                   </div>
                   <ChevronRight size={16} className={`text-stone-500 transition-transform ${collapsed ? '' : 'rotate-90'}`} />
                 </button>
@@ -34906,6 +34933,40 @@ function ReviewAssignmentModal({ assignment, employee, onDone, onClose }) {
     onDone();
   };
 
+  // Already clean — no cleaning needed. Approve it (so it's a real
+  // assignment, not stuck in PM limbo) AND mark every bedroom done in one
+  // go, stamped now. It lands in the Done view like any finished job,
+  // never reaching a cleaner.
+  const markDone = async () => {
+    if (!confirm('Mark this as already cleaned? It will go straight to Done — no cleaner needed.')) return;
+    setBusy(true); setError('');
+    const nowIso = new Date().toISOString();
+    const { error: aErr } = await supabase.from('assignments').update({
+      pm_status: 'approved', approved_by: employee.id, approved_at: nowIso,
+      pm_rejection_reason: null, assignment_type: editedType, scheduled_date: editedDate || null,
+    }).eq('id', assignment.id);
+    if (aErr) { setBusy(false); setError(aErr.message); return; }
+    const { error: tErr } = await supabase.from('assignment_targets')
+      .update({ status: 'done', completed_at: nowIso, completed_by: employee.id })
+      .eq('assignment_id', assignment.id)
+      .neq('status', 'done');
+    setBusy(false);
+    if (tErr) { setError(tErr.message); return; }
+    onDone();
+  };
+
+  // Not needed at all — get rid of it. Soft-delete, so it's recoverable.
+  const discard = async () => {
+    if (!confirm('Discard this submission? It won\u2019t be cleaned or billed. This can be undone later.')) return;
+    setBusy(true); setError('');
+    const { error: e } = await supabase.from('assignments').update({
+      deleted_at: new Date().toISOString(), deleted_by: employee.id,
+    }).eq('id', assignment.id);
+    setBusy(false);
+    if (e) { setError(e.message); return; }
+    onDone();
+  };
+
   return (
     <div className="fixed inset-0 bg-stone-900/80 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
       <div className="bg-stone-50 w-full sm:max-w-lg sm:rounded-3xl rounded-t-3xl max-h-[90vh] flex flex-col">
@@ -35002,10 +35063,22 @@ function ReviewAssignmentModal({ assignment, employee, onDone, onClose }) {
                 className="w-full py-4 rounded-2xl bg-emerald-600 text-white font-medium flex items-center justify-center gap-2 disabled:opacity-50">
                 <Check size={16} /> {busy ? 'Approving…' : 'Approve & make visible to cleaners'}
               </button>
-              <button onClick={() => setRejectMode(true)} disabled={busy}
-                className="w-full py-3 rounded-2xl border-2 border-red-200 text-red-700 text-sm font-medium">
-                Send back for changes
+              {/* Already clean → straight to Done, skips cleaners entirely. */}
+              <button onClick={markDone} disabled={busy}
+                className="w-full py-3 rounded-2xl bg-stone-900 text-white text-sm font-medium flex items-center justify-center gap-2 disabled:opacity-50">
+                <Check size={14} /> Already clean — mark done
               </button>
+              <div className="flex gap-2">
+                <button onClick={() => setRejectMode(true)} disabled={busy}
+                  className="flex-1 py-3 rounded-2xl border-2 border-red-200 text-red-700 text-sm font-medium">
+                  Send back for changes
+                </button>
+                <button onClick={discard} disabled={busy}
+                  title="Discard — not needed at all"
+                  className="px-4 py-3 rounded-2xl border-2 border-stone-200 text-stone-500 hover:text-red-600 hover:border-red-200 flex items-center justify-center disabled:opacity-50">
+                  <Trash2 size={16} />
+                </button>
+              </div>
             </>
           )}
         </div>

@@ -48,7 +48,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul18-done2";
+const BUILD_TAG = "jul18-fix3";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -26233,8 +26233,19 @@ function ChecklistAssignmentWizard({ property, employee, actorKind = null, porta
         const variantKey = sectionKey === 'bathroom' ? current.bathroomVariant
           : sectionKey === 'general' ? current.generalVariant
           : 'default';
-        const variant = variantKey ? variantBySectionKey(sectionKey, variantKey) : null;
-        const variantItems = variant ? itemsForVariant(variant.id) : [];
+        // 'all' = whole bathroom → check every bathroom item across all
+        // variants (deduped by item_key). Without this branch, Fail-all
+        // found no matching variant and checked nothing.
+        let variantItems;
+        if (sectionKey === 'bathroom' && variantKey === 'all') {
+          const seen = new Set();
+          variantItems = variantsBySection('bathroom')
+            .flatMap(v => itemsForVariant(v.id))
+            .filter(it => { if (seen.has(it.item_key)) return false; seen.add(it.item_key); return true; });
+        } else {
+          const variant = variantKey ? variantBySectionKey(sectionKey, variantKey) : null;
+          variantItems = variant ? itemsForVariant(variant.id) : [];
+        }
         const checked = { ...(current.checked || {}) };
         variantItems.forEach(it => {
           checked[`${sectionKey}:${it.item_key}`] = true;
@@ -30733,18 +30744,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                  Done-family tabs where completed dates exist. */}
               {isDoneView && (
                 <div>
-                  <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1">Show</div>
-                  <div className="flex p-0.5 bg-stone-100 rounded-lg mb-2">
-                    <button onClick={() => { setDoneWindow('recent'); setDateFrom(''); setDateTo(''); }}
-                      className={`flex-1 py-1.5 rounded-md text-[11px] font-mono ${doneWindow === 'recent' && !dateFrom && !dateTo ? 'bg-white shadow-sm text-stone-900 font-medium' : 'text-stone-500'}`}>
-                      Last 2 days
-                    </button>
-                    <button onClick={() => { setDoneWindow('all'); setDateFrom(''); setDateTo(''); }}
-                      className={`flex-1 py-1.5 rounded-md text-[11px] font-mono ${doneWindow === 'all' && !dateFrom && !dateTo ? 'bg-white shadow-sm text-stone-900 font-medium' : 'text-stone-500'}`}>
-                      All time
-                    </button>
-                  </div>
-                  <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1">Or a specific range</div>
+                  <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1">Specific range</div>
                   <div className="flex gap-2 flex-wrap items-center">
                     <label className="flex items-center gap-1 text-xs font-mono text-stone-600">
                       <span className="text-stone-400">From</span>
@@ -30801,6 +30801,23 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
               </button>
             );
           })}
+        </div>
+      )}
+
+      {/* Last 2 days / All time — placed here, below the building pills
+         and directly above the results, where it's actually in view when
+         scanning the list. (It also lives inside Filters, but only power
+         users open that.) Only meaningful on the Done family of tabs. */}
+      {isDoneView && !dateFrom && !dateTo && (
+        <div className="flex p-0.5 bg-stone-100 rounded-lg mb-3 max-w-xs">
+          <button onClick={() => setDoneWindow('recent')}
+            className={`flex-1 py-1.5 rounded-md text-[11px] font-mono ${doneWindow === 'recent' ? 'bg-white shadow-sm text-stone-900 font-medium' : 'text-stone-500'}`}>
+            Last 2 days
+          </button>
+          <button onClick={() => setDoneWindow('all')}
+            className={`flex-1 py-1.5 rounded-md text-[11px] font-mono ${doneWindow === 'all' ? 'bg-white shadow-sm text-stone-900 font-medium' : 'text-stone-500'}`}>
+            All time
+          </button>
         </div>
       )}
 
@@ -34422,6 +34439,20 @@ function InboxView({ employee, onBack }) {
   const [queueMode, setQueueMode] = useState(false);
   const [queueDone, setQueueDone] = useState(false);
 
+  // Discard a PM submission straight from the row — soft-delete, so it's
+  // recoverable, and reload so it leaves the queue.
+  const discardPmAssignment = async (assignment) => {
+    if (togglingAssignmentId) return;
+    if (!confirm(`Discard "${assignment.title || 'this submission'}"? It won\u2019t be cleaned or billed. This can be undone later.`)) return;
+    setTogglingAssignmentId(assignment.id);
+    const { error } = await supabase.from('assignments')
+      .update({ deleted_at: new Date().toISOString(), deleted_by: employee.id })
+      .eq('id', assignment.id);
+    setTogglingAssignmentId(null);
+    if (error) { alert('Could not discard: ' + error.message); return; }
+    load();
+  };
+
   // Flip priority on every target of an assignment from the inbox row.
   // Sweep mode: if ANY target is priority, turn all off; otherwise turn
   // all on. Lets owners flag urgent PM submissions without opening the
@@ -34455,6 +34486,7 @@ function InboxView({ employee, onBack }) {
     const { data: aData } = await supabase.from('assignments')
       .select('*, property:customers(id, name, property_type), targets:assignment_targets(id, priority, unit:units(label), party:parties(label))')
       .eq('source', 'pm').eq('pm_status', 'pending')
+      .is('deleted_at', null)
       .order('created_at', { ascending: false });
     setPendingAssignments(aData || []);
 
@@ -34679,7 +34711,15 @@ function InboxView({ employee, onBack }) {
                           )}
                         </div>
                       </div>
-                      <ChevronRight size={16} className="text-stone-400 flex-shrink-0" />
+                      <div className="flex flex-col items-center gap-2 flex-shrink-0">
+                        <button onClick={(e) => { e.stopPropagation(); discardPmAssignment(a); }}
+                          disabled={isToggling}
+                          title="Discard — not needed at all"
+                          className="p-1.5 rounded-lg text-stone-300 hover:text-red-600 hover:bg-red-50 disabled:opacity-50">
+                          <Trash2 size={16} />
+                        </button>
+                        <ChevronRight size={16} className="text-stone-400" />
+                      </div>
                     </div>
                   </div>
                 );

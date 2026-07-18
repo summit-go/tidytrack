@@ -48,7 +48,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul17-pend1";
+const BUILD_TAG = "jul17-reopen1";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -3527,6 +3527,20 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       if (activeTask) {
         try { await stopTask(activeTask, false); } catch (e) { console.warn('[signOut] stopTask failed', e); }
       }
+      // Before closing the block, park any in-progress items at this
+      // shift as 'paused' rather than leaving them 'in_progress' with no
+      // open block behind them. An orphaned in_progress item claims
+      // someone is actively cleaning when nobody is, and it doesn't
+      // surface in the Paused bucket where a cleaner would look to
+      // resume. This is the same routing the manual back-out uses.
+      if (shift?.id) {
+        try {
+          await supabase.from('assignment_targets')
+            .update({ status: 'paused' })
+            .eq('started_by', employee.id)
+            .eq('status', 'in_progress');
+        } catch (e) { console.warn('[signOut] pause-in-progress failed', e); }
+      }
       if (activeBlock && !activeBlock.end_time) {
         await supabase.from('work_blocks').update({ end_time: new Date().toISOString() }).eq('id', activeBlock.id);
       }
@@ -5028,6 +5042,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       onCancel={cancelPendingStart}
       onStart={confirmPendingStart}
       onSendBackToPending={sendBackToPendingFromPrepare}
+      onReopen={reopenBlock}
       onOpenMessages={() => setShowMessages(true)}
       onOpenBedroomHistory={setBedroomHistory}
       onJoinBlock={joinBlock}
@@ -6373,12 +6388,13 @@ const unitPartyLabel = (unitLabel, partyLabel) =>
 // if it's still open) belongs to it. Anything that matches nothing is
 // listed separately rather than silently dropped.
 // =================================================================
-function AssignmentWorkHistory({ propertyId, unitId, partyId, employee, defaultOpen = false }) {
+function AssignmentWorkHistory({ propertyId, unitId, partyId, employee, defaultOpen = false, onReopen = null }) {
   const [rows, setRows] = useState([]);
   const [loose, setLoose] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [openId, setOpenId] = useState(null);
   const [show, setShow] = useState(defaultOpen);
+  const [reopening, setReopening] = useState(null);
 
   useEffect(() => {
     if (!show || !unitId) return;
@@ -6482,9 +6498,26 @@ function AssignmentWorkHistory({ propertyId, unitId, partyId, employee, defaultO
             {running && <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />}
             {b.shift?.employee?.name || '?'}
           </span>
-          <span className="text-[10px] font-mono text-stone-400">
-            {fmtDateWithDay(b.start_time)} · {fmtClock(b.start_time)}
-            {b.end_time ? `–${fmtClock(b.end_time)}` : ' · running'} · {fmtTimeShort(ms)}
+          <span className="flex items-center gap-2">
+            <span className="text-[10px] font-mono text-stone-400">
+              {fmtDateWithDay(b.start_time)} · {fmtClock(b.start_time)}
+              {b.end_time ? `–${fmtClock(b.end_time)}` : ' · running'} · {fmtTimeShort(ms)}
+            </span>
+            {/* Reopen this exact session. Closed blocks (incl. ones the app
+               force-closed on sign-out) can be reopened one by one — the
+               cleaner picks which, nothing is guessed. A running block
+               shows a live dot instead of a button. */}
+            {onReopen && (running ? (
+              <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 inline-flex items-center gap-1">
+                <Pause size={9} /> Open now
+              </span>
+            ) : (
+              <button onClick={() => { setReopening(b.id); onReopen(b); }} disabled={reopening === b.id}
+                title="Reopen this session — add photos, notes and tasks to it"
+                className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-stone-900 text-white inline-flex items-center gap-1 disabled:opacity-50">
+                <Play size={9} /> {reopening === b.id ? 'Opening…' : 'Reopen'}
+              </button>
+            ))}
           </span>
         </div>
         <div className="text-[10px] font-mono text-stone-400 mt-1">
@@ -7779,7 +7812,7 @@ function OtherWorkblocksHere({ unitId, partyId, currentBlockId, currentEmployeeI
 // would tangle the logic. Cleaner to have a dedicated screen.
 // =================================================================
 function PreparingBlockView({ shift, pendingStart, employeeName, employee,
-  onSignOut, onCancel, onStart, onSendBackToPending, onOpenMessages, onOpenBedroomHistory, onJoinBlock, busy }) {
+  onSignOut, onCancel, onStart, onSendBackToPending, onReopen, onOpenMessages, onOpenBedroomHistory, onJoinBlock, busy }) {
   const handleLogoClick = () => onCancel();
 
   // Load priority + cleaning types for this bedroom's open assignments
@@ -7906,7 +7939,7 @@ function PreparingBlockView({ shift, pendingStart, employeeName, employee,
            clock just to find out whether a bedroom is half done. */}
         <AssignmentWorkHistory propertyId={shift.customer_id}
           unitId={pendingStart.unitId} partyId={pendingStart.partyId}
-          employee={employee} />
+          employee={employee} onReopen={onReopen} />
       </div>
     </div>
   );

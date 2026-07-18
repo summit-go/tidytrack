@@ -48,7 +48,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul17-reopen1";
+const BUILD_TAG = "jul17-fixes1";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -2177,7 +2177,9 @@ function RequestItemsModal({ section, templateSetId, bathroomVariant, generalVar
       // vs 'toilet'); General uses general_variant (a/b/c/d); Bedroom
       // and Vanity don't have multi-variants in the current schema.
       let pickedVariants = variants || [];
-      if (section === 'bathroom' && bathroomVariant) {
+      // 'all' = whole bathroom (one cleaner does everything, e.g. move-outs).
+      // Anything else filters to that responsibility split.
+      if (section === 'bathroom' && bathroomVariant && bathroomVariant !== 'all') {
         pickedVariants = pickedVariants.filter(v => v.variant_key === bathroomVariant.toLowerCase());
       } else if (section === 'general' && generalVariant) {
         pickedVariants = pickedVariants.filter(v => v.variant_key === generalVariant.toLowerCase());
@@ -26015,6 +26017,9 @@ function ChecklistAssignmentWizard({ property, employee, actorKind = null, porta
       const next = { ...prev };
       const current = next[partyId] || { mode: 'configure', checked: {} };
       next[partyId] = { ...current, bathroomVariant: variant };
+      // Whole-bathroom means this bedroom's cleaner does everything —
+      // there's no split to mirror, so leave the partner alone.
+      if (variant === 'all') return next;
       // Find the partner bedroom (same bathroom group, different bedroom number)
       const party = parties.find(p => p.id === partyId);
       const myNum = parseInt((party?.label || '').match(/(\d+)/)?.[1] || '0', 10);
@@ -27279,8 +27284,18 @@ function ChecklistAssignmentWizard({ property, employee, actorKind = null, porta
     const variantKey = sectionKey === 'bathroom' ? c.bathroomVariant
       : sectionKey === 'general' ? c.generalVariant
       : 'default';
-    const variant = variantKey ? variantBySectionKey(sectionKey, variantKey) : null;
-    const items = variant ? itemsForVariant(variant.id) : [];
+    // 'all' = the whole bathroom: pull items from EVERY bathroom variant,
+    // deduped by item_key so a shared item (e.g. floor) isn't listed twice.
+    let items;
+    if (sectionKey === 'bathroom' && variantKey === 'all') {
+      const seen = new Set();
+      items = variantsBySection('bathroom')
+        .flatMap(v => itemsForVariant(v.id))
+        .filter(it => { if (seen.has(it.item_key)) return false; seen.add(it.item_key); return true; });
+    } else {
+      const variant = variantKey ? variantBySectionKey(sectionKey, variantKey) : null;
+      items = variant ? itemsForVariant(variant.id) : [];
+    }
 
     return (
       <div className="space-y-3">
@@ -27334,10 +27349,15 @@ function ChecklistAssignmentWizard({ property, employee, actorKind = null, porta
               )}
             </div>
             <div className="flex gap-2">
+              {/* Whole bathroom — one cleaner does everything. Skips the
+                 tub/toilet split, which is the norm for move-outs. */}
+              <button onClick={() => setBathroomVariantWithAutofill(partyId, 'all')}
+                className={`flex-1 px-3 py-2 rounded-lg border-2 text-sm font-medium transition-colors ${c.bathroomVariant === 'all' ? 'bg-amber-50 border-amber-500 text-amber-900' : 'bg-white border-stone-200 text-stone-700'}`}>
+                Entire bathroom
+              </button>
               {variantsBySection('bathroom').map(v => (
                 <button key={v.id} onClick={() => setBathroomVariantWithAutofill(partyId, v.variant_key)}
                   className={`flex-1 px-3 py-2 rounded-lg border-2 text-sm font-medium transition-colors ${c.bathroomVariant === v.variant_key ? 'bg-amber-50 border-amber-500 text-amber-900' : 'bg-white border-stone-200 text-stone-700'}`}>
-                  {/* Rename "tub side" → "tub responsibility" per request */}
                   {v.label.replace(/ side$/i, ' responsibility')}
                 </button>
               ))}
@@ -29425,6 +29445,14 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
   // that side. Replaces the old day-of / last-3 / older quick tabs.
   const [dateFrom, setDateFrom] = useState(''); // YYYY-MM-DD inclusive start
   const [dateTo, setDateTo] = useState('');     // YYYY-MM-DD inclusive end
+  // Done view defaults to the last 2 days — that's what you're almost
+  // always looking for, and scrolling through weeks of finished work to
+  // find today's was the complaint. 'all' widens it.
+  const [doneWindow, setDoneWindow] = useState('recent'); // 'recent' | 'all'
+  const recentCutoff = (() => {
+    const d = new Date(); d.setDate(d.getDate() - 2);
+    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+  })();
   const [filterCategories, setFilterCategories] = useState(new Set()); // task categories like 'bedroom'
   const [editDueId, setEditDueId] = useState(null);
   const canEditDatesT = can(employee, 'edit_due_dates');
@@ -29825,6 +29853,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
   // Apply user filters (type / cleaner / day) before grouping.
   // We build "filteredTargets" once and feed it to all downstream
   // grouping/rendering logic.
+  const isDoneTab = statusFilter === 'done' || statusFilter === 'mine_today' || statusFilter === 'recheck_passed';
   const todayKey = (() => {
     const d = new Date();
     return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
@@ -29850,6 +29879,11 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
       if (!cd) return false;
       if (dateFrom && cd < dateFrom) return false;
       if (dateTo && cd > dateTo) return false;
+    } else if (isDoneTab && doneWindow === 'recent') {
+      // Default Done view: last 2 days only. A manual range above
+      // overrides this — pick dates and you see everything you asked for.
+      const cd = t.completed_at ? new Date(t.completed_at).toISOString().slice(0, 10) : null;
+      if (!cd || cd < recentCutoff) return false;
     }
     // Category filter — checks if any task at this bedroom matches
     if (filterCategories.size > 0) {
@@ -30306,6 +30340,20 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                                 {(() => {
                                   const asg = (newItems[0] || firstTarget)?.assignment;
                                   const sd = asg?.scheduled_date;
+                                  // Done work has a completion date, not a due
+                                  // date. "Overdue" on a finished job is a
+                                  // contradiction — overdue means unfinished
+                                  // past its due date. Show when it finished.
+                                  const grpDone = newItems.every(t => t.status === 'done') && newItems.length > 0;
+                                  if (grpDone) {
+                                    const last = newItems
+                                      .map(t => t.completed_at).filter(Boolean).sort().slice(-1)[0];
+                                    return (
+                                      <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-stone-900 text-white inline-flex items-center gap-1">
+                                        <Check size={9} /> {last ? `Done ${fmtDueDate(String(last).slice(0,10))}` : 'Done'}
+                                      </span>
+                                    );
+                                  }
                                   if (editDueId === asg?.id) return (
                                     <input type="date" autoFocus value={sd || ''}
                                       onChange={(e) => saveDueT(asg?.id, e.target.value)}
@@ -30613,22 +30661,24 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                   </div>
                 </div>
               )}
-              {/* Cleaner — multi-select chips */}
+              {/* Cleaner — dropdown (was a wall of chips) */}
               {availableCleaners.length > 0 && (
                 <div>
                   <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1">Cleaner (started or completed)</div>
-                  <div className="flex gap-1.5 flex-wrap">
-                    {availableCleaners.map(c => {
-                      const active = filterCleaners.has(c.id);
-                      return (
-                        <button key={c.id} onClick={() => toggleCleaner(c.id)}
-                          className={`px-2.5 py-1 rounded-full text-xs font-mono flex items-center gap-1 ${active ? 'bg-stone-900 text-stone-50' : 'bg-white border border-stone-300 text-stone-600'}`}>
-                          {active && <Check size={10} />}
-                          {c.name}
-                        </button>
-                      );
-                    })}
-                  </div>
+                  <select
+                    value={filterCleaners.size === 1 ? [...filterCleaners][0] : (filterCleaners.size === 0 ? '' : '__multi__')}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      if (v === '') setFilterCleaners(new Set());
+                      else if (v !== '__multi__') setFilterCleaners(new Set([v]));
+                    }}
+                    className="w-full px-3 py-2 rounded-lg border border-stone-300 bg-white text-sm text-stone-700">
+                    <option value="">All cleaners</option>
+                    {filterCleaners.size > 1 && <option value="__multi__">{filterCleaners.size} selected</option>}
+                    {availableCleaners.map(c => (
+                      <option key={c.id} value={c.id}>{c.name}</option>
+                    ))}
+                  </select>
                 </div>
               )}
               {/* Task category — what kind of work happened at the bedroom */}
@@ -30656,7 +30706,18 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                  Done-family tabs where completed dates exist. */}
               {isDoneView && (
                 <div>
-                  <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1">Completed between</div>
+                  <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1">Show</div>
+                  <div className="flex gap-1.5 mb-2">
+                    <button onClick={() => { setDoneWindow('recent'); setDateFrom(''); setDateTo(''); }}
+                      className={`px-2.5 py-1 rounded-full text-xs font-mono ${doneWindow === 'recent' && !dateFrom && !dateTo ? 'bg-stone-900 text-stone-50' : 'bg-white border border-stone-300 text-stone-600'}`}>
+                      Last 2 days
+                    </button>
+                    <button onClick={() => { setDoneWindow('all'); setDateFrom(''); setDateTo(''); }}
+                      className={`px-2.5 py-1 rounded-full text-xs font-mono ${doneWindow === 'all' && !dateFrom && !dateTo ? 'bg-stone-900 text-stone-50' : 'bg-white border border-stone-300 text-stone-600'}`}>
+                      All time
+                    </button>
+                  </div>
+                  <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1">Or a specific range</div>
                   <div className="flex gap-2 flex-wrap items-center">
                     <label className="flex items-center gap-1 text-xs font-mono text-stone-600">
                       <span className="text-stone-400">From</span>

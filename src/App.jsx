@@ -48,7 +48,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul18-teamicon1";
+const BUILD_TAG = "jul18-navtint1";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -10583,12 +10583,16 @@ function TeamClockIcon({ size = 18 }) {
 }
 
 function TabButton({ active, onClick, icon, label, badge, tone = 'ops' }) {
-  // Active tab tint matches its mode: dark for Operations, amber for
-  // Business — so the two contexts read as visually distinct.
-  const activeCls = tone === 'business' ? 'bg-amber-700 text-white' : 'bg-stone-900 text-stone-50';
+  // Every tab carries its mode's color: filled when active, outlined when
+  // not. Operations = dark, Business = amber — so all four tabs read as
+  // belonging to the mode above them, not just the selected one.
+  const activeCls = tone === 'business' ? 'bg-amber-700 text-white border-2 border-amber-700' : 'bg-stone-900 text-stone-50 border-2 border-stone-900';
+  const idleCls = tone === 'business'
+    ? 'border-2 border-amber-300 text-amber-800 hover:border-amber-700'
+    : 'border-2 border-stone-300 text-stone-600 hover:border-stone-900';
   return (
     <button onClick={onClick}
-      className={`relative flex flex-col items-center gap-0.5 py-1.5 px-1 rounded-xl transition-colors ${active ? activeCls : 'text-stone-500 hover:text-stone-900'}`}>
+      className={`relative flex flex-col items-center gap-0.5 py-1.5 px-1 rounded-xl transition-colors ${active ? activeCls : idleCls}`}>
       {icon}
       <span className="text-[9px] font-mono uppercase tracking-wider">{label}</span>
       {badge > 0 && (

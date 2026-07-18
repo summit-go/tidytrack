@@ -48,7 +48,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul18-fix3";
+const BUILD_TAG = "jul18-hours1";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -10992,7 +10992,33 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
     const targetSec = Math.round(h * 3600 + m * 60);
     if (targetSec < 0) { setAdjusting(null); return; }
     const finished = dayShifts.filter(s => s.end_time);
-    if (!finished.length) { setAdjusting(null); return; }
+    // No finished shift to anchor the offset to. This happens when every
+    // shift on the day is still open — a forgotten clock-out. Rather than
+    // silently do nothing (the bug: "adjust works today but not
+    // yesterday"), close the longest-open shift at start + target so the
+    // day reads the hours you typed, and clear the rest to zero-length.
+    if (!finished.length) {
+      const open = dayShifts.filter(s => !s.end_time);
+      if (!open.length) { setAdjusting(null); return; }
+      if (!confirm('These shifts were never clocked out. Set the day to the hours you entered and close them?')) { setAdjusting(null); return; }
+      setPayBusy('adj');
+      const anchor = open.slice().sort((a, b) => new Date(a.start_time) - new Date(b.start_time))[0];
+      const anchorEnd = new Date(new Date(anchor.start_time).getTime() + targetSec * 1000).toISOString();
+      await supabase.from('shifts').update({ end_time: anchorEnd, manual_adjustment_seconds: 0, idle_seconds: 0 }).eq('id', anchor.id);
+      // Close every other open shift as zero-length so they stop running
+      // and stop inflating totals.
+      for (const s of open.filter(x => x.id !== anchor.id)) {
+        await supabase.from('shifts').update({ end_time: s.start_time, manual_adjustment_seconds: 0 }).eq('id', s.id);
+      }
+      // And any open work blocks under those shifts.
+      const shiftIds = open.map(s => s.id);
+      for (const sid of shiftIds) {
+        await supabase.from('work_blocks').update({ end_time: anchorEnd }).eq('shift_id', sid).is('end_time', null);
+      }
+      setPayBusy(null); setAdjusting(null);
+      onReload && onReload();
+      return;
+    }
     const anchor = finished.slice().sort((a, b) =>
       (new Date(b.end_time) - new Date(b.start_time)) - (new Date(a.end_time) - new Date(a.start_time)))[0];
     // Seconds the OTHER shifts already contribute (with their own adjustments).
@@ -11004,6 +11030,13 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
     await supabase.from('shifts')
       .update({ manual_adjustment_seconds: neededOffset })
       .eq('id', anchor.id);
+    // If there are ALSO open shifts on this day (mix of closed + running),
+    // close them zero-length so they don't keep ticking past the number
+    // you just set.
+    for (const s of dayShifts.filter(x => !x.end_time)) {
+      await supabase.from('shifts').update({ end_time: s.start_time }).eq('id', s.id);
+      await supabase.from('work_blocks').update({ end_time: s.start_time }).eq('shift_id', s.id).is('end_time', null);
+    }
     setPayBusy(null); setAdjusting(null);
     onReload && onReload();
   };
@@ -11126,6 +11159,19 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
                     <Building2 size={11} /> {props.join(' · ')}
                   </div>
                 )}
+                {/* Still-running shifts on a PAST day = forgotten clock-outs.
+                   They tick forever and blow up the total (the 246h you saw).
+                   Flag it and point at the fix. */}
+                {(() => {
+                  const stillOpen = d.shifts.filter(s => !s.end_time).length;
+                  const isToday = d.key === new Date().toISOString().slice(0, 10);
+                  if (stillOpen === 0 || isToday) return null;
+                  return (
+                    <div className="text-[11px] font-mono text-red-700 bg-red-50 border border-red-200 rounded-lg px-2 py-1 mb-1.5">
+                      {stillOpen} shift{stillOpen === 1 ? '' : 's'} never clocked out — still counting. Use Adjust hours to set the real time.
+                    </div>
+                  );
+                })()}
                 {/* What they actually cleaned, and when. The blocks were
                    already loaded with their unit/party labels — the card
                    just never showed them, so "3 blocks" was all you got. */}
@@ -22562,7 +22608,8 @@ function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenAssi
     (async () => {
       const { count: pAssign } = await supabase.from('assignments')
         .select('id', { count: 'exact', head: true })
-        .eq('source', 'pm').eq('pm_status', 'pending');
+        .eq('source', 'pm').eq('pm_status', 'pending')
+        .is('deleted_at', null);
       const { count: pRechecks } = await supabase.from('recheck_requests')
         .select('id', { count: 'exact', head: true })
         .eq('pm_status', 'pending');
@@ -33158,6 +33205,7 @@ function PortalAssignmentsTab({ property, portalKind, portalUser }) {
       .select('*, targets:assignment_targets(id, status, priority, unit:units(label), party:parties(label))')
       .eq('customer_id', property.id)
       .eq('source', 'pm')
+      .is('deleted_at', null)
       .order('created_at', { ascending: false });
     setAssignments(data || []);
     setLoaded(true);

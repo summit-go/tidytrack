@@ -48,7 +48,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul18-aptprice1";
+const BUILD_TAG = "jul18-overdue1";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -16983,6 +16983,44 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
         };
       });
     }
+    // Any saved line whose apartment didn't regenerate (its targets are
+    // no longer inside the date window, or the free-targets update hadn't
+    // propagated yet) is REBUILT straight from the saved row. Without
+    // this, reopening silently dropped those lines and their prices —
+    // which is exactly the "it erased my presets" report. We reconstruct
+    // the whole line from what was saved so nothing is lost.
+    if (seedInvoice?.lines?.length) {
+      const builtKeys = new Set(builtSeeded.map(l => `${l.unitId || ''}:${l.partyId || ''}`));
+      const missing = seedInvoice.lines.filter(sl =>
+        !builtKeys.has(`${sl.unit_id || ''}:${sl.party_id || ''}`));
+      if (missing.length) {
+        const rebuilt = missing.map(sl => {
+          const savedSubs = Array.isArray(sl.subsections) ? sl.subsections : [];
+          const subs = savedSubs.length
+            ? savedSubs.map(s => ({ key: s.key, label: s.label, mode: s.mode || 'fixed', amount: s.amount != null ? s.amount : '', rate: s.rate || 0, minutes: s.minutes || '', included: true, fromBook: false }))
+            : [{ key: `__flat__:${sl.service_type || 'clean'}`, label: sl.label || 'Whole bedroom', mode: 'fixed', amount: (parseFloat(sl.base_amount) || parseFloat(sl.amount) || 0), rate: 0, minutes: '', included: true, fromBook: false }];
+          const hasExtra = (parseFloat(sl.extra_amount) || 0) > 0 || sl.extra_note;
+          return {
+            key: `saved:${sl.id}`,
+            unitId: sl.unit_id || null, partyId: sl.party_id || null,
+            label: sl.label || 'Line', serviceType: sl.service_type || '',
+            tookLonger: false, cleanedDays: [], description: sl.description || '',
+            subsections: subs,
+            amountOverride: sl.amount_overridden ? String(sl.amount ?? '') : '',
+            extraOn: !!hasExtra, extraMode: sl.extra_mode || 'fixed',
+            extraAmount: (sl.extra_mode !== 'time' && (parseFloat(sl.extra_amount) || 0) > 0) ? String(sl.extra_amount) : '',
+            extraMinutes: sl.extra_minutes != null ? String(sl.extra_minutes) : '',
+            extraRate: sl.extra_rate != null ? String(sl.extra_rate) : '',
+            extraNote: sl.extra_note || '',
+            // No source targets to re-stamp — this line was already billed
+            // and its targets freed; saving re-stamps whatever regenerated.
+            sourceTargetIds: [],
+          };
+        });
+        builtSeeded = [...builtSeeded, ...rebuilt].sort((a, b) =>
+          String(a.label).localeCompare(String(b.label), undefined, { numeric: true }));
+      }
+    }
     setLines(builtSeeded);
     // Diagnostics — surfaced in the empty state so we can see where it
     // breaks (no items found vs found-but-unpriced vs query error).
@@ -17148,6 +17186,10 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
       extra_rate: (l.extraOn && l.extraMode === 'time') ? (parseFloat(l.extraRate) || 0) : null,
     }));
     return <InvoiceDocument data={{ inv: previewInv, lines: previewLines }} preview
+      saving={saving}
+      onSaveDraft={() => save('draft')}
+      onSaveSent={() => save('sent')}
+      onSavePaid={() => save('paid')}
       onBack={() => setPreviewing(false)} />;
   }
 
@@ -17595,7 +17637,7 @@ function fmtInvoiceDate(d) {
 // invoice + its lines and renders the polished layout matching the
 // company's PDF, with print / status / delete actions.
 // =================================================================
-function InvoiceDocument({ invoiceId, data, preview, onBack, onChanged, onEditDraft }) {
+function InvoiceDocument({ invoiceId, data, preview, onBack, onChanged, onEditDraft, saving = false, onSaveDraft, onSaveSent, onSavePaid }) {
   const [inv, setInv] = useState(null);
   const [lines, setLines] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -17656,7 +17698,29 @@ function InvoiceDocument({ invoiceId, data, preview, onBack, onChanged, onEditDr
           <ArrowLeft size={16} /> {preview ? 'Back to draft' : 'Back'}
         </button>
         <div className="flex items-center gap-2 flex-wrap">
-          {preview && <span className="text-xs font-mono text-amber-700 px-2 py-1 rounded bg-amber-50">Preview — not saved</span>}
+          {preview && (
+            <>
+              <span className="text-xs font-mono text-amber-700 px-2 py-1 rounded bg-amber-50">Preview</span>
+              {onSaveDraft && (
+                <button onClick={onSaveDraft} disabled={saving}
+                  className="px-3 py-1.5 rounded-lg bg-white border border-stone-300 text-stone-700 text-xs font-medium disabled:opacity-50">
+                  {saving ? 'Saving…' : 'Save draft'}
+                </button>
+              )}
+              {onSaveSent && (
+                <button onClick={onSaveSent} disabled={saving}
+                  className="px-3 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-medium disabled:opacity-50">
+                  Save & mark sent
+                </button>
+              )}
+              {onSavePaid && (
+                <button onClick={onSavePaid} disabled={saving}
+                  className="px-3 py-1.5 rounded-lg bg-emerald-600 text-white text-xs font-medium disabled:opacity-50">
+                  Save & mark paid
+                </button>
+              )}
+            </>
+          )}
           {!preview && inv.status === 'draft' && onEditDraft && (
             <button onClick={() => { if (confirm('Reopen this invoice to edit? Your prices, overrides and notes are kept, and any newer cleanings in the period merge in.')) onEditDraft(inv); }}
               disabled={working} className="px-3 py-1.5 rounded-lg bg-amber-600 text-white text-xs font-medium disabled:opacity-50">Edit / add cleanings</button>
@@ -18726,8 +18790,10 @@ function InvoiceView({ employee, onSignOut, onOpenMessages, onLogoClick, topTogg
     const { data: full } = await supabase.from('invoices').select('*').eq('id', inv.id).single();
     const { data: savedLines } = await supabase.from('invoice_lines').select('*').eq('invoice_id', inv.id);
     // Free this invoice's targets so they (plus any newer cleanings) flow
-    // back into the draft. Then delete the old invoice row.
-    await supabase.from('assignment_targets').update({ invoiced_on: null }).eq('invoiced_on', inv.id);
+    // back into the draft. Await it fully before reopening so the editor's
+    // regeneration query sees them as un-invoiced.
+    const { error: freeErr } = await supabase.from('assignment_targets').update({ invoiced_on: null }).eq('invoiced_on', inv.id);
+    if (freeErr) { alert('Could not reopen: ' + freeErr.message); return; }
     await supabase.from('invoices').delete().eq('id', inv.id);
     setSeedInvoice({ ...(full || inv), lines: savedLines || [] });
     setSelectedId(inv.customer_id);
@@ -30318,7 +30384,12 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
           const unitLabel = group.unit?.label || (key === 'no-unit' ? 'No unit' : key);
           const bundleHasPriority = group.items.some(t => t.priority);
           // Most-urgent due status across this apartment's jobs.
-          const unitDueKinds = group.items.map(t => assignmentDueKind(t.assignment?.scheduled_date)).filter(Boolean);
+          // Overdue only counts UNFINISHED work. A done item with a past
+          // scheduled date is not overdue — it's done. Including it made a
+          // fully-cleaned bedroom show "Overdue", which is nonsense.
+          const unitDueKinds = group.items
+            .filter(t => t.status !== 'done')
+            .map(t => assignmentDueKind(t.assignment?.scheduled_date)).filter(Boolean);
           const unitDue = unitDueKinds.includes('overdue') ? 'overdue'
             : unitDueKinds.includes('today') ? 'today'
             : unitDueKinds.includes('upcoming') ? 'upcoming' : null;

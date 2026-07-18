@@ -48,7 +48,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul18-overdue3";
+const BUILD_TAG = "jul18-icon1";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -10372,7 +10372,7 @@ function Header({ name, onSignOut, role, employee, onOpenMessages, onLogoClick, 
           <button onClick={onOpenWhosHere}
             className="relative p-2 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-50"
             title="Who's here right now">
-            <User size={18} />
+            <Users size={18} />
           </button>
         )}
         {menuItems && menuItems.length > 0 && (
@@ -14389,6 +14389,7 @@ function UnitList({ property, onBack, onEditProperty, onUnitOpen, onUnitEdit, on
   const [units, setUnits] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [search, setSearch] = useState('');
+  const [tab, setTab] = useState('units'); // 'units' | 'team'
   const load = async () => {
     const { data } = await supabase.from('units').select('*, parties(id)')
       .eq('customer_id', property.id).order('sort_order').order('label');
@@ -14417,6 +14418,22 @@ function UnitList({ property, onBack, onEditProperty, onUnitOpen, onUnitEdit, on
         </button>
       </div>
       <div className="px-5 pt-6">
+        {/* Units / Team toggle. Team editing used to be buried inside
+           Edit property; this surfaces it as a peer of the units list. */}
+        <div className="flex p-0.5 bg-stone-100 rounded-xl mb-5">
+          <button onClick={() => setTab('units')}
+            className={`flex-1 py-2 rounded-lg text-sm font-medium ${tab === 'units' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+            Units
+          </button>
+          <button onClick={() => setTab('team')}
+            className={`flex-1 py-2 rounded-lg text-sm font-medium ${tab === 'team' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+            Team
+          </button>
+        </div>
+
+        {tab === 'team' ? (
+          <PropertyTeamTab property={property} />
+        ) : (<>
         <div className="flex items-baseline justify-between mb-4">
           <h2 className="font-serif text-2xl text-stone-900">Units</h2>
           <span className="text-xs font-mono text-stone-500">{units.length} total</span>
@@ -14509,8 +14526,70 @@ function UnitList({ property, onBack, onEditProperty, onUnitOpen, onUnitEdit, on
             })()}
           </div>
         )}
+        </>)}
       </div>
     </div>
+  );
+}
+
+// Standalone Team tab for a property. Reuses the same team picker as
+// Edit property, but persists each access change IMMEDIATELY (add/remove
+// the portal_user_properties link) rather than on a form submit — since
+// there's no form here. Add-new and code editing come from the picker.
+function PropertyTeamTab({ property }) {
+  const [allPortalUsers, setAllPortalUsers] = useState([]);
+  const [assignedIds, setAssignedIds] = useState(new Set());
+  const [loaded, setLoaded] = useState(false);
+  const [search, setSearch] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const load = async () => {
+    setLoaded(false);
+    const [{ data: usersData }, { data: links }] = await Promise.all([
+      supabase.from('portal_users').select('*').order('name'),
+      supabase.from('portal_user_properties').select('portal_user_id').eq('property_id', property.id),
+    ]);
+    setAllPortalUsers((usersData || []).filter(u => u.active !== false));
+    setAssignedIds(new Set((links || []).map(l => l.portal_user_id)));
+    setLoaded(true);
+  };
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, [property.id]);
+
+  // Persist immediately on toggle.
+  const onToggle = async (pid) => {
+    if (busy) return;
+    setBusy(true);
+    const has = assignedIds.has(pid);
+    // Optimistic.
+    setAssignedIds(prev => {
+      const next = new Set(prev);
+      if (has) next.delete(pid); else next.add(pid);
+      return next;
+    });
+    const { error } = has
+      ? await supabase.from('portal_user_properties').delete().eq('portal_user_id', pid).eq('property_id', property.id)
+      : await supabase.from('portal_user_properties').insert({ portal_user_id: pid, property_id: property.id });
+    setBusy(false);
+    if (error) {
+      alert('Could not update access: ' + error.message);
+      load(); // resync on failure
+    }
+  };
+
+  return (
+    <PortalUserAssignmentSection
+      portalUsers={allPortalUsers}
+      assignedIds={assignedIds}
+      loaded={loaded}
+      search={search}
+      setSearch={setSearch}
+      onToggle={onToggle}
+      onUserCreated={(user) => {
+        setAllPortalUsers(prev => [...prev, user].sort((a, b) => (a.name || '').localeCompare(b.name || '')));
+        // A newly created user is auto-linked to this property.
+        onToggle(user.id);
+      }}
+    />
   );
 }
 
@@ -20285,6 +20364,32 @@ function PortalDashboard({ property, portalKind, portalUser, properties, onSwitc
     onOpenUnitDay={(unitId, date) => setView({ kind: 'unit-day', unitId, date })} />;
 }
 
+// Language toggle for the PM portal header. The portal already lives
+// inside TranslationProvider, so flipping locale re-translates the whole
+// portal UI — it just never had a visible control. Persists to the
+// portal_users row so a PM's choice follows them.
+function PortalLangToggle({ portalUser }) {
+  const { locale, setLocale } = useLocale();
+  if (!isTranslateConfigured()) return null;
+  return (
+    <button
+      onClick={async () => {
+        const next = locale === 'es' ? 'en' : 'es';
+        setLocale(next);
+        if (portalUser?.id && !portalUser.__preview) {
+          try { await supabase.from('portal_users').update({ locale: next }).eq('id', portalUser.id); }
+          catch (e) { console.warn('[portal locale] save failed', e); }
+        }
+      }}
+      className="relative p-2 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-50 flex items-center gap-1"
+      title={locale === 'es' ? 'Switch to English' : 'Cambiar a Español'}
+      data-no-translate>
+      <Languages size={16} />
+      <span className="text-[10px] font-mono uppercase font-bold">{locale === 'es' ? 'ES' : 'EN'}</span>
+    </button>
+  );
+}
+
 function PortalHome({ property, portalKind, portalUser, properties, onSwitchProperty, hasMultipleProperties, onBackToPicker, onSignOut, onRefreshProperty, onOpenUnitDay }) {
   const [tab, setTab] = useState('history'); // 'history' | 'assignments'
   const [asgSub, setAsgSub] = useState('requests'); // 'requests' | 'concerns'
@@ -20484,6 +20589,7 @@ function PortalHome({ property, portalKind, portalUser, properties, onSwitchProp
             </div>
           </button>
           <div className="flex items-center gap-2 flex-shrink-0">
+            <PortalLangToggle portalUser={portalUser} />
             <button onClick={() => setShowMessages(true)}
               className="relative p-2 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-50"
               title="Messages">

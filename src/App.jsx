@@ -48,7 +48,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul18-hours1";
+const BUILD_TAG = "jul18-hours2";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -10991,50 +10991,47 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
     if (hours === '' && mins === '') { setAdjusting(null); return; }
     const targetSec = Math.round(h * 3600 + m * 60);
     if (targetSec < 0) { setAdjusting(null); return; }
-    const finished = dayShifts.filter(s => s.end_time);
-    // No finished shift to anchor the offset to. This happens when every
-    // shift on the day is still open — a forgotten clock-out. Rather than
-    // silently do nothing (the bug: "adjust works today but not
-    // yesterday"), close the longest-open shift at start + target so the
-    // day reads the hours you typed, and clear the rest to zero-length.
-    if (!finished.length) {
-      const open = dayShifts.filter(s => !s.end_time);
-      if (!open.length) { setAdjusting(null); return; }
-      if (!confirm('These shifts were never clocked out. Set the day to the hours you entered and close them?')) { setAdjusting(null); return; }
-      setPayBusy('adj');
-      const anchor = open.slice().sort((a, b) => new Date(a.start_time) - new Date(b.start_time))[0];
-      const anchorEnd = new Date(new Date(anchor.start_time).getTime() + targetSec * 1000).toISOString();
-      await supabase.from('shifts').update({ end_time: anchorEnd, manual_adjustment_seconds: 0, idle_seconds: 0 }).eq('id', anchor.id);
-      // Close every other open shift as zero-length so they stop running
-      // and stop inflating totals.
-      for (const s of open.filter(x => x.id !== anchor.id)) {
-        await supabase.from('shifts').update({ end_time: s.start_time, manual_adjustment_seconds: 0 }).eq('id', s.id);
-      }
-      // And any open work blocks under those shifts.
-      const shiftIds = open.map(s => s.id);
-      for (const sid of shiftIds) {
-        await supabase.from('work_blocks').update({ end_time: anchorEnd }).eq('shift_id', sid).is('end_time', null);
-      }
-      setPayBusy(null); setAdjusting(null);
-      onReload && onReload();
-      return;
+    if (!dayShifts.length) { setAdjusting(null); return; }
+
+    // Force the WHOLE DAY to `targetSec`, however many shifts there are.
+    // The old code only nudged the single longest shift, which can't work
+    // when 19 shifts each carry ~13h — one negative offset can't cancel
+    // 240h spread across the others (it clamps at zero). Instead:
+    //   • the FIRST shift becomes the anchor and carries the full target
+    //     (closed at start + target if it was open),
+    //   • every other shift is zeroed — closed at its own start_time with
+    //     adjustment 0, so it contributes nothing,
+    //   • open work blocks under any of them get closed.
+    // Net: the day reads exactly what you typed, and nothing keeps ticking.
+    const anyOpen = dayShifts.some(s => !s.end_time);
+    if (anyOpen && !confirm('Some of these shifts were never clocked out. Set the whole day to the hours you entered and close them?')) {
+      setAdjusting(null); return;
     }
-    const anchor = finished.slice().sort((a, b) =>
-      (new Date(b.end_time) - new Date(b.start_time)) - (new Date(a.end_time) - new Date(a.start_time)))[0];
-    // Seconds the OTHER shifts already contribute (with their own adjustments).
-    const othersSec = finished.filter(s => s.id !== anchor.id)
-      .reduce((sum, s) => sum + shiftBillableMs(s) / 1000, 0);
-    const anchorRawSec = ((new Date(anchor.end_time) - new Date(anchor.start_time)) / 1000) - (anchor.idle_seconds || 0);
-    const neededOffset = Math.round(targetSec - othersSec - anchorRawSec);
     setPayBusy('adj');
-    await supabase.from('shifts')
-      .update({ manual_adjustment_seconds: neededOffset })
-      .eq('id', anchor.id);
-    // If there are ALSO open shifts on this day (mix of closed + running),
-    // close them zero-length so they don't keep ticking past the number
-    // you just set.
-    for (const s of dayShifts.filter(x => !x.end_time)) {
-      await supabase.from('shifts').update({ end_time: s.start_time }).eq('id', s.id);
+    const ordered = dayShifts.slice().sort((a, b) => new Date(a.start_time) - new Date(b.start_time));
+    const anchor = ordered[0];
+    const anchorRawSec = anchor.end_time
+      ? Math.max(0, (new Date(anchor.end_time) - new Date(anchor.start_time)) / 1000 - (anchor.idle_seconds || 0))
+      : 0;
+    // If the anchor is still open, close it at start + target and use no
+    // offset; if it's closed, keep its end_time and use an offset to reach
+    // the target exactly.
+    if (anchor.end_time) {
+      await supabase.from('shifts').update({
+        manual_adjustment_seconds: Math.round(targetSec - anchorRawSec),
+      }).eq('id', anchor.id);
+    } else {
+      const anchorEnd = new Date(new Date(anchor.start_time).getTime() + targetSec * 1000).toISOString();
+      await supabase.from('shifts').update({
+        end_time: anchorEnd, manual_adjustment_seconds: 0, idle_seconds: 0,
+      }).eq('id', anchor.id);
+      await supabase.from('work_blocks').update({ end_time: anchorEnd }).eq('shift_id', anchor.id).is('end_time', null);
+    }
+    // Zero out every other shift on the day.
+    for (const s of ordered.slice(1)) {
+      await supabase.from('shifts').update({
+        end_time: s.start_time, manual_adjustment_seconds: 0, idle_seconds: 0,
+      }).eq('id', s.id);
       await supabase.from('work_blocks').update({ end_time: s.start_time }).eq('shift_id', s.id).is('end_time', null);
     }
     setPayBusy(null); setAdjusting(null);
@@ -11165,10 +11162,19 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
                 {(() => {
                   const stillOpen = d.shifts.filter(s => !s.end_time).length;
                   const isToday = d.key === new Date().toISOString().slice(0, 10);
-                  if (stillOpen === 0 || isToday) return null;
+                  const dayHrs = totalMs / 3600000;
+                  // A single person can't bill much over ~16h in a day.
+                  // Flag either still-running shifts OR a closed day whose
+                  // total is impossibly long (forgotten clock-outs that got
+                  // closed days later still read as huge).
+                  const runaway = dayHrs > 16;
+                  if ((stillOpen === 0 && !runaway) || isToday) return null;
                   return (
                     <div className="text-[11px] font-mono text-red-700 bg-red-50 border border-red-200 rounded-lg px-2 py-1 mb-1.5">
-                      {stillOpen} shift{stillOpen === 1 ? '' : 's'} never clocked out — still counting. Use Adjust hours to set the real time.
+                      {stillOpen > 0
+                        ? `${stillOpen} shift${stillOpen === 1 ? '' : 's'} never clocked out — still counting.`
+                        : `${dayHrs.toFixed(0)}h on one day is almost certainly a forgotten clock-out.`}
+                      {' '}Use Adjust hours to set the real time.
                     </div>
                   );
                 })()}

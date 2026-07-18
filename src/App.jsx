@@ -48,7 +48,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul18-overdue1";
+const BUILD_TAG = "jul18-overdue2";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -29438,6 +29438,9 @@ function SuggestedTabContent({ propertyId, employee, onGoToBedroom, onOpenBedroo
     const statusOrder = ['pending', 'in_progress', 'paused', 'blocked'];
     const dominantStatus = statusOrder.find(s => items.some(i => i.status === s)) || 'pending';
     const statusPill = ASSIGNMENT_STATUSES[dominantStatus] || ASSIGNMENT_STATUSES.pending;
+    // Done items don't get an overdue pill — overdue means unfinished
+    // past its due date, and these are finished.
+    const allDone = items.length > 0 && items.every(i => i.status === 'done');
     const goTo = () => {
       if (!onGoToBedroom) return;
       onGoToBedroom({
@@ -29455,8 +29458,10 @@ function SuggestedTabContent({ propertyId, employee, onGoToBedroom, onOpenBedroo
             <button onClick={goTo} disabled={busy}
               className="block text-left w-full font-serif text-lg text-stone-900 leading-tight break-words hover:underline disabled:opacity-50">
               <span className="font-bold">{c.unitLabel}</span>
-              <span className="text-stone-400 mx-1.5">·</span>
-              <span className="italic">{c.partyLabel}</span>
+              {partyDisplay(c.partyLabel) && <>
+                <span className="text-stone-400 mx-1.5">·</span>
+                <span className="italic">{partyDisplay(c.partyLabel)}</span>
+              </>}
             </button>
           </div>
           <div className="flex flex-col sm:flex-row sm:items-center gap-1.5 flex-shrink-0 sm:max-w-[60%]">
@@ -29470,7 +29475,16 @@ function SuggestedTabContent({ propertyId, employee, onGoToBedroom, onOpenBedroo
               <span className={`text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full border ${statusPill.color}`}>
                 {statusPill.label}
               </span>
-              {(editDueId === rep.assignment?.id ? (
+              {allDone ? (
+                (() => {
+                  const last = items.map(i => i.completed_at).filter(Boolean).sort().slice(-1)[0];
+                  return (
+                    <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-stone-900 text-white inline-flex items-center gap-1">
+                      <Check size={9} /> {last ? `Done ${fmtDueDate(String(last).slice(0,10))}` : 'Done'}
+                    </span>
+                  );
+                })()
+              ) : (editDueId === rep.assignment?.id ? (
                 <input type="date" autoFocus value={rep.assignment?.scheduled_date || ''}
                   onChange={(e) => saveDueS(rep.assignment?.id, e.target.value)}
                   onBlur={() => setEditDueId(null)}

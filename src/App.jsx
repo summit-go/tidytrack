@@ -48,7 +48,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul18-hours2";
+const BUILD_TAG = "jul18-aptprice1";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -16312,6 +16312,8 @@ function PriceBookEditor({ property, onBack }) {
   const [prices, setPrices] = useState({});       // key -> {mode, base_amount, rate, default_minutes}
   const [originalKeys, setOriginalKeys] = useState([]);
   const [defaultRate, setDefaultRate] = useState(''); // preset $/hr for time items
+  const [aptSizes, setAptSizes] = useState([]);        // [{key:'2x2', bedrooms, bathrooms, label}]
+  const [aptPrices, setAptPrices] = useState({});      // '__apt__:2x2' -> amount string
   const [expanded, setExpanded] = useState(new Set());
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState(null);
@@ -16371,6 +16373,27 @@ function PriceBookEditor({ property, onBack }) {
       });
       setPrices(pmap);
       setDefaultRate(dr === 0 ? '' : (dr ?? ''));
+      // Apartment SIZE tiers (1x1, 2x2, 3x2…) for whole-apartment flat
+      // pricing at Bridges/Citifront-style properties. Discover which
+      // sizes actually exist here from the units table, then load any
+      // saved __apt__ prices.
+      const { data: unitRows } = await supabase.from('units')
+        .select('bedrooms, bathrooms').eq('customer_id', property.id);
+      const sizeSet = new Map();
+      (unitRows || []).forEach(u => {
+        if (u.bedrooms == null || u.bathrooms == null) return;
+        const key = `${u.bedrooms}x${u.bathrooms}`;
+        if (!sizeSet.has(key)) sizeSet.set(key, { key, bedrooms: u.bedrooms, bathrooms: u.bathrooms });
+      });
+      const sizes = Array.from(sizeSet.values()).sort((a, b) => a.bedrooms - b.bedrooms || a.bathrooms - b.bathrooms);
+      setAptSizes(sizes);
+      const apmap = {};
+      (pb || []).forEach(r => {
+        if (r.subsection_key?.startsWith('__apt__:')) {
+          apmap[r.subsection_key] = r.base_amount != null ? String(r.base_amount) : '';
+        }
+      });
+      setAptPrices(apmap);
       setOriginalKeys((pb || []).filter(r => r.subsection_key !== '__hourly_rate__').map(r => r.subsection_key));
     } catch (e) { setError(e.message || 'Could not load template.'); }
     setLoaded(true);
@@ -16411,6 +16434,20 @@ function PriceBookEditor({ property, onBack }) {
         sort_order: 0, updated_at: new Date().toISOString(),
       });
     });
+    // Apartment size-tier flat prices (__apt__:2x2 etc).
+    const aptKeep = [];
+    aptSizes.forEach(sz => {
+      const k = `__apt__:${sz.key}`;
+      const amt = parseFloat(aptPrices[k]) || 0;
+      if (amt <= 0) return;
+      aptKeep.push(k);
+      payload.push({
+        customer_id: property.id, subsection_key: k,
+        label: `${sz.bedrooms}x${sz.bathrooms} apartment`,
+        mode: 'fixed', base_amount: amt, rate: 0, default_minutes: 0,
+        sort_order: 0, updated_at: new Date().toISOString(),
+      });
+    });
     // Persist the preset hourly rate as a sentinel row (skipped by the
     // invoice generator). Generators must ignore keys starting with '__'.
     const dr = parseFloat(defaultRate) || 0;
@@ -16434,6 +16471,13 @@ function PriceBookEditor({ property, onBack }) {
     const templateKeys = new Set(items.map(it => it.key));
     const removed = originalKeys.filter(k => !keepKeys.includes(k) && templateKeys.has(k));
     for (const k of removed) {
+      await supabase.from('invoice_price_book').delete().eq('customer_id', property.id).eq('subsection_key', k);
+    }
+    // Remove size-tier prices the user cleared to zero/blank.
+    const aptClearedKeys = aptSizes
+      .map(sz => `__apt__:${sz.key}`)
+      .filter(k => !aptKeep.includes(k) && originalKeys.includes(k));
+    for (const k of aptClearedKeys) {
       await supabase.from('invoice_price_book').delete().eq('customer_id', property.id).eq('subsection_key', k);
     }
     setSaving(false); onBack();
@@ -16477,6 +16521,36 @@ function PriceBookEditor({ property, onBack }) {
             className="w-28 px-3 py-1.5 rounded-lg border border-amber-300 bg-white text-right text-sm font-mono" />
           <span className="text-[11px] text-amber-700/80 font-mono">/hr — time items use this unless you override one</span>
         </div>
+
+        {/* Whole-apartment flat pricing by SIZE. For properties billed per
+           apartment (not per item) — a 2x2 is one price regardless of what
+           was cleaned. Only the sizes that exist at this property show. */}
+        {aptSizes.length > 0 && (
+          <div className="mb-5 p-3 rounded-2xl bg-stone-100 border border-stone-200">
+            <div className="text-xs font-mono uppercase tracking-wider text-stone-600 mb-1">Whole-apartment price by size</div>
+            <p className="text-[11px] text-stone-500 mb-3">
+              A flat rate per apartment size, used when the whole unit is cleaned. Leave blank for sizes you price by item instead.
+            </p>
+            <div className="space-y-2">
+              {aptSizes.map(sz => {
+                const k = `__apt__:${sz.key}`;
+                return (
+                  <div key={k} className="flex items-center gap-2">
+                    <span className="font-mono text-sm text-stone-800 w-16">{sz.bedrooms}x{sz.bathrooms}</span>
+                    <span className="text-[10px] font-mono text-stone-400 flex-1">
+                      {sz.bedrooms} bed / {sz.bathrooms} bath
+                    </span>
+                    <span className="text-stone-400 font-mono">$</span>
+                    <input type="number" step="0.01" value={aptPrices[k] || ''}
+                      onChange={e => setAptPrices(p => ({ ...p, [k]: e.target.value }))}
+                      placeholder="0.00"
+                      className="w-28 px-3 py-1.5 rounded-lg border border-stone-300 bg-white text-right text-sm font-mono" />
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
 
         {!loaded ? <Splash text="Loading items…" /> : error ? (
           <div className="p-4 rounded-2xl bg-amber-50 border border-amber-200 text-sm text-amber-900">{error}</div>
@@ -16624,7 +16698,7 @@ function lineAmount(l) {
   return baseAmount(l) + extraAmount(l);
 }
 
-function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved }) {
+function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, seedInvoice = null }) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [lines, setLines] = useState([]);
@@ -16838,16 +16912,28 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
       // failed) still get billed — give them one flat "whole bedroom"
       // line, priced per service type and remembered like any item.
       if (subs.length === 0) {
+        // Whole-apartment (nothing itemized failed). Price by SIZE first —
+        // a 1x1 / 2x2 / 3x2 tier in the price book — because Bridges and
+        // Citifront bill a flat rate per apartment size. Fall back to the
+        // per-type flat price, then to unpriced.
+        const meta = unitMetaById[g.unit_id] || {};
+        const bd = meta.bedrooms != null ? meta.bedrooms : null;
+        const ba = meta.bathrooms != null ? meta.bathrooms : null;
+        const sizeKey = (bd != null && ba != null) ? `__apt__:${bd}x${ba}` : null;
         const flatKey = `__flat__:${g.type || 'clean'}`;
-        const b = book[flatKey];
+        const sizeBook = sizeKey ? book[sizeKey] : null;
+        const b = sizeBook || book[flatKey];
         const flatLabel = g.type === 'cleaning_check' ? 'Cleaning check (whole bedroom)'
           : g.type === 'move_out_check' ? 'Move-out clean (whole bedroom)'
           : 'Whole bedroom';
+        // Use the size key when a size price exists so removing/relabeling
+        // stays stable; otherwise keep the flat-by-type key.
+        const useKey = sizeBook ? sizeKey : flatKey;
         if (b) {
           const mode = b.mode === 'time' ? 'time' : 'fixed';
-          subs.push({ key: flatKey, label: b.label || flatLabel, mode, amount: mode === 'fixed' ? (b.base_amount || 0) : '', rate: b.rate || defRate || 0, minutes: b.default_minutes || '', included: true, fromBook: true });
+          subs.push({ key: useKey, label: b.label || flatLabel, mode, amount: mode === 'fixed' ? (b.base_amount || 0) : '', rate: b.rate || defRate || 0, minutes: b.default_minutes || '', included: true, fromBook: true });
         } else {
-          subs.push({ key: flatKey, label: flatLabel, mode: 'fixed', amount: '', rate: defRate || 0, minutes: '', included: true, fromBook: false });
+          subs.push({ key: useKey, label: flatLabel, mode: 'fixed', amount: '', rate: defRate || 0, minutes: '', included: true, fromBook: false });
         }
       }
       subs.sort((a, b) => a.label.localeCompare(b.label));
@@ -16856,7 +16942,48 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
       // only has to type the amount.
       return { key: g.aid, unitId: g.unit_id, partyId: g.party_id, label, serviceType: g.type, tookLonger, cleanedDays: Array.from(g.days).sort(), description: INVOICE_DESCR[g.type] || '', subsections: subs, amountOverride: '', extraOn: tookLonger, extraMode: 'fixed', extraAmount: '', extraMinutes: '', extraRate: '', extraNote: '', sourceTargetIds: g.targetIds };
     }).filter(l => l.label && l.subsections.length > 0).sort((a, b) => a.label.localeCompare(b.label, undefined, { numeric: true }));
-    setLines(built);
+
+    // Reopen path: carry the SAVED invoice's customizations onto the
+    // freshly-regenerated lines, matched by unit:party. Without this,
+    // reopening an invoice wiped every manual price, override, extra and
+    // description because the editor rebuilds lines from scratch. Newly
+    // eligible cleanings still appear (they just won't have a saved line
+    // to inherit from); everything you'd already tuned survives.
+    let builtSeeded = built;
+    if (seedInvoice?.lines?.length) {
+      const savedByKey = {};
+      seedInvoice.lines.forEach(sl => {
+        savedByKey[`${sl.unit_id || ''}:${sl.party_id || ''}`] = sl;
+      });
+      builtSeeded = built.map(l => {
+        const sl = savedByKey[`${l.unitId || ''}:${l.partyId || ''}`];
+        if (!sl) return l;
+        const hasExtra = (parseFloat(sl.extra_amount) || 0) > 0 || sl.extra_note;
+        // Rebuild subsection prices from the saved line so edited amounts
+        // return exactly as they were.
+        const savedSubs = Array.isArray(sl.subsections) ? sl.subsections : [];
+        const subByKey = {};
+        savedSubs.forEach(s => { subByKey[s.key] = s; });
+        const mergedSubs = l.subsections.map(s => {
+          const ss = subByKey[s.key];
+          if (!ss) return s;
+          return { ...s, mode: ss.mode || s.mode, amount: ss.amount != null ? ss.amount : s.amount, rate: ss.rate != null ? ss.rate : s.rate, minutes: ss.minutes != null ? ss.minutes : s.minutes, included: true };
+        });
+        return {
+          ...l,
+          subsections: mergedSubs,
+          description: sl.description != null ? sl.description : l.description,
+          amountOverride: sl.amount_overridden ? String(sl.amount ?? '') : l.amountOverride,
+          extraOn: !!hasExtra,
+          extraMode: sl.extra_mode || 'fixed',
+          extraAmount: (sl.extra_mode !== 'time' && (parseFloat(sl.extra_amount) || 0) > 0) ? String(sl.extra_amount) : '',
+          extraMinutes: sl.extra_minutes != null ? String(sl.extra_minutes) : '',
+          extraRate: sl.extra_rate != null ? String(sl.extra_rate) : '',
+          extraNote: sl.extra_note || '',
+        };
+      });
+    }
+    setLines(builtSeeded);
     // Diagnostics — surfaced in the empty state so we can see where it
     // breaks (no items found vs found-but-unpriced vs query error).
     const pricedKeys = Object.keys(book).length;
@@ -16891,13 +17018,26 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved })
       .map(r => parseInt(String(r.invoice_number || '').replace(/[^0-9]/g, ''), 10))
       .filter(n => Number.isFinite(n))
       .reduce((m, n) => Math.max(m, n), 0);
-    setInvoiceNumber(maxNum > 0 ? String(maxNum + 1) : '1');
+    // Reopen keeps the SAME invoice number and metadata — you're editing
+    // the same bill, not writing a new one. A fresh draft gets max+1.
+    if (seedInvoice?.invoice_number) {
+      setInvoiceNumber(String(seedInvoice.invoice_number));
+    } else {
+      setInvoiceNumber(maxNum > 0 ? String(maxNum + 1) : '1');
+    }
     setTakenNumbers(new Set(allNums.map(r => String(r.invoice_number || '').trim()).filter(Boolean)));
-    // 7) Bill-to defaults from the property.
+    if (seedInvoice) {
+      if (seedInvoice.title) setTitle(seedInvoice.title);
+      if (seedInvoice.invoice_date) setInvoiceDate(seedInvoice.invoice_date);
+      if (seedInvoice.due_date) setDueDate(seedInvoice.due_date);
+    }
+    // 7) Bill-to: from the reopened invoice if present, else property.
     setBillTo({
-      org: property.name || '', contact: property.billing_contact_name || '',
-      email: property.billing_email || '', phone: property.billing_phone || '',
-      address: property.billing_address || property.address || '',
+      org: seedInvoice?.bill_to_org || property.name || '',
+      contact: seedInvoice?.bill_to_contact || property.billing_contact_name || '',
+      email: seedInvoice?.bill_to_email || property.billing_email || '',
+      phone: seedInvoice?.bill_to_phone || property.billing_phone || '',
+      address: seedInvoice?.bill_to_address || property.billing_address || property.address || '',
     });
     setLoading(false);
   })(); /* eslint-disable-next-line */ }, []);
@@ -17518,7 +17658,7 @@ function InvoiceDocument({ invoiceId, data, preview, onBack, onChanged, onEditDr
         <div className="flex items-center gap-2 flex-wrap">
           {preview && <span className="text-xs font-mono text-amber-700 px-2 py-1 rounded bg-amber-50">Preview — not saved</span>}
           {!preview && inv.status === 'draft' && onEditDraft && (
-            <button onClick={() => { if (confirm('Reopen this draft to add more cleanings? Its items are freed and it reopens in the editor so newer cleanings merge in.')) onEditDraft(inv); }}
+            <button onClick={() => { if (confirm('Reopen this invoice to edit? Your prices, overrides and notes are kept, and any newer cleanings in the period merge in.')) onEditDraft(inv); }}
               disabled={working} className="px-3 py-1.5 rounded-lg bg-amber-600 text-white text-xs font-medium disabled:opacity-50">Edit / add cleanings</button>
           )}
           {!preview && inv.status !== 'sent' && <button onClick={() => setStatus('sent')} disabled={working} className="px-3 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-medium disabled:opacity-50">Mark sent</button>}
@@ -18577,12 +18717,22 @@ function InvoiceView({ employee, onSignOut, onOpenMessages, onLogoClick, topTogg
   };
   // "Edit draft": free this draft's cleanings and reopen the generator for
   // its period through today, so newer cleanings merge into one invoice.
+  const [seedInvoice, setSeedInvoice] = useState(null);
   const editDraft = async (inv) => {
     if (!inv) return;
+    // Capture the full invoice + its lines BEFORE freeing it, so the
+    // reopened editor can restore every price, override, extra and note.
+    // The old code deleted first and rebuilt blank — wiping all of it.
+    const { data: full } = await supabase.from('invoices').select('*').eq('id', inv.id).single();
+    const { data: savedLines } = await supabase.from('invoice_lines').select('*').eq('invoice_id', inv.id);
+    // Free this invoice's targets so they (plus any newer cleanings) flow
+    // back into the draft. Then delete the old invoice row.
+    await supabase.from('assignment_targets').update({ invoiced_on: null }).eq('invoiced_on', inv.id);
     await supabase.from('invoices').delete().eq('id', inv.id);
+    setSeedInvoice({ ...(full || inv), lines: savedLines || [] });
     setSelectedId(inv.customer_id);
     setStart(inv.period_start || twoWeeksAgo);
-    setEnd(today);
+    setEnd(inv.period_end || today);
     setViewingInvoiceId(null);
     setDraftOn(true);
   };
@@ -18599,8 +18749,9 @@ function InvoiceView({ employee, onSignOut, onOpenMessages, onLogoClick, topTogg
   if (draftOn && selectedId) {
     const property = properties.find(p => p.id === selectedId);
     return <InvoiceDraftEditor property={property} start={start} end={end} employee={employee}
-      onBack={() => setDraftOn(false)}
-      onSaved={(inv) => { setDraftOn(false); setViewingInvoiceId(inv?.id || null); }} />;
+      seedInvoice={seedInvoice}
+      onBack={() => { setDraftOn(false); setSeedInvoice(null); }}
+      onSaved={(inv) => { setDraftOn(false); setSeedInvoice(null); setViewingInvoiceId(inv?.id || null); }} />;
   }
   if (invoice) {
     return <InvoicePreview invoice={invoice} showZeros={showZeros} setShowZeros={setShowZeros}

@@ -48,7 +48,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul18-navtint1";
+const BUILD_TAG = "jul18-myjobs1";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -5293,7 +5293,7 @@ function CleanerBottomNav({ active, onChange }) {
         {useLogo ? (
           <img
             src="https://bbaynvqnbkjyqhzhhypr.supabase.co/storage/v1/object/public/brand/unnamed%20(2).png"
-            alt="Home"
+            alt="My Jobs"
             className={`h-6 w-6 object-contain transition-opacity ${isActive ? 'opacity-100' : 'opacity-50'}`}
             style={{ filter: isActive ? 'none' : 'grayscale(60%)' }}
           />
@@ -5309,7 +5309,7 @@ function CleanerBottomNav({ active, onChange }) {
   return (
     <div className="fixed bottom-0 left-0 right-0 z-30 bg-white border-t border-stone-200 flex"
       style={{ paddingBottom: 'env(safe-area-inset-bottom, 0px)' }}>
-      <Item id="home"        label="Home"        useLogo />
+      <Item id="home"        label="My Jobs"     useLogo />
       <Item id="assignments" label="Assignments" Icon={ClipboardList} />
       <Item id="more"        label="More"        Icon={Menu} />
     </div>
@@ -13579,6 +13579,11 @@ function PropertyAdmin({ employee, onSignOut, onOpenMessages, onLogoClick }) {
   }
   if (view.kind === 'unit-list') {
     return <UnitList property={view.property}
+      employee={employee}
+      onAssignmentNew={() => setView({ kind: 'assignment-new', property: view.property })}
+      onAssignmentNewChecklist={() => setView({ kind: 'assignment-new-checklist', property: view.property })}
+      onAssignmentNewQuick={() => setView({ kind: 'assignment-new-quick', property: view.property })}
+      onAssignmentOpen={(a) => setView({ kind: 'assignment-detail', property: view.property, assignment: a })}
       onBack={() => { setView({ kind: 'list' }); load(); }}
       onEditProperty={() => setView({ kind: 'property-edit', property: view.property })}
       onUnitOpen={(unit) => setView({ kind: 'party-list', property: view.property, unit })}
@@ -14408,7 +14413,7 @@ function PropertyForm({ property, currentUserRole, onCancel, onSaved, onManageAs
   );
 }
 
-function UnitList({ property, onBack, onEditProperty, onUnitOpen, onUnitEdit, onUnitNew, onBulkNew, onAssignments }) {
+function UnitList({ property, employee, onBack, onEditProperty, onUnitOpen, onUnitEdit, onUnitNew, onBulkNew, onAssignments, onAssignmentNew, onAssignmentNewChecklist, onAssignmentNewQuick, onAssignmentOpen }) {
   const [units, setUnits] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [search, setSearch] = useState('');
@@ -14448,8 +14453,8 @@ function UnitList({ property, onBack, onEditProperty, onUnitOpen, onUnitEdit, on
             className={`flex-1 py-2 rounded-lg text-sm font-medium ${tab === 'units' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
             Units
           </button>
-          <button onClick={() => onAssignments()}
-            className="flex-1 py-2 rounded-lg text-sm font-medium text-stone-500 hover:text-stone-900">
+          <button onClick={() => setTab('assignments')}
+            className={`flex-1 py-2 rounded-lg text-sm font-medium ${tab === 'assignments' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
             Assignments
           </button>
           <button onClick={() => setTab('team')}
@@ -14460,6 +14465,12 @@ function UnitList({ property, onBack, onEditProperty, onUnitOpen, onUnitEdit, on
 
         {tab === 'team' ? (
           <PropertyTeamTab property={property} />
+        ) : tab === 'assignments' ? (
+          <AssignmentList property={property} employee={employee} embedded
+            onNew={onAssignmentNew}
+            onNewChecklist={onAssignmentNewChecklist}
+            onNewQuick={onAssignmentNewQuick}
+            onOpen={onAssignmentOpen} />
         ) : (<>
         <div className="flex items-baseline justify-between mb-4">
           <h2 className="font-serif text-2xl text-stone-900">Units</h2>
@@ -24572,7 +24583,7 @@ function DailyUnitDayDetail({ date, propertyId, unitId, unitLabel, propertyName,
 // =================================================================
 // ASSIGNMENT LIST — owner/manager view of all assignments for a property
 // =================================================================
-function AssignmentList({ property, employee, onBack, onNew, onNewChecklist, onNewQuick, onOpen }) {
+function AssignmentList({ property, employee, onBack, onNew, onNewChecklist, onNewQuick, onOpen, embedded = false }) {
   const [assignments, setAssignments] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [filter, setFilter] = useState('open'); // open | all
@@ -24899,7 +24910,8 @@ function AssignmentList({ property, employee, onBack, onNew, onNewChecklist, onN
   };
 
   return (
-    <div className="pb-24">
+    <div className={embedded ? '' : 'pb-24'}>
+      {!embedded && (
       <div className="flex items-center gap-3 px-5 py-4 border-b border-stone-200">
         <button onClick={onBack} className="p-2 -ml-2 rounded-full hover:bg-stone-100">
           <ArrowLeft size={20} className="text-stone-700" />
@@ -24917,6 +24929,7 @@ function AssignmentList({ property, employee, onBack, onNew, onNewChecklist, onN
           </button>
         )}
       </div>
+      )}
 
       {/* Bulk-action toolbar — sticky-ish row that appears just under
          the header whenever the owner has tapped Select. Shows the

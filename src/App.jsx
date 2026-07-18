@@ -48,7 +48,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul18-icon1";
+const BUILD_TAG = "jul18-teamicon1";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -10524,30 +10524,31 @@ function ManagerShell({ employee, onSignOut }) {
       <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-stone-200 px-1 py-2 z-30">
         {isOwner ? (
           <div className="max-w-md mx-auto">
-            {/* Operations / Business hat toggle */}
+            {/* Operations / Business hat toggle — color-coded so the two
+               modes read as distinct contexts, matching their nav tabs. */}
             <div className="flex gap-1 bg-stone-100 p-1 rounded-xl mb-2">
               <button onClick={() => switchMode('ops')}
-                className={`flex-1 py-1.5 px-3 rounded-lg text-xs font-medium ${mode === 'ops' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+                className={`flex-1 py-1.5 px-3 rounded-lg text-xs font-medium ${mode === 'ops' ? 'bg-stone-900 text-white shadow-sm' : 'text-stone-500'}`}>
                 Operations
               </button>
               <button onClick={() => switchMode('business')}
-                className={`flex-1 py-1.5 px-3 rounded-lg text-xs font-medium ${mode === 'business' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+                className={`flex-1 py-1.5 px-3 rounded-lg text-xs font-medium ${mode === 'business' ? 'bg-amber-700 text-white shadow-sm' : 'text-stone-500'}`}>
                 Business
               </button>
             </div>
             {mode === 'ops' ? (
               <div className="grid gap-0.5" style={{ gridTemplateColumns: 'repeat(4, minmax(0, 1fr))' }}>
-                <TabButton active={false}                 onClick={() => setPreviewMode(true)}     icon={<Eye size={18} />}             label="Clean" />
-                <TabButton active={tab==='assignments'}   onClick={() => setTab('assignments')}    icon={<FileText size={18} />}        label="Assignments" />
-                <TabButton active={tab==='daily'}         onClick={() => setTab('daily')}          icon={<Calendar size={18} />}        label="Daily" />
-                <TabButton active={tab==='dashboard'}     onClick={() => setTab('dashboard')}      icon={<LayoutDashboard size={18} />} label="Shifts" />
+                <TabButton tone="ops" active={tab==='daily'}         onClick={() => setTab('daily')}          icon={<Calendar size={18} />}        label="Daily" />
+                <TabButton tone="ops" active={tab==='assignments'}   onClick={() => setTab('assignments')}    icon={<FileText size={18} />}        label="Assignments" />
+                <TabButton tone="ops" active={tab==='dashboard'}     onClick={() => setTab('dashboard')}      icon={<LayoutDashboard size={18} />} label="Shifts" />
+                <TabButton tone="ops" active={false}                 onClick={() => setPreviewMode(true)}     icon={<Eye size={18} />}             label="Clean" />
               </div>
             ) : (
               <div className="grid gap-0.5" style={{ gridTemplateColumns: `repeat(${showMoneyTabs ? 4 : 3}, minmax(0, 1fr))` }}>
-                <TabButton active={tab==='props'} onClick={() => setTab('props')} icon={<Building2 size={18} />} label="Properties" />
-                {showMoneyTabs && <TabButton active={tab==='money'} onClick={() => setTab('money')} icon={<DollarSign size={18} />} label="Money" />}
-                <TabButton active={tab==='team'}  onClick={() => setTab('team')}  icon={<Users size={18} />} label="Team" />
-                <TabButton active={false} onClick={() => setPmPreview(true)} icon={<Eye size={18} />} label="PM view" />
+                <TabButton tone="business" active={tab==='props'} onClick={() => setTab('props')} icon={<Building2 size={18} />} label="Properties" />
+                {showMoneyTabs && <TabButton tone="business" active={tab==='money'} onClick={() => setTab('money')} icon={<DollarSign size={18} />} label="Money" />}
+                <TabButton tone="business" active={tab==='team'}  onClick={() => setTab('team')}  icon={<TeamClockIcon size={18} />} label="Team" />
+                <TabButton tone="business" active={false} onClick={() => setPmPreview(true)} icon={<Eye size={18} />} label="PM view" />
               </div>
             )}
           </div>
@@ -10555,7 +10556,7 @@ function ManagerShell({ employee, onSignOut }) {
           <div className="max-w-md mx-auto grid gap-0.5" style={{ gridTemplateColumns: `repeat(${colCount}, minmax(0, 1fr))` }}>
             <TabButton active={tab==='daily'}       onClick={() => setTab('daily')}       icon={<Calendar size={18} />} label="Daily" />
             <TabButton active={tab==='dashboard'}   onClick={() => setTab('dashboard')}   icon={<LayoutDashboard size={18} />} label="Shifts" />
-            <TabButton active={tab==='team'}        onClick={() => setTab('team')}        icon={<Users size={18} />} label="Team" />
+            <TabButton active={tab==='team'}        onClick={() => setTab('team')}        icon={<TeamClockIcon size={18} />} label="Team" />
             <TabButton active={tab==='props'}       onClick={() => setTab('props')}       icon={<Building2 size={18} />} label="Properties" />
             <TabButton active={tab==='assignments'} onClick={() => setTab('assignments')} icon={<FileText size={18} />} label="Assignments" />
           </div>
@@ -10566,10 +10567,28 @@ function ManagerShell({ employee, onSignOut }) {
   );
 }
 
-function TabButton({ active, onClick, icon, label, badge }) {
+// Team icon: people with a small clock badge, to signify "who's on the
+// clock". lucide has no UserClock in this version, so we compose Users +
+// Clock rather than risk a missing import that would crash the app.
+function TeamClockIcon({ size = 18 }) {
+  return (
+    <span className="relative inline-flex" style={{ width: size, height: size }}>
+      <Users size={size} />
+      <span className="absolute -bottom-1 -right-1 rounded-full flex items-center justify-center ring-1 ring-current bg-white"
+        style={{ width: size * 0.64, height: size * 0.64 }}>
+        <Clock size={size * 0.48} className="text-stone-900" strokeWidth={2.5} />
+      </span>
+    </span>
+  );
+}
+
+function TabButton({ active, onClick, icon, label, badge, tone = 'ops' }) {
+  // Active tab tint matches its mode: dark for Operations, amber for
+  // Business — so the two contexts read as visually distinct.
+  const activeCls = tone === 'business' ? 'bg-amber-700 text-white' : 'bg-stone-900 text-stone-50';
   return (
     <button onClick={onClick}
-      className={`relative flex flex-col items-center gap-0.5 py-1.5 px-1 rounded-xl transition-colors ${active ? 'bg-stone-900 text-stone-50' : 'text-stone-500 hover:text-stone-900'}`}>
+      className={`relative flex flex-col items-center gap-0.5 py-1.5 px-1 rounded-xl transition-colors ${active ? activeCls : 'text-stone-500 hover:text-stone-900'}`}>
       {icon}
       <span className="text-[9px] font-mono uppercase tracking-wider">{label}</span>
       {badge > 0 && (
@@ -14418,12 +14437,16 @@ function UnitList({ property, onBack, onEditProperty, onUnitOpen, onUnitEdit, on
         </button>
       </div>
       <div className="px-5 pt-6">
-        {/* Units / Team toggle. Team editing used to be buried inside
-           Edit property; this surfaces it as a peer of the units list. */}
+        {/* Units / Assignments / Team toggle. Consolidates the three
+           things you do to a property in one row of tabs. */}
         <div className="flex p-0.5 bg-stone-100 rounded-xl mb-5">
           <button onClick={() => setTab('units')}
             className={`flex-1 py-2 rounded-lg text-sm font-medium ${tab === 'units' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
             Units
+          </button>
+          <button onClick={() => onAssignments()}
+            className="flex-1 py-2 rounded-lg text-sm font-medium text-stone-500 hover:text-stone-900">
+            Assignments
           </button>
           <button onClick={() => setTab('team')}
             className={`flex-1 py-2 rounded-lg text-sm font-medium ${tab === 'team' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
@@ -14449,10 +14472,6 @@ function UnitList({ property, onBack, onEditProperty, onUnitOpen, onUnitEdit, on
             <Layers size={16} /> Bulk create
           </button>
         </div>
-        <button onClick={onAssignments}
-          className="w-full mb-4 p-3 rounded-2xl bg-white border-2 border-stone-300 text-stone-800 font-medium text-sm flex items-center justify-center gap-2 active:scale-98 hover:border-stone-900">
-          <FileText size={16} /> Manage assignments
-        </button>
 
         {units.length >= 8 && (
           <input type="text" value={search} onChange={(e) => setSearch(e.target.value)}
@@ -27895,7 +27914,7 @@ function ChecklistAssignmentWizard({ property, employee, actorKind = null, porta
   // own bottom tab bar.
   return (
     <>
-    <div className="min-h-screen bg-stone-50 pb-[136px]">
+    <div className="min-h-screen bg-stone-50 pb-[176px]">
       <div className="px-5 py-4 border-b border-stone-200 bg-white sticky top-0 z-10">
         <div className="flex items-center gap-3 mb-3">
           <button onClick={() => { if (step > 0) setStep(step - 1); else onCancel(); }}
@@ -27984,13 +28003,11 @@ function ChecklistAssignmentWizard({ property, employee, actorKind = null, porta
         )}
       </div>
 
-      {/* Action bar — fixed above the manager tab bar (~64px tall)
-         when this wizard renders inside ManagerShell. z-30 matches
-      {/* Bottom action bar. Stays above the manager tab bar via the
-         z-30 + bottom-[64px] offset. Back button is on the left so the
-         user can step back one wizard step without hunting for the
-         tiny arrow at the top header. */}
-      <div className="fixed bottom-[64px] left-0 right-0 bg-white border-t border-stone-200 px-5 py-3 flex gap-2 z-30 shadow-[0_-4px_12px_rgba(0,0,0,0.06)]">
+      {/* Bottom action bar. Must clear the manager tab bar below it. The
+         OWNER nav is two rows (mode toggle + tabs) at ~104px, taller than
+         the ~64px single-row nav — so offset by 104px or the Next button
+         hides behind the nav (exactly what happened in Business mode). */}
+      <div className="fixed bottom-[104px] left-0 right-0 bg-white border-t border-stone-200 px-5 py-3 flex gap-2 z-30 shadow-[0_-4px_12px_rgba(0,0,0,0.06)]">
         <button
           onClick={() => { if (step > 0) setStep(step - 1); else onCancel(); }}
           className="px-4 py-3 rounded-xl bg-stone-100 hover:bg-stone-200 text-stone-700 text-sm font-medium flex items-center gap-1.5 active:scale-95">

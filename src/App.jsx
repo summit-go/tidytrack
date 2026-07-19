@@ -106,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul18-securewrite1";
+const BUILD_TAG = "jul18-securelock1";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -13030,7 +13030,10 @@ function EmployeeForm({ employee, currentUserId, currentUserRole, onCancel, onSa
   })();
 
   const [name, setName] = useState(employee?.name || '');
-  const [pin, setPin] = useState(employee?.pin || '');
+  // PIN is never pre-filled — once the table is locked the app can't read
+  // it, and showing existing PINs is itself an exposure. Blank on an edit
+  // means "leave the PIN unchanged".
+  const [pin, setPin] = useState('');
   const [role, setRole] = useState(employee?.role || 'employee');
   const [active, setActive] = useState(employee?.active ?? true);
   const [phone, setPhone] = useState(employee?.phone || '');
@@ -13076,7 +13079,11 @@ function EmployeeForm({ employee, currentUserId, currentUserRole, onCancel, onSa
   const save = async () => {
     setError('');
     if (!name.trim()) { setError('Name is required'); return; }
-    if (!/^\d{4}$/.test(pin)) { setError('PIN must be exactly 4 digits'); return; }
+    // New employees must set a PIN; edits may leave it blank to keep the
+    // existing one. A provided PIN must be 4 digits.
+    const pinProvided = pin.length > 0;
+    if (isNew && !pinProvided) { setError('Set a 4-digit PIN'); return; }
+    if (pinProvided && !/^\d{4}$/.test(pin)) { setError('PIN must be exactly 4 digits'); return; }
     // Phone validation: if SMS opt-in, phone is required and must look like a phone number
     const cleanPhone = phone.trim();
     if (smsOptIn && !cleanPhone) {
@@ -13088,47 +13095,38 @@ function EmployeeForm({ employee, currentUserId, currentUserRole, onCancel, onSa
       return;
     }
     setBusy(true);
-    // Proactive PIN uniqueness check — catches duplicates BEFORE the
-    // insert/update so the error message names the conflicting employee.
-    const { data: pinClash } = await supabase.from('employees')
-      .select('id, name')
-      .eq('pin', pin)
-      .maybeSingle();
-    if (pinClash && pinClash.id !== employee?.id) {
-      setBusy(false);
-      setError(`That PIN is already in use by ${pinClash.name}. Pick a different PIN.`);
-      return;
-    }
 
+    // The row payload no longer includes the PIN — credentials are set
+    // server-side by the Edge Function (which hashes and checks
+    // uniqueness), so the browser never writes a plaintext PIN.
     const payload = {
-      name: name.trim(), pin, role, active,
+      name: name.trim(), role, active,
       phone: cleanPhone || null,
       sms_opt_in: smsOptIn,
       notification_prefs: { messages: notifyMessages },
       responsibilities,
       ...(canEditOwner ? { pay_rate_hourly: payRate.trim() ? parseFloat(payRate) : null } : {}),
     };
-    const { error: e } = isNew
-      ? await supabase.from('employees').insert(payload)
-      : await supabase.from('employees').update(payload).eq('id', employee.id);
-    // Hash the PIN server-side so it survives the table lockdown.
-    // For a new employee we look up the id we just created.
-    if (!e && pin) {
-      let empId = employee?.id;
-      if (isNew) {
-        const { data: created } = await supabase.from('employees')
-          .select('id').eq('pin', pin).eq('name', name.trim()).order('created_at', { ascending: false }).limit(1).maybeSingle();
-        empId = created?.id;
+    let empId = employee?.id;
+    if (isNew) {
+      const { data: created, error: e } = await supabase.from('employees').insert(payload).select('id').single();
+      if (e) { setBusy(false); setError(e.message); return; }
+      empId = created?.id;
+    } else {
+      const { error: e } = await supabase.from('employees').update(payload).eq('id', employee.id);
+      if (e) { setBusy(false); setError(e.message); return; }
+    }
+    // Set the PIN through the function if one was provided. It hashes and
+    // enforces uniqueness server-side; a 409 means the PIN is taken.
+    if (pinProvided && empId) {
+      const res = await secureSetCredential('employee', empId, pin);
+      if (res?.error) {
+        setBusy(false);
+        setError(res.error.includes('in use') ? 'That PIN is already in use. Pick a different one.' : res.error);
+        return;
       }
-      if (empId) await secureSetCredential('employee', empId, pin);
     }
     setBusy(false);
-    if (e) {
-      // Belt-and-suspenders: if a race lets a duplicate through, fall back
-      // to the DB constraint's error message.
-      setError(e.message.includes('duplicate') ? 'That PIN is already in use. Pick a different PIN.' : e.message);
-      return;
-    }
     onSaved();
   };
   const remove = async () => {
@@ -13158,9 +13156,11 @@ function EmployeeForm({ employee, currentUserId, currentUserRole, onCancel, onSa
             className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white focus:outline-none focus:border-stone-900 text-stone-900" />
         </div>
         <div>
-          <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">4-digit PIN</label>
+          <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">
+            {isNew ? '4-digit PIN' : 'New PIN — leave blank to keep current'}
+          </label>
           <input type="text" inputMode="numeric" pattern="[0-9]*" maxLength={4} value={pin}
-            onChange={(e) => setPin(e.target.value.replace(/\D/g, '').slice(0, 4))} placeholder="0000"
+            onChange={(e) => setPin(e.target.value.replace(/\D/g, '').slice(0, 4))} placeholder={isNew ? '0000' : '••••'}
             className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white focus:outline-none focus:border-stone-900 text-stone-900 font-mono text-2xl tracking-widest" />
         </div>
         <div>
@@ -19783,8 +19783,12 @@ function ChangePinModal({ employee, onClose, onSaved }) {
     if (activePin.length !== 4 || busy) return;
     (async () => {
       if (step === 'current') {
-        // Validate current PIN
-        if (activePin !== employee.pin) {
+        // Validate current PIN through the secure function (the app can't
+        // read the stored PIN once the table is locked).
+        setBusy(true);
+        const who = await secureEmployeeSignIn(activePin);
+        setBusy(false);
+        if (!who || who.id !== employee.id) {
           setError('That\'s not your current PIN.');
           setCurrentPin('');
           return;
@@ -19797,11 +19801,6 @@ function ChangePinModal({ employee, onClose, onSaved }) {
           setNewPin('');
           return;
         }
-        if (activePin === employee.pin) {
-          setError('Your new PIN must be different from your current PIN.');
-          setNewPin('');
-          return;
-        }
         setStep('confirm');
       } else {
         // Confirm matches new
@@ -19810,29 +19809,19 @@ function ChangePinModal({ employee, onClose, onSaved }) {
           setConfirmPin('');
           return;
         }
-        // Final save: check uniqueness then update
+        // Final save: the function checks uniqueness, hashes, and writes
+        // both pin and pin_hash server-side.
         setBusy(true);
-        const { data: dup } = await supabase.from('employees')
-          .select('id').eq('pin', newPin).neq('id', employee.id).maybeSingle();
-        if (dup) {
-          setBusy(false);
-          setError('That PIN is already in use by another employee. Try a different one.');
-          setConfirmPin('');
-          setNewPin('');
-          setStep('new');
-          return;
-        }
-        const { error: upErr } = await supabase.from('employees')
-          .update({ pin: newPin }).eq('id', employee.id);
-        if (!upErr) {
-          // Also store the bcrypt hash so this PIN keeps working
-          // once the table is locked to the Edge Function only.
-          await secureSetCredential('employee', employee.id, newPin);
-        }
+        const res = await secureSetCredential('employee', employee.id, newPin);
         setBusy(false);
-        if (upErr) {
-          setError('Could not save: ' + upErr.message);
-          setConfirmPin('');
+        if (res?.error) {
+          if (res.error.includes('in use')) {
+            setError('That PIN is already in use by another employee. Try a different one.');
+            setConfirmPin(''); setNewPin(''); setStep('new');
+          } else {
+            setError('Could not save: ' + res.error);
+            setConfirmPin('');
+          }
           return;
         }
         alert('PIN updated! Use your new PIN next time you sign in.');
@@ -20261,9 +20250,9 @@ function PortalApp({ previewMode = false, previewEmployee = null, onExitPreview 
               localStorage.removeItem('tidytrack_portal');
             }
           } else if (parsed.code) {
-            // Old format — try to migrate using the saved code
-            const { data: pu } = await supabase.from('portal_users')
-              .select('*').eq('code', parsed.code.toLowerCase()).eq('active', true).maybeSingle();
+            // Old localStorage format — restore via the secure function
+            // (the app can't read portal_users by code once locked).
+            const pu = await securePortalSignIn(parsed.code);
             if (pu) {
               const props = await loadProperties(pu.id);
               setPortalUser(pu);

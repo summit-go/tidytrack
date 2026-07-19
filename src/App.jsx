@@ -48,7 +48,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul18-myjobs1";
+const BUILD_TAG = "jul18-ready2";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -7105,15 +7105,11 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
          At PropertyHub the cleaner is on segment 1 (Property). Tapping
          "Property" switches to a different property. Later segments
          aren't yet reachable so they have no onClick handler. */}
-      <CleanerProgressBar
-        segments={[
-          { label: 'Property', filled: true, isCurrent: true, onClick: onSwitchProperty },
-          { label: 'Assignment', filled: false },
-          { label: 'Items', filled: false },
-          { label: 'Working', filled: false },
-          { label: 'Complete', filled: false },
-        ]}
-        inActiveWork={false} />
+      {/* No progress stepper here: on the property overview you haven't
+         entered a bedroom's Property→Items→Working→Complete flow yet, so
+         the bar showed inert future steps that looked tappable but weren't.
+         The bottom nav (My Jobs / Assignments / More) is the real
+         navigation. The stepper still appears inside a bedroom's flow. */}
       <div className="bg-stone-900 text-stone-50 px-5 py-5 sticky top-0 z-10 shadow-md">
         <div className="flex items-start justify-between mb-3 gap-2">
           <div>
@@ -7911,12 +7907,34 @@ function PreparingBlockView({ shift, pendingStart, employeeName, employee,
            The Items step in the progress bar is for picking what
            you'll clean, not for jumping into someone else's session. */}
 
+        {/* Readiness reminders — NOT a checklist to tick, just a calm
+           pre-flight so the cleaner is safe, stocked, at the RIGHT
+           bedroom, and announces themselves on entry. The clock isn't
+           running yet, so there's no pressure. */}
         <div className="p-4 rounded-2xl bg-amber-50 border-2 border-amber-300 mb-4">
-          <div className="text-xs text-stone-700 leading-relaxed">
-            You're heading to <strong>{unitPartyLabel(pendingStart.unitLabel, pendingStart.partyLabel)}</strong>.
-            Take your time getting ready — supplies, walking over, double-checking the bedroom. Your clock only
-            starts when you tap the button below.
+          <div className="text-sm font-medium text-stone-900 mb-2">
+            Before you start{unitPartyLabel(pendingStart.unitLabel, pendingStart.partyLabel)
+              ? <> — heading to <span className="text-amber-800">{unitPartyLabel(pendingStart.unitLabel, pendingStart.partyLabel)}</span></>
+              : ''}
           </div>
+          <ul className="space-y-2 text-xs text-stone-700">
+            <li className="flex items-start gap-2">
+              <Check size={13} className="text-amber-700 flex-shrink-0 mt-0.5" />
+              <span>Grab your supplies and anything special this job needs.</span>
+            </li>
+            <li className="flex items-start gap-2">
+              <Check size={13} className="text-amber-700 flex-shrink-0 mt-0.5" />
+              <span>Double-check you're at the right bedroom{pendingStart.unitLabel ? <> — <strong>{pendingStart.unitLabel}</strong></> : ''}{partyDisplay(pendingStart.partyLabel) ? <>, <strong>{partyDisplay(pendingStart.partyLabel)}</strong></> : ''}.</span>
+            </li>
+            <li className="flex items-start gap-2">
+              <Check size={13} className="text-amber-700 flex-shrink-0 mt-0.5" />
+              <span>Knock and announce yourself — say your name and that you're here to clean.</span>
+            </li>
+            <li className="flex items-start gap-2">
+              <Check size={13} className="text-amber-700 flex-shrink-0 mt-0.5" />
+              <span>Watch your footing and handle any hazards safely.</span>
+            </li>
+          </ul>
         </div>
 
         <button onClick={onStart} disabled={busy}

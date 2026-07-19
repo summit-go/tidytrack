@@ -7,7 +7,7 @@ import {
   Trash2, Eye, EyeOff, LayoutDashboard, FileText, DollarSign,
   Home, Layers, User, Edit2, Copy, Printer, Calendar, HelpCircle,
   MessageCircle, MessageSquare, Settings, Languages, Menu, Square, Share2,
-  ClipboardList, Lock, Circle, MoreVertical, RotateCcw
+  ClipboardList, Lock, Circle, MoreVertical
 } from 'lucide-react';
 
 // =================================================================
@@ -26,64 +26,6 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 const GOOGLE_TRANSLATE_API_KEY = "AIzaSyD7ceHPryMzs45hWJOyFNBxtOzQOEmJcSA";
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-
-// ============================================================
-// SECURE SIGN-IN — calls the server-side `secure-signin` Edge
-// Function, which verifies the PIN/code against its bcrypt hash
-// without ever exposing the table to the browser.
-//
-// SAFETY: if the function is unreachable or errors, we fall back
-// to the old direct query so nobody is ever locked out during
-// the migration. Once the function is proven and the table
-// policies are locked down, the fallback simply stops working
-// for attackers (the table won't be readable) but keeps this
-// code path harmless.
-// ============================================================
-async function secureEmployeeSignIn(pin) {
-  try {
-    const { data, error } = await supabase.functions.invoke('secure-signin', {
-      body: { mode: 'employee', pin },
-    });
-    if (!error && data && data.employee) return data.employee;
-    if (!error && data && data.error) return null; // valid response, wrong PIN
-  } catch (e) {
-    console.warn('[secureEmployeeSignIn] function unavailable, falling back', e);
-  }
-  // Fallback (pre-lockdown only): direct query.
-  const { data } = await supabase.from('employees').select('*').eq('pin', pin).eq('active', true).maybeSingle();
-  return data || null;
-}
-
-async function securePortalSignIn(code) {
-  const clean = (code || '').trim().toLowerCase();
-  try {
-    const { data, error } = await supabase.functions.invoke('secure-signin', {
-      body: { mode: 'portal', code: clean },
-    });
-    if (!error && data && data.portalUser) return data.portalUser;
-    if (!error && data && data.error) return null;
-  } catch (e) {
-    console.warn('[securePortalSignIn] function unavailable, falling back', e);
-  }
-  const { data } = await supabase.from('portal_users').select('*').eq('code', clean).eq('active', true).maybeSingle();
-  return data || null;
-}
-
-// After a PIN/code is written (insert/update), call this so the
-// server hashes it into pin_hash / code_hash. Without it, a newly
-// set credential wouldn't verify once the tables are locked down.
-// target: 'employee' | 'portal'. Returns { ok } or { error }.
-async function secureSetCredential(target, id, value) {
-  try {
-    const { data, error } = await supabase.functions.invoke('secure-signin', {
-      body: { mode: 'set', target, id, value },
-    });
-    if (error) return { error: error.message || 'set failed' };
-    return data || { error: 'no response' };
-  } catch (e) {
-    return { error: String(e) };
-  }
-}
 const PHOTO_BUCKET = 'task-photos';
 const ASSIGNMENT_BUCKET = 'assignments';
 const PM_UPLOAD_BUCKET = 'pm-uploads';
@@ -97,16 +39,10 @@ const ASSIGNMENT_TYPES = [
   { value: 'deep',           label: 'Deep clean',     short: 'Deep clean',     color: 'bg-purple-100 text-purple-800 border-purple-300' },
   { value: 'move_out_check', label: 'Move-out check', short: 'Move-out check', color: 'bg-orange-100 text-orange-800 border-orange-300' },
   { value: 'reclean',        label: 'Reclean',        short: 'Reclean',        color: 'bg-yellow-100 text-yellow-800 border-yellow-300' },
-  { value: 'trash_out',      label: 'Trash out',      short: 'Trash out',      color: 'bg-lime-100 text-lime-800 border-lime-300' },
   { value: 'standard',       label: 'Standard clean', short: 'Standard clean', color: 'bg-emerald-100 text-emerald-800 border-emerald-300' },
 ];
 const assignmentTypeLabel = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value)?.label || value || '';
-
-// Build tag — shows next to "TidyTrack" in the top bar so you can verify
-// which version is live. Kept well away from the Supabase keys so it
-// doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul18-tap4";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -807,18 +743,12 @@ const assignmentDueKind = (scheduledDate) => {
   return 'upcoming';
 };
 // Sort rank: overdue first, then today, then undated, then upcoming.
-// Sort bucket for a due date. Anything WITH a date outranks anything
-// without one, so scheduled work rises to the top; undated work falls to
-// the bottom and keeps its natural (building) order. Note upcoming is a
-// single bucket on purpose — callers must tie-break on the actual date,
-// or every future date compares equal and the sort silently falls
-// through to building order.
 const assignmentDueRank = (scheduledDate) => {
   const k = assignmentDueKind(scheduledDate);
   if (k === 'overdue') return 0;
   if (k === 'today') return 1;
-  if (!k) return 3;  // no date → last
-  return 2;          // upcoming
+  if (!k) return 2;
+  return 3;
 };
 const fmtClock = (ts) => new Date(ts).toLocaleTimeString('en-US', { hour:'numeric', minute:'2-digit' });
 
@@ -877,12 +807,8 @@ function naturalCompare(a, b) {
 // Falls back to first non-numeric prefix, or null if no match.
 function buildingFromLabel(label) {
   if (!label) return null;
-  const s = String(label);
-  const dash = s.match(/^([A-Za-z]+\d+)-/);
-  if (dash) return dash[1];
-  const letter = s.match(/^([A-Za-z]+)\d/);
-  if (letter) return letter[1].toUpperCase();
-  return null;
+  const m = String(label).match(/^([A-Za-z]+\d+)/);
+  return m ? m[1] : null;
 }
 
 // Pull the floor number out of an apartment label. The first digit of
@@ -1564,7 +1490,7 @@ function SignIn({ onSignIn }) {
   }, [pin]);
   const tryLogin = async () => {
     setBusy(true);
-    const data = await secureEmployeeSignIn(pin);
+    const { data } = await supabase.from('employees').select('*').eq('pin', pin).eq('active', true).maybeSingle();
     setBusy(false);
     if (!data) {
       setError('Invalid PIN');
@@ -1685,7 +1611,6 @@ const CAPABILITIES = [
   { key: 'manage_units',             label: 'Manage units & properties',  hint: 'Add or edit units, parties, properties, and bulk imports.' },
   { key: 'manage_assignments_admin', label: 'Reassign & delete assignments', hint: 'Move assignments between bedrooms or delete them entirely.' },
   { key: 'edit_due_dates',           label: 'Change due dates',           hint: 'Tap an assignment\u2019s date to reschedule when it\u2019s due.' },
-  { key: 'assign_cleaners',          label: 'Assign cleaners to jobs',    hint: 'Choose who works a cleaning, and approve cleaner requests.' },
 ];
 
 // Returns true if the employee has the given capability key.
@@ -2235,9 +2160,7 @@ function RequestItemsModal({ section, templateSetId, bathroomVariant, generalVar
       // vs 'toilet'); General uses general_variant (a/b/c/d); Bedroom
       // and Vanity don't have multi-variants in the current schema.
       let pickedVariants = variants || [];
-      // 'all' = whole bathroom (one cleaner does everything, e.g. move-outs).
-      // Anything else filters to that responsibility split.
-      if (section === 'bathroom' && bathroomVariant && bathroomVariant !== 'all') {
+      if (section === 'bathroom' && bathroomVariant) {
         pickedVariants = pickedVariants.filter(v => v.variant_key === bathroomVariant.toLowerCase());
       } else if (section === 'general' && generalVariant) {
         pickedVariants = pickedVariants.filter(v => v.variant_key === generalVariant.toLowerCase());
@@ -3233,6 +3156,12 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
               ? `Start 1 task (${selectedSubs.size} areas)`
               : 'Start task'}
         </button>
+        {(category || hasTargetPicks) && (
+          <button onClick={reset} disabled={busy} type="button"
+            className="px-4 py-3 rounded-xl border border-stone-300 text-stone-700 font-medium text-sm disabled:opacity-50">
+            Clear
+          </button>
+        )}
       </div>
       {editingLabel && (
         <EditItemLabelModal
@@ -3359,7 +3288,6 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   const [busy, setBusy] = useState(false);
   const [showMessages, setShowMessages] = useState(false);
   const [showChangePin, setShowChangePin] = useState(false);
-  const [whosWorkingOpen, setWhosWorkingOpen] = useState(false); // read-only "where is everyone"
   const [bedroomHistory, setBedroomHistory] = useState(null); // params for BedroomHistoryView
   // Whenever an activeBlock transitions from null → set (cleaner just
   // started a workblock), snap the bottom-nav tab back to Home so they
@@ -3369,12 +3297,6 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   useEffect(() => {
     if (activeBlock) setCleanerTab('home');
   }, [activeBlock?.id]);
-  // Not clocked in → always land on Home. Otherwise a cleaner who was last
-  // on More or Assignments clocks out and comes back to that tab instead of
-  // their work list.
-  useEffect(() => {
-    if (!shift) setCleanerTab('home');
-  }, [!shift]);
   // When the cleaner taps a different bedroom while one is open, we
   // surface a 3-button modal (Stay / Pause + switch / Finish + switch)
   // instead of a native confirm. Shape: { target, fromLabel, toLabel }.
@@ -3435,25 +3357,6 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
 
   // Clock-in
   const startClockIn = () => setClockInFlow({ step: 'property' });
-
-  // When a cleaner taps a job from the signed-in home, we clock them into
-  // that job's property and then jump straight to its bedroom.
-  const [pendingJob, setPendingJob] = useState(null);
-  const startJob = async (job) => {
-    setPendingJob(job);
-    const { data: prop } = await supabase.from('customers').select('*').eq('id', job.customerId).single();
-    if (!prop) { setPendingJob(null); return; }
-    await onPickProperty(prop);
-  };
-
-  useEffect(() => {
-    if (!pendingJob || !shift) return;
-    if (shift.customer_id !== pendingJob.customerId) return;
-    const j = pendingJob;
-    setPendingJob(null);
-    goToBedroomForTarget({ unit_id: j.unitId, party_id: j.partyId });
-    /* eslint-disable-next-line */
-  }, [shift, pendingJob]);
 
   const onPickProperty = async (property) => {
     if (property === null) { await doClockIn({ customerId: null }); return; }
@@ -3581,20 +3484,6 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       if (activeTask) {
         try { await stopTask(activeTask, false); } catch (e) { console.warn('[signOut] stopTask failed', e); }
       }
-      // Before closing the block, park any in-progress items at this
-      // shift as 'paused' rather than leaving them 'in_progress' with no
-      // open block behind them. An orphaned in_progress item claims
-      // someone is actively cleaning when nobody is, and it doesn't
-      // surface in the Paused bucket where a cleaner would look to
-      // resume. This is the same routing the manual back-out uses.
-      if (shift?.id) {
-        try {
-          await supabase.from('assignment_targets')
-            .update({ status: 'paused' })
-            .eq('started_by', employee.id)
-            .eq('status', 'in_progress');
-        } catch (e) { console.warn('[signOut] pause-in-progress failed', e); }
-      }
       if (activeBlock && !activeBlock.end_time) {
         await supabase.from('work_blocks').update({ end_time: new Date().toISOString() }).eq('id', activeBlock.id);
       }
@@ -3638,47 +3527,6 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     onAutoClockOut: autoClockOut,
     enabled: !!shift && !shift.end_time
   });
-
-  // Switch straight to a specific pending job at ANOTHER property. The
-  // cleaner already told us which job by tapping it — so instead of the
-  // generic "clock out → confirm → pick a property → land generically"
-  // dance, we clock out here, clock into THAT job's property, and open
-  // its bedroom. One tap, no picker.
-  const [pendingBedroomAfterSwitch, setPendingBedroomAfterSwitch] = useState(null);
-  const switchToJob = async (job) => {
-    if (!job?.customerId) { switchProperty(); return; }
-    setBusy(true);
-    if (activeTask) await stopTask(activeTask, false);
-    if (activeBlock && !activeBlock.end_time) {
-      await supabase.from('work_blocks').update({ end_time: new Date().toISOString() }).eq('id', activeBlock.id);
-    }
-    if (shift?.id) await supabase.from('shifts').update({ end_time: new Date().toISOString() }).eq('id', shift.id);
-    setWorkBlocks([]); setActiveBlock(null); setTasks([]); setActiveTask(null);
-    // Clock into the job's property.
-    const { data: prop } = await supabase.from('customers').select('*').eq('id', job.customerId).single();
-    const { data: newShift, error } = await supabase.from('shifts').insert({
-      employee_id: employee.id, customer_id: job.customerId,
-      bill_rate_at_work: prop?.property_type === 'simple'
-        ? (prop?.bill_mode === 'hourly' ? prop?.bill_rate_hourly : prop?.flat_rate_amount) : null,
-      is_preview: previewMode,
-    }).select('*, customer:customers(*)').single();
-    setBusy(false);
-    if (error) { alert('Could not switch: ' + error.message); return; }
-    setShift(newShift); setClockInFlow(null);
-    // Queue the bedroom so we land on its ready-to-start screen.
-    if (job.unitId && job.partyId) {
-      setPendingBedroomAfterSwitch({ unit_id: job.unitId, party_id: job.partyId });
-    }
-  };
-  // Once the new shift is live, open the queued bedroom's ready-to-start.
-  useEffect(() => {
-    if (pendingBedroomAfterSwitch && shift?.id) {
-      const target = pendingBedroomAfterSwitch;
-      setPendingBedroomAfterSwitch(null);
-      goToBedroomForTarget(target);
-    }
-    // eslint-disable-next-line
-  }, [shift?.id, pendingBedroomAfterSwitch]);
 
   // Switch property = clock out current shift, then drop straight on the property picker.
   // Cleaner break than clock-out → home → clock-in.
@@ -3949,7 +3797,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     if (!confirm(msg)) return;
     setBusy(true);
     try {
-      // 1. Revert assignment_targets the cleaner advanced during this
+      // 1) Revert assignment_targets the cleaner advanced during this
       //    block. Scope to (unit_id, party_id, started_by=employee.id,
       //    status='in_progress'). Reset status to pending and clear
       //    the started_at / started_by stamps.
@@ -3961,11 +3809,11 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
           .eq('started_by', employee.id)
           .eq('status', 'in_progress');
       }
-      // 2. Delete tasks belonging to this block (cascades photos via FK).
+      // 2) Delete tasks belonging to this block (cascades photos via FK).
       await supabase.from('tasks').delete().eq('work_block_id', activeBlock.id);
-      // 3. Delete the work_block itself.
+      // 3) Delete the work_block itself.
       await supabase.from('work_blocks').delete().eq('id', activeBlock.id);
-      // 4. Reset local state — drop from list, clear active.
+      // 4) Reset local state — drop from list, clear active.
       setWorkBlocks(prev => prev.filter(b => b.id !== activeBlock.id));
       setActiveBlock(null); setTasks([]); setActiveTask(null);
     } catch (e) {
@@ -5024,102 +4872,30 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
 
   if (!shift) {
     return withIdleModal(
-      <div className="min-h-screen bg-stone-50 flex flex-col pb-24">
+      <div className="min-h-screen bg-stone-50 flex flex-col">
         <Header name={employee.name} onSignOut={signOutWithCleanup} role={employee.role}
-          employee={employee} onOpenMessages={() => setShowMessages(true)}
-          onOpenWhosHere={() => setWhosWorkingOpen(true)} />
-        {whosWorkingOpen && (
-          <WhosWorkingNowModal employee={employee} onClose={() => setWhosWorkingOpen(false)} />
-        )}
-
-        {/* NOT CLOCKED IN. This is its own screen — it is NOT PropertyHub's
-           Home tab, it just shares the same CleanerWorkList, which is why
-           the two look alike. The Assignments / More tabs in PropertyHub are
-           scoped to the property of the current shift, and there's no shift
-           yet, so those tabs get property-independent content here. */}
-        {cleanerTab === 'home' && (<>
-          <div className="px-1 pt-2">
-            <div className="px-4">
-              <div className="text-xs uppercase tracking-widest text-stone-400 font-mono mb-1">
-                {new Date().toLocaleDateString('en-US', { weekday:'long', month:'long', day:'numeric' })}
-              </div>
-              <h2 className="text-3xl font-light text-stone-900 tracking-tight mb-1">
-                Your <span className="font-serif italic text-amber-700">work</span>
-              </h2>
-              <p className="text-xs text-stone-500">Tap a job to clock in and start.</p>
+          employee={employee} onOpenMessages={() => setShowMessages(true)} />
+        <div className="flex-1 flex flex-col justify-center items-center px-6">
+          <div className="text-center mb-12">
+            <div className="text-xs uppercase tracking-widest text-stone-400 font-mono mb-3">
+              {new Date().toLocaleDateString('en-US', { weekday:'long', month:'long', day:'numeric' })}
             </div>
-            <CleanerWorkList employee={employee} currentPropertyId={null}
-              onStartJob={startJob} onGoToBedroom={null} onSwitchProperty={null} />
+            <h2 className="text-5xl font-light text-stone-900 tracking-tight mb-2">
+              Ready to <span className="font-serif italic text-amber-700">work?</span>
+            </h2>
+            <p className="text-stone-500">Clock in to start tracking your shift.</p>
           </div>
-
-          <div className="flex-1 flex flex-col justify-center items-center px-6 pb-6">
-            <button onClick={startClockIn} disabled={busy}
-              className="w-full max-w-sm py-4 rounded-2xl bg-stone-900 text-stone-50 font-medium flex items-center justify-center gap-2 active:scale-98 transition-transform disabled:opacity-50">
-              <Clock size={18} />
-              <span>Clock in without a job</span>
-            </button>
-            <button onClick={startViewOnly} disabled={busy}
-              className="mt-6 px-5 py-2.5 rounded-full bg-white border border-stone-300 hover:border-stone-500 text-stone-700 text-sm font-medium flex items-center gap-2 active:scale-95 transition-transform disabled:opacity-50">
-              <Eye size={14} /> Just look around (no clock-in)
-            </button>
-            <p className="text-[11px] text-stone-400 mt-2">View messages, properties &amp; assignments without tracking time.</p>
-          </div>
-        </>)}
-
-        {/* Assignments, before a property is picked = where is the work.
-           Tapping a property starts the clock-in flow there. */}
-        {cleanerTab === 'assignments' && (
-          <div className="pt-4">
-            <div className="px-4 mb-1">
-              <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">Where the work is</div>
-              <p className="text-[11px] text-stone-400 mt-0.5">Open jobs by property. Tap one to clock in there.</p>
-            </div>
-            {/* Tapping a property clocks straight in there. It used to call
-               startClockIn, which reopened the generic picker and made you
-               choose the same property a second time. */}
-            <CleanerPropertiesList currentPropertyId={null} employee={employee}
-              onOpenCurrent={startClockIn} onSwitch={(p) => onPickProperty(p)} />
-          </div>
-        )}
-
-        {cleanerTab === 'more' && (
-          <div className="px-4 pt-4 space-y-2">
-            <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2">Account &amp; settings</div>
-            <button onClick={() => setShowMessages(true)}
-              className="w-full px-4 py-3.5 rounded-2xl bg-white border border-stone-200 hover:border-stone-400 text-left flex items-center gap-3 active:scale-98">
-              <MessageSquare size={18} className="text-stone-700" />
-              <div className="flex-1">
-                <div className="text-sm font-medium text-stone-900">Messages</div>
-                <div className="text-xs text-stone-500">Read and reply to the team</div>
-              </div>
-            </button>
-            <button onClick={() => setShowChangePin(true)}
-              className="w-full px-4 py-3.5 rounded-2xl bg-white border border-stone-200 hover:border-stone-400 text-left flex items-center gap-3 active:scale-98">
-              <User size={18} className="text-stone-700" />
-              <div className="flex-1">
-                <div className="text-sm font-medium text-stone-900">Change PIN</div>
-                <div className="text-xs text-stone-500">Update your sign-in code</div>
-              </div>
-            </button>
-            <button onClick={startViewOnly} disabled={busy}
-              className="w-full px-4 py-3.5 rounded-2xl bg-white border border-stone-200 hover:border-stone-400 text-left flex items-center gap-3 active:scale-98 disabled:opacity-50">
-              <Eye size={18} className="text-stone-700" />
-              <div className="flex-1">
-                <div className="text-sm font-medium text-stone-900">Just look around</div>
-                <div className="text-xs text-stone-500">Browse without tracking time</div>
-              </div>
-            </button>
-            <button onClick={signOutWithCleanup}
-              className="w-full px-4 py-3.5 rounded-2xl bg-white border border-stone-200 hover:border-red-300 text-left flex items-center gap-3 active:scale-98">
-              <LogOut size={18} className="text-red-600" />
-              <div className="flex-1">
-                <div className="text-sm font-medium text-red-600">Sign out</div>
-              </div>
-            </button>
-          </div>
-        )}
-
-        <CleanerBottomNav active={cleanerTab} onChange={setCleanerTab} />
+          <button onClick={startClockIn} disabled={busy}
+            className="w-48 h-48 rounded-full bg-stone-900 text-stone-50 font-medium text-lg flex flex-col items-center justify-center gap-2 shadow-2xl active:scale-95 transition-transform disabled:opacity-50">
+            <Clock size={32} />
+            <span>Clock In</span>
+          </button>
+          <button onClick={startViewOnly} disabled={busy}
+            className="mt-6 px-5 py-2.5 rounded-full bg-white border border-stone-300 hover:border-stone-500 text-stone-700 text-sm font-medium flex items-center gap-2 active:scale-95 transition-transform disabled:opacity-50">
+            <Eye size={14} /> Just look around (no clock-in)
+          </button>
+          <p className="text-[11px] text-stone-400 mt-2">View messages, properties & assignments without tracking time.</p>
+        </div>
       </div>
     );
   }
@@ -5137,7 +4913,6 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       onCancel={cancelPendingStart}
       onStart={confirmPendingStart}
       onSendBackToPending={sendBackToPendingFromPrepare}
-      onReopen={reopenBlock}
       onOpenMessages={() => setShowMessages(true)}
       onOpenBedroomHistory={setBedroomHistory}
       onJoinBlock={joinBlock}
@@ -5145,7 +4920,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   }
   if (isMulti && (!activeBlock || cleanerTab !== 'home')) {
     return withIdleModal(<PropertyHub shift={shift} workBlocks={workBlocks} employeeName={employee.name} employee={employee}
-      onSignOut={signOutWithCleanup} onClockOut={clockOut} onSwitchProperty={switchProperty} onSwitchToJob={switchToJob}
+      onSignOut={signOutWithCleanup} onClockOut={clockOut} onSwitchProperty={switchProperty}
       onStartNew={startNewBlock} onReopen={reopenBlock} onEndBlock={endBlock} onGoToBedroom={goToBedroomForTarget}
       onOpenMessages={() => setShowMessages(true)}
       onOpenChangePin={() => setShowChangePin(true)}
@@ -5161,7 +4936,6 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       employeeName={employee.name} employee={employee} onSignOut={signOutWithCleanup} onFinish={finishBlock}
       onPause={() => setActiveBlock(null)}
       onUndo={undoBlock}
-      onReopen={reopenBlock}
       newTaskName={newTaskName} setNewTaskName={setNewTaskName}
       onStartTask={startTask} onStartTasksFromPicker={startTasksFromPicker}
       onStartChecklistItems={startTasksFromChecklistItems}
@@ -5178,8 +4952,6 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       onLeaveBlock={leaveBlock}
       onJoinBlock={joinBlock}
       onDeletePhoto={deletePhoto}
-      onGoToBedroom={goToBedroomForTarget}
-      onSwitchProperty={switchProperty}
       cleanerTab={cleanerTab} setCleanerTab={setCleanerTab}
       previewMode={previewMode}
       busy={busy} />);
@@ -5387,7 +5159,7 @@ function CleanerBottomNav({ active, onChange }) {
         {useLogo ? (
           <img
             src="https://bbaynvqnbkjyqhzhhypr.supabase.co/storage/v1/object/public/brand/unnamed%20(2).png"
-            alt="My Jobs"
+            alt="Home"
             className={`h-6 w-6 object-contain transition-opacity ${isActive ? 'opacity-100' : 'opacity-50'}`}
             style={{ filter: isActive ? 'none' : 'grayscale(60%)' }}
           />
@@ -5403,7 +5175,7 @@ function CleanerBottomNav({ active, onChange }) {
   return (
     <div className="fixed bottom-0 left-0 right-0 z-30 bg-white border-t border-stone-200 flex"
       style={{ paddingBottom: 'env(safe-area-inset-bottom, 0px)' }}>
-      <Item id="home"        label="My Jobs"     useLogo />
+      <Item id="home"        label="Home"        useLogo />
       <Item id="assignments" label="Assignments" Icon={ClipboardList} />
       <Item id="more"        label="More"        Icon={Menu} />
     </div>
@@ -5454,7 +5226,7 @@ function OthersActivityToday({ propertyId, myEmployeeId, onOpenBedroomHistory })
                   {name}{isDone ? '' : ' · working now'}
                 </div>
                 <div className="font-serif text-base text-stone-900 truncate">
-                  {unitPartyLabel(b.unit?.label, b.party?.label)}
+                  {b.unit?.label} · {b.party?.label}
                 </div>
                 <div className="text-xs text-stone-500 font-mono mt-0.5">
                   {fmtClock(b.start_time)}{b.end_time && ` — ${fmtClock(b.end_time)}`} · {fmtTimeShort(dur)}
@@ -6025,1171 +5797,10 @@ function TodayApartmentsCard({ propertyId, onGoToBedroom, full = false }) {
   );
 }
 
-// =================================================================
-// ASSIGNED TO YOU — jobs specifically assigned to this cleaner at the
-// property they're clocked into. Surfaces on their Home so a job
-// assigned to them lands right in their queue.
-// =================================================================
-function YourJobsCard({ propertyId, employeeId, onGoToBedroom }) {
-  const [jobs, setJobs] = useState([]);
-  const [loaded, setLoaded] = useState(false);
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      const { data } = await supabase.from('assignment_targets')
-        .select('id, unit_id, party_id, status, unit:units(label), party:parties(label), assignment:assignments!inner(customer_id, active, deleted_at, assignment_type)')
-        .eq('assigned_to', employeeId)
-        .not('status', 'in', '(done,blocked)');
-      const rows = (data || []).filter(t => t.assignment?.customer_id === propertyId && t.assignment?.active !== false && !t.assignment?.deleted_at);
-      const byBed = {};
-      rows.forEach(t => {
-        const k = `${t.unit_id}:${t.party_id}`;
-        if (!byBed[k]) byBed[k] = { unitId: t.unit_id, partyId: t.party_id, unitLabel: t.unit?.label || '', partyLabel: t.party?.label || '', type: t.assignment?.assignment_type || '' };
-      });
-      if (!cancelled) {
-        setJobs(Object.values(byBed).sort((a, b) => naturalCompare(a.unitLabel, b.unitLabel)));
-        setLoaded(true);
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [propertyId, employeeId]);
-
-  if (!loaded || jobs.length === 0) return null;
-  return (
-    <div className="mx-4 mt-4 p-4 rounded-2xl bg-indigo-50 border border-indigo-200">
-      <div className="text-xs uppercase tracking-wider text-indigo-800 font-mono mb-2.5 flex items-center gap-1.5">
-        <User size={12} /> Assigned to you · {jobs.length}
-      </div>
-      <div className="space-y-1.5">
-        {jobs.map(j => (
-          <button key={`${j.unitId}:${j.partyId}`} onClick={() => onGoToBedroom && onGoToBedroom({ unit_id: j.unitId, party_id: j.partyId })}
-            className="w-full text-left px-3 py-2 rounded-lg bg-white border border-indigo-200 flex items-center justify-between gap-2 active:scale-98">
-            <div className="min-w-0">
-              <div className="text-sm text-stone-800 truncate">{unitPartyLabel(j.unitLabel, j.partyLabel)}</div>
-              {j.type && <div className="text-[11px] text-stone-500 font-mono">{assignmentTypeLabel(j.type)}</div>}
-            </div>
-            <ChevronRight size={14} className="text-indigo-400 flex-shrink-0" />
-          </button>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-// =================================================================
-// ASSIGN PICKER — ONE shared picker for every "+ Assign" button in
-// the app (cleaner work list, assignment schedule, daily view, and
-// the assignments tab). There used to be four near-identical copies;
-// a change to one silently skipped the other three. Add new assign UI
-// here, not at the call sites.
-//
-// Nothing is written until Save is tapped. Taps only move a local
-// selection, so an accidental tap costs nothing and the owner can
-// back out with Cancel.
-// =================================================================
-function AssignPicker({ team, currentIds, busy, onSave, onCancel }) {
-  const [sel, setSel] = useState(() => new Set(currentIds || []));
-  const toggle = (id) => setSel(prev => {
-    const next = new Set(prev);
-    if (next.has(id)) next.delete(id); else next.add(id);
-    return next;
-  });
-  const base = new Set(currentIds || []);
-  const dirty = sel.size !== base.size || Array.from(sel).some(id => !base.has(id));
-  return (
-    <div className="mt-2 p-2 rounded-xl bg-stone-50 border border-stone-200">
-      <div className="flex items-center justify-between gap-2 mb-1.5">
-        <span className="text-[10px] uppercase tracking-wider font-mono text-stone-400">
-          {dirty ? 'Unsaved — tap Save' : 'Tap to add or remove'}
-        </span>
-        <div className="flex items-center gap-1 flex-shrink-0">
-          <button onClick={onCancel} disabled={busy}
-            className="text-[10px] font-medium px-2.5 py-1 rounded-full bg-white border border-stone-300 text-stone-600 disabled:opacity-50">
-            Cancel
-          </button>
-          <button onClick={() => onSave(Array.from(sel))} disabled={busy || !dirty}
-            className={`text-[10px] font-medium px-2.5 py-1 rounded-full disabled:opacity-40 ${dirty ? 'bg-indigo-600 text-white' : 'bg-stone-900 text-white'}`}>
-            {busy ? 'Saving…' : 'Save'}
-          </button>
-        </div>
-      </div>
-      <div className="max-h-40 overflow-y-auto grid grid-cols-2 gap-1">
-        {(team || []).map(m => {
-          const on = sel.has(m.id);
-          return (
-            <button key={m.id} onClick={() => toggle(m.id)} disabled={busy}
-              className={`text-left px-2 py-1.5 rounded-lg text-xs flex items-center justify-between gap-1 disabled:opacity-50 ${on ? 'bg-indigo-600 text-white font-medium' : 'bg-white text-stone-700 border border-stone-200'}`}>
-              <span className="truncate">{m.name}</span>{on && <Check size={12} className="flex-shrink-0" />}
-            </button>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-// Commits an AssignPicker selection. Only writes the difference, so a
-// cleaner who ASKED for a job (status 'requested') and is left selected
-// keeps that status instead of being silently promoted to 'assigned'.
-// Returns an error object, or null on success.
-async function saveAssignees(assignmentId, currentIds, nextIds, actorId) {
-  const cur = new Set(currentIds || []);
-  const next = new Set(nextIds || []);
-  const toAdd = Array.from(next).filter(id => !cur.has(id));
-  const toRemove = Array.from(cur).filter(id => !next.has(id));
-  if (toRemove.length) {
-    const { error } = await supabase.from('assignment_assignees')
-      .delete().eq('assignment_id', assignmentId).in('employee_id', toRemove);
-    if (error) return error;
-  }
-  if (toAdd.length) {
-    const { error } = await supabase.from('assignment_assignees')
-      .upsert(toAdd.map(id => ({ assignment_id: assignmentId, employee_id: id, status: 'assigned', created_by: actorId })),
-        { onConflict: 'assignment_id,employee_id' });
-    if (error) return error;
-  }
-  return null;
-}
-
-// =================================================================
-// WHOS WORKING NOW — read-only "where is everyone right now", safe to
-// show to cleaners. Deliberately NOT WhosWherePanel: that one is the
-// owner widget and force-closes stale shifts as a side effect of
-// loading. A cleaner peeking at the board must never write to anyone
-// else's shift, so this one only reads. It applies the same 2h cutoff
-// client-side so a stale session never shows as active.
-// =================================================================
-function WhosWorkingNowModal({ employee, onClose }) {
-  const [rows, setRows] = useState([]);
-  const [loaded, setLoaded] = useState(false);
-  useTick(true);
-  useEffect(() => {
-    let cancelled = false;
-    const load = async () => {
-      const cutoffMs = Date.now() - STALE_FORCE_MIN * 60 * 1000;
-      const [blocksRes, shiftsRes] = await Promise.all([
-        supabase.from('work_blocks')
-          .select('id, start_time, unit:units(label), party:parties(label), shift:shifts!inner(id, is_preview, employee:employees(id, name), customer:customers(id, name))')
-          .is('end_time', null).order('start_time', { ascending: true }),
-        supabase.from('shifts')
-          .select('id, start_time, is_preview, employee:employees(id, name), customer:customers(id, name)')
-          .is('end_time', null),
-      ]);
-      const blocks = (blocksRes.data || []).filter(b => !b.shift?.is_preview);
-      const blockedShiftIds = new Set(blocks.map(b => b.shift?.id).filter(Boolean));
-      const standby = (shiftsRes.data || []).filter(s => !s.is_preview && !blockedShiftIds.has(s.id));
-      const out = [
-        ...blocks.filter(b => new Date(b.start_time).getTime() > cutoffMs).map(b => ({
-          kind: 'block', id: b.id,
-          cleanerName: b.shift?.employee?.name || '?',
-          isMe: b.shift?.employee?.id === employee?.id,
-          propertyName: b.shift?.customer?.name || '',
-          where: unitPartyLabel(b.unit?.label, b.party?.label),
-          startTime: b.start_time,
-        })),
-        ...standby.filter(s => new Date(s.start_time).getTime() > cutoffMs).map(s => ({
-          kind: 'standby', id: s.id,
-          cleanerName: s.employee?.name || '?',
-          isMe: s.employee?.id === employee?.id,
-          propertyName: s.customer?.name || '',
-          where: '',
-          startTime: s.start_time,
-        })),
-      ];
-      if (!cancelled) { setRows(out); setLoaded(true); }
-    };
-    load();
-    const iv = setInterval(load, 30000);
-    return () => { cancelled = true; clearInterval(iv); };
-  }, [employee?.id]);
-
-  const working = rows.filter(r => r.kind === 'block');
-  const standby = rows.filter(r => r.kind === 'standby');
-  return (
-    <div onClick={onClose} className="fixed inset-0 bg-stone-900/80 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
-      <div onClick={(e) => e.stopPropagation()}
-        className="bg-stone-50 w-full sm:max-w-md sm:rounded-3xl rounded-t-3xl flex flex-col max-h-[80vh]">
-        <div className="flex items-center justify-between p-5 border-b border-stone-200">
-          <div className="min-w-0 flex-1">
-            <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">Right now</div>
-            <div className="font-serif text-lg text-stone-900">Who's working</div>
-          </div>
-          <button onClick={onClose} className="p-2 rounded-full hover:bg-stone-100 flex-shrink-0">
-            <X size={20} className="text-stone-600" />
-          </button>
-        </div>
-        <div className="flex-1 overflow-y-auto p-4 space-y-2">
-          {!loaded ? (
-            <div className="text-center py-8 text-stone-400 text-sm">Loading…</div>
-          ) : rows.length === 0 ? (
-            <div className="text-center py-10 text-stone-400 text-sm">Nobody's on the clock right now.</div>
-          ) : (<>
-            {working.map(r => (
-              <div key={r.id} className="p-3 rounded-2xl bg-white border border-stone-200">
-                <div className="flex items-center justify-between gap-2">
-                  <div className="min-w-0">
-                    <div className="text-sm font-medium text-stone-900 truncate">
-                      {r.cleanerName}{r.isMe && <span className="ml-1.5 text-[10px] font-mono text-stone-400">(you)</span>}
-                    </div>
-                    <div className="text-xs text-stone-500 font-mono truncate">
-                      {r.propertyName}{r.where ? ` · ${r.where}` : ''}
-                    </div>
-                  </div>
-                  <div className="text-right flex-shrink-0">
-                    <div className="text-xs font-mono text-emerald-700">{fmtTimeShort(Date.now() - new Date(r.startTime).getTime())}</div>
-                    <div className="text-[10px] font-mono text-stone-400">since {fmtClock(r.startTime)}</div>
-                  </div>
-                </div>
-              </div>
-            ))}
-            {standby.length > 0 && (
-              <div className="text-[10px] uppercase tracking-wider font-mono text-stone-400 pt-2">Clocked in, not started</div>
-            )}
-            {standby.map(r => (
-              <div key={r.id} className="p-3 rounded-2xl bg-stone-100 border border-stone-200">
-                <div className="flex items-center justify-between gap-2">
-                  <div className="min-w-0">
-                    <div className="text-sm font-medium text-stone-700 truncate">
-                      {r.cleanerName}{r.isMe && <span className="ml-1.5 text-[10px] font-mono text-stone-400">(you)</span>}
-                    </div>
-                    <div className="text-xs text-stone-500 font-mono truncate">{r.propertyName || 'No property'}</div>
-                  </div>
-                  <div className="text-[10px] font-mono text-stone-400 flex-shrink-0">since {fmtClock(r.startTime)}</div>
-                </div>
-              </div>
-            ))}
-          </>)}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// =================================================================
-// LIVE PRESENCE — who is physically in a bedroom RIGHT NOW, keyed
-// "unitId:partyId". Work blocks carry unit_id/party_id, not
-// assignment_id, so that pair is the only thing that lines a live
-// block up with a job card.
-//
-// Shared on purpose: the "X is here" chip was previously reinvented at
-// each call site, which is why it showed on some cards and not others.
-// Stale blocks are dropped using the same 2h rule the rest of the app
-// uses — someone who forgot to clock out three days ago is not "here".
-// =================================================================
-async function fetchLivePresence() {
-  let rows = []; const PAGE = 1000;
-  for (let from = 0; ; from += PAGE) {
-    const { data, error } = await supabase.from('work_blocks')
-      .select('id, unit_id, party_id, start_time, shift:shifts!inner(is_preview, employee:employees(id, name))')
-      .is('end_time', null)
-      .range(from, from + PAGE - 1);
-    if (error || !data) break;
-    rows = rows.concat(data);
-    if (data.length < PAGE) break;
-    if (from > 100000) break;
-  }
-  const cutoff = Date.now() - STALE_FORCE_MIN * 60 * 1000;
-  const m = {};
-  rows.forEach(b => {
-    if (b.shift?.is_preview) return;
-    if (!b.unit_id) return;
-    if (new Date(b.start_time).getTime() <= cutoff) return;
-    const k = `${b.unit_id}:${b.party_id || ''}`;
-    (m[k] = m[k] || []).push({
-      id: b.shift?.employee?.id,
-      name: b.shift?.employee?.name || '?',
-      since: b.start_time,
-    });
-  });
-  return m;
-}
-
-// =================================================================
-// QUICK GLANCE — read-only peek at a job. Tapping a card on the work
-// list clocks you in and starts the clean, which is a heavy commitment
-// for "what's actually in there?". This answers that question and
-// writes nothing: no shift, no work block, no status changes.
-// =================================================================
-function JobPeekModal({ job, employee, onClose }) {
-  const { locale } = useLocale();
-  const { overrides } = useItemLabelOverrides(job.customerId, locale, employee);
-  const [items, setItems] = useState([]);
-  const [loaded, setLoaded] = useState(false);
-  const [secFilter, setSecFilter] = useState('all'); // 'all' | section key
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      // Scoped to this one bedroom, so no pagination needed — but keep
-      // the assignment filter tight so a second job at the same bedroom
-      // doesn't bleed in.
-      let q = supabase.from('assignment_targets')
-        .select('id, status, template_item_key, template_section, status_notes, completed_at')
-        .eq('assignment_id', job.id);
-      if (job.unitId) q = q.eq('unit_id', job.unitId);
-      if (job.partyId) q = q.eq('party_id', job.partyId);
-      const { data, error } = await q;
-      if (cancelled) return;
-      if (error) { alert('Could not load this job: ' + error.message); setLoaded(true); return; }
-      setItems(data || []);
-      setLoaded(true);
-    })();
-    return () => { cancelled = true; };
-  }, [job.id, job.unitId, job.partyId]);
-
-  const labelFor = (t) => {
-    if (t.status_notes && (t.template_item_key?.startsWith?.('requested:') || t.template_item_key?.startsWith?.('custom_'))) return t.status_notes;
-    const key = t.template_item_key || '';
-    const fallback = key.replace(/^[a-z]+:/, '').replace(/_/g, ' ').replace(/^./, c => c.toUpperCase());
-    return resolveItemLabel(key, locale, overrides, fallback);
-  };
-
-  const SECTIONS = ['bedroom', 'vanity', 'bathroom', 'general'];
-  const bySection = {};
-  items.forEach(t => {
-    const sec = (t.template_section || 'other').toLowerCase();
-    (bySection[sec] = bySection[sec] || []).push(t);
-  });
-  const order = [...SECTIONS.filter(s => bySection[s]), ...Object.keys(bySection).filter(s => !SECTIONS.includes(s))];
-  const done = items.filter(t => t.status === 'done').length;
-  const size = (job.bedrooms || job.bathrooms) ? `${job.bedrooms || 0}BR / ${job.bathrooms || 0}BA` : null;
-  // Same chip pattern as the real working screen, so switching between
-  // peek and work doesn't feel like two different apps.
-  const shown = secFilter === 'all' ? order : order.filter(s => s === secFilter);
-
-  return (
-    <div onClick={onClose} className="fixed inset-0 bg-stone-900/80 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
-      <div onClick={(e) => e.stopPropagation()}
-        className="bg-stone-50 w-full sm:max-w-lg sm:rounded-3xl rounded-t-3xl flex flex-col max-h-[85vh]">
-        <div className="p-5 border-b border-stone-200">
-          <div className="flex items-start justify-between gap-2">
-            <div className="min-w-0 flex-1">
-              <div className="text-[10px] uppercase tracking-wider text-stone-400 font-mono">Quick glance — nothing is started</div>
-              <div className="font-serif text-xl text-stone-900 truncate">
-                {unitPartyLabel(job.unitLabel, job.partyLabel) || 'Job'}
-              </div>
-              <div className="text-xs text-stone-500 font-mono mt-0.5 truncate">
-                {job.propName}{job.type ? ` · ${assignmentTypeLabel(job.type)}` : ''}
-              </div>
-            </div>
-            <button onClick={onClose} className="p-2 rounded-full hover:bg-stone-100 flex-shrink-0">
-              <X size={20} className="text-stone-600" />
-            </button>
-          </div>
-          <div className="flex items-center gap-1.5 flex-wrap mt-2">
-            {size && <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-stone-200 text-stone-700">{size}</span>}
-            <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-stone-100 text-stone-600">
-              {done} of {items.length} done
-            </span>
-            {job.hereNow?.map((h, i) => (
-              <span key={i} className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 flex items-center gap-1">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" /> {h.name} is here
-              </span>
-            ))}
-            {job.assignees?.map(a => (
-              <span key={a.id} className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700 flex items-center gap-1">
-                <User size={9} /> {a.name}
-              </span>
-            ))}
-          </div>
-          {job.propAddress && (
-            <div className="text-[10px] text-blue-600 font-mono mt-2 underline decoration-blue-300 underline-offset-2">
-              <AddressLink address={job.propAddress} className="text-blue-600" />
-            </div>
-          )}
-        </div>
-
-        {/* Section tabs. Sticky under the header so they stay reachable
-           on a 74-item job. */}
-        {loaded && items.length > 0 && (
-          <div className="px-4 pt-3 pb-2 border-b border-stone-200 bg-stone-50 flex items-center gap-1.5 overflow-x-auto">
-            <button onClick={() => setSecFilter('all')}
-              className={`text-[11px] font-mono px-2.5 py-1 rounded-full flex-shrink-0 ${secFilter === 'all' ? 'bg-stone-900 text-white' : 'bg-stone-200 text-stone-600'}`}>
-              All ({items.length})
-            </button>
-            {order.map(sec => (
-              <button key={sec} onClick={() => setSecFilter(sec)}
-                className={`text-[11px] font-mono px-2.5 py-1 rounded-full flex-shrink-0 capitalize ${secFilter === sec ? 'bg-stone-900 text-white' : 'bg-stone-200 text-stone-600'}`}>
-                {sec} ({bySection[sec].length})
-              </button>
-            ))}
-          </div>
-        )}
-
-        <div className="flex-1 overflow-y-auto p-4 space-y-3">
-          {!loaded ? (
-            <div className="text-center py-8 text-stone-400 text-sm">Loading…</div>
-          ) : items.length === 0 ? (
-            <div className="text-center py-8 text-stone-400 text-sm">No items on this job.</div>
-          ) : shown.map(sec => (
-            <div key={sec}>
-              {/* The heading is redundant once a single tab is picked. */}
-              {secFilter === 'all' && (
-                <div className="text-[10px] uppercase tracking-wider font-mono text-stone-400 mb-1.5">
-                  {sec} ({bySection[sec].length})
-                </div>
-              )}
-              <div className="space-y-1">
-                {bySection[sec].map(t => (
-                  <div key={t.id} className="flex items-center gap-2 px-3 py-2 rounded-xl bg-white border border-stone-200">
-                    <span className={`w-2 h-2 rounded-full flex-shrink-0 ${
-                      t.status === 'done' ? 'bg-emerald-500'
-                      : t.status === 'in_progress' ? 'bg-amber-500'
-                      : t.status === 'blocked' ? 'bg-red-500'
-                      : 'bg-stone-300'}`} />
-                    <span className={`text-sm flex-1 ${t.status === 'done' ? 'text-stone-400 line-through' : 'text-stone-700'}`}>
-                      {labelFor(t)}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          ))}
-        </div>
-
-        <div className="p-4 border-t border-stone-200">
-          <button onClick={onClose} className="w-full py-3 rounded-2xl bg-white border border-stone-300 text-stone-700 text-sm font-medium">
-            Close
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// "Main" is the auto-created whole-apartment party. It exists so a job
-// has something to hang on when the apartment is cleaned as one unit —
-// it is bookkeeping, not information. "A106 · Main" tells a cleaner
-// nothing, so it's hidden everywhere it would print.
-const partyDisplay = (label) => {
-  const l = String(label || '').trim();
-  return l.toLowerCase() === 'main' ? '' : l;
-};
-const unitPartyLabel = (unitLabel, partyLabel) =>
-  [String(unitLabel || '').trim(), partyDisplay(partyLabel)].filter(Boolean).join(' · ');
-
-// =================================================================
-// ASSIGNMENT WORK HISTORY — every assignment ever run at ONE bedroom,
-// newest first, each with the sessions and photos that belong to it.
-//
-// This is NOT the History button (BedroomHistoryView) — that one is a
-// day-by-day browser and stays exactly as it is. This answers a
-// different question: "what happened on THIS job, and what did it look
-// like when they finished?" — the thing you need before re-opening a
-// clean someone else already did.
-//
-// Work blocks carry unit_id/party_id but NOT assignment_id, so a
-// session is matched to an assignment by time: any block that started
-// between the assignment being created and it being completed (or now,
-// if it's still open) belongs to it. Anything that matches nothing is
-// listed separately rather than silently dropped.
-// =================================================================
-function AssignmentWorkHistory({ propertyId, unitId, partyId, employee, defaultOpen = false, onReopen = null }) {
-  const [rows, setRows] = useState([]);
-  const [loose, setLoose] = useState([]);
-  const [loaded, setLoaded] = useState(false);
-  const [openId, setOpenId] = useState(null);
-  const [show, setShow] = useState(defaultOpen);
-  const [reopening, setReopening] = useState(null);
-
-  useEffect(() => {
-    if (!show || !unitId) return;
-    let cancelled = false;
-    (async () => {
-      const [tRes, bRes] = await Promise.all([
-        supabase.from('assignment_targets')
-          .select('id, status, completed_at, assignment_id, assignment:assignments(id, assignment_type, title, created_at, deleted_at)')
-          .eq('unit_id', unitId).eq('party_id', partyId),
-        supabase.from('work_blocks')
-          .select('id, start_time, end_time, unit_id, party_id, shift:shifts!inner(customer_id, employee:employees(id, name)), tasks(*, photos(*))')
-          .eq('unit_id', unitId).eq('party_id', partyId)
-          .order('start_time', { ascending: false }),
-      ]);
-      if (cancelled) return;
-      const targets = (tRes.data || []).filter(t => t.assignment && !t.assignment.deleted_at);
-      const blocks = (bRes.data || []).filter(b => b.shift?.customer_id === propertyId);
-
-      // One row per assignment.
-      const byAsg = new Map();
-      targets.forEach(t => {
-        const a = t.assignment;
-        if (!byAsg.has(a.id)) {
-          byAsg.set(a.id, {
-            id: a.id, type: a.assignment_type || '', title: a.title || '',
-            createdAt: a.created_at, total: 0, done: 0, lastDone: null, blocks: [],
-          });
-        }
-        const r = byAsg.get(a.id);
-        r.total++;
-        if (t.status === 'done') {
-          r.done++;
-          if (t.completed_at && (!r.lastDone || t.completed_at > r.lastDone)) r.lastDone = t.completed_at;
-        }
-      });
-      const list = Array.from(byAsg.values());
-
-      // Match sessions to assignments by time window.
-      const unmatched = [];
-      blocks.forEach(b => {
-        const t = new Date(b.start_time).getTime();
-        const hit = list.find(r => {
-          const from = new Date(r.createdAt).getTime();
-          // +1 day of slack: work often finishes just after the last item
-          // is ticked, and we'd rather over-attribute than lose a session.
-          const to = r.lastDone ? new Date(r.lastDone).getTime() + 86400000 : Date.now();
-          return t >= from && t <= to;
-        });
-        if (hit) hit.blocks.push(b); else unmatched.push(b);
-      });
-      list.sort((a, b) => new Date(b.lastDone || b.createdAt) - new Date(a.lastDone || a.createdAt));
-      setRows(list); setLoose(unmatched); setLoaded(true);
-    })();
-    return () => { cancelled = true; };
-  }, [show, unitId, partyId, propertyId]);
-
-  const photosOf = (b) => (b.tasks || []).flatMap(t => (t.photos || []).filter(p => !p.deleted_at));
-  // Photos already carry kind = before | after | damage. Dumping them in
-  // one grid throws that away — and before/after IS the point when you're
-  // deciding whether a bedroom needs redoing.
-  const PHOTO_GROUPS = [
-    { key: 'before', label: 'Before', cls: 'bg-stone-200 text-stone-700' },
-    { key: 'after',  label: 'After',  cls: 'bg-emerald-100 text-emerald-800' },
-    { key: 'damage', label: 'Damage', cls: 'bg-red-100 text-red-700' },
-  ];
-  const photoGrid = (pics) => {
-    const groups = PHOTO_GROUPS
-      .map(g => ({ ...g, items: pics.filter(p => p.kind === g.key) }))
-      .filter(g => g.items.length > 0);
-    const tagged = groups.reduce((n, g) => n + g.items.length, 0);
-    const untagged = pics.filter(p => !PHOTO_GROUPS.some(g => g.key === p.kind));
-    if (untagged.length) groups.push({ key: 'other', label: 'Untagged', cls: 'bg-stone-100 text-stone-500', items: untagged });
-    return groups.map(g => (
-      <div key={g.key} className="mt-2">
-        <div className="flex items-center gap-1.5 mb-1">
-          <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full ${g.cls}`}>{g.label}</span>
-          <span className="text-[10px] font-mono text-stone-400">{g.items.length}</span>
-        </div>
-        <div className="grid grid-cols-4 sm:grid-cols-6 gap-1">
-          {g.items.map(p => (
-            <a key={p.id} href={p.public_url} target="_blank" rel="noopener noreferrer"
-              className="aspect-square rounded-lg overflow-hidden bg-stone-200 block relative">
-              <img loading="lazy" src={p.public_url} alt={g.label} className="w-full h-full object-cover" />
-              <span className={`absolute top-0.5 left-0.5 text-[8px] font-mono px-1 rounded ${g.cls}`}>{g.label[0]}</span>
-            </a>
-          ))}
-        </div>
-      </div>
-    ));
-  };
-  const peopleOf = (r) => [...new Set(r.blocks.map(b => b.shift?.employee?.name).filter(Boolean))];
-
-  const renderBlocks = (blocks) => blocks.map(b => {
-    const pics = photosOf(b);
-    const running = !b.end_time;
-    const ms = b.end_time ? (new Date(b.end_time) - new Date(b.start_time)) : (Date.now() - new Date(b.start_time));
-    return (
-      <div key={b.id} className="mt-2 p-3 rounded-xl bg-stone-50 border border-stone-200">
-        <div className="flex items-center justify-between gap-2 flex-wrap">
-          <span className="text-xs font-mono text-stone-700 flex items-center gap-1.5">
-            {running && <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />}
-            {b.shift?.employee?.name || '?'}
-          </span>
-          <span className="flex items-center gap-2">
-            <span className="text-[10px] font-mono text-stone-400">
-              {fmtDateWithDay(b.start_time)} · {fmtClock(b.start_time)}
-              {b.end_time ? `–${fmtClock(b.end_time)}` : ' · running'} · {fmtTimeShort(ms)}
-            </span>
-            {/* Reopen this exact session. Closed blocks (incl. ones the app
-               force-closed on sign-out) can be reopened one by one — the
-               cleaner picks which, nothing is guessed. A running block
-               shows a live dot instead of a button. */}
-            {onReopen && (running ? (
-              <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 inline-flex items-center gap-1">
-                <Pause size={9} /> Open now
-              </span>
-            ) : (
-              <button onClick={() => { setReopening(b.id); onReopen(b); }} disabled={reopening === b.id}
-                title="Reopen this session — add photos, notes and tasks to it"
-                className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-stone-900 text-white inline-flex items-center gap-1 disabled:opacity-50">
-                <Play size={9} /> {reopening === b.id ? 'Opening…' : 'Reopen'}
-              </button>
-            ))}
-          </span>
-        </div>
-        <div className="text-[10px] font-mono text-stone-400 mt-1">
-          {(b.tasks || []).length} {(b.tasks || []).length === 1 ? 'task' : 'tasks'} · {pics.length} {pics.length === 1 ? 'photo' : 'photos'}
-          {(() => {
-            const bef = pics.filter(p => p.kind === 'before').length;
-            const aft = pics.filter(p => p.kind === 'after').length;
-            return (bef || aft) ? ` · ${bef} before, ${aft} after` : '';
-          })()}
-        </div>
-        {pics.length > 0 && photoGrid(pics)}
-        {(b.tasks || []).length > 0 && (
-          <div className="mt-2 flex flex-wrap gap-1">
-            {(b.tasks || []).map(t => (
-              <span key={t.id} className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-white border border-stone-200 text-stone-600">
-                {t.name || t.template_item_key || 'Task'}
-              </span>
-            ))}
-          </div>
-        )}
-      </div>
-    );
-  });
-
-  return (
-    <div className="mt-4">
-      <button onClick={() => setShow(v => !v)}
-        className="w-full flex items-center justify-between gap-2 px-4 py-3 rounded-2xl bg-white border border-stone-200 active:scale-98 transition-transform">
-        <span className="text-xs uppercase tracking-wider font-mono text-stone-500 flex items-center gap-2">
-          <Camera size={13} /> What's been done here
-        </span>
-        <ChevronRight size={15} className={`text-stone-400 transition-transform ${show ? 'rotate-90' : ''}`} />
-      </button>
-
-      {show && (
-        <div className="mt-2 space-y-2">
-          {!loaded ? (
-            <div className="text-center py-6 text-stone-400 text-sm">Loading…</div>
-          ) : rows.length === 0 && loose.length === 0 ? (
-            <div className="text-center py-6 text-stone-400 text-sm">Nothing has been cleaned here yet.</div>
-          ) : (<>
-            {rows.map(r => {
-              const open = openId === r.id;
-              const people = peopleOf(r);
-              const pics = r.blocks.flatMap(photosOf).length;
-              const running = r.blocks.some(b => !b.end_time);
-              const isDone = r.total > 0 && r.done >= r.total;
-              return (
-                <div key={r.id} className="rounded-2xl bg-white border border-stone-200 overflow-hidden">
-                  <button onClick={() => setOpenId(open ? null : r.id)} className="w-full text-left p-3.5 hover:bg-stone-50">
-                    <div className="flex items-center justify-between gap-2 flex-wrap">
-                      <span className="flex items-center gap-1.5 flex-wrap">
-                        <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full ${
-                          running ? 'bg-emerald-100 text-emerald-800'
-                          : isDone ? 'bg-stone-900 text-white'
-                          : 'bg-amber-100 text-amber-800'}`}>
-                          {running ? 'In progress' : isDone ? 'Done' : 'Not finished'}
-                        </span>
-                        {r.type && <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-stone-100 text-stone-600">{assignmentTypeLabel(r.type)}</span>}
-                      </span>
-                      <ChevronRight size={14} className={`text-stone-400 transition-transform ${open ? 'rotate-90' : ''}`} />
-                    </div>
-                    <div className="text-xs font-mono text-stone-600 mt-1.5">
-                      {isDone && r.lastDone ? `Completed ${fmtDateWithDay(r.lastDone)}` : running ? 'Being cleaned right now' : `Started ${fmtDateWithDay(r.createdAt)}`}
-                    </div>
-                    <div className="text-[10px] font-mono text-stone-400 mt-0.5">
-                      {people.length > 0 ? people.join(', ') : 'Nobody clocked in'} · {r.done}/{r.total} items · {pics} {pics === 1 ? 'photo' : 'photos'}
-                    </div>
-                  </button>
-                  {open && (
-                    <div className="px-3.5 pb-3.5 border-t border-stone-100">
-                      {r.blocks.length === 0
-                        ? <div className="text-[11px] text-stone-400 mt-2">No clocked sessions on this one.</div>
-                        : renderBlocks(r.blocks)}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-            {loose.length > 0 && (
-              <div className="rounded-2xl bg-white border border-stone-200 p-3.5">
-                <div className="text-[10px] uppercase tracking-wider font-mono text-stone-400">
-                  Other sessions at this bedroom
-                </div>
-                {renderBlocks(loose)}
-              </div>
-            )}
-          </>)}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// =================================================================
-// CLEANER WORK LIST — the cleaner's own jobs (and all pending jobs)
-// across EVERY property, so they see their whole day. Same-property
-// jobs start the clean directly; other-property jobs offer to switch.
-// =================================================================
-function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchProperty, onSwitchToJob, onStartJob }) {
-  const [sub, setSub] = useState('mine'); // 'mine' | 'all'
-  const [jobs, setJobs] = useState([]);
-  const [team, setTeam] = useState([]);
-  const [loaded, setLoaded] = useState(false);
-  const [assignOpen, setAssignOpen] = useState(null); // assignment id
-  const [busyId, setBusyId] = useState(null);
-  const todayKey = localTodayKey();
-  const canAssign = can(employee, 'assign_cleaners');
-  const canDone = can(employee, 'mark_assignments_done');
-  // Same capability the owner-side cards use, so one toggle governs both.
-  const canEditDates = can(employee, 'edit_due_dates');
-  const [editDueId, setEditDueId] = useState(null);
-  const [peekJob, setPeekJob] = useState(null); // read-only quick glance
-  const [collapsedDates, setCollapsedDates] = useState(new Set()); // date-group keys that are collapsed
-  const saveDue = async (j, date) => {
-    setEditDueId(null); setBusyId(j.id);
-    const { data, error } = await supabase.from('assignments')
-      .update({ scheduled_date: date || null }).eq('id', j.id).select('id, scheduled_date');
-    setBusyId(null);
-    if (error) { alert('Could not change the date: ' + error.message); return; }
-    if (!data || data.length === 0) { alert('Date did not save — the database rejected the change for this job.'); return; }
-    load();
-  };
-
-  const load = async () => {
-    // Only properties this cleaner is allowed to see (hides BETA
-    // properties unless they're a beta tester / owner).
-    const [{ data: propRows }, { data: emps }] = await Promise.all([
-      supabase.from('customers').select('*').eq('active', true),
-      supabase.from('employees').select('id, name, role').eq('active', true).order('name'),
-    ]);
-    const allowed = new Set(visibleProps(propRows || [], employee).map(p => p.id));
-    setTeam((emps || []).filter(e => e.role !== 'owner'));
-    // Paginated — this query is unscoped (every property, every open target),
-    // so a plain call stops at PostgREST's 1000-row cap and silently drops
-    // jobs. That made freshly-assigned work never show up under "Mine".
-    const fetchOpenTargets = async () => {
-      let rows = []; const PAGE = 1000;
-      for (let from = 0; ; from += PAGE) {
-        const { data: page, error } = await supabase.from('assignment_targets')
-          .select('id, unit_id, party_id, status, priority, unit:units(label, bedrooms, bathrooms), party:parties(label), assignment:assignments!inner(id, customer_id, active, deleted_at, assignment_type, scheduled_date, customer:customers(name, address))')
-          .not('status', 'in', '(done,blocked)')
-          .range(from, from + PAGE - 1);
-        if (error || !page) break;
-        rows = rows.concat(page);
-        if (page.length < PAGE) break;
-        if (from > 100000) break;
-      }
-      return rows;
-    };
-    const data = await fetchOpenTargets();
-    const byJob = {};
-    (data || []).forEach(t => {
-      const a = t.assignment;
-      if (!a || a.active === false || a.deleted_at) return;
-      if (!allowed.has(a.customer_id)) return;
-      if (!byJob[a.id]) {
-        byJob[a.id] = { id: a.id, customerId: a.customer_id, propName: a.customer?.name || 'Property', propAddress: a.customer?.address || '', type: a.assignment_type || '', scheduledDate: a.scheduled_date || null, unitLabel: t.unit?.label || '', partyLabel: t.party?.label || '', unitId: t.unit_id, partyId: t.party_id, bedrooms: t.unit?.bedrooms, bathrooms: t.unit?.bathrooms, priority: false, items: 0, hereNow: [], assignees: [], requested: [] };
-      }
-      byJob[a.id].items++;
-      if (t.priority) byJob[a.id].priority = true;
-    });
-    const ids = Object.keys(byJob);
-    if (ids.length) {
-      // No employees embed — see the note in the assignment schedule load().
-      const nameById = Object.fromEntries((emps || []).map(e => [e.id, e.name]));
-      const { data: rows, error: rowsErr } = await supabase.from('assignment_assignees')
-        .select('assignment_id, employee_id, status')
-        .in('assignment_id', ids);
-      if (rowsErr) alert('Could not load who\u2019s assigned: ' + rowsErr.message);
-      (rows || []).forEach(r => {
-        const j = byJob[r.assignment_id]; if (!j) return;
-        const entry = { id: r.employee_id, name: nameById[r.employee_id] || '' };
-        if (r.status === 'requested') j.requested.push(entry); else j.assignees.push(entry);
-      });
-    }
-    // Who's already physically in each bedroom. Excludes the viewer —
-    // a cleaner doesn't need telling they're in the room they're in.
-    const here = await fetchLivePresence();
-    Object.values(byJob).forEach(j => {
-      j.hereNow = (here[`${j.unitId}:${j.partyId || ''}`] || []).filter(h => h.id !== employee?.id);
-    });
-    setJobs(Object.values(byJob));
-    setLoaded(true);
-  };
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [employee?.id]);
-
-  const isMine = (j) => j.assignees.some(a => a.id === employee?.id);
-  const iRequested = (j) => j.requested.some(a => a.id === employee?.id);
-
-  const requestJob = async (j) => {
-    setBusyId(j.id);
-    const { error } = await supabase.from('assignment_assignees')
-      .upsert({ assignment_id: j.id, employee_id: employee.id, status: 'requested', created_by: employee.id }, { onConflict: 'assignment_id,employee_id' });
-    setBusyId(null);
-    if (error) { alert('Could not ask for this job: ' + error.message); return; }
-    load();
-  };
-  const commitAssignees = async (j, ids) => {    setBusyId(j.id);
-    const current = [...j.assignees.map(a => a.id), ...j.requested.map(a => a.id)];
-    const error = await saveAssignees(j.id, current, ids, employee.id);
-    setBusyId(null);
-    if (error) { alert('Could not update who\u2019s assigned: ' + error.message); return; }
-    setAssignOpen(null);
-    load();
-  };
-  const approveRequest = async (j, empId) => {
-    setBusyId(j.id);
-    await supabase.from('assignment_assignees').update({ status: 'assigned' }).eq('assignment_id', j.id).eq('employee_id', empId);
-    setBusyId(null); load();
-  };
-  const markDone = async (j) => {
-    if (!confirm(`Mark ${j.unitLabel || 'this job'} completed?`)) return;
-    setBusyId(j.id);
-    await supabase.from('assignment_targets')
-      .update({ status: 'done', completed_at: new Date().toISOString(), completed_by: employee.id })
-      .eq('assignment_id', j.id).neq('status', 'done');
-    setBusyId(null); load();
-  };
-
-  // Date buckets, soonest first. The old ranking put EVERY future date in a
-  // single bucket, so Jul 15 and Jul 17 tied and fell through to sorting by
-  // unit label — which is why A403 (Jul 17) sat above C404 (Jul 15). It also
-  // ranked "no date" above future work; undated jobs now sort last.
-  const dueRank = (d) => !d ? 3 : (d < todayKey ? 0 : d === todayKey ? 1 : 2);
-  const tomorrowKey = (() => {
-    const t = new Date(); t.setDate(t.getDate() + 1);
-    return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`;
-  })();
-  const list = (sub === 'mine' ? jobs.filter(j => isMine(j) || iRequested(j)) : jobs)
-    .slice()
-    .sort((a, b) =>
-      dueRank(a.scheduledDate) - dueRank(b.scheduledDate)
-      // Real chronological order within a bucket. scheduled_date is
-      // 'YYYY-MM-DD', so a plain string compare is already date order.
-      || (a.scheduledDate || '').localeCompare(b.scheduledDate || '')
-      || (sub === 'all' ? ((isMine(b) ? 1 : 0) - (isMine(a) ? 1 : 0)) : 0)
-      || naturalCompare(a.propName, b.propName)
-      || naturalCompare(a.unitLabel, b.unitLabel));
-  // Priority jobs float to a pinned section at the very top, regardless of
-  // date — "do these first" supersedes the date buckets. They're pulled out
-  // of the date sections below so they don't show twice.
-  const priorityJobs = list.filter(j => j.priority);
-  const datedList = list.filter(j => !j.priority);
-  // Group the sorted list into date sections so the date is impossible to miss.
-  const dateSections = (() => {
-    const out = []; let cur = null;
-    datedList.forEach(j => {
-      const key = j.scheduledDate || 'none';
-      if (!cur || cur.key !== key) { cur = { key, date: j.scheduledDate || null, jobs: [] }; out.push(cur); }
-      cur.jobs.push(j);
-    });
-    return out;
-  })();
-  const sectionLabel = (d) => {
-    if (!d) return 'No date assigned';
-    if (d < todayKey) return `Overdue · ${fmtDueDate(d)}`;
-    if (d === todayKey) return `Today · ${fmtDueDate(d)}`;
-    if (d === tomorrowKey) return `Tomorrow · ${fmtDueDate(d)}`;
-    return fmtDueDate(d);
-  };
-  const sectionTone = (d) => {
-    if (!d) return 'text-stone-400';
-    if (d < todayKey) return 'text-red-600';
-    if (d === todayKey) return 'text-emerald-700';
-    return 'text-stone-500';
-  };
-  const fmtDue = (d) => !d ? 'No date' : d < todayKey ? `Overdue · ${fmtDueDate(d)}` : d === todayKey ? 'Today' : fmtDueDate(d);
-  const openJob = (j) => {
-    // Not clocked in yet → tapping a job clocks into its property and opens it.
-    if (onStartJob) { onStartJob(j); return; }
-    if (j.customerId === currentPropertyId) onGoToBedroom && onGoToBedroom({ unit_id: j.unitId, party_id: j.partyId });
-    else if (onSwitchToJob) onSwitchToJob(j);       // direct: clock into THIS job's property + open it
-    else onSwitchProperty && onSwitchProperty();     // fallback: generic picker
-  };
-
-  return (
-    <div className="px-4">
-      <div className="flex gap-1 bg-stone-100 p-1 rounded-xl mb-4 mt-4">
-        <button onClick={() => setSub('mine')} className={`flex-1 py-2 rounded-lg text-xs font-medium ${sub === 'mine' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>Assigned to me</button>
-        <button onClick={() => setSub('all')} className={`flex-1 py-2 rounded-lg text-xs font-medium ${sub === 'all' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>All pending</button>
-      </div>
-      {!loaded ? (
-        <div className="text-center py-8 text-stone-400 text-sm">Loading…</div>
-      ) : list.length === 0 ? (
-        <div className="text-center py-10 text-stone-400 text-sm">{sub === 'mine' ? 'Nothing assigned to you right now. 🎉' : 'No open assignments.'}</div>
-      ) : (
-        <div className="pb-4">
-          {priorityJobs.length > 0 && (
-            <div className="mb-5">
-              <div className="flex items-center gap-2 mb-2 px-3 py-1.5 rounded-lg border-l-4 border-red-500 bg-red-50">
-                <AlertCircle size={13} className="text-red-600" />
-                <span className="text-xs uppercase tracking-wider font-mono font-bold text-red-700">Priority — do these first</span>
-                <span className="text-[10px] font-mono text-red-500 ml-auto">{priorityJobs.length}</span>
-              </div>
-              <div className="space-y-2">
-                {priorityJobs.map(j => {
-                  const here = j.customerId === currentPropertyId;
-                  const mine = isMine(j);
-                  return (
-                    <div key={j.id} className="p-3.5 rounded-2xl bg-white border-2 border-red-200">
-                      <div className="flex items-start justify-between gap-2">
-                        <button onClick={() => openJob(j)}
-                          className="min-w-0 text-left flex-1 rounded-lg -m-1 p-1 hover:bg-red-50 active:scale-[0.99] transition group">
-                          <div className="flex items-center gap-1">
-                            <span className="font-serif text-lg text-stone-900 truncate group-hover:underline decoration-stone-300 underline-offset-2">{unitPartyLabel(j.unitLabel, j.partyLabel) || 'Job'}</span>
-                            <ChevronRight size={15} className="text-stone-300 group-hover:text-stone-500 flex-shrink-0" />
-                          </div>
-                          <div className="text-xs text-stone-500 font-mono mt-0.5 flex items-center gap-1">
-                            <Building2 size={11} /> {j.propName}{j.type ? ` · ${assignmentTypeLabel(j.type)}` : ''}{j.items > 0 ? ` · ${j.items} ${j.items === 1 ? 'item' : 'items'}` : ''}
-                          </div>
-                        </button>
-                        <span className="flex items-center gap-1 flex-shrink-0">
-                          {mine && <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700">Yours</span>}
-                          <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-red-100 text-red-700 font-bold flex items-center gap-1"><AlertCircle size={9} /> Priority</span>
-                        </span>
-                      </div>
-                      <div className="flex items-center justify-end gap-2 mt-2">
-                        {canDone && (
-                          <button onClick={() => markDone(j)} disabled={busyId === j.id}
-                            title="Mark completed" className="p-1 rounded-lg text-emerald-600 hover:bg-emerald-50 disabled:opacity-40">
-                            <Check size={15} />
-                          </button>
-                        )}
-                        <button onClick={() => openJob(j)}
-                          className="text-[11px] font-medium px-3 py-1.5 rounded-full bg-amber-600 hover:bg-amber-700 text-white flex items-center gap-1 active:scale-95 transition">
-                          {onStartJob ? 'Clock in & start' : here ? 'Start' : 'Switch'} <ChevronRight size={12} />
-                        </button>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-          {dateSections.map(sec => {
-            const isCollapsed = collapsedDates.has(sec.key);
-            return (
-            <div key={sec.key} className="mb-5">
-              {/* Date header — tap to collapse/expand its jobs. */}
-              <button onClick={() => setCollapsedDates(prev => {
-                  const next = new Set(prev);
-                  if (next.has(sec.key)) next.delete(sec.key); else next.add(sec.key);
-                  return next;
-                })}
-                className={`w-full flex items-center gap-2 mb-2 px-3 py-1.5 rounded-lg border-l-4 active:scale-[0.99] transition ${
-                !sec.date ? 'border-stone-300 bg-stone-100 hover:bg-stone-200'
-                : sec.date < todayKey ? 'border-red-500 bg-red-50 hover:bg-red-100'
-                : sec.date === todayKey ? 'border-emerald-500 bg-emerald-50 hover:bg-emerald-100'
-                : 'border-stone-400 bg-stone-100 hover:bg-stone-200'}`}>
-                <ChevronRight size={13} className={`flex-shrink-0 transition-transform ${isCollapsed ? '' : 'rotate-90'} ${sec.date && sec.date < todayKey ? 'text-red-600' : sec.date === todayKey ? 'text-emerald-700' : 'text-stone-500'}`} />
-                <Calendar size={13} className={sec.date && sec.date < todayKey ? 'text-red-600' : sec.date === todayKey ? 'text-emerald-700' : 'text-stone-500'} />
-                <span className={`text-xs uppercase tracking-wider font-mono font-bold ${sectionTone(sec.date)}`}>
-                  {sectionLabel(sec.date)}
-                </span>
-                <span className="text-[10px] font-mono text-stone-500 ml-auto flex-shrink-0">
-                  {sec.jobs.length} {sec.jobs.length === 1 ? 'job' : 'jobs'}
-                </span>
-              </button>
-              {!isCollapsed && (
-              <div className="space-y-2">
-          {sec.jobs.map(j => {
-            const here = j.customerId === currentPropertyId;
-            const mine = isMine(j);
-            return (
-              <div key={j.id} className="p-3.5 rounded-2xl bg-white border border-stone-200">
-                <div className="flex items-start gap-2">
-                <div className="flex-1 min-w-0">
-                  {/* Only the text is the tap target — not the empty width
-                     of the row. The badge + chevron sit alongside, not
-                     inside, so there's no invisible dead-zone to tap. */}
-                  <div className="flex items-center justify-between gap-2">
-                    <button onClick={() => openJob(j)}
-                      title={here ? 'Open this job' : 'Switch to this job'}
-                      className="min-w-0 text-left rounded-lg -m-1 p-1 hover:bg-stone-50 active:scale-[0.99] transition group inline-flex items-center gap-1">
-                      <span className="font-serif text-lg text-stone-900 truncate group-hover:underline decoration-stone-300 underline-offset-2">{unitPartyLabel(j.unitLabel, j.partyLabel) || 'Job'}</span>
-                      <ChevronRight size={15} className="text-stone-300 group-hover:text-stone-500 flex-shrink-0" />
-                    </button>
-                    <span className="flex items-center gap-1 flex-shrink-0">
-                      {/* Size — a cleaner needs to know if it's a 1x1 or a 3x2
-                         BEFORE they drive there, same as the owner cards show. */}
-                      {(j.bedrooms || j.bathrooms) && (
-                        <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-stone-200 text-stone-700">
-                          {j.bedrooms || 0}BR / {j.bathrooms || 0}BA
-                        </span>
-                      )}
-                      {mine && <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700">Yours</span>}
-                    </span>
-                  </div>
-                  <div className="text-xs text-stone-500 font-mono mt-0.5 flex items-center gap-1">
-                    <Building2 size={11} /> {j.propName}{j.type ? ` · ${assignmentTypeLabel(j.type)}` : ''}
-                    {j.items > 0 && ` · ${j.items} ${j.items === 1 ? 'item' : 'items'}`}
-                  </div>
-                </div>
-                {/* Quick glance. Sits OUTSIDE the card button on purpose —
-                   tapping the card clocks you in, and peeking shouldn't. */}
-                <button onClick={(e) => { e.stopPropagation(); setPeekJob(j); }}
-                  title="Peek inside — doesn't clock you in"
-                  className="p-2 rounded-xl border border-stone-200 text-stone-500 hover:text-stone-900 hover:border-stone-400 active:scale-95 flex-shrink-0">
-                  <Eye size={16} />
-                </button>
-                </div>
-                {j.propAddress && (
-                  <div className="text-[10px] text-blue-600 font-mono mt-0.5 underline decoration-blue-300 underline-offset-2">
-                    <AddressLink address={j.propAddress} className="text-blue-600" />
-                  </div>
-                )}
-
-                {/* Who's on this job */}
-                <div className="flex items-center gap-1.5 flex-wrap mt-2">
-                  {/* Someone is physically in there right now — worth knowing
-                     before you drive over or start a second block on it. */}
-                  {j.hereNow.map((h, hi) => (
-                    <span key={`${h.id}-${hi}`} className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 flex items-center gap-1"
-                      title={`Working here since ${fmtClock(h.since)}`}>
-                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                      {h.name} is here
-                    </span>
-                  ))}
-                  {j.assignees.map(a => (
-                    <span key={a.id} className={`text-[10px] font-mono px-2 py-0.5 rounded-full flex items-center gap-1 ${a.id === employee?.id ? 'bg-indigo-100 text-indigo-700' : 'bg-stone-100 text-stone-600'}`}>
-                      <User size={9} /> {a.name}
-                    </span>
-                  ))}
-                  {j.requested.map(a => (
-                    <span key={a.id} className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 flex items-center gap-1">
-                      <Clock size={9} /> {a.name} asked
-                      {canAssign && (
-                        <button onClick={() => approveRequest(j, a.id)} disabled={busyId === j.id}
-                          className="ml-1 px-1.5 py-0.5 rounded-full bg-amber-600 hover:bg-amber-700 text-white text-[9px] font-bold active:scale-95 transition disabled:opacity-50">approve</button>
-                      )}
-                    </span>
-                  ))}
-                  {j.assignees.length === 0 && j.requested.length === 0 && (
-                    <span className="text-[10px] font-mono text-stone-400">Unassigned</span>
-                  )}
-                  {canAssign && (
-                    <button onClick={() => setAssignOpen(assignOpen === j.id ? null : j.id)}
-                      className="text-[10px] font-mono px-2 py-0.5 rounded-full border border-dashed border-stone-300 text-stone-500 flex items-center gap-1">
-                      <Plus size={9} /> Assign
-                    </button>
-                  )}
-                </div>
-
-                {/* Assign picker — shared component; saves only on Save */}
-                {canAssign && assignOpen === j.id && (
-                  <AssignPicker key={j.id} team={team} busy={busyId === j.id}
-                    currentIds={[...j.assignees.map(a => a.id), ...j.requested.map(a => a.id)]}
-                    onCancel={() => setAssignOpen(null)}
-                    onSave={(ids) => commitAssignees(j, ids)} />
-                )}
-
-                <div className="flex items-center justify-between mt-2 gap-2">
-                  {/* Due date — tappable when the employee has "Change due dates" */}
-                  {editDueId === j.id ? (
-                    <input type="date" autoFocus defaultValue={j.scheduledDate || ''}
-                      onChange={(e) => saveDue(j, e.target.value)} onBlur={() => setEditDueId(null)}
-                      className="text-[11px] font-mono px-1.5 py-0.5 rounded border border-stone-400 bg-white" />
-                  ) : canEditDates ? (
-                    <button onClick={() => setEditDueId(j.id)} disabled={busyId === j.id}
-                      className={`text-[11px] font-mono px-2 py-0.5 rounded-full border inline-flex items-center gap-1 disabled:opacity-50 ${j.scheduledDate
-                        ? (j.scheduledDate < todayKey ? 'bg-red-100 text-red-700 border-red-200'
-                           : j.scheduledDate === todayKey ? 'bg-emerald-100 text-emerald-800 border-emerald-200'
-                           : 'bg-stone-100 text-stone-600 border-stone-200')
-                        : 'bg-white text-stone-500 border-dashed border-stone-300'}`}>
-                      <Calendar size={9} /> {j.scheduledDate ? fmtDue(j.scheduledDate) : 'Set date'}
-                    </button>
-                  ) : (
-                    <span className={`text-[11px] font-mono ${j.scheduledDate && j.scheduledDate < todayKey ? 'text-red-600' : j.scheduledDate === todayKey ? 'text-emerald-700' : 'text-stone-400'}`}>{fmtDue(j.scheduledDate)}</span>
-                  )}
-                  <div className="flex items-center gap-2">
-                    {!mine && !iRequested(j) && !canAssign && (
-                      <button onClick={() => requestJob(j)} disabled={busyId === j.id}
-                        className="text-[11px] font-medium px-2.5 py-1 rounded-full bg-stone-100 text-stone-700 disabled:opacity-50">Request</button>
-                    )}
-                    {iRequested(j) && <span className="text-[11px] font-mono text-amber-700">Requested</span>}
-                    {canDone && (
-                      <button onClick={() => markDone(j)} disabled={busyId === j.id}
-                        title="Mark completed" className="p-1 rounded-lg text-emerald-600 hover:bg-emerald-50 disabled:opacity-40">
-                        <Check size={15} />
-                      </button>
-                    )}
-                    <button onClick={() => openJob(j)}
-                      className="text-[11px] font-medium px-3 py-1.5 rounded-full bg-amber-600 hover:bg-amber-700 text-white flex items-center gap-1 active:scale-95 transition">
-                      {onStartJob ? 'Clock in & start' : here ? 'Start' : 'Switch'} <ChevronRight size={12} />
-                    </button>
-                  </div>
-                </div>
-              </div>
-            );
-          })}
-              </div>
-              )}
-            </div>
-            );
-          })}
-        </div>
-      )}
-      {peekJob && (
-        <JobPeekModal job={peekJob} employee={employee} onClose={() => setPeekJob(null)} />
-      )}
-    </div>
-  );
-}
-
-// Cleaner "Properties" tab — every property with its open count. Tap the
-// one you're in to work it; tap another to switch (clock out + pick).
-function CleanerPropertiesList({ currentPropertyId, employee, onOpenCurrent, onSwitch }) {
-  const [props, setProps] = useState([]);
-  const [counts, setCounts] = useState({});
-  const [loaded, setLoaded] = useState(false);
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      // Paginated: this counts open work across EVERY property, so a plain
-      // call stops at PostgREST's 1000-row cap and undercounts silently.
-      const fetchAllTargets = async () => {
-        let rows = []; const PAGE = 1000;
-        for (let from = 0; ; from += PAGE) {
-          const { data, error } = await supabase.from('assignment_targets')
-            .select('unit_id, party_id, status, assignment:assignments!inner(customer_id, active, deleted_at)')
-            .not('status', 'in', '(done,blocked)')
-            .range(from, from + PAGE - 1);
-          if (error || !data) break;
-          rows = rows.concat(data);
-          if (data.length < PAGE) break;
-          if (from > 100000) break;
-        }
-        return rows;
-      };
-      const [pRes, allTargets] = await Promise.all([
-        supabase.from('customers').select('*').eq('active', true).order('name'),
-        fetchAllTargets(),
-      ]);
-      const c = {}; const seen = new Set();
-      (allTargets || []).forEach(t => {
-        const a = t.assignment; if (!a || a.active === false || a.deleted_at) return;
-        const cid = a.customer_id; if (!cid) return;
-        const k = `${cid}:${t.unit_id || ''}:${t.party_id || ''}`;
-        if (!seen.has(k)) { seen.add(k); c[cid] = (c[cid] || 0) + 1; }
-      });
-      if (!cancelled) { setProps(visibleProps(pRes.data || [], employee)); setCounts(c); setLoaded(true); }
-    })();
-    return () => { cancelled = true; };
-  }, []);
-  if (!loaded) return <div className="text-center py-8 text-stone-400 text-sm">Loading…</div>;
-  const sorted = [...props].sort((a, b) =>
-    (a.id === currentPropertyId ? -1 : b.id === currentPropertyId ? 1 : 0)
-    || (counts[b.id] || 0) - (counts[a.id] || 0)
-    || (a.name || '').localeCompare(b.name || ''));
-  return (
-    <div className="px-4 pt-4 pb-4 space-y-2">
-      {sorted.map(p => {
-        const here = p.id === currentPropertyId;
-        return (
-          <button key={p.id} onClick={() => here ? onOpenCurrent() : onSwitch(p)}
-            className={`w-full text-left p-4 rounded-2xl border active:scale-98 ${here ? 'bg-amber-50 border-amber-300' : 'bg-white border-stone-200'}`}>
-            <div className="flex items-center justify-between gap-2">
-              <span className="font-serif text-lg text-stone-900 truncate">{p.name}</span>
-              <div className="flex items-center gap-2 flex-shrink-0">
-                {here && <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-amber-600 text-white">You're here</span>}
-                {(counts[p.id] || 0) > 0 && <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-stone-100 text-stone-600">{counts[p.id]} open</span>}
-              </div>
-            </div>
-            {p.address && <div className="text-xs text-stone-500 font-mono mt-1 truncate">{p.address}</div>}
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
-function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onClockOut, onSwitchProperty, onSwitchToJob, onStartNew, onReopen, onEndBlock, onGoToBedroom, onOpenMessages, onOpenChangePin, onOpenBedroomHistory, onJoinBlock, onUndoBlock, onMoveBlock, cleanerTab: cleanerTabProp, setCleanerTab: setCleanerTabProp, busy }) {
+function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onClockOut, onSwitchProperty, onStartNew, onReopen, onEndBlock, onGoToBedroom, onOpenMessages, onOpenChangePin, onOpenBedroomHistory, onJoinBlock, onUndoBlock, onMoveBlock, cleanerTab: cleanerTabProp, setCleanerTab: setCleanerTabProp, busy }) {
   const [showMenu, setShowMenu] = useState(false);
   const [showAssignmentForm, setShowAssignmentForm] = useState(false);
-  const [showProps, setShowProps] = useState(false); // Properties browser in More
+  const [homeView, setHomeView] = useState('now'); // 'now' | 'today'
   // Bottom nav tab — Home / Assignments / More. Parent (AuthedShift)
   // controls this when provided so the tab persists across BlockView
   // navigation. Falls back to local state for standalone use.
@@ -7276,38 +5887,38 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
          At PropertyHub the cleaner is on segment 1 (Property). Tapping
          "Property" switches to a different property. Later segments
          aren't yet reachable so they have no onClick handler. */}
-      {/* No progress stepper here: on the property overview you haven't
-         entered a bedroom's Property→Items→Working→Complete flow yet, so
-         the bar showed inert future steps that looked tappable but weren't.
-         The bottom nav (My Jobs / Assignments / More) is the real
-         navigation. The stepper still appears inside a bedroom's flow. */}
+      <CleanerProgressBar
+        segments={[
+          { label: 'Property', filled: true, isCurrent: true, onClick: onSwitchProperty },
+          { label: 'Assignment', filled: false },
+          { label: 'Items', filled: false },
+          { label: 'Working', filled: false },
+          { label: 'Complete', filled: false },
+        ]}
+        inActiveWork={false} />
       <div className="bg-stone-900 text-stone-50 px-5 py-5 sticky top-0 z-10 shadow-md">
         <div className="flex items-start justify-between mb-3 gap-2">
-          <div className="min-w-0 flex-1">
-            <div className="text-xs uppercase tracking-widest text-stone-400 font-mono">You're at</div>
-            <div className="flex items-center gap-2 mt-1">
-              <Building2 size={22} className="text-amber-400 shrink-0" />
-              <div className="font-serif text-2xl text-stone-50 leading-tight">{shift.customer?.name}</div>
-            </div>
+          <div>
+            <div className="text-xs uppercase tracking-widest text-stone-400 font-mono">At property</div>
+            <div className="text-3xl font-mono font-light tracking-tight">{fmtTime(elapsed)}</div>
           </div>
-          <div className="flex flex-col gap-1.5 items-end shrink-0">
+          <div className="flex flex-col gap-1.5 items-end">
             <button onClick={onClockOut} disabled={busy}
               className="px-4 py-2.5 rounded-full bg-amber-700 text-stone-50 text-sm font-medium flex items-center gap-2 active:scale-95 transition-transform disabled:opacity-50">
               <LogOut size={14} /> Clock out
             </button>
           </div>
         </div>
+        <div className="flex items-center gap-1.5 text-xs text-amber-400 font-mono">
+          <Building2 size={11} /> {shift.customer?.name}
+        </div>
         {shift.customer?.address && (
-          <div className="mt-2 text-xs text-stone-300">
+          <div className="mt-1 text-xs text-stone-300">
             <AddressLink address={shift.customer.address} className="text-stone-300" />
           </div>
         )}
-        <div className="mt-2 flex items-center gap-2 text-xs text-stone-400 font-mono flex-wrap">
-          <span className="inline-flex items-center gap-1 text-stone-200"><Clock size={11} /> {fmtTime(elapsed)}</span>
-          <span className="text-stone-600">·</span>
-          <span>Started {fmtClock(shift.start_time)}</span>
-          <span className="text-stone-600">·</span>
-          <span>{workBlocks.length} {workBlocks.length === 1 ? 'apartment cleaned' : 'apartments cleaned'}</span>
+        <div className="mt-1 text-xs text-stone-400 font-mono">
+          Started {fmtClock(shift.start_time)} · {workBlocks.length} {workBlocks.length === 1 ? 'apartment cleaned' : 'apartments cleaned'}
         </div>
       </div>
 
@@ -7319,35 +5930,19 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
       {/* === HOME TAB === */}
       {cleanerTab === 'home' && (
         <>
-          {/* Paused / open work blocks — so a cleaner can always get back
-             into what they were doing. (An ACTIVE block takes over the
-             whole screen, so these are the paused/unfinished ones.) */}
-          {workBlocks.filter(b => !b.end_time).length > 0 && (
-            <div className="px-4 pt-4">
-              <div className="text-xs uppercase tracking-wider text-amber-800 font-mono mb-2">Working on now</div>
-              <div className="space-y-2">
-                {workBlocks.filter(b => !b.end_time).map(b => (
-                  <button key={b.id} onClick={() => onReopen && onReopen(b)} disabled={busy}
-                    className="w-full text-left p-3.5 rounded-2xl bg-amber-50 border border-amber-300 flex items-center justify-between gap-2 active:scale-98 disabled:opacity-50">
-                    <div className="min-w-0">
-                      <div className="font-serif text-lg text-stone-900 truncate">{unitPartyLabel(b.unit?.label, b.party?.label)}</div>
-                      <div className="text-xs text-stone-500 font-mono">Started {fmtClock(b.start_time)} · paused</div>
-                    </div>
-                    <span className="text-[11px] font-medium text-amber-800 flex items-center gap-1 flex-shrink-0"><Play size={11} /> Resume</span>
-                  </button>
-                ))}
-              </div>
+          {/* Now / Today toggle */}
+          <div className="px-4 pt-4">
+            <div className="flex gap-1 bg-stone-100 p-1 rounded-xl">
+              <button onClick={() => setHomeView('now')}
+                className={`flex-1 py-2 rounded-lg text-sm font-medium ${homeView === 'now' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>Now</button>
+              <button onClick={() => setHomeView('today')}
+                className={`flex-1 py-2 rounded-lg text-sm font-medium ${homeView === 'today' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>Today</button>
             </div>
-          )}
+          </div>
 
-          <CleanerWorkList employee={employee} currentPropertyId={shift.customer_id}
-            onGoToBedroom={onGoToBedroom} onSwitchProperty={onSwitchProperty} onSwitchToJob={onSwitchToJob} />
-          {false && (<>
           {homeView === 'today' && (
             <TodayApartmentsCard full propertyId={shift.customer_id} onGoToBedroom={onGoToBedroom} />
           )}
-
-          <YourJobsCard propertyId={shift.customer_id} employeeId={employee?.id} onGoToBedroom={onGoToBedroom} />
 
           {homeView === 'now' && (<>
           {/* Today's stats card — quick summary of what the cleaner
@@ -7406,7 +6001,7 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
                             <div className="flex items-center gap-2 mb-0.5 flex-wrap">
                               {isDone && <Check size={14} className="text-emerald-600 flex-shrink-0" />}
                               <span className="font-serif text-lg text-stone-900 truncate">
-                                {unitPartyLabel(b.unit?.label, b.party?.label)}
+                                {b.unit?.label} · {b.party?.label}
                               </span>
                             </div>
                             <div className="text-xs text-stone-500 font-mono">
@@ -7452,7 +6047,6 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
             )}
           </div>
           </>)}
-          </>)}
         </>
       )}
 
@@ -7474,25 +6068,7 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
       {/* === MORE TAB === */}
       {cleanerTab === 'more' && (
         <div className="px-4 pt-4 space-y-2">
-          <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2">Properties</div>
-          <button onClick={() => setShowProps(s => !s)}
-            className="w-full px-4 py-3.5 rounded-2xl bg-white border border-stone-200 hover:border-stone-400 text-left flex items-center gap-3 active:scale-98">
-            <Building2 size={18} className="text-stone-700" />
-            <div className="flex-1">
-              <div className="text-sm font-medium text-stone-900">Browse properties</div>
-              <div className="text-xs text-stone-500">See every property and its open work</div>
-            </div>
-            <ChevronRight size={16} className={`text-stone-400 transition-transform ${showProps ? 'rotate-90' : ''}`} />
-          </button>
-          {showProps && (
-            <div className="-mx-4">
-              <CleanerPropertiesList currentPropertyId={shift.customer_id} employee={employee}
-                onOpenCurrent={() => setCleanerTab('assignments')}
-                onSwitch={() => onSwitchProperty && onSwitchProperty()} />
-            </div>
-          )}
-
-          <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 pt-3">Account &amp; settings</div>
+          <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2">Account &amp; settings</div>
           {onSwitchProperty && (
             <button onClick={onSwitchProperty}
               className="w-full px-4 py-3.5 rounded-2xl bg-white border border-stone-200 hover:border-stone-400 text-left flex items-center gap-3 active:scale-98">
@@ -7817,18 +6393,11 @@ function OtherCleanersTasksPanel({ block }) {
 
   return (
     <div className="mx-4 mt-3 rounded-2xl bg-amber-50 border border-amber-200 overflow-hidden">
-      <div className="px-4 py-3 bg-amber-100">
-        <div className="flex items-center gap-2">
-          <Check size={14} className="text-amber-900" />
-          <div className="text-xs uppercase tracking-wider text-amber-900 font-mono flex-1">
-            Tasks others did today ({totalTasks})
-          </div>
+      <div className="px-4 py-3 bg-amber-100 flex items-center gap-2">
+        <Check size={14} className="text-amber-900" />
+        <div className="text-xs uppercase tracking-wider text-amber-900 font-mono flex-1">
+          Tasks others did today ({totalTasks})
         </div>
-        {(block?.unit?.label || block?.party?.label) && (
-          <div className="text-[11px] text-amber-800 font-mono mt-0.5 pl-6">
-            {block?.unit?.label}{block?.unit?.label && block?.party?.label ? ' · ' : ''}{block?.party?.label}
-          </div>
-        )}
       </div>
       <div className="px-4 py-3 space-y-3">
         {data.byCleaner.map(c => (
@@ -7991,7 +6560,7 @@ function OtherWorkblocksHere({ unitId, partyId, currentBlockId, currentEmployeeI
 // would tangle the logic. Cleaner to have a dedicated screen.
 // =================================================================
 function PreparingBlockView({ shift, pendingStart, employeeName, employee,
-  onSignOut, onCancel, onStart, onSendBackToPending, onReopen, onOpenMessages, onOpenBedroomHistory, onJoinBlock, busy }) {
+  onSignOut, onCancel, onStart, onSendBackToPending, onOpenMessages, onOpenBedroomHistory, onJoinBlock, busy }) {
   const handleLogoClick = () => onCancel();
 
   // Load priority + cleaning types for this bedroom's open assignments
@@ -8023,6 +6592,7 @@ function PreparingBlockView({ shift, pendingStart, employeeName, employee,
          working. Tapping Property or Assignment goes back. */}
       <CleanerProgressBar
         segments={[
+          { label: 'Property', filled: true, onClick: onCancel },
           { label: 'Assignment', filled: true, onClick: onCancel },
           { label: 'Items', filled: false, isCurrent: true },
           { label: 'Working', filled: false },
@@ -8032,7 +6602,7 @@ function PreparingBlockView({ shift, pendingStart, employeeName, employee,
       <div className="bg-stone-900 text-stone-50 px-5 py-5 sticky top-0 z-10 shadow-md">
         <div className="flex items-center justify-between mb-3 gap-2 flex-wrap">
           <button onClick={onCancel}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-stone-700 hover:bg-stone-600 text-stone-50 text-xs font-medium border border-stone-500 active:scale-95 transition">
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-50 text-xs font-medium">
             <Home size={12} /> Property home
           </button>
           <div className="flex items-center gap-2 flex-wrap">
@@ -8043,7 +6613,7 @@ function PreparingBlockView({ shift, pendingStart, employeeName, employee,
                home. Doesn't touch other cleaners' work. */}
             {onSendBackToPending && (
               <button onClick={onSendBackToPending} disabled={busy}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-stone-700 hover:bg-stone-600 text-stone-50 text-xs font-medium border border-stone-500 active:scale-95 transition disabled:opacity-50">
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-50 text-xs font-medium disabled:opacity-50">
                 <ArrowLeft size={12} /> Send back to pending
               </button>
             )}
@@ -8055,23 +6625,15 @@ function PreparingBlockView({ shift, pendingStart, employeeName, employee,
                   unitId: pendingStart.unitId, unitLabel: pendingStart.unitLabel,
                   partyId: pendingStart.partyId, partyLabel: pendingStart.partyLabel
                 })}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-stone-700 hover:bg-stone-600 text-stone-50 text-xs font-medium border border-stone-500 active:scale-95 transition">
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-50 text-xs font-medium">
                 <Clock size={12} /> History
               </button>
             )}
           </div>
         </div>
         <div className="text-xs uppercase tracking-widest text-amber-400 font-mono">Ready to start</div>
-        {/* Property name, prominent — so a cleaner who just switched here
-           knows exactly which property they're at. */}
-        {shift?.customer?.name && (
-          <div className="flex items-center gap-1.5 text-sm text-amber-300 font-mono mt-0.5 mb-1">
-            <Building2 size={13} /> {shift.customer.name}
-          </div>
-        )}
         <div className="font-serif text-2xl text-stone-50 leading-tight">
-          {pendingStart.unitLabel}
-          {partyDisplay(pendingStart.partyLabel) && <> · <span className="italic text-amber-400">{partyDisplay(pendingStart.partyLabel)}</span></>}
+          {pendingStart.unitLabel} · <span className="italic text-amber-400">{pendingStart.partyLabel}</span>
         </div>
         {(bedroomContext.priority || bedroomContext.types.length > 0) && (
           <div className="mt-2 flex items-center gap-1.5 flex-wrap">
@@ -8094,34 +6656,12 @@ function PreparingBlockView({ shift, pendingStart, employeeName, employee,
            The Items step in the progress bar is for picking what
            you'll clean, not for jumping into someone else's session. */}
 
-        {/* Readiness reminders — NOT a checklist to tick, just a calm
-           pre-flight so the cleaner is safe, stocked, at the RIGHT
-           bedroom, and announces themselves on entry. The clock isn't
-           running yet, so there's no pressure. */}
         <div className="p-4 rounded-2xl bg-amber-50 border-2 border-amber-300 mb-4">
-          <div className="text-sm font-medium text-stone-900 mb-2">
-            Before you start{unitPartyLabel(pendingStart.unitLabel, pendingStart.partyLabel)
-              ? <> — heading to <span className="text-amber-800">{unitPartyLabel(pendingStart.unitLabel, pendingStart.partyLabel)}</span></>
-              : ''}
+          <div className="text-xs text-stone-700 leading-relaxed">
+            You're heading to <strong>{pendingStart.unitLabel} · {pendingStart.partyLabel}</strong>.
+            Take your time getting ready — supplies, walking over, double-checking the bedroom. Your clock only
+            starts when you tap the button below.
           </div>
-          <ul className="space-y-2 text-xs text-stone-700">
-            <li className="flex items-start gap-2">
-              <Check size={13} className="text-amber-700 flex-shrink-0 mt-0.5" />
-              <span>Grab your supplies and anything special this job needs.</span>
-            </li>
-            <li className="flex items-start gap-2">
-              <Check size={13} className="text-amber-700 flex-shrink-0 mt-0.5" />
-              <span>Double-check you're at the right bedroom{pendingStart.unitLabel ? <> — <strong>{pendingStart.unitLabel}</strong></> : ''}{partyDisplay(pendingStart.partyLabel) ? <>, <strong>{partyDisplay(pendingStart.partyLabel)}</strong></> : ''}.</span>
-            </li>
-            <li className="flex items-start gap-2">
-              <Check size={13} className="text-amber-700 flex-shrink-0 mt-0.5" />
-              <span>Knock and announce yourself — say your name and that you're here to clean.</span>
-            </li>
-            <li className="flex items-start gap-2">
-              <Check size={13} className="text-amber-700 flex-shrink-0 mt-0.5" />
-              <span>Watch your footing and handle any hazards safely.</span>
-            </li>
-          </ul>
         </div>
 
         <button onClick={onStart} disabled={busy}
@@ -8140,13 +6680,6 @@ function PreparingBlockView({ shift, pendingStart, employeeName, employee,
         <AssignmentBanner propertyId={shift.customer_id}
           unitId={pendingStart.unitId} partyId={pendingStart.partyId}
           employee={employee} />
-
-        {/* What's already happened here — including anyone working it
-           right now, with their photos. You should never have to start a
-           clock just to find out whether a bedroom is half done. */}
-        <AssignmentWorkHistory propertyId={shift.customer_id}
-          unitId={pendingStart.unitId} partyId={pendingStart.partyId}
-          employee={employee} onReopen={onReopen} />
       </div>
     </div>
   );
@@ -8183,15 +6716,13 @@ function UndoMoveMenu({ disabled, canUndo, canMove, onUndo, onMoveBedroom, onMov
     };
   }, [open]);
   return (
-    <div className="inline-block relative" data-undo-menu="root">
+    <div className="mt-2 inline-block relative" data-undo-menu="root">
       <button onClick={() => setOpen(o => !o)} disabled={disabled}
-        aria-label="Something's wrong — undo this workblock or move it"
-        title="Started by mistake, or in the wrong bedroom? Fix it here"
-        className="w-8 h-8 rounded-full bg-stone-700 hover:bg-stone-600 text-stone-100 inline-flex items-center justify-center border border-stone-500 disabled:opacity-50 active:scale-95 transition">
-        <RotateCcw size={14} />
+        className="text-[11px] font-mono uppercase tracking-wider px-2.5 py-1 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-200 inline-flex items-center gap-1.5 disabled:opacity-50">
+        <HelpCircle size={11} /> Something's wrong
       </button>
       {open && (
-        <div className="absolute z-40 top-full right-0 mt-1 w-72 bg-stone-50 rounded-2xl shadow-xl border border-stone-200 overflow-hidden">
+        <div className="absolute z-40 top-full left-0 mt-1 w-72 bg-stone-50 rounded-2xl shadow-xl border border-stone-200 overflow-hidden">
           {canUndo && (
             <button onClick={() => { setOpen(false); onUndo(); }}
               className="w-full text-left px-4 py-3 hover:bg-stone-100 border-b border-stone-100 flex items-start gap-3">
@@ -8228,10 +6759,10 @@ function UndoMoveMenu({ disabled, canUndo, canMove, onUndo, onMoveBedroom, onMov
   );
 }
 
-function BlockView({ shift, block, tasks, activeTask, employeeName, employee, onSignOut, onFinish, onPause, onUndo, onReopen,
+function BlockView({ shift, block, tasks, activeTask, employeeName, employee, onSignOut, onFinish, onPause, onUndo,
   newTaskName, setNewTaskName, onStartTask, onStartTasksFromPicker, onStartChecklistItems, onReleaseTargets, onStopTask, onResumeTask, onAddPhoto,
   photoModal, onClosePhotoModal, onUploadPhoto, onSavePhotoNote, onOpenMessages, onOpenBedroomHistory,
-  onMoveBlock, onMoveMultiple, onLeaveBlock, onJoinBlock, onDeletePhoto, onGoToBedroom, onSwitchProperty, cleanerTab, setCleanerTab, previewMode, busy }) {
+  onMoveBlock, onMoveMultiple, onLeaveBlock, onJoinBlock, onDeletePhoto, cleanerTab, setCleanerTab, previewMode, busy }) {
   useTick(true);
   const blockElapsed = Date.now() - new Date(block.start_time).getTime();
   const activeTaskObj = tasks.find(t => t.id === activeTask);
@@ -8260,10 +6791,6 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
   const totalActive = participants.length;
   // Task input mode toggle: structured picker (default) vs freeform typing
   const [taskInputMode, setTaskInputMode] = useState('picker'); // 'picker' | 'custom'
-  // "Your other jobs" — the Assigned to me / All pending list, shown at the
-  // bottom of the block so the cleaner can see what's next without pausing.
-  // Collapsed by default: the open block is still the point of this screen.
-  const [showWorkList, setShowWorkList] = useState(false);
   // "Move bedroom" modal — shown to owners/managers and in preview
   // mode. Cleaners typically don't see this so they don't accidentally
   // re-attach their work to the wrong bedroom; managers can fix
@@ -8309,54 +6836,6 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
   // Quick-view popup for cleaners — peek at who else is at this property
   const [whosHereOpen, setWhosHereOpen] = useState(false);
 
-  // === Three-tab layout: New / Active / Done ===
-  // 'new'    = the task picker (start something)
-  // 'active' = the current open workblock (running task + your tasks here)
-  // 'done'   = finished workblocks at this bedroom today (yours + others)
-  // Opens on Active when a task is already running, else New.
-  const [blockTab, setBlockTab] = useState(() => activeTask ? 'active' : 'new');
-  // Auto-jump to Active the moment a task starts (activeTask becomes set).
-  useEffect(() => { if (activeTask) setBlockTab('active'); }, [activeTask]);
-
-  // Finished workblocks at THIS bedroom today — closed blocks only, mine +
-  // others, grouped by workblock. Powers the Done tab and replaces the old
-  // standalone "Tasks others did today" panel.
-  const [doneBlocks, setDoneBlocks] = useState({ list: [], loading: true });
-  useEffect(() => {
-    let cancelled = false;
-    const load = async () => {
-      if (!block?.unit_id || !block?.party_id) { if (!cancelled) setDoneBlocks({ list: [], loading: false }); return; }
-      const start = new Date(); start.setHours(0, 0, 0, 0);
-      const { data } = await supabase.from('work_blocks')
-        .select('*, unit:units(*), party:parties(*), shift:shifts!inner(id, employee:employees!inner(id, name)), tasks(id, name, category, subcategory, start_time, end_time)')
-        .eq('unit_id', block.unit_id).eq('party_id', block.party_id)
-        .gte('start_time', start.toISOString())
-        .not('end_time', 'is', null)
-        .neq('id', block.id)
-        .order('start_time', { ascending: false });
-      if (cancelled) return;
-      const list = (data || []).map(b => ({
-        ...b,
-        ownerName: b.shift?.employee?.name || 'A cleaner',
-        ownerId: b.shift?.employee?.id,
-        mine: b.shift?.employee?.id === employee?.id,
-      })).filter(b => (b.tasks || []).length > 0);
-      setDoneBlocks({ list, loading: false });
-    };
-    load();
-    return () => { cancelled = true; };
-    // eslint-disable-next-line
-  }, [block?.id, block?.unit_id, block?.party_id, employee?.id, blockTab]);
-
-  // Reopen a finished workblock → it becomes the active block. Confirm first
-  // when it belongs to someone else (you're picking up their session).
-  const handleReopenDone = (b) => {
-    if (!onReopen) return;
-    if (!b.mine && !confirm(`Reopen ${b.ownerName}'s workblock and continue it?\n\nIt becomes your active workblock at this bedroom.`)) return;
-    setBlockTab('active');
-    onReopen(b);
-  };
-
   return (
     <div className="min-h-screen bg-stone-50 pb-24">
       <Header name={employeeName} onSignOut={onSignOut} role={employee?.role} employee={employee}
@@ -8376,6 +6855,7 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
          can finish or pause the block before navigating. */}
       <CleanerProgressBar
         segments={[
+          { label: 'Property', filled: true },
           { label: 'Assignment', filled: true },
           { label: 'Items', filled: true },
           { label: 'Working', filled: true, isCurrent: true },
@@ -8387,23 +6867,14 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
           if (decision === 'pause') return onPause();
         }} />
       <div className="bg-stone-900 text-stone-50 px-5 py-5 sticky top-0 z-10 shadow-md">
-        <div className="flex items-center justify-between mb-3 gap-2">
-          {/* The logo up top is the way home now — tap it to pause and go
-             back to property home. The old "Property home" button is gone. */}
-          <button onClick={handleLogoClick}
-            className="flex items-center gap-1 text-[10px] uppercase tracking-wider font-mono text-stone-400 hover:text-stone-200 active:scale-95 transition">
-            <Home size={11} /> Tap logo ↑ for home
+        <div className="flex items-center justify-between mb-3">
+          <button onClick={onPause}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-50 text-xs font-medium">
+            <Home size={12} /> Property home
           </button>
-          {(onUndo || canMoveBlock) && (
-            <UndoMoveMenu
-              disabled={busy}
-              canUndo={!!onUndo}
-              canMove={!!canMoveBlock}
-              onUndo={onUndo}
-              onMoveBedroom={() => { setMoveMode('bedroom'); setMoveModalOpen(true); }}
-              onMoveWorkblock={() => { setMoveMode('workblock'); setMoveModalOpen(true); }}
-            />
-          )}
+          {/* The multi-cleaner "leave" action lives on the big bottom
+             button now ("I'm finished here (others stay)"), so we no
+             longer duplicate it as a small header button. */}
         </div>
         <div className="text-xs uppercase tracking-widest text-stone-400 font-mono">Working on</div>
         <div className="font-serif text-2xl text-stone-50 leading-tight">
@@ -8424,14 +6895,35 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
             ))}
           </div>
         )}
-        {/* The "something's wrong" undo/move control moved up into the
-           header's top row (as an undo icon), so it's no longer here. */}
-        {/* Context chip — priority only. The assignment TYPE (e.g. "Cleaning
-           check") used to show here too, but it's already on the assignment
-           card just below, so we dropped the duplicate from the header. */}
-        {bedroomContext.priority && (
+        {/* Consolidated "Something's wrong" menu — single button opens a
+           dropdown with three escape hatches:
+             1) Started by mistake   → undo the workblock entirely
+             2) I'm in the wrong bedroom → move the workblock to a
+                                          different bedroom (keep items)
+             3) Wrong workblock        → move the workblock + reset any
+                                          items the cleaner advanced at
+                                          this bedroom back to pending
+           Replaces the two separate inline links so the header stays
+           tidy and the three options are discoverable together. */}
+        {(onUndo || canMoveBlock) && (
+          <UndoMoveMenu
+            disabled={busy}
+            canUndo={!!onUndo}
+            canMove={!!canMoveBlock}
+            onUndo={onUndo}
+            onMoveBedroom={() => { setMoveMode('bedroom'); setMoveModalOpen(true); }}
+            onMoveWorkblock={() => { setMoveMode('workblock'); setMoveModalOpen(true); }}
+          />
+        )}
+        {/* Context chips for this bedroom — priority + cleaning types
+           pulled from the open assignments here. Shown right under
+           the title so the cleaner sees urgency at a glance. */}
+        {(bedroomContext.priority || bedroomContext.types.length > 0) && (
           <div className="mt-2 flex items-center gap-1.5 flex-wrap">
             <PriorityChip on={bedroomContext.priority} />
+            {bedroomContext.types.map(typ => (
+              <AssignmentTypeChip key={typ} type={typ} />
+            ))}
           </div>
         )}
         {block.unit?.kind === 'townhome' && (block.unit?.bedrooms != null || block.unit?.bathrooms != null) && (
@@ -8481,56 +6973,18 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
         </div>
       )}
 
-      {/* New / Active / Done toggle — splits the old single-scroll view so
-         the cleaner sees one thing at a time. Badges flag where the work is
-         even when looking at another tab. */}
-      <div className="mx-4 mt-4">
-        <div className="grid grid-cols-3 gap-1 p-1 bg-stone-200 rounded-2xl">
-          {[
-            { key: 'new', label: 'New', count: null },
-            { key: 'active', label: 'Active', count: activeTaskObj ? 1 : 0 },
-            { key: 'done', label: 'Done', count: (tasks || []).filter(t => t.id !== activeTask).length + doneBlocks.list.length },
-          ].map(t => {
-            const on = blockTab === t.key;
-            return (
-              <button key={t.key} onClick={() => setBlockTab(t.key)}
-                className={`py-2.5 rounded-xl text-[11px] font-mono uppercase tracking-wider flex items-center justify-center gap-1.5 transition-colors ${on ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
-                {t.key === 'active' && <span className={`w-1.5 h-1.5 rounded-full ${activeTaskObj ? 'bg-amber-600 animate-pulse' : 'bg-stone-300'}`} />}
-                {t.label}
-                {t.count > 0 && <span className={`px-1.5 py-0.5 rounded-full text-[9px] ${on ? 'bg-stone-200 text-stone-700' : 'bg-stone-300 text-stone-600'}`}>{t.count}</span>}
-              </button>
-            );
-          })}
-        </div>
-      </div>
-
-      {blockTab === 'active' && (
-        <>
-          {activeTaskObj ? (
-            <ActiveWorkblockCard task={activeTaskObj}
-              onStop={() => onStopTask(activeTaskObj.id)}
-              onAddPhoto={(kind) => onAddPhoto(activeTaskObj.id, kind)} />
-          ) : (
-            <div className="mx-4 mt-6 text-center py-10 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
-              Nothing running right now.<br />
-              Tap <span className="font-mono text-stone-500">New</span> to start a task, or check <span className="font-mono text-stone-500">Done</span> to resume one.
-            </div>
-          )}
-          <div className="mx-4 mt-4 flex items-center gap-1.5 flex-wrap">
-            <span className="text-[10px] uppercase tracking-wider font-mono text-stone-400">In this workblock:</span>
-            <span className="inline-flex items-center gap-1 text-[11px] font-mono px-2 py-0.5 rounded-full bg-stone-100 text-stone-700 border border-stone-200">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" /> You
-            </span>
-            {others.map(p => (
-              <span key={p.id} className="inline-flex items-center gap-1 text-[11px] font-mono px-2 py-0.5 rounded-full bg-stone-100 text-stone-700 border border-stone-200">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" /> {p.employee?.name || '?'}
-              </span>
-            ))}
-          </div>
-        </>
+      {activeTaskObj && (
+        <ActiveWorkblockCard task={activeTaskObj}
+          onStop={() => onStopTask(activeTaskObj.id)}
+          onAddPhoto={(kind) => onAddPhoto(activeTaskObj.id, kind)} />
       )}
 
-      {blockTab === 'new' && (
+      {/* Blue OtherCleanersActivity card removed — it was redundant
+         with the amber OtherWorkblocksHere card above (both showed
+         "X is here right now"). OtherCleanersTasksPanel moved to the
+         very bottom of this view so it doesn't interfere with the
+         cleaning workflow. */}
+
       <div className="mx-4 mt-4">
         <div className="flex items-center justify-between mb-2">
           <label className="text-xs uppercase tracking-wider text-stone-500 font-mono">Start a new task</label>
@@ -8573,111 +7027,30 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
             </button>
           </div>
         )}
-
-        {/* Close out the whole bedroom — moved here from an always-visible
-           footer so it sits with the other "start work" controls, in New only. */}
-        <div className="mt-6">
-          <button
-            onClick={() => {
-              if (totalActive > 1 && onLeaveBlock) return onLeaveBlock();
-              if (!confirm('Finish ALL assignments in this bedroom?\n\nThis closes out every assignment here and ends your work block. Anything not marked done will be completed automatically.')) return;
-              return onFinish();
-            }}
-            disabled={busy}
-            className="w-full py-4 rounded-2xl bg-amber-700 hover:bg-amber-800 text-stone-50 text-base font-bold flex items-center justify-center gap-2 active:scale-98 transition-transform disabled:opacity-50">
-            <Check size={18} />
-            {totalActive > 1 && onLeaveBlock ? "I'm finished in this bedroom (others stay)" : 'Close out entire bedroom'}
-          </button>
-          {totalActive > 1 && onLeaveBlock && (
-            <div className="text-[11px] text-stone-500 text-center mt-1.5 font-mono">
-              {totalActive} cleaners here · the block stays open until everyone finishes
-            </div>
-          )}
-        </div>
       </div>
-      )}
 
-      {/* Finished tasks in the current block now live in the Done tab
-         ("this session"), so hitting Done on a task moves it out of Active.
-         Active shows only what's running. */}
-
-      {/* DONE — everything finished at this bedroom today: your finished
-         tasks in the current (open) block, plus closed workblocks (yours
-         from earlier + other cleaners'). Tasks resume; blocks reopen. */}
-      {blockTab === 'done' && (() => {
-        const finishedHere = (tasks || []).filter(t => t.id !== activeTask);
-        const nothing = finishedHere.length === 0 && doneBlocks.list.length === 0;
-        return (
-        <div className="mx-4 mt-4">
-          <div className="flex items-center justify-between mb-3">
-            <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">Finished here today</div>
-            {(block?.unit?.label || block?.party?.label) && (
-              <div className="text-[11px] text-stone-400 font-mono">
-                {block?.unit?.label}{block?.unit?.label && block?.party?.label ? ' · ' : ''}{block?.party?.label}
-              </div>
-            )}
+      <div className="mx-4 mt-6">
+        <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-3">Tasks for this party</div>
+        {tasks.length === 0 ? (
+          <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
+            Add a task above when you start cleaning.
           </div>
-          {doneBlocks.loading && nothing ? (
-            <div className="text-center py-10 text-stone-400 text-sm font-mono">Loading…</div>
-          ) : nothing ? (
-            <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
-              Nothing finished here yet today.
-            </div>
-          ) : (
-            <div className="space-y-4">
-              {finishedHere.length > 0 && (
-                <div>
-                  <div className="text-[10px] uppercase tracking-wider text-stone-400 font-mono mb-2">This session · tap ▶ to resume</div>
-                  <div className="space-y-3">
-                    {finishedHere.map(t => (
-                      <TaskCard key={t.id} task={t} isActive={false}
-                        onStop={() => onStopTask(t.id)} onResume={() => onResumeTask(t.id)}
-                        onAddPhoto={(kind) => onAddPhoto(t.id, kind)} />
-                    ))}
-                  </div>
-                </div>
-              )}
-              {doneBlocks.list.length > 0 && (
-                <div>
-                  <div className="text-[10px] uppercase tracking-wider text-stone-400 font-mono mb-2">Closed workblocks</div>
-                  <div className="space-y-3">
-                    {doneBlocks.list.map(b => {
-                      const bTasks = b.tasks || [];
-                      const dur = b.end_time ? (new Date(b.end_time) - new Date(b.start_time)) : null;
-                      return (
-                        <div key={b.id} className="p-4 rounded-2xl bg-white border border-stone-200">
-                          <div className="flex items-start justify-between gap-3">
-                            <span className={`inline-flex items-center gap-1 text-[10px] uppercase tracking-wider font-mono px-2 py-1 rounded-full ${b.mine ? 'bg-emerald-50 text-emerald-800 border border-emerald-200' : 'bg-amber-50 text-amber-800 border border-amber-200'}`}>
-                              <User size={11} /> {b.mine ? 'You' : b.ownerName}
-                            </span>
-                            <button onClick={() => handleReopenDone(b)} disabled={busy}
-                              aria-label="Reopen workblock"
-                              className="w-9 h-9 rounded-full bg-stone-900 text-stone-50 flex items-center justify-center active:scale-95 transition-transform disabled:opacity-40">
-                              <Play size={15} />
-                            </button>
-                          </div>
-                          <div className="mt-2.5 flex flex-wrap gap-x-3 gap-y-1">
-                            {bTasks.map(t => (
-                              <span key={t.id} className="font-serif text-[15px] text-stone-900">{splitTaskName(t.name)[0] || t.name}</span>
-                            ))}
-                          </div>
-                          <div className="mt-2 text-[10px] text-stone-500 font-mono">
-                            {fmtClock(b.start_time)} – {fmtClock(b.end_time)}{dur ? ` · ${fmtTimeShort(dur)}` : ''} · {bTasks.length} task{bTasks.length === 1 ? '' : 's'}
-                          </div>
-                          <div className="mt-2 text-[10px] text-stone-500 font-mono flex items-center gap-1.5">
-                            <Play size={11} /> {b.mine ? 'Tap play to reopen and keep working' : `Tap play to reopen ${b.ownerName}'s block`}
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-        );
-      })()}
+        ) : (
+          <div className="space-y-3">
+            {tasks
+              // Active task is already rendered at the top of the
+              // screen with its photo buttons — skip it here so the
+              // cleaner doesn't see it twice. The list below shows
+              // paused / done tasks only.
+              .filter(t => t.id !== activeTask)
+              .map(t => (
+              <TaskCard key={t.id} task={t} isActive={false}
+                onStop={() => onStopTask(t.id)} onResume={() => onResumeTask(t.id)}
+                onAddPhoto={(kind) => onAddPhoto(t.id, kind)} />
+            ))}
+          </div>
+        )}
+      </div>
 
       {photoModal && (
         <PhotoModal kind={photoModal.kind}
@@ -8706,35 +7079,41 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
           } : null}
           onClose={() => setMoveModalOpen(false)} />
       )}
-      {/* The "Close out entire bedroom" button now lives inside the New tab
-         (with the task picker) instead of always-on-screen, so it can't be
-         hit by accident while a cleaner is mid-task. */}
-
-      {/* "Tasks others did today" panel removed — its contents now live in
-         the Done tab above, grouped by workblock and labeled by cleaner. */}
-
-      {/* The rest of the day, without leaving this block. The active
-         block still owns the top of the screen; this just means the
-         cleaner no longer has to finish or pause to see what's next.
-         Collapsed by default so it can't crowd out the work in hand.
-         Tapping another bedroom routes through onGoToBedroom, which
-         raises the switch-bedroom prompt rather than silently
-         abandoning the open block. */}
-      <div className="mx-4 mt-6 mb-2">
-        <button onClick={() => setShowWorkList(v => !v)}
-          className="w-full flex items-center justify-between gap-2 px-4 py-3 rounded-2xl bg-white border border-stone-200 active:scale-98 transition-transform">
-          <span className="text-xs uppercase tracking-wider font-mono text-stone-500 flex items-center gap-2">
-            <Layers size={13} /> Your other jobs
-          </span>
-          <ChevronRight size={15} className={`text-stone-400 transition-transform ${showWorkList ? 'rotate-90' : ''}`} />
+      {/* "Finished entire assignment" — the natural endpoint of the
+         cleaning workflow. After the cleaner works through their tasks,
+         this is the next thing they see. Behavior depends on whether
+         the workblock is shared:
+           • Solo (totalActive <= 1): onFinish closes the block and
+             marks in-progress items done.
+           • Multi-cleaner (totalActive > 1): onLeaveBlock signs THIS
+             cleaner out of the shared block but keeps it open for the
+             others. The last person to leave triggers the finish +
+             pending-items prompt (handled inside leaveBlock). So one
+             cleaner finishing never kicks the others out. */}
+      <div className="mx-4 mt-6 mb-4">
+        <button
+          onClick={() => {
+            if (totalActive > 1 && onLeaveBlock) return onLeaveBlock();
+            if (!confirm('Finish ALL assignments in this bedroom?\n\nThis closes out every assignment here and ends your work block. Anything not marked done will be completed automatically.')) return;
+            return onFinish();
+          }}
+          disabled={busy}
+          className="w-full py-4 rounded-2xl bg-amber-700 hover:bg-amber-800 text-stone-50 text-base font-bold flex items-center justify-center gap-2 active:scale-98 transition-transform disabled:opacity-50">
+          <Check size={18} />
+          {totalActive > 1 && onLeaveBlock ? "I'm finished in this bedroom (others stay)" : 'Finished All Assignments'}
         </button>
+        {totalActive > 1 && onLeaveBlock && (
+          <div className="text-[11px] text-stone-500 text-center mt-1.5 font-mono">
+            {totalActive} cleaners here · the block stays open until everyone finishes
+          </div>
+        )}
       </div>
-      {showWorkList && (
-        <div className="-mt-1">
-          <CleanerWorkList employee={employee} currentPropertyId={shift.customer_id}
-            onGoToBedroom={onGoToBedroom} onSwitchProperty={onSwitchProperty} />
-        </div>
-      )}
+
+      {/* Tasks others did today — moved to the very bottom so it
+         doesn't interfere with the cleaner's workflow. Shows when
+         another cleaner has logged work at this bedroom earlier
+         today. */}
+      <OtherCleanersTasksPanel block={block} />
 
       {/* Persistent bottom nav — lets the cleaner peek at Assignments
          or More without finishing/pausing the workblock. The block
@@ -9408,7 +7787,7 @@ function ViewOnlyDashboard({ employee, property, onSignOut, onEndViewing, onOpen
             )}
           </div>
           <button onClick={() => setShowMenu(true)}
-            className="px-3 py-1.5 rounded-full bg-stone-700 hover:bg-stone-600 text-stone-50 text-xs font-medium border border-stone-500 active:scale-95 transition flex items-center gap-1.5 flex-shrink-0">
+            className="px-3 py-1.5 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-50 text-xs font-medium flex items-center gap-1.5 flex-shrink-0">
             <Menu size={12} /> More
           </button>
         </div>
@@ -9483,13 +7862,6 @@ function ViewOnlyAssignmentsPanel({ propertyId, employee, onOpenBedroomHistory }
   const dueTodayCount = targets.filter(t => t.status !== 'done' && t.assignment?.scheduled_date === todayKey).length;
   const overdueCount = targets.filter(t => t.status !== 'done' && t.assignment?.scheduled_date && t.assignment.scheduled_date < todayKey).length;
 
-  const canEditDates = can(employee, 'edit_due_dates');
-  const [editDateId, setEditDateId] = useState(null);
-  const saveDue = async (id, date) => {
-    setEditDateId(null);
-    if (id) { await supabase.from('assignments').update({ scheduled_date: date || null }).eq('id', id); load(); }
-  };
-
   const visible = filter === 'open'
     ? targets.filter(t => t.status !== 'done').sort((a, b) => {
         const ra = dueRank(a), rb = dueRank(b);
@@ -9540,9 +7912,9 @@ function ViewOnlyAssignmentsPanel({ propertyId, employee, onOpenBedroomHistory }
                 <div className="flex items-start justify-between gap-2 mb-2">
                   <div className="flex-1 min-w-0">
                     <div className="font-serif text-base text-stone-900 truncate">{a.title}</div>
-                    {unitPartyLabel(t.unit?.label, t.party?.label) && (
+                    {(t.unit?.label || t.party?.label) && (
                       <div className="text-xs font-mono text-stone-500 mt-0.5">
-                        {unitPartyLabel(t.unit?.label, t.party?.label)}
+                        {t.unit?.label}{t.party?.label && ` · ${t.party.label}`}
                       </div>
                     )}
                     {a.notes && (
@@ -9557,30 +7929,7 @@ function ViewOnlyAssignmentsPanel({ propertyId, employee, onOpenBedroomHistory }
                           {assignmentTypeLabel(a.assignment_type)}
                         </span>
                       )}
-                      {t.status === 'done' ? (
-                        <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-stone-900 text-white flex items-center gap-1">
-                          <Check size={9} /> {t.completed_at ? `Done ${fmtDueDate(String(t.completed_at).slice(0,10))}` : 'Done'}
-                        </span>
-                      ) : editDateId === a.id ? (
-                        <input type="date" autoFocus value={a.scheduled_date || ''}
-                          onChange={(e) => saveDue(a.id, e.target.value)}
-                          onBlur={() => setEditDateId(null)}
-                          onClick={(e) => e.stopPropagation()}
-                          className="text-[10px] font-mono px-1.5 py-0.5 rounded border border-stone-400 bg-white" />
-                      ) : canEditDates ? (
-                        <button onClick={(e) => { e.stopPropagation(); setEditDateId(a.id); }}
-                          className={`text-[10px] font-mono px-2 py-0.5 rounded-full border flex items-center gap-1 ${a.scheduled_date
-                            ? (a.scheduled_date < todayKey ? 'bg-red-100 text-red-700 border-red-200'
-                               : a.scheduled_date === todayKey ? 'bg-emerald-100 text-emerald-800 border-emerald-200'
-                               : 'bg-stone-200 text-stone-600 border-stone-300')
-                            : 'bg-white text-stone-500 border-dashed border-stone-300'}`}>
-                          <Calendar size={9} /> {a.scheduled_date
-                            ? (a.scheduled_date < todayKey ? `Overdue · ${fmtDueDate(a.scheduled_date)}`
-                               : a.scheduled_date === todayKey ? 'Today'
-                               : fmtDueDate(a.scheduled_date))
-                            : 'Set due date'}
-                        </button>
-                      ) : a.scheduled_date && (
+                      {a.scheduled_date && (
                         a.scheduled_date < todayKey ? (
                           <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-red-100 text-red-700 flex items-center gap-1">
                             <Calendar size={9} /> Overdue · {fmtDueDate(a.scheduled_date)}
@@ -10616,7 +8965,7 @@ function Header({ name, onSignOut, role, employee, onOpenMessages, onLogoClick, 
             <span className="text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-stone-700 text-stone-50">Manager</span>
           )}
         </div>
-        <div className="text-[10px] font-mono opacity-60">TidyTrack · {BUILD_TAG}</div>
+        <div className="text-[10px] font-mono opacity-60">TidyTrack</div>
       </div>
     </div>
   );
@@ -10704,7 +9053,7 @@ function Header({ name, onSignOut, role, employee, onOpenMessages, onLogoClick, 
           <button onClick={onOpenWhosHere}
             className="relative p-2 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-50"
             title="Who's here right now">
-            <Users size={18} />
+            <User size={18} />
           </button>
         )}
         {menuItems && menuItems.length > 0 && (
@@ -10856,31 +9205,30 @@ function ManagerShell({ employee, onSignOut }) {
       <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-stone-200 px-1 py-2 z-30">
         {isOwner ? (
           <div className="max-w-md mx-auto">
-            {/* Operations / Business hat toggle — color-coded so the two
-               modes read as distinct contexts, matching their nav tabs. */}
+            {/* Operations / Business hat toggle */}
             <div className="flex gap-1 bg-stone-100 p-1 rounded-xl mb-2">
               <button onClick={() => switchMode('ops')}
-                className={`flex-1 py-1.5 px-3 rounded-lg text-xs font-medium ${mode === 'ops' ? 'bg-stone-900 text-white shadow-sm' : 'text-stone-500'}`}>
+                className={`flex-1 py-1.5 px-3 rounded-lg text-xs font-medium ${mode === 'ops' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
                 Operations
               </button>
               <button onClick={() => switchMode('business')}
-                className={`flex-1 py-1.5 px-3 rounded-lg text-xs font-medium ${mode === 'business' ? 'bg-amber-700 text-white shadow-sm' : 'text-stone-500'}`}>
+                className={`flex-1 py-1.5 px-3 rounded-lg text-xs font-medium ${mode === 'business' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
                 Business
               </button>
             </div>
             {mode === 'ops' ? (
               <div className="grid gap-0.5" style={{ gridTemplateColumns: 'repeat(4, minmax(0, 1fr))' }}>
-                <TabButton tone="ops" active={tab==='daily'}         onClick={() => setTab('daily')}          icon={<Calendar size={18} />}        label="Daily" />
-                <TabButton tone="ops" active={tab==='assignments'}   onClick={() => setTab('assignments')}    icon={<FileText size={18} />}        label="Assignments" />
-                <TabButton tone="ops" active={tab==='dashboard'}     onClick={() => setTab('dashboard')}      icon={<LayoutDashboard size={18} />} label="Shifts" />
-                <TabButton tone="ops" active={false}                 onClick={() => setPreviewMode(true)}     icon={<Eye size={18} />}             label="Cleaner view" />
+                <TabButton active={false}                 onClick={() => setPreviewMode(true)}     icon={<Eye size={18} />}             label="Clean" />
+                <TabButton active={tab==='assignments'}   onClick={() => setTab('assignments')}    icon={<FileText size={18} />}        label="Assignments" />
+                <TabButton active={tab==='daily'}         onClick={() => setTab('daily')}          icon={<Calendar size={18} />}        label="Daily" />
+                <TabButton active={tab==='dashboard'}     onClick={() => setTab('dashboard')}      icon={<LayoutDashboard size={18} />} label="Shifts" />
               </div>
             ) : (
               <div className="grid gap-0.5" style={{ gridTemplateColumns: `repeat(${showMoneyTabs ? 4 : 3}, minmax(0, 1fr))` }}>
-                <TabButton tone="business" active={tab==='props'} onClick={() => setTab('props')} icon={<Building2 size={18} />} label="Properties" />
-                {showMoneyTabs && <TabButton tone="business" active={tab==='money'} onClick={() => setTab('money')} icon={<DollarSign size={18} />} label="Money" />}
-                <TabButton tone="business" active={tab==='team'}  onClick={() => setTab('team')}  icon={<TeamClockIcon size={18} />} label="Team" />
-                <TabButton tone="business" active={false} onClick={() => setPmPreview(true)} icon={<Eye size={18} />} label="PM view" />
+                <TabButton active={tab==='props'} onClick={() => setTab('props')} icon={<Building2 size={18} />} label="Properties" />
+                {showMoneyTabs && <TabButton active={tab==='money'} onClick={() => setTab('money')} icon={<DollarSign size={18} />} label="Money" />}
+                <TabButton active={tab==='team'}  onClick={() => setTab('team')}  icon={<Users size={18} />} label="Team" />
+                <TabButton active={false} onClick={() => setPmPreview(true)} icon={<Eye size={18} />} label="PM view" />
               </div>
             )}
           </div>
@@ -10888,7 +9236,7 @@ function ManagerShell({ employee, onSignOut }) {
           <div className="max-w-md mx-auto grid gap-0.5" style={{ gridTemplateColumns: `repeat(${colCount}, minmax(0, 1fr))` }}>
             <TabButton active={tab==='daily'}       onClick={() => setTab('daily')}       icon={<Calendar size={18} />} label="Daily" />
             <TabButton active={tab==='dashboard'}   onClick={() => setTab('dashboard')}   icon={<LayoutDashboard size={18} />} label="Shifts" />
-            <TabButton active={tab==='team'}        onClick={() => setTab('team')}        icon={<TeamClockIcon size={18} />} label="Team" />
+            <TabButton active={tab==='team'}        onClick={() => setTab('team')}        icon={<Users size={18} />} label="Team" />
             <TabButton active={tab==='props'}       onClick={() => setTab('props')}       icon={<Building2 size={18} />} label="Properties" />
             <TabButton active={tab==='assignments'} onClick={() => setTab('assignments')} icon={<FileText size={18} />} label="Assignments" />
           </div>
@@ -10899,32 +9247,10 @@ function ManagerShell({ employee, onSignOut }) {
   );
 }
 
-// Team icon: people with a small clock badge, to signify "who's on the
-// clock". lucide has no UserClock in this version, so we compose Users +
-// Clock rather than risk a missing import that would crash the app.
-function TeamClockIcon({ size = 18 }) {
-  return (
-    <span className="relative inline-flex" style={{ width: size, height: size }}>
-      <Users size={size} />
-      <span className="absolute -bottom-1 -right-1 rounded-full flex items-center justify-center ring-1 ring-current bg-white"
-        style={{ width: size * 0.64, height: size * 0.64 }}>
-        <Clock size={size * 0.48} className="text-stone-900" strokeWidth={2.5} />
-      </span>
-    </span>
-  );
-}
-
-function TabButton({ active, onClick, icon, label, badge, tone = 'ops' }) {
-  // Every tab carries its mode's color: filled when active, outlined when
-  // not. Operations = dark, Business = amber — so all four tabs read as
-  // belonging to the mode above them, not just the selected one.
-  const activeCls = tone === 'business' ? 'bg-amber-700 text-white border-2 border-amber-700' : 'bg-stone-900 text-stone-50 border-2 border-stone-900';
-  const idleCls = tone === 'business'
-    ? 'border-2 border-amber-300 text-amber-800 hover:border-amber-700'
-    : 'border-2 border-stone-300 text-stone-600 hover:border-stone-900';
+function TabButton({ active, onClick, icon, label, badge }) {
   return (
     <button onClick={onClick}
-      className={`relative flex flex-col items-center gap-0.5 py-1.5 px-1 rounded-xl transition-colors ${active ? activeCls : idleCls}`}>
+      className={`relative flex flex-col items-center gap-0.5 py-1.5 px-1 rounded-xl transition-colors ${active ? 'bg-stone-900 text-stone-50' : 'text-stone-500 hover:text-stone-900'}`}>
       {icon}
       <span className="text-[9px] font-mono uppercase tracking-wider">{label}</span>
       {badge > 0 && (
@@ -10968,7 +9294,7 @@ function ManagerDashboard({ employee, onSignOut, onOpenMessages, onLogoClick }) 
     for (let from = 0; ; from += PAGE) {
       let q = supabase
         .from('shifts')
-        .select('*, employee:employees(id,name,pay_rate_hourly), customer:customers(id,name,property_type,bill_rate_hourly), work_blocks(id, end_time, start_time, bill_rate_at_work, unit:units(label), party:parties(label))')
+        .select('*, employee:employees(id,name), customer:customers(id,name,property_type,bill_rate_hourly), work_blocks(id, end_time, start_time, bill_rate_at_work, unit:units(label), party:parties(label))')
         .eq('is_preview', false)
         .order('start_time', { ascending: false })
         .range(from, from + PAGE - 1);
@@ -10983,22 +9309,6 @@ function ManagerDashboard({ employee, onSignOut, onOpenMessages, onLogoClick }) 
     setShifts(rows); setLoaded(true);
   }, [dateFrom, dateTo]);
   useEffect(() => { load(); }, [load, view]);
-
-  // Keep the drill-down in sync with the cleaner filter. Without this you
-  // can be drilled into cleaner A while the filter only allows cleaner B,
-  // which shows an empty "Cleaner · 0 days" screen.
-  useEffect(() => {
-    if (!selectedCleanerId) {
-      // Filtering to exactly one cleaner drills straight into them.
-      if (filterCleaners.size === 1) setSelectedCleanerId(Array.from(filterCleaners)[0]);
-      return;
-    }
-    if (filterCleaners.size && !filterCleaners.has(selectedCleanerId)) {
-      setSelectedCleanerId(filterCleaners.size === 1 ? Array.from(filterCleaners)[0] : null);
-    }
-    /* eslint-disable-next-line */
-  }, [filterCleaners]);
-
 
   if (!loaded) return <Splash text="Loading shifts…" />;
   if (view === 'detail' && selectedShift) {
@@ -11116,13 +9426,19 @@ function ManagerDashboard({ employee, onSignOut, onOpenMessages, onLogoClick }) 
                     className={`px-3 py-1 rounded-full text-xs font-mono ${isAllTime ? 'bg-stone-900 text-stone-50' : 'bg-white border border-stone-300 text-stone-600'}`}>
                     All time
                   </button>
-                  <div className="flex-1 min-w-[180px]">
-                    <DateRangePicker start={dateFrom} end={dateTo}
-                      onChange={(s2, e2) => { setDateFrom(s2); setDateTo(e2); }} />
-                  </div>
+                  <label className="flex items-center gap-1 text-xs font-mono text-stone-600">
+                    <span className="text-stone-400">From</span>
+                    <input type="date" value={dateFrom} max={dateTo || undefined} onChange={e => setDateFrom(e.target.value)}
+                      className="px-2 py-1 rounded-lg border border-stone-300 bg-white text-stone-700" />
+                  </label>
+                  <label className="flex items-center gap-1 text-xs font-mono text-stone-600">
+                    <span className="text-stone-400">To</span>
+                    <input type="date" value={dateTo} min={dateFrom || undefined} onChange={e => setDateTo(e.target.value)}
+                      className="px-2 py-1 rounded-lg border border-stone-300 bg-white text-stone-700" />
+                  </label>
                 </div>
                 <div className="text-[10px] font-mono text-stone-400 mt-1">
-                  Tap the range to pick start and end on one calendar, or All time for everything.
+                  Pick a From/To range, or All time to show everything.
                 </div>
               </div>
 
@@ -11184,8 +9500,6 @@ function ManagerDashboard({ employee, onSignOut, onOpenMessages, onLogoClick }) 
         <ShiftsByCleanerView shifts={filteredShifts} showMoney={showMoney}
           selectedCleanerId={selectedCleanerId}
           onSelectCleaner={setSelectedCleanerId}
-          currentEmployee={employee}
-          onReload={load}
           onOpenShift={(s) => { setSelectedShift(s); setView('detail'); }} />
       ) : subView === 'today' ? (
         <GroupedByPartyView shifts={filteredShifts} showMoney={showMoney}
@@ -11292,115 +9606,11 @@ const localDayKey = (ts) => {
 // many shifts they logged). Drill in = that cleaner's work grouped BY DAY
 // (a day with two shifts is one row, not two). A day expands to its
 // shift(s); clicking a shift opens the full detail.
-function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCleaner, onOpenShift, currentEmployee, onReload }) {
+function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCleaner, onOpenShift }) {
   const [expandedDays, setExpandedDays] = useState(new Set());
   const toggleDay = (k) => setExpandedDays(prev => {
     const n = new Set(prev); n.has(k) ? n.delete(k) : n.add(k); return n;
   });
-
-  // Pay tracking (v47). One row per cleaner per work day.
-  const [payDays, setPayDays] = useState({}); // `${empId}:${dateKey}` -> row
-  const [payBusy, setPayBusy] = useState(null);
-  const [adjusting, setAdjusting] = useState(null); // day key being edited
-  const [adjH, setAdjH] = useState('');
-  const [adjM, setAdjM] = useState('');
-  const monthStart = (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-01`; })();
-
-  const loadPay = async () => {
-    const { data, error } = await supabase.from('employee_pay_days')
-      .select('*').gte('work_date', monthStart);
-    if (error) return; // table not created yet
-    const m = {};
-    (data || []).forEach(r => { m[`${r.employee_id}:${r.work_date}`] = r; });
-    setPayDays(m);
-  };
-  useEffect(() => { loadPay(); /* eslint-disable-next-line */ }, []);
-
-  const payOwed = (dayShifts) => {
-    const rate = Number(dayShifts[0]?.employee?.pay_rate_hourly) || 0;
-    if (!rate) return 0;
-    const ms = dayShifts.filter(s => s.end_time).reduce((sum, s) => sum + shiftBillableMs(s), 0);
-    return (ms / 3600000) * rate;
-  };
-  const togglePaid = async (empId, dateKey, amount) => {
-    const key = `${empId}:${dateKey}`;
-    const existing = payDays[key];
-    setPayBusy(key);
-    if (existing?.paid_at) {
-      await supabase.from('employee_pay_days').update({ paid_at: null }).eq('id', existing.id);
-    } else if (existing) {
-      await supabase.from('employee_pay_days').update({ paid_at: new Date().toISOString(), amount }).eq('id', existing.id);
-    } else {
-      await supabase.from('employee_pay_days').insert({
-        employee_id: empId, work_date: dateKey, paid_at: new Date().toISOString(),
-        amount, created_by: currentEmployee?.id || null,
-      });
-    }
-    setPayBusy(null);
-    await loadPay();
-  };
-  // Set the TOTAL worked time for a whole day. manual_adjustment_seconds
-  // is an OFFSET added to raw clocked time, so to make the day total the
-  // target we solve for the offset instead of storing the target itself.
-  // The offset lands on the day's longest finished shift; any other
-  // shifts that day keep their own raw time, so the day sums to the target.
-  const saveAdjust = async (dayShifts, hours, mins) => {
-    const h = parseFloat(hours) || 0;
-    const m = parseFloat(mins) || 0;
-    if (hours === '' && mins === '') { setAdjusting(null); return; }
-    const targetSec = Math.round(h * 3600 + m * 60);
-    if (targetSec < 0) { setAdjusting(null); return; }
-    if (!dayShifts.length) { setAdjusting(null); return; }
-
-    // Force the WHOLE DAY to `targetSec`, however many shifts there are.
-    // The old code only nudged the single longest shift, which can't work
-    // when 19 shifts each carry ~13h — one negative offset can't cancel
-    // 240h spread across the others (it clamps at zero). Instead:
-    //   • the FIRST shift becomes the anchor and carries the full target
-    //     (closed at start + target if it was open),
-    //   • every other shift is zeroed — closed at its own start_time with
-    //     adjustment 0, so it contributes nothing,
-    //   • open work blocks under any of them get closed.
-    // Net: the day reads exactly what you typed, and nothing keeps ticking.
-    const anyOpen = dayShifts.some(s => !s.end_time);
-    if (anyOpen && !confirm('Some of these shifts were never clocked out. Set the whole day to the hours you entered and close them?')) {
-      setAdjusting(null); return;
-    }
-    setPayBusy('adj');
-    const ordered = dayShifts.slice().sort((a, b) => new Date(a.start_time) - new Date(b.start_time));
-    const anchor = ordered[0];
-    const anchorRawSec = anchor.end_time
-      ? Math.max(0, (new Date(anchor.end_time) - new Date(anchor.start_time)) / 1000 - (anchor.idle_seconds || 0))
-      : 0;
-    // If the anchor is still open, close it at start + target and use no
-    // offset; if it's closed, keep its end_time and use an offset to reach
-    // the target exactly.
-    if (anchor.end_time) {
-      await supabase.from('shifts').update({
-        manual_adjustment_seconds: Math.round(targetSec - anchorRawSec),
-      }).eq('id', anchor.id);
-    } else {
-      const anchorEnd = new Date(new Date(anchor.start_time).getTime() + targetSec * 1000).toISOString();
-      await supabase.from('shifts').update({
-        end_time: anchorEnd, manual_adjustment_seconds: 0, idle_seconds: 0,
-      }).eq('id', anchor.id);
-      await supabase.from('work_blocks').update({ end_time: anchorEnd }).eq('shift_id', anchor.id).is('end_time', null);
-    }
-    // Zero out every other shift on the day.
-    for (const s of ordered.slice(1)) {
-      await supabase.from('shifts').update({
-        end_time: s.start_time, manual_adjustment_seconds: 0, idle_seconds: 0,
-      }).eq('id', s.id);
-      await supabase.from('work_blocks').update({ end_time: s.start_time }).eq('shift_id', s.id).is('end_time', null);
-    }
-    setPayBusy(null); setAdjusting(null);
-    onReload && onReload();
-  };
-  const isUnpaidStale = (dateKey, paid) => {
-    if (paid) return false;
-    if (dateKey < monthStart) return false; // don't chase old history
-    return (Date.now() - new Date(dateKey + 'T00:00:00').getTime()) > 7 * 86400000;
-  };
 
   // ---- Level 1: cleaner cards -----------------------------------------
   if (!selectedCleanerId) {
@@ -11455,19 +9665,6 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
   // ---- Level 2: one cleaner's days ------------------------------------
   const cShifts = shifts.filter(s => s.employee?.id === selectedCleanerId);
   const name = cShifts[0]?.employee?.name || 'Cleaner';
-  if (cShifts.length === 0) {
-    return (
-      <div className="px-5">
-        <button onClick={() => onSelectCleaner(null)}
-          className="flex items-center gap-1.5 text-xs font-mono text-stone-500 hover:text-stone-800 mb-3">
-          <ArrowLeft size={14} /> All cleaners
-        </button>
-        <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
-          No shifts for this cleaner in the selected dates. Try widening the date range or “All time”.
-        </div>
-      </div>
-    );
-  }
   const byDay = new Map();
   cShifts.forEach(s => {
     const k = localDayKey(s.start_time);
@@ -11515,112 +9712,11 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
                     <Building2 size={11} /> {props.join(' · ')}
                   </div>
                 )}
-                {/* Still-running shifts on a PAST day = forgotten clock-outs.
-                   They tick forever and blow up the total (the 246h you saw).
-                   Flag it and point at the fix. */}
-                {(() => {
-                  const stillOpen = d.shifts.filter(s => !s.end_time).length;
-                  const isToday = d.key === new Date().toISOString().slice(0, 10);
-                  const dayHrs = totalMs / 3600000;
-                  // A single person can't bill much over ~16h in a day.
-                  // Flag either still-running shifts OR a closed day whose
-                  // total is impossibly long (forgotten clock-outs that got
-                  // closed days later still read as huge).
-                  const runaway = dayHrs > 16;
-                  if ((stillOpen === 0 && !runaway) || isToday) return null;
-                  return (
-                    <div className="text-[11px] font-mono text-red-700 bg-red-50 border border-red-200 rounded-lg px-2 py-1 mb-1.5">
-                      {stillOpen > 0
-                        ? `${stillOpen} shift${stillOpen === 1 ? '' : 's'} never clocked out — still counting.`
-                        : `${dayHrs.toFixed(0)}h on one day is almost certainly a forgotten clock-out.`}
-                      {' '}Use Adjust hours to set the real time.
-                    </div>
-                  );
-                })()}
-                {/* What they actually cleaned, and when. The blocks were
-                   already loaded with their unit/party labels — the card
-                   just never showed them, so "3 blocks" was all you got. */}
-                {(() => {
-                  const blocksList = d.shifts.flatMap(s => (s.work_blocks || []).map(b => ({ ...b, propName: s.customer?.name || '' })))
-                    .filter(b => b.start_time)
-                    .sort((a, b) => new Date(a.start_time) - new Date(b.start_time));
-                  if (blocksList.length === 0) return null;
-                  const show = blocksList.slice(0, 5);
-                  return (
-                    <div className="mb-1.5 space-y-0.5">
-                      {show.map(b => {
-                        const label = unitPartyLabel(b.unit?.label, b.party?.label) || 'No bedroom set';
-                        const ms = b.end_time ? (new Date(b.end_time) - new Date(b.start_time)) : 0;
-                        return (
-                          <div key={b.id} className="flex items-center justify-between gap-2 text-[11px] font-mono">
-                            <span className="text-stone-700 truncate">{label}</span>
-                            <span className="text-stone-400 flex-shrink-0">
-                              {fmtClock(b.start_time)}{b.end_time ? `–${fmtClock(b.end_time)}` : ' · running'}
-                              {b.end_time && ms > 0 ? ` · ${fmtTimeShort(ms)}` : ''}
-                            </span>
-                          </div>
-                        );
-                      })}
-                      {blocksList.length > show.length && (
-                        <div className="text-[10px] font-mono text-stone-400">
-                          +{blocksList.length - show.length} more — open the day to see them
-                        </div>
-                      )}
-                    </div>
-                  );
-                })()}
                 <div className="flex items-center justify-between text-xs text-stone-500 font-mono">
                   <span>{d.shifts.length} {d.shifts.length === 1 ? 'shift' : 'shifts'} · {blocks} {blocks === 1 ? 'block' : 'blocks'} · {fmtTimeShort(totalMs)}</span>
                   {showMoney && billable > 0 && <span className="text-emerald-700 font-medium">{fmtMoney(billable)}</span>}
                 </div>
               </button>
-              {showMoney && (() => {
-                const owed = payOwed(d.shifts);
-                const key = `${selectedCleanerId}:${d.key}`;
-                const row = payDays[key];
-                const paid = !!row?.paid_at;
-                const stale = isUnpaidStale(d.key, paid);
-                return (
-                  <div className={`px-4 py-2.5 border-t flex items-center justify-between gap-2 flex-wrap ${stale ? 'bg-amber-50 border-amber-200' : 'border-stone-100'}`}>
-                    <div className="text-xs font-mono">
-                      <span className="text-stone-500">You owe </span>
-                      <span className="text-stone-900 font-bold">{owed > 0 ? fmtMoney(owed) : '—'}</span>
-                      {owed === 0 && <span className="text-stone-400"> (set a pay rate)</span>}
-                      {stale && <span className="text-amber-700"> · unpaid 7+ days</span>}
-                    </div>
-                    <div className="flex items-center gap-1.5">
-                      {adjusting === d.key ? (
-                        <span className="flex items-center gap-1">
-                          <input type="number" min="0" autoFocus value={adjH} onChange={e => setAdjH(e.target.value)}
-                            placeholder="h"
-                            className="w-12 px-1.5 py-0.5 rounded border border-stone-300 text-xs font-mono" />
-                          <span className="text-[10px] text-stone-400">h</span>
-                          <input type="number" min="0" max="59" value={adjM} onChange={e => setAdjM(e.target.value)}
-                            placeholder="m"
-                            className="w-12 px-1.5 py-0.5 rounded border border-stone-300 text-xs font-mono" />
-                          <span className="text-[10px] text-stone-400">m</span>
-                          <button onClick={() => saveAdjust(d.shifts, adjH, adjM)} disabled={payBusy === 'adj'}
-                            className="text-[11px] px-2 py-0.5 rounded bg-stone-900 text-white">Save</button>
-                          <button onClick={() => setAdjusting(null)} className="text-[11px] px-1 text-stone-500">Cancel</button>
-                        </span>
-                      ) : (
-                        <button onClick={() => {
-                            setAdjusting(d.key);
-                            const cur = Math.round(totalMs / 60000);
-                            setAdjH(String(Math.floor(cur / 60))); setAdjM(String(cur % 60));
-                          }}
-                          className="text-[11px] font-mono px-2 py-0.5 rounded-full bg-stone-100 text-stone-600 flex items-center gap-1">
-                          <Clock size={10} /> Adjust hours
-                        </button>
-                      )}
-                      <button onClick={() => togglePaid(selectedCleanerId, d.key, owed)} disabled={payBusy === key}
-                        className={`text-[11px] font-mono px-2.5 py-0.5 rounded-full flex items-center gap-1 disabled:opacity-50 ${paid ? 'bg-emerald-600 text-white' : 'bg-white border border-stone-300 text-stone-600'}`}>
-                        {paid ? <><Check size={10} /> Paid</> : 'Mark paid'}
-                      </button>
-                    </div>
-                  </div>
-                );
-              })()}
               {multi && expanded && (
                 <div className="border-t border-stone-100 divide-y divide-stone-100">
                   {d.shifts.slice().sort((a, b) => new Date(a.start_time) - new Date(b.start_time)).map(s => {
@@ -13221,10 +11317,7 @@ function EmployeeForm({ employee, currentUserId, currentUserRole, onCancel, onSa
   })();
 
   const [name, setName] = useState(employee?.name || '');
-  // PIN is never pre-filled — once the table is locked the app can't read
-  // it, and showing existing PINs is itself an exposure. Blank on an edit
-  // means "leave the PIN unchanged".
-  const [pin, setPin] = useState('');
+  const [pin, setPin] = useState(employee?.pin || '');
   const [role, setRole] = useState(employee?.role || 'employee');
   const [active, setActive] = useState(employee?.active ?? true);
   const [phone, setPhone] = useState(employee?.phone || '');
@@ -13270,11 +11363,7 @@ function EmployeeForm({ employee, currentUserId, currentUserRole, onCancel, onSa
   const save = async () => {
     setError('');
     if (!name.trim()) { setError('Name is required'); return; }
-    // New employees must set a PIN; edits may leave it blank to keep the
-    // existing one. A provided PIN must be 4 digits.
-    const pinProvided = pin.length > 0;
-    if (isNew && !pinProvided) { setError('Set a 4-digit PIN'); return; }
-    if (pinProvided && !/^\d{4}$/.test(pin)) { setError('PIN must be exactly 4 digits'); return; }
+    if (!/^\d{4}$/.test(pin)) { setError('PIN must be exactly 4 digits'); return; }
     // Phone validation: if SMS opt-in, phone is required and must look like a phone number
     const cleanPhone = phone.trim();
     if (smsOptIn && !cleanPhone) {
@@ -13286,38 +11375,36 @@ function EmployeeForm({ employee, currentUserId, currentUserRole, onCancel, onSa
       return;
     }
     setBusy(true);
+    // Proactive PIN uniqueness check — catches duplicates BEFORE the
+    // insert/update so the error message names the conflicting employee.
+    const { data: pinClash } = await supabase.from('employees')
+      .select('id, name')
+      .eq('pin', pin)
+      .maybeSingle();
+    if (pinClash && pinClash.id !== employee?.id) {
+      setBusy(false);
+      setError(`That PIN is already in use by ${pinClash.name}. Pick a different PIN.`);
+      return;
+    }
 
-    // The row payload no longer includes the PIN — credentials are set
-    // server-side by the Edge Function (which hashes and checks
-    // uniqueness), so the browser never writes a plaintext PIN.
     const payload = {
-      name: name.trim(), role, active,
+      name: name.trim(), pin, role, active,
       phone: cleanPhone || null,
       sms_opt_in: smsOptIn,
       notification_prefs: { messages: notifyMessages },
       responsibilities,
       ...(canEditOwner ? { pay_rate_hourly: payRate.trim() ? parseFloat(payRate) : null } : {}),
     };
-    let empId = employee?.id;
-    if (isNew) {
-      const { data: created, error: e } = await supabase.from('employees').insert(payload).select('id').single();
-      if (e) { setBusy(false); setError(e.message); return; }
-      empId = created?.id;
-    } else {
-      const { error: e } = await supabase.from('employees').update(payload).eq('id', employee.id);
-      if (e) { setBusy(false); setError(e.message); return; }
-    }
-    // Set the PIN through the function if one was provided. It hashes and
-    // enforces uniqueness server-side; a 409 means the PIN is taken.
-    if (pinProvided && empId) {
-      const res = await secureSetCredential('employee', empId, pin);
-      if (res?.error) {
-        setBusy(false);
-        setError(res.error.includes('in use') ? 'That PIN is already in use. Pick a different one.' : res.error);
-        return;
-      }
-    }
+    const { error: e } = isNew
+      ? await supabase.from('employees').insert(payload)
+      : await supabase.from('employees').update(payload).eq('id', employee.id);
     setBusy(false);
+    if (e) {
+      // Belt-and-suspenders: if a race lets a duplicate through, fall back
+      // to the DB constraint's error message.
+      setError(e.message.includes('duplicate') ? 'That PIN is already in use. Pick a different PIN.' : e.message);
+      return;
+    }
     onSaved();
   };
   const remove = async () => {
@@ -13347,11 +11434,9 @@ function EmployeeForm({ employee, currentUserId, currentUserRole, onCancel, onSa
             className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white focus:outline-none focus:border-stone-900 text-stone-900" />
         </div>
         <div>
-          <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">
-            {isNew ? '4-digit PIN' : 'New PIN — leave blank to keep current'}
-          </label>
+          <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">4-digit PIN</label>
           <input type="text" inputMode="numeric" pattern="[0-9]*" maxLength={4} value={pin}
-            onChange={(e) => setPin(e.target.value.replace(/\D/g, '').slice(0, 4))} placeholder={isNew ? '0000' : '••••'}
+            onChange={(e) => setPin(e.target.value.replace(/\D/g, '').slice(0, 4))} placeholder="0000"
             className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white focus:outline-none focus:border-stone-900 text-stone-900 font-mono text-2xl tracking-widest" />
         </div>
         <div>
@@ -13727,11 +11812,6 @@ function PortalUserForm({ employee, user, allProperties, onCancel, onSaved }) {
       savedId = user.id;
     }
 
-    // Hash the access code server-side so it survives table lockdown.
-    if (savedId && cleanCode) {
-      await secureSetCredential('portal', savedId, cleanCode);
-    }
-
     // Sync property assignments: delete existing then insert current set
     await supabase.from('portal_user_properties').delete().eq('portal_user_id', savedId);
     if (assignedPropIds.size > 0) {
@@ -13927,11 +12007,6 @@ function PropertyAdmin({ employee, onSignOut, onOpenMessages, onLogoClick }) {
   }
   if (view.kind === 'unit-list') {
     return <UnitList property={view.property}
-      employee={employee}
-      onAssignmentNew={() => setView({ kind: 'assignment-new', property: view.property })}
-      onAssignmentNewChecklist={() => setView({ kind: 'assignment-new-checklist', property: view.property })}
-      onAssignmentNewQuick={() => setView({ kind: 'assignment-new-quick', property: view.property })}
-      onAssignmentOpen={(a) => setView({ kind: 'assignment-detail', property: view.property, assignment: a })}
       onBack={() => { setView({ kind: 'list' }); load(); }}
       onEditProperty={() => setView({ kind: 'property-edit', property: view.property })}
       onUnitOpen={(unit) => setView({ kind: 'party-list', property: view.property, unit })}
@@ -14318,7 +12393,6 @@ function QuickAddPortalUserModal({ defaultKind = 'pm', onClose, onCreated }) {
       phone: phone.trim() || null,
       active: true,
     }).select().single();
-    if (!e && data?.id) await secureSetCredential('portal', data.id, cleanCode);
     setBusy(false);
     if (e) {
       setError('Could not save: ' + e.message);
@@ -14762,11 +12836,10 @@ function PropertyForm({ property, currentUserRole, onCancel, onSaved, onManageAs
   );
 }
 
-function UnitList({ property, employee, onBack, onEditProperty, onUnitOpen, onUnitEdit, onUnitNew, onBulkNew, onAssignments, onAssignmentNew, onAssignmentNewChecklist, onAssignmentNewQuick, onAssignmentOpen }) {
+function UnitList({ property, onBack, onEditProperty, onUnitOpen, onUnitEdit, onUnitNew, onBulkNew, onAssignments }) {
   const [units, setUnits] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [search, setSearch] = useState('');
-  const [tab, setTab] = useState('units'); // 'units' | 'team'
   const load = async () => {
     const { data } = await supabase.from('units').select('*, parties(id)')
       .eq('customer_id', property.id).order('sort_order').order('label');
@@ -14795,32 +12868,6 @@ function UnitList({ property, employee, onBack, onEditProperty, onUnitOpen, onUn
         </button>
       </div>
       <div className="px-5 pt-6">
-        {/* Units / Assignments / Team toggle. Consolidates the three
-           things you do to a property in one row of tabs. */}
-        <div className="flex p-0.5 bg-stone-100 rounded-xl mb-5">
-          <button onClick={() => setTab('units')}
-            className={`flex-1 py-2 rounded-lg text-sm font-medium ${tab === 'units' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
-            Units
-          </button>
-          <button onClick={() => setTab('assignments')}
-            className={`flex-1 py-2 rounded-lg text-sm font-medium ${tab === 'assignments' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
-            Assignments
-          </button>
-          <button onClick={() => setTab('team')}
-            className={`flex-1 py-2 rounded-lg text-sm font-medium ${tab === 'team' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
-            Team
-          </button>
-        </div>
-
-        {tab === 'team' ? (
-          <PropertyTeamTab property={property} />
-        ) : tab === 'assignments' ? (
-          <AssignmentList property={property} employee={employee} embedded
-            onNew={onAssignmentNew}
-            onNewChecklist={onAssignmentNewChecklist}
-            onNewQuick={onAssignmentNewQuick}
-            onOpen={onAssignmentOpen} />
-        ) : (<>
         <div className="flex items-baseline justify-between mb-4">
           <h2 className="font-serif text-2xl text-stone-900">Units</h2>
           <span className="text-xs font-mono text-stone-500">{units.length} total</span>
@@ -14836,6 +12883,10 @@ function UnitList({ property, employee, onBack, onEditProperty, onUnitOpen, onUn
             <Layers size={16} /> Bulk create
           </button>
         </div>
+        <button onClick={onAssignments}
+          className="w-full mb-4 p-3 rounded-2xl bg-white border-2 border-stone-300 text-stone-800 font-medium text-sm flex items-center justify-center gap-2 active:scale-98 hover:border-stone-900">
+          <FileText size={16} /> Manage assignments
+        </button>
 
         {units.length >= 8 && (
           <input type="text" value={search} onChange={(e) => setSearch(e.target.value)}
@@ -14878,8 +12929,7 @@ function UnitList({ property, employee, onBack, onEditProperty, onUnitOpen, onUn
                     </div>
                   </button>
                   <div className="px-4 pb-3 pt-0">
-                    <button onClick={() => onUnitEdit(u)}
-                      className="text-xs font-mono text-stone-600 hover:text-stone-900 flex items-center gap-1 px-2.5 py-1 rounded-lg border border-stone-200 hover:border-stone-400 hover:bg-stone-50 active:scale-95 transition">
+                    <button onClick={() => onUnitEdit(u)} className="text-xs font-mono text-stone-500 hover:text-stone-900 flex items-center gap-1">
                       <Edit2 size={11} /> Edit unit
                     </button>
                   </div>
@@ -14910,70 +12960,8 @@ function UnitList({ property, employee, onBack, onEditProperty, onUnitOpen, onUn
             })()}
           </div>
         )}
-        </>)}
       </div>
     </div>
-  );
-}
-
-// Standalone Team tab for a property. Reuses the same team picker as
-// Edit property, but persists each access change IMMEDIATELY (add/remove
-// the portal_user_properties link) rather than on a form submit — since
-// there's no form here. Add-new and code editing come from the picker.
-function PropertyTeamTab({ property }) {
-  const [allPortalUsers, setAllPortalUsers] = useState([]);
-  const [assignedIds, setAssignedIds] = useState(new Set());
-  const [loaded, setLoaded] = useState(false);
-  const [search, setSearch] = useState('');
-  const [busy, setBusy] = useState(false);
-
-  const load = async () => {
-    setLoaded(false);
-    const [{ data: usersData }, { data: links }] = await Promise.all([
-      supabase.from('portal_users').select('*').order('name'),
-      supabase.from('portal_user_properties').select('portal_user_id').eq('property_id', property.id),
-    ]);
-    setAllPortalUsers((usersData || []).filter(u => u.active !== false));
-    setAssignedIds(new Set((links || []).map(l => l.portal_user_id)));
-    setLoaded(true);
-  };
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [property.id]);
-
-  // Persist immediately on toggle.
-  const onToggle = async (pid) => {
-    if (busy) return;
-    setBusy(true);
-    const has = assignedIds.has(pid);
-    // Optimistic.
-    setAssignedIds(prev => {
-      const next = new Set(prev);
-      if (has) next.delete(pid); else next.add(pid);
-      return next;
-    });
-    const { error } = has
-      ? await supabase.from('portal_user_properties').delete().eq('portal_user_id', pid).eq('property_id', property.id)
-      : await supabase.from('portal_user_properties').insert({ portal_user_id: pid, property_id: property.id });
-    setBusy(false);
-    if (error) {
-      alert('Could not update access: ' + error.message);
-      load(); // resync on failure
-    }
-  };
-
-  return (
-    <PortalUserAssignmentSection
-      portalUsers={allPortalUsers}
-      assignedIds={assignedIds}
-      loaded={loaded}
-      search={search}
-      setSearch={setSearch}
-      onToggle={onToggle}
-      onUserCreated={(user) => {
-        setAllPortalUsers(prev => [...prev, user].sort((a, b) => (a.name || '').localeCompare(b.name || '')));
-        // A newly created user is auto-linked to this property.
-        onToggle(user.id);
-      }}
-    />
   );
 }
 
@@ -15781,16 +13769,6 @@ function PartyForm({ property, unit, party, onCancel, onSaved }) {
 function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
   const [properties, setProperties] = useState([]);
   const [assignmentCounts, setAssignmentCounts] = useState({}); // { customer_id: open_count }
-  const [jobs, setJobs] = useState([]); // one entry per open assignment
-  const [scheduleMode, setScheduleMode] = useState('schedule'); // 'schedule' | 'property'
-  const [adding, setAdding] = useState(false); // property picker for adding
-  const [expanded, setExpanded] = useState(() => new Set()); // expanded card keys
-  const [actioning, setActioning] = useState(null); // job id being marked done / deleted
-  const [team, setTeam] = useState([]);
-  const [editDueJob, setEditDueJob] = useState(null);
-  const [assignJob, setAssignJob] = useState(null);
-  const [sizeJob, setSizeJob] = useState(null);
-  const [sizeBr, setSizeBr] = useState(''); const [sizeBa, setSizeBa] = useState('');
   const [loaded, setLoaded] = useState(false);
   const [picked, setPicked] = useState(null); // selected property
   const [view, setView] = useState('open');   // 'open' | 'upload' | 'detail'
@@ -15798,72 +13776,31 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
   const [propSearch, setPropSearch] = useState('');
 
   const load = async () => {
-    // Paginated — a plain query hits PostgREST's 1000-row cap and silently
-    // drops jobs (cards then show missing/blank options).
-    const fetchOpenTargets = async () => {
-      let rows = []; const PAGE = 1000;
-      for (let from = 0; ; from += PAGE) {
-        const { data, error } = await supabase.from('assignment_targets')
-          .select('id, status, unit_id, party_id, template_section, unit:units(label, bedrooms, bathrooms), party:parties(label), assignment:assignments!inner(id, title, customer_id, active, deleted_at, scheduled_date, assignment_type, took_longer)')
-          .not('status', 'in', '(done,blocked)')
-          .range(from, from + PAGE - 1);
-        if (error || !data) break;
-        rows = rows.concat(data);
-        if (data.length < PAGE) break;
-        if (from > 100000) break;
-      }
-      return { data: rows };
-    };
     const [propsRes, targetsRes] = await Promise.all([
       supabase.from('customers').select('*').eq('active', true).order('name'),
-      fetchOpenTargets(),
+      supabase.from('assignment_targets')
+        .select('unit_id, party_id, status, assignment:assignments!inner(customer_id, active)')
+        .not('status', 'in', '(done,blocked)'),
     ]);
+    // Count unique (unit_id, party_id) bedrooms per customer rather
+    // than raw item rows. A 4-bedroom apartment with 80 items shows
+    // as 4, not 80 — the count answers "how many bedrooms still need
+    // cleaning", which is what the owner actually wants to know at a
+    // glance.
     const counts = {};
     const seenBedrooms = new Set();
-    const jobsByAsg = {};
     (targetsRes.data || []).forEach(t => {
       const a = t.assignment;
-      if (!a || a.active === false || a.deleted_at) return;
+      if (!a || a.active === false) return;
       const cid = a.customer_id;
       if (!cid) return;
       const key = `${cid}::${t.unit_id || ''}::${t.party_id || ''}`;
-      if (!seenBedrooms.has(key)) { seenBedrooms.add(key); counts[cid] = (counts[cid] || 0) + 1; }
-      if (!jobsByAsg[a.id]) {
-        jobsByAsg[a.id] = { id: a.id, customerId: cid, title: a.title || '', scheduledDate: a.scheduled_date || null, type: a.assignment_type || '', unitLabel: t.unit?.label || '', partyLabel: t.party?.label || '', unitId: t.unit_id, partyId: t.party_id, bedrooms: t.unit?.bedrooms, bathrooms: t.unit?.bathrooms, tookLonger: !!a.took_longer, assignees: [], hereNow: [], count: 0, sections: { bedroom: 0, vanity: 0, bathroom: 0, general: 0, other: 0 } };
-      }
-      jobsByAsg[a.id].count++;
-      const sec = (t.template_section || '').toLowerCase();
-      if (sec === 'bedroom' || sec === 'vanity' || sec === 'bathroom' || sec === 'general') jobsByAsg[a.id].sections[sec]++;
-      else jobsByAsg[a.id].sections.other++;
-    });
-    // Load the roster FIRST so we can resolve assignee names ourselves.
-    // Note: no `employee:employees(...)` embed on assignment_assignees below.
-    // That embed needs a foreign key PostgREST can see; without one the whole
-    // read fails and (because the error used to be discarded) assignees just
-    // silently vanished. Joining by hand here can't fail that way.
-    const { data: emps } = await supabase.from('employees').select('id, name, role').eq('active', true).order('name');
-    const nameById = Object.fromEntries((emps || []).map(e => [e.id, e.name]));
-    const jobIds = Object.keys(jobsByAsg);
-    if (jobIds.length) {
-      const { data: asgn, error: asgnErr } = await supabase.from('assignment_assignees')
-        .select('assignment_id, employee_id, status')
-        .in('assignment_id', jobIds);
-      if (asgnErr) alert('Could not load who\u2019s assigned: ' + asgnErr.message);
-      (asgn || []).forEach(r => {
-        const j = jobsByAsg[r.assignment_id]; if (!j) return;
-        j.assignees.push({ id: r.employee_id, name: nameById[r.employee_id] || '', requested: r.status === 'requested' });
-      });
-    }
-    setTeam((emps || []).filter(e => e.role !== 'owner'));
-    // Who's physically in each bedroom right now. Matched on unit:party
-    // because that's all a work block records.
-    const here = await fetchLivePresence();
-    Object.values(jobsByAsg).forEach(j => {
-      j.hereNow = here[`${j.unitId}:${j.partyId || ''}`] || [];
+      if (seenBedrooms.has(key)) return;
+      seenBedrooms.add(key);
+      counts[cid] = (counts[cid] || 0) + 1;
     });
     setProperties(visibleProps(propsRes.data || [], employee));
     setAssignmentCounts(counts);
-    setJobs(Object.values(jobsByAsg));
     setLoaded(true);
   };
   useEffect(() => { load(); }, []);
@@ -15905,8 +13842,8 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
       onOpen={(a) => { setDetail(a); setView('detail'); }} />;
   }
 
-  // No picked property → new landing: Add button + Schedule/By-property
-  // with expandable property cards showing their scheduled jobs.
+  // No picked property → property picker
+  // Top section: properties with open assignments. Below: everything else alphabetical.
   const pq = propSearch.trim().toLowerCase();
   const matchesPropSearch = (p) => !pq
     || (p.name || '').toLowerCase().includes(pq)
@@ -15918,89 +13855,19 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
     .filter(p => (assignmentCounts[p.id] || 0) === 0 && matchesPropSearch(p))
     .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
 
-  const propById = Object.fromEntries(properties.map(p => [p.id, p]));
-  const toggleExpand = (k) => setExpanded(prev => { const n = new Set(prev); n.has(k) ? n.delete(k) : n.add(k); return n; });
-
-  // Quick actions straight from a schedule card.
-  const markJobDone = async (job) => {
-    if (!confirm(`Mark ${job.unitLabel || 'this job'} completed? This marks all its items done.`)) return;
-    setActioning(job.id);
-    await supabase.from('assignment_targets')
-      .update({ status: 'done', completed_at: new Date().toISOString(), completed_by: employee.id })
-      .eq('assignment_id', job.id).neq('status', 'done');
-    setActioning(null);
-    load();
-  };
-  const deleteJob = async (job) => {
-    if (!confirm(`Delete this assignment (${job.unitLabel || ''})? It can be restored later.`)) return;
-    setActioning(job.id);
-    await supabase.from('assignments')
-      .update({ deleted_at: new Date().toISOString(), deleted_by: employee.id })
-      .eq('id', job.id);
-    setActioning(null);
-    load();
-  };
-  const canAssignJobs = can(employee, 'assign_cleaners');
-  const canEditJobDates = can(employee, 'edit_due_dates');
-  const todayK = localTodayKey();
-  const saveJobDue = async (job, date) => {
-    setEditDueJob(null); setActioning(job.id);
-    await supabase.from('assignments').update({ scheduled_date: date || null }).eq('id', job.id);
-    setActioning(null); load();
-  };
-  const commitJobAssignees = async (job, ids) => {
-    setActioning(job.id);
-    const error = await saveAssignees(job.id, job.assignees.map(a => a.id), ids, employee.id);
-    setActioning(null);
-    if (error) { alert('Could not update who\u2019s assigned: ' + error.message); return; }
-    setAssignJob(null);
-    load();
-  };
-  const saveJobSize = async (job, br, ba) => {
-    if (!job.unitId) { setSizeJob(null); return; }
-    setActioning(job.id);
-    const { data: updated, error } = await supabase.from('units').update({
-      // parseFloat on baths: 2.5 is a real size and parseInt would silently
-      // save it as 2.
-      bedrooms: br === '' ? null : parseInt(br, 10),
-      bathrooms: ba === '' ? null : parseFloat(ba),
-    }).eq('id', job.unitId).select('id, bedrooms, bathrooms');
-    setActioning(null);
-    if (error) { alert('Could not save size: ' + error.message); return; }
-    if (!updated || updated.length === 0) {
-      alert('Size did not save — the database rejected the update for this apartment.');
-      return;
-    }
-    setSizeJob(null); load();
-  };
-  const toggleTookLonger = async (job) => {
-    setActioning(job.id);
-    await supabase.from('assignments').update({ took_longer: !job.tookLonger }).eq('id', job.id);
-    setActioning(null); load();
-  };
-
-  const canDelete = can(employee, 'manage_assignments_admin');
-  const canDone = can(employee, 'mark_assignments_done');
-  const fmtSched = (key) => {
-    const today = localTodayKey();
-    const t = new Date(); t.setDate(t.getDate() + 1);
-    const tmr = `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`;
-    if (key === today) return 'Today';
-    if (key === tmr) return 'Tomorrow';
-    return new Date(key + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
-  };
-
-  // Row used in the "Add assignment" property picker (tap to pick).
   const PropertyRow = ({ p }) => (
-    <button onClick={() => { setAdding(false); setPicked(p); setView('open'); }}
+    <button onClick={() => setPicked(p)}
       className="w-full text-left p-4 rounded-2xl bg-white border-2 border-stone-200 hover:border-stone-900 transition-all">
       <div className="flex items-center justify-between gap-3">
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 mb-1 flex-wrap">
             <span className="font-serif text-lg text-stone-900">{p.name}</span>
+            {p.property_type === 'multi_unit' && (
+              <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-amber-100 text-amber-800">Multi-unit</span>
+            )}
             {(assignmentCounts[p.id] || 0) > 0 && (
               <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-amber-600 text-white font-bold flex items-center gap-1">
-                <FileText size={10} /> {assignmentCounts[p.id]} open
+                <FileText size={10} /> {assignmentCounts[p.id]} bedroom{assignmentCounts[p.id] === 1 ? '' : 's'} to clean
               </span>
             )}
           </div>
@@ -16011,243 +13878,52 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
     </button>
   );
 
-  // Expandable property card — drops down to show its jobs.
-  const PropertyCard = ({ property, cardJobs, keyId }) => {
-    const isOpen = expanded.has(keyId);
-    return (
-      <div className="rounded-2xl bg-white border border-stone-200 overflow-hidden">
-        <button onClick={() => toggleExpand(keyId)}
-          className="w-full px-4 py-3 flex items-center justify-between hover:bg-stone-50 gap-3">
-          <div className="min-w-0 text-left">
-            <div className="font-serif text-lg text-stone-900 truncate">{property?.name || 'Property'}</div>
-            <div className="text-xs text-stone-500 font-mono">{cardJobs.length} job{cardJobs.length === 1 ? '' : 's'}</div>
-          </div>
-          <ChevronRight size={16} className={`text-stone-400 flex-shrink-0 transition-transform ${isOpen ? 'rotate-90' : ''}`} />
-        </button>
-        {isOpen && (
-          <div className="px-3 pb-3 border-t border-stone-100 pt-2 space-y-1.5">
-            {cardJobs.map(j => {
-              const sec = j.sections || {};
-              const secBits = [
-                ['Bedroom', sec.bedroom], ['Vanity', sec.vanity],
-                ['Bathroom', sec.bathroom], ['General', sec.general],
-              ].filter(([, n]) => n > 0);
-              return (
-              <div key={j.id} className="px-3 py-2.5 rounded-lg bg-stone-50 flex items-start justify-between gap-2">
-                <button onClick={() => { setPicked(property); setView('open'); }} className="min-w-0 flex-1 text-left">
-                  <div className="text-sm text-stone-800 truncate">{unitPartyLabel(j.unitLabel, j.partyLabel) || 'Job'}</div>
-                  <div className="text-[11px] text-stone-500 font-mono truncate">
-                    {j.type ? assignmentTypeLabel(j.type) : 'Clean'}{j.scheduledDate ? ` · ${fmtSched(j.scheduledDate)}` : ' · no date'} · {j.count} item{j.count === 1 ? '' : 's'}
-                  </div>
-                  {secBits.length > 0 ? (
-                    <div className="grid grid-cols-2 gap-x-4 gap-y-0.5 mt-1.5 max-w-[220px]">
-                      {secBits.map(([label, n]) => (
-                        <div key={label} className="flex items-center justify-between text-[10px] font-mono">
-                          <span className="text-stone-500">{label}</span>
-                          <span className="text-stone-700 font-bold">{n}</span>
-                        </div>
-                      ))}
-                    </div>
-                  ) : null}
-                </button>
-
-                {/* Inline controls — due date, size, who's on it, took longer */}
-                <div className="flex items-center gap-1.5 flex-wrap mt-2">
-                  {/* Due date */}
-                  {editDueJob === j.id ? (
-                    <input type="date" autoFocus defaultValue={j.scheduledDate || ''}
-                      onChange={(e) => saveJobDue(j, e.target.value)} onBlur={() => setEditDueJob(null)}
-                      className="text-[10px] font-mono px-1.5 py-0.5 rounded border border-stone-400 bg-white" />
-                  ) : canEditJobDates ? (
-                    <button onClick={() => setEditDueJob(j.id)}
-                      className={`text-[10px] font-mono px-2 py-0.5 rounded-full border inline-flex items-center gap-1 ${j.scheduledDate
-                        ? (j.scheduledDate < todayK ? 'bg-red-100 text-red-700 border-red-200'
-                           : j.scheduledDate === todayK ? 'bg-emerald-100 text-emerald-800 border-emerald-200'
-                           : 'bg-stone-100 text-stone-600 border-stone-200')
-                        : 'bg-white text-stone-500 border-dashed border-stone-300'}`}>
-                      <Calendar size={9} /> {j.scheduledDate ? fmtSched(j.scheduledDate) : 'Set due date'}
-                    </button>
-                  ) : null}
-
-                  {/* Size (BR/BA) — editable, e.g. after a 1x1 turns out to be 2x2 */}
-                  {sizeJob === j.id ? (
-                    <span className="inline-flex items-center gap-1">
-                      <input type="number" min="0" autoFocus value={sizeBr} onChange={e => setSizeBr(e.target.value)}
-                        className="w-10 px-1 py-0.5 rounded border border-stone-300 text-[10px] font-mono" placeholder="BR" />
-                      <span className="text-[9px] text-stone-400">BR</span>
-                      <input type="number" min="0" step="0.5" value={sizeBa} onChange={e => setSizeBa(e.target.value)}
-                        className="w-12 px-1 py-0.5 rounded border border-stone-300 text-[10px] font-mono" placeholder="BA" />
-                      <span className="text-[9px] text-stone-400">BA</span>
-                      <button onClick={() => saveJobSize(j, sizeBr, sizeBa)} className="text-[10px] px-1.5 py-0.5 rounded bg-stone-900 text-white">Save</button>
-                      <button onClick={() => setSizeJob(null)} className="text-[10px] px-1 text-stone-500">×</button>
-                    </span>
-                  ) : j.unitId ? (
-                    <button onClick={() => { setSizeJob(j.id); setSizeBr(j.bedrooms ?? ''); setSizeBa(j.bathrooms ?? ''); }}
-                      className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-stone-200 text-stone-700 inline-flex items-center gap-1">
-                      {(j.bedrooms || j.bathrooms) ? `${j.bedrooms || 0}BR / ${j.bathrooms || 0}BA` : 'Set size'}
-                    </button>
-                  ) : null}
-
-                  {/* Who's physically in there RIGHT NOW — distinct from the
-                     indigo "assigned to" pills, which are only a plan. */}
-                  {j.hereNow.map((h, hi) => (
-                    <span key={`${h.id}-${hi}`} className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 inline-flex items-center gap-1"
-                      title={`Working here since ${fmtClock(h.since)}`}>
-                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                      {h.name} is here
-                    </span>
-                  ))}
-
-                  {/* Who's on it */}
-                  {j.assignees.map(a => (
-                    <span key={a.id} className={`text-[10px] font-mono px-2 py-0.5 rounded-full inline-flex items-center gap-1 ${a.requested ? 'bg-amber-100 text-amber-800' : 'bg-indigo-100 text-indigo-700'}`}>
-                      <User size={9} /> {a.name}{a.requested ? ' asked' : ''}
-                    </span>
-                  ))}
-                  {canAssignJobs && (
-                    <button onClick={() => setAssignJob(assignJob === j.id ? null : j.id)}
-                      className="text-[10px] font-mono px-2 py-0.5 rounded-full border border-dashed border-stone-300 text-stone-500 inline-flex items-center gap-1">
-                      <Plus size={9} /> Assign
-                    </button>
-                  )}
-
-                  {/* Took longer → charge extra on the invoice */}
-                  <button onClick={() => toggleTookLonger(j)} disabled={actioning === j.id}
-                    className={`text-[10px] font-mono px-2 py-0.5 rounded-full inline-flex items-center gap-1 disabled:opacity-50 ${j.tookLonger ? 'bg-amber-500 text-white' : 'bg-white border border-dashed border-stone-300 text-stone-500'}`}>
-                    <Clock size={9} /> {j.tookLonger ? 'Extra' : 'Mark extra'}
-                  </button>
-                </div>
-
-                {canAssignJobs && assignJob === j.id && (
-                  <AssignPicker key={j.id} team={team} busy={actioning === j.id}
-                    currentIds={j.assignees.map(a => a.id)}
-                    onCancel={() => setAssignJob(null)}
-                    onSave={(ids) => commitJobAssignees(j, ids)} />
-                )}
-                <div className="flex items-center gap-1 flex-shrink-0">
-                  {canDone && (
-                    <button onClick={() => markJobDone(j)} disabled={actioning === j.id}
-                      title="Mark completed" className="p-1.5 rounded-lg text-emerald-600 hover:bg-emerald-50 disabled:opacity-40">
-                      <Check size={16} />
-                    </button>
-                  )}
-                  {canDelete && (
-                    <button onClick={() => deleteJob(j)} disabled={actioning === j.id}
-                      title="Delete assignment" className="p-1.5 rounded-lg text-stone-400 hover:text-red-600 hover:bg-red-50 disabled:opacity-40">
-                      <Trash2 size={15} />
-                    </button>
-                  )}
-                </div>
-              </div>
-              );
-            })}
-            <button onClick={() => { setPicked(property); setView('open'); }}
-              className="w-full text-center py-2 text-xs font-medium text-amber-700 hover:bg-amber-50 rounded-lg">
-              Manage all →
-            </button>
-          </div>
-        )}
-      </div>
-    );
-  };
-
-  // Group jobs by property (for By-property) and by date→property (Schedule).
-  const jobsByProp = {};
-  jobs.forEach(j => { (jobsByProp[j.customerId] = jobsByProp[j.customerId] || []).push(j); });
-  const propKeysSorted = Object.keys(jobsByProp).sort((a, b) => (propById[a]?.name || '').localeCompare(propById[b]?.name || ''));
-
-  const byDate = {};
-  jobs.forEach(j => { const d = j.scheduledDate || '__none__'; (byDate[d] = byDate[d] || []).push(j); });
-  const dateKeysSorted = Object.keys(byDate).filter(k => k !== '__none__').sort();
-
   return (
     <div className="pb-24">
       <Header name={employee.name} onSignOut={onSignOut} role={employee.role} employee={employee} onOpenMessages={onOpenMessages} onLogoClick={onLogoClick} />
       <div className="px-5 pt-6">
         <div className="text-xs uppercase tracking-widest text-stone-400 font-mono mb-3">Manage</div>
-        <h1 className="text-4xl font-light text-stone-900 tracking-tight mb-4">
+        <h1 className="text-4xl font-light text-stone-900 tracking-tight mb-2">
           <span className="font-serif italic text-amber-700">Assignments</span>
         </h1>
+        <p className="text-sm text-stone-600 mb-6">Pick a property to view open assignments or upload new ones.</p>
 
-        {adding ? (
-          <>
-            <div className="flex items-center justify-between mb-4">
-              <p className="text-sm text-stone-600">Pick a property to add an assignment.</p>
-              <button onClick={() => setAdding(false)} className="text-xs text-stone-500 hover:text-stone-800">Cancel</button>
-            </div>
-            {properties.length > 3 && (
-              <input type="text" value={propSearch} onChange={(e) => setPropSearch(e.target.value)}
-                placeholder={`Search ${properties.length} properties…`}
-                className="w-full px-4 py-3 mb-4 rounded-xl border border-stone-300 bg-white focus:outline-none focus:border-stone-900 text-stone-900 text-sm" />
-            )}
-            {!loaded ? <Splash text="Loading…" /> : (
-              <div className="space-y-4">
-                {withAssignments.length > 0 && (
-                  <div>
-                    <div className="text-xs uppercase tracking-wider text-amber-700 font-mono mb-2">Has open assignments</div>
-                    <div className="space-y-2">{withAssignments.map(p => <PropertyRow key={p.id} p={p} />)}</div>
-                  </div>
-                )}
-                {others.length > 0 && (
-                  <div>
-                    <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2">All properties</div>
-                    <div className="space-y-2">{others.map(p => <PropertyRow key={p.id} p={p} />)}</div>
-                  </div>
-                )}
-              </div>
-            )}
-          </>
+        {/* Property search — always show when there's more than a couple */}
+        {properties.length > 3 && (
+          <div className="mb-4">
+            <input type="text" value={propSearch}
+              onChange={(e) => setPropSearch(e.target.value)}
+              placeholder={`Search ${properties.length} properties…`}
+              className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white focus:outline-none focus:border-stone-900 text-stone-900 text-sm" />
+          </div>
+        )}
+
+        {!loaded ? <Splash text="Loading…" /> : properties.length === 0 ? (
+          <div className="text-center py-12 text-stone-400 text-sm">No properties yet.</div>
+        ) : (withAssignments.length === 0 && others.length === 0 && pq) ? (
+          <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
+            No properties match "{propSearch}".
+          </div>
         ) : (
           <>
-            <button onClick={() => { setPropSearch(''); setAdding(true); }}
-              className="w-full flex items-center justify-center gap-2 bg-stone-900 text-stone-50 rounded-xl py-3.5 font-medium mb-5 active:scale-98">
-              <Plus size={18} /> Add assignment
-            </button>
-
-            <div className="flex gap-1 bg-stone-100 p-1 rounded-xl mb-5">
-              <button onClick={() => setScheduleMode('schedule')}
-                className={`flex-1 py-2 rounded-lg text-sm font-medium ${scheduleMode === 'schedule' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>Schedule</button>
-              <button onClick={() => setScheduleMode('property')}
-                className={`flex-1 py-2 rounded-lg text-sm font-medium ${scheduleMode === 'property' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>By property</button>
-            </div>
-
-            {!loaded ? <Splash text="Loading…" /> : jobs.length === 0 ? (
-              <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
-                No open assignments. Tap “Add assignment” to create one.
+            {withAssignments.length > 0 && (
+              <div className="mb-6">
+                <div className="text-xs uppercase tracking-wider text-amber-700 font-mono mb-2 flex items-center gap-1.5">
+                  <FileText size={11} /> Has open assignments
+                </div>
+                <div className="space-y-2">
+                  {withAssignments.map(p => <PropertyRow key={p.id} p={p} />)}
+                </div>
               </div>
-            ) : scheduleMode === 'schedule' ? (
-              <div className="space-y-6">
-                {dateKeysSorted.map(dk => {
-                  const dJobsByProp = {};
-                  byDate[dk].forEach(j => { (dJobsByProp[j.customerId] = dJobsByProp[j.customerId] || []).push(j); });
-                  const props = Object.keys(dJobsByProp).sort((a, b) => (propById[a]?.name || '').localeCompare(propById[b]?.name || ''));
-                  return (
-                    <div key={dk}>
-                      <div className="text-xs uppercase tracking-wider text-amber-700 font-mono mb-2 flex items-center gap-1.5">
-                        <Calendar size={11} /> {fmtSched(dk)}
-                      </div>
-                      <div className="space-y-2">
-                        {props.map(cid => <PropertyCard key={cid} property={propById[cid]} cardJobs={dJobsByProp[cid]} keyId={`${dk}::${cid}`} />)}
-                      </div>
-                    </div>
-                  );
-                })}
-                {byDate['__none__'] && (
-                  <div>
-                    <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 flex items-center gap-1.5">
-                      <FileText size={11} /> No date set
-                    </div>
-                    <div className="space-y-2">
-                      {Object.entries((() => { const m = {}; byDate['__none__'].forEach(j => { (m[j.customerId] = m[j.customerId] || []).push(j); }); return m; })())
-                        .sort((a, b) => (propById[a[0]]?.name || '').localeCompare(propById[b[0]]?.name || ''))
-                        .map(([cid, cj]) => <PropertyCard key={cid} property={propById[cid]} cardJobs={cj} keyId={`none::${cid}`} />)}
-                    </div>
-                  </div>
-                )}
-              </div>
-            ) : (
-              <div className="space-y-2">
-                {propKeysSorted.map(cid => <PropertyCard key={cid} property={propById[cid]} cardJobs={jobsByProp[cid]} keyId={`prop::${cid}`} />)}
+            )}
+            {others.length > 0 && (
+              <div className="mb-6">
+                <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 flex items-center gap-1.5">
+                  <Building2 size={11} /> All properties ({others.length})
+                </div>
+                <div className="space-y-2">
+                  {others.map(p => <PropertyRow key={p.id} p={p} />)}
+                </div>
               </div>
             )}
           </>
@@ -16779,8 +14455,6 @@ function PriceBookEditor({ property, onBack }) {
   const [prices, setPrices] = useState({});       // key -> {mode, base_amount, rate, default_minutes}
   const [originalKeys, setOriginalKeys] = useState([]);
   const [defaultRate, setDefaultRate] = useState(''); // preset $/hr for time items
-  const [aptSizes, setAptSizes] = useState([]);        // [{key:'2x2', bedrooms, bathrooms, label}]
-  const [aptPrices, setAptPrices] = useState({});      // '__apt__:2x2' -> amount string
   const [expanded, setExpanded] = useState(new Set());
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState(null);
@@ -16840,27 +14514,6 @@ function PriceBookEditor({ property, onBack }) {
       });
       setPrices(pmap);
       setDefaultRate(dr === 0 ? '' : (dr ?? ''));
-      // Apartment SIZE tiers (1x1, 2x2, 3x2…) for whole-apartment flat
-      // pricing at Bridges/Citifront-style properties. Discover which
-      // sizes actually exist here from the units table, then load any
-      // saved __apt__ prices.
-      const { data: unitRows } = await supabase.from('units')
-        .select('bedrooms, bathrooms').eq('customer_id', property.id);
-      const sizeSet = new Map();
-      (unitRows || []).forEach(u => {
-        if (u.bedrooms == null || u.bathrooms == null) return;
-        const key = `${u.bedrooms}x${u.bathrooms}`;
-        if (!sizeSet.has(key)) sizeSet.set(key, { key, bedrooms: u.bedrooms, bathrooms: u.bathrooms });
-      });
-      const sizes = Array.from(sizeSet.values()).sort((a, b) => a.bedrooms - b.bedrooms || a.bathrooms - b.bathrooms);
-      setAptSizes(sizes);
-      const apmap = {};
-      (pb || []).forEach(r => {
-        if (r.subsection_key?.startsWith('__apt__:')) {
-          apmap[r.subsection_key] = r.base_amount != null ? String(r.base_amount) : '';
-        }
-      });
-      setAptPrices(apmap);
       setOriginalKeys((pb || []).filter(r => r.subsection_key !== '__hourly_rate__').map(r => r.subsection_key));
     } catch (e) { setError(e.message || 'Could not load template.'); }
     setLoaded(true);
@@ -16901,20 +14554,6 @@ function PriceBookEditor({ property, onBack }) {
         sort_order: 0, updated_at: new Date().toISOString(),
       });
     });
-    // Apartment size-tier flat prices (__apt__:2x2 etc).
-    const aptKeep = [];
-    aptSizes.forEach(sz => {
-      const k = `__apt__:${sz.key}`;
-      const amt = parseFloat(aptPrices[k]) || 0;
-      if (amt <= 0) return;
-      aptKeep.push(k);
-      payload.push({
-        customer_id: property.id, subsection_key: k,
-        label: `${sz.bedrooms}x${sz.bathrooms} apartment`,
-        mode: 'fixed', base_amount: amt, rate: 0, default_minutes: 0,
-        sort_order: 0, updated_at: new Date().toISOString(),
-      });
-    });
     // Persist the preset hourly rate as a sentinel row (skipped by the
     // invoice generator). Generators must ignore keys starting with '__'.
     const dr = parseFloat(defaultRate) || 0;
@@ -16938,13 +14577,6 @@ function PriceBookEditor({ property, onBack }) {
     const templateKeys = new Set(items.map(it => it.key));
     const removed = originalKeys.filter(k => !keepKeys.includes(k) && templateKeys.has(k));
     for (const k of removed) {
-      await supabase.from('invoice_price_book').delete().eq('customer_id', property.id).eq('subsection_key', k);
-    }
-    // Remove size-tier prices the user cleared to zero/blank.
-    const aptClearedKeys = aptSizes
-      .map(sz => `__apt__:${sz.key}`)
-      .filter(k => !aptKeep.includes(k) && originalKeys.includes(k));
-    for (const k of aptClearedKeys) {
       await supabase.from('invoice_price_book').delete().eq('customer_id', property.id).eq('subsection_key', k);
     }
     setSaving(false); onBack();
@@ -16988,36 +14620,6 @@ function PriceBookEditor({ property, onBack }) {
             className="w-28 px-3 py-1.5 rounded-lg border border-amber-300 bg-white text-right text-sm font-mono" />
           <span className="text-[11px] text-amber-700/80 font-mono">/hr — time items use this unless you override one</span>
         </div>
-
-        {/* Whole-apartment flat pricing by SIZE. For properties billed per
-           apartment (not per item) — a 2x2 is one price regardless of what
-           was cleaned. Only the sizes that exist at this property show. */}
-        {aptSizes.length > 0 && (
-          <div className="mb-5 p-3 rounded-2xl bg-stone-100 border border-stone-200">
-            <div className="text-xs font-mono uppercase tracking-wider text-stone-600 mb-1">Whole-apartment price by size</div>
-            <p className="text-[11px] text-stone-500 mb-3">
-              A flat rate per apartment size, used when the whole unit is cleaned. Leave blank for sizes you price by item instead.
-            </p>
-            <div className="space-y-2">
-              {aptSizes.map(sz => {
-                const k = `__apt__:${sz.key}`;
-                return (
-                  <div key={k} className="flex items-center gap-2">
-                    <span className="font-mono text-sm text-stone-800 w-16">{sz.bedrooms}x{sz.bathrooms}</span>
-                    <span className="text-[10px] font-mono text-stone-400 flex-1">
-                      {sz.bedrooms} bed / {sz.bathrooms} bath
-                    </span>
-                    <span className="text-stone-400 font-mono">$</span>
-                    <input type="number" step="0.01" value={aptPrices[k] || ''}
-                      onChange={e => setAptPrices(p => ({ ...p, [k]: e.target.value }))}
-                      placeholder="0.00"
-                      className="w-28 px-3 py-1.5 rounded-lg border border-stone-300 bg-white text-right text-sm font-mono" />
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        )}
 
         {!loaded ? <Splash text="Loading items…" /> : error ? (
           <div className="p-4 rounded-2xl bg-amber-50 border border-amber-200 text-sm text-amber-900">{error}</div>
@@ -17144,36 +14746,20 @@ function subAmount(s) {
     ? ((parseFloat(s.rate) || 0) * (parseFloat(s.minutes) || 0) / 60)
     : (parseFloat(s.amount) || 0);
 }
-// The line BEFORE any extra. "Override line total" replaces this figure;
-// it does not replace the extra.
-function baseAmount(l) {
+function lineAmount(l) {
   if (l.overrideMode === 'time') {
     return ((parseFloat(l.overrideRate) || 0) * (parseFloat(l.overrideMinutes) || 0)) / 60;
   }
   if (l.amountOverride !== '' && l.amountOverride != null) return parseFloat(l.amountOverride) || 0;
   return (l.subsections || []).filter(s => s.included).reduce((sum, s) => sum + subAmount(s), 0);
 }
-// The extra ADDS to the base — that's the whole point of it being separate.
-// Entered either as a flat dollar amount or as minutes × rate.
-function extraAmount(l) {
-  if (!l.extraOn) return 0;
-  return l.extraMode === 'time'
-    ? ((parseFloat(l.extraRate) || 0) * (parseFloat(l.extraMinutes) || 0)) / 60
-    : (parseFloat(l.extraAmount) || 0);
-}
-function lineAmount(l) {
-  return baseAmount(l) + extraAmount(l);
-}
 
-function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, seedInvoice = null }) {
+function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved }) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [lines, setLines] = useState([]);
   const [expanded, setExpanded] = useState(new Set());
   const [invoiceNumber, setInvoiceNumber] = useState('');
-  const [takenNumbers, setTakenNumbers] = useState(new Set()); // numbers already used
-  const [unfinished, setUnfinished] = useState([]);   // scheduled in range, not finished
-  const [dismissed, setDismissed] = useState(new Set()); // ones you've waved off
   const [title, setTitle] = useState('');
   const today = new Date().toISOString().split('T')[0];
   const [invoiceDate, setInvoiceDate] = useState(today);
@@ -17181,8 +14767,6 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
   const [billTo, setBillTo] = useState({ org: '', contact: '', email: '', phone: '', address: '' });
   const [billOpen, setBillOpen] = useState(false);
   const [diag, setDiag] = useState(null);
-  // Done work in this window that an earlier invoice already claimed.
-  const [billedElsewhere, setBilledElsewhere] = useState({ bedrooms: 0, invoices: [] });
   const [defaultRate, setDefaultRate] = useState(0);
   const [previewing, setPreviewing] = useState(false);
 
@@ -17207,7 +14791,7 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
       const PAGE = 1000;
       for (let from = 0; ; from += PAGE) {
         let q = supabase.from('assignment_targets')
-          .select('id, unit_id, party_id, assignment_id, template_item_key, template_section, status_notes, completed_at, status, assignment:assignments(id, assignment_type, deleted_at, took_longer), party:parties(id,label)')
+          .select('id, unit_id, party_id, assignment_id, template_item_key, template_section, status_notes, completed_at, status, assignment:assignments(id, assignment_type, deleted_at), party:parties(id,label)')
           .eq('status', 'done')
           .in('unit_id', unitIds)
           .gte('completed_at', start + 'T00:00:00').lte('completed_at', end + 'T23:59:59')
@@ -17228,78 +14812,6 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
       }
       targets = res.rows; fetchErr = res.err;
     }
-    // 3a2) Work in this range that ISN'T finished. It has no completed_at
-    //      (only done targets get stamped), so "in this range" can only
-    //      mean the assignment's SCHEDULED date. Never billed — you can't
-    //      charge for a clean that hasn't happened — but it's listed so
-    //      you can see what the range was expecting and chase it.
-    let notDone = [];
-    if (unitIds.length) {
-      const PAGE = 1000;
-      for (let from = 0; ; from += PAGE) {
-        const { data, error } = await supabase.from('assignment_targets')
-          .select('id, unit_id, party_id, assignment_id, status, assignment:assignments!inner(id, assignment_type, deleted_at, scheduled_date), unit:units(label), party:parties(label)')
-          .not('status', 'in', '(done)')
-          .in('unit_id', unitIds)
-          .gte('assignment.scheduled_date', start).lte('assignment.scheduled_date', end)
-          .range(from, from + PAGE - 1);
-        if (error || !data) break;
-        notDone = notDone.concat(data);
-        if (data.length < PAGE) break;
-        if (from > 100000) break;
-      }
-    }
-    {
-      const byJob = new Map();
-      notDone.filter(t => t.assignment && !t.assignment.deleted_at).forEach(t => {
-        const k = t.assignment_id;
-        if (!byJob.has(k)) byJob.set(k, {
-          id: k,
-          label: unitPartyLabel(t.unit?.label, t.party?.label) || 'Job',
-          type: t.assignment?.assignment_type || '',
-          scheduled: t.assignment?.scheduled_date || null,
-          total: 0, started: 0,
-        });
-        const r = byJob.get(k);
-        r.total++;
-        if (t.status === 'in_progress' || t.status === 'paused') r.started++;
-      });
-      setUnfinished(Array.from(byJob.values()).sort((a, b) => String(a.label).localeCompare(String(b.label), undefined, { numeric: true })));
-    }
-
-    // 3b) The gap. `invoiced_on IS NULL` above is the ONLY filter this
-    //     draft applies that the property's Done tab does not — so a
-    //     bedroom finished in this window that an earlier invoice already
-    //     stamped is done, in range, and still absent here with no
-    //     explanation. That silence is what makes the two screens look
-    //     like they disagree. Count it and say so.
-    let alreadyBilled = { bedrooms: 0, invoices: [] };
-    if (unitIds.length) {
-      let billed = []; const PAGE = 1000;
-      for (let from = 0; ; from += PAGE) {
-        const { data, error } = await supabase.from('assignment_targets')
-          .select('unit_id, party_id, invoiced_on')
-          .eq('status', 'done')
-          .in('unit_id', unitIds)
-          .gte('completed_at', start + 'T00:00:00').lte('completed_at', end + 'T23:59:59')
-          .not('invoiced_on', 'is', null)
-          .range(from, from + PAGE - 1);
-        if (error || !data) break;
-        billed = billed.concat(data);
-        if (data.length < PAGE) break;
-        if (from > 100000) break;
-      }
-      const beds = new Set(billed.map(b => `${b.unit_id}:${b.party_id}`));
-      const invIds = [...new Set(billed.map(b => b.invoiced_on).filter(Boolean))];
-      let invMeta = [];
-      if (invIds.length) {
-        const { data: im } = await supabase.from('invoices')
-          .select('id, invoice_number, invoice_date, status').in('id', invIds);
-        invMeta = im || [];
-      }
-      alreadyBilled = { bedrooms: beds.size, invoices: invMeta };
-    }
-    setBilledElsewhere(alreadyBilled);
     // 4) Group by assignment (= one bedroom clean).
     const byAssign = new Map();
     const sampleItems = [];
@@ -17308,15 +14820,7 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
     targets.forEach(t => {
       if (t.assignment && t.assignment.deleted_at) return;  // skip soft-deleted assignments
       const aid = t.assignment_id || `${t.unit_id}:${t.party_id}`;
-      if (!byAssign.has(aid)) byAssign.set(aid, { aid, unit_id: t.unit_id, party_id: t.party_id, type: t.assignment?.assignment_type, partyLabel: t.party?.label || '', tookLonger: false, days: new Set(), items: [], targetIds: [] });
-      // The Extra flag lives on the ASSIGNMENT, so capture it here off the
-      // target's joined assignment. It used to be read off the item objects
-      // pushed below, which never carried an `assignment` key — so it was
-      // always undefined and no line was ever marked EXTRA.
-      if (t.assignment?.took_longer) byAssign.get(aid).tookLonger = true;
-      // When the work actually happened. Every target carries completed_at
-      // (the draft only takes status='done'), so collect the distinct days.
-      if (t.completed_at) byAssign.get(aid).days.add(String(t.completed_at).slice(0, 10));
+      if (!byAssign.has(aid)) byAssign.set(aid, { aid, unit_id: t.unit_id, party_id: t.party_id, type: t.assignment?.assignment_type, partyLabel: t.party?.label || '', items: [], targetIds: [] });
       const sec = (t.template_section || '').toLowerCase();
       const itemKey = t.template_item_key || '';
       const fullKey = itemKey
@@ -17340,11 +14844,7 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
       const brBa = (!brm && (meta.bedrooms || meta.bathrooms))
         ? ` · ${meta.bedrooms || 0}BR/${meta.bathrooms || 0}BA`
         : '';
-      const tookLonger = !!g.tookLonger;
-      // NOTE: `label` prints on the client's invoice (see the print view), so
-      // the EXTRA flag deliberately does NOT go in here. It rides on the line
-      // as `tookLonger` and shows as an amber chip in the editor only.
-      const label = (brm ? `${apt} - ${brm}` : `${apt}${brBa}`);
+      const label = brm ? `${apt} - ${brm}` : `${apt}${brBa}`;
       const subs = [];
       const seen = new Set();
       g.items.forEach(it => {
@@ -17379,116 +14879,22 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
       // failed) still get billed — give them one flat "whole bedroom"
       // line, priced per service type and remembered like any item.
       if (subs.length === 0) {
-        // Whole-apartment (nothing itemized failed). Price by SIZE first —
-        // a 1x1 / 2x2 / 3x2 tier in the price book — because Bridges and
-        // Citifront bill a flat rate per apartment size. Fall back to the
-        // per-type flat price, then to unpriced.
-        const meta = unitMetaById[g.unit_id] || {};
-        const bd = meta.bedrooms != null ? meta.bedrooms : null;
-        const ba = meta.bathrooms != null ? meta.bathrooms : null;
-        const sizeKey = (bd != null && ba != null) ? `__apt__:${bd}x${ba}` : null;
         const flatKey = `__flat__:${g.type || 'clean'}`;
-        const sizeBook = sizeKey ? book[sizeKey] : null;
-        const b = sizeBook || book[flatKey];
+        const b = book[flatKey];
         const flatLabel = g.type === 'cleaning_check' ? 'Cleaning check (whole bedroom)'
           : g.type === 'move_out_check' ? 'Move-out clean (whole bedroom)'
           : 'Whole bedroom';
-        // Use the size key when a size price exists so removing/relabeling
-        // stays stable; otherwise keep the flat-by-type key.
-        const useKey = sizeBook ? sizeKey : flatKey;
         if (b) {
           const mode = b.mode === 'time' ? 'time' : 'fixed';
-          subs.push({ key: useKey, label: b.label || flatLabel, mode, amount: mode === 'fixed' ? (b.base_amount || 0) : '', rate: b.rate || defRate || 0, minutes: b.default_minutes || '', included: true, fromBook: true });
+          subs.push({ key: flatKey, label: b.label || flatLabel, mode, amount: mode === 'fixed' ? (b.base_amount || 0) : '', rate: b.rate || defRate || 0, minutes: b.default_minutes || '', included: true, fromBook: true });
         } else {
-          subs.push({ key: useKey, label: flatLabel, mode: 'fixed', amount: '', rate: defRate || 0, minutes: '', included: true, fromBook: false });
+          subs.push({ key: flatKey, label: flatLabel, mode: 'fixed', amount: '', rate: defRate || 0, minutes: '', included: true, fromBook: false });
         }
       }
       subs.sort((a, b) => a.label.localeCompare(b.label));
-      // extraOn defaults to whatever the cleaner flagged on the job, so a
-      // job marked Extra in the field arrives here pre-armed and the owner
-      // only has to type the amount.
-      return { key: g.aid, unitId: g.unit_id, partyId: g.party_id, label, serviceType: g.type, tookLonger, cleanedDays: Array.from(g.days).sort(), description: INVOICE_DESCR[g.type] || '', subsections: subs, amountOverride: '', extraOn: tookLonger, extraMode: 'fixed', extraAmount: '', extraMinutes: '', extraRate: '', extraNote: '', sourceTargetIds: g.targetIds };
+      return { key: g.aid, unitId: g.unit_id, partyId: g.party_id, label, serviceType: g.type, description: INVOICE_DESCR[g.type] || '', subsections: subs, amountOverride: '', sourceTargetIds: g.targetIds };
     }).filter(l => l.label && l.subsections.length > 0).sort((a, b) => a.label.localeCompare(b.label, undefined, { numeric: true }));
-
-    // Reopen path: carry the SAVED invoice's customizations onto the
-    // freshly-regenerated lines, matched by unit:party. Without this,
-    // reopening an invoice wiped every manual price, override, extra and
-    // description because the editor rebuilds lines from scratch. Newly
-    // eligible cleanings still appear (they just won't have a saved line
-    // to inherit from); everything you'd already tuned survives.
-    let builtSeeded = built;
-    if (seedInvoice?.lines?.length) {
-      const savedByKey = {};
-      seedInvoice.lines.forEach(sl => {
-        savedByKey[`${sl.unit_id || ''}:${sl.party_id || ''}`] = sl;
-      });
-      builtSeeded = built.map(l => {
-        const sl = savedByKey[`${l.unitId || ''}:${l.partyId || ''}`];
-        if (!sl) return l;
-        const hasExtra = (parseFloat(sl.extra_amount) || 0) > 0 || sl.extra_note;
-        // Rebuild subsection prices from the saved line so edited amounts
-        // return exactly as they were.
-        const savedSubs = Array.isArray(sl.subsections) ? sl.subsections : [];
-        const subByKey = {};
-        savedSubs.forEach(s => { subByKey[s.key] = s; });
-        const mergedSubs = l.subsections.map(s => {
-          const ss = subByKey[s.key];
-          if (!ss) return s;
-          return { ...s, mode: ss.mode || s.mode, amount: ss.amount != null ? ss.amount : s.amount, rate: ss.rate != null ? ss.rate : s.rate, minutes: ss.minutes != null ? ss.minutes : s.minutes, included: true };
-        });
-        return {
-          ...l,
-          subsections: mergedSubs,
-          description: sl.description != null ? sl.description : l.description,
-          amountOverride: sl.amount_overridden ? String(sl.amount ?? '') : l.amountOverride,
-          extraOn: !!hasExtra,
-          extraMode: sl.extra_mode || 'fixed',
-          extraAmount: (sl.extra_mode !== 'time' && (parseFloat(sl.extra_amount) || 0) > 0) ? String(sl.extra_amount) : '',
-          extraMinutes: sl.extra_minutes != null ? String(sl.extra_minutes) : '',
-          extraRate: sl.extra_rate != null ? String(sl.extra_rate) : '',
-          extraNote: sl.extra_note || '',
-        };
-      });
-    }
-    // Any saved line whose apartment didn't regenerate (its targets are
-    // no longer inside the date window, or the free-targets update hadn't
-    // propagated yet) is REBUILT straight from the saved row. Without
-    // this, reopening silently dropped those lines and their prices —
-    // which is exactly the "it erased my presets" report. We reconstruct
-    // the whole line from what was saved so nothing is lost.
-    if (seedInvoice?.lines?.length) {
-      const builtKeys = new Set(builtSeeded.map(l => `${l.unitId || ''}:${l.partyId || ''}`));
-      const missing = seedInvoice.lines.filter(sl =>
-        !builtKeys.has(`${sl.unit_id || ''}:${sl.party_id || ''}`));
-      if (missing.length) {
-        const rebuilt = missing.map(sl => {
-          const savedSubs = Array.isArray(sl.subsections) ? sl.subsections : [];
-          const subs = savedSubs.length
-            ? savedSubs.map(s => ({ key: s.key, label: s.label, mode: s.mode || 'fixed', amount: s.amount != null ? s.amount : '', rate: s.rate || 0, minutes: s.minutes || '', included: true, fromBook: false }))
-            : [{ key: `__flat__:${sl.service_type || 'clean'}`, label: sl.label || 'Whole bedroom', mode: 'fixed', amount: (parseFloat(sl.base_amount) || parseFloat(sl.amount) || 0), rate: 0, minutes: '', included: true, fromBook: false }];
-          const hasExtra = (parseFloat(sl.extra_amount) || 0) > 0 || sl.extra_note;
-          return {
-            key: `saved:${sl.id}`,
-            unitId: sl.unit_id || null, partyId: sl.party_id || null,
-            label: sl.label || 'Line', serviceType: sl.service_type || '',
-            tookLonger: false, cleanedDays: [], description: sl.description || '',
-            subsections: subs,
-            amountOverride: sl.amount_overridden ? String(sl.amount ?? '') : '',
-            extraOn: !!hasExtra, extraMode: sl.extra_mode || 'fixed',
-            extraAmount: (sl.extra_mode !== 'time' && (parseFloat(sl.extra_amount) || 0) > 0) ? String(sl.extra_amount) : '',
-            extraMinutes: sl.extra_minutes != null ? String(sl.extra_minutes) : '',
-            extraRate: sl.extra_rate != null ? String(sl.extra_rate) : '',
-            extraNote: sl.extra_note || '',
-            // No source targets to re-stamp — this line was already billed
-            // and its targets freed; saving re-stamps whatever regenerated.
-            sourceTargetIds: [],
-          };
-        });
-        builtSeeded = [...builtSeeded, ...rebuilt].sort((a, b) =>
-          String(a.label).localeCompare(String(b.label), undefined, { numeric: true }));
-      }
-    }
-    setLines(builtSeeded);
+    setLines(built);
     // Diagnostics — surfaced in the empty state so we can see where it
     // breaks (no items found vs found-but-unpriced vs query error).
     const pricedKeys = Object.keys(book).length;
@@ -17502,47 +14908,15 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
       sampleItems, sampleSecs,
       err: fetchErr ? (fetchErr.message || String(fetchErr)) : null,
     });
-    // 6) Next invoice number = HIGHEST existing number + 1.
-    //    This used to take the most recently CREATED row and add one,
-    //    which is only the same thing if invoices are always made in
-    //    order. Reopen an old invoice, or save one late, and the "last
-    //    created" row is a low number — so the next draft would reuse a
-    //    number you've already sent. Scan them all and take the max.
-    //    Ordering in SQL can't help here: invoice_number is text, so the
-    //    database sorts "99" above "472".
-    let allNums = [];
-    for (let from = 0; ; from += 1000) {
-      const { data, error } = await supabase.from('invoices')
-        .select('invoice_number').range(from, from + 999);
-      if (error || !data) break;
-      allNums = allNums.concat(data);
-      if (data.length < 1000) break;
-      if (from > 100000) break;
-    }
-    const maxNum = allNums
-      .map(r => parseInt(String(r.invoice_number || '').replace(/[^0-9]/g, ''), 10))
-      .filter(n => Number.isFinite(n))
-      .reduce((m, n) => Math.max(m, n), 0);
-    // Reopen keeps the SAME invoice number and metadata — you're editing
-    // the same bill, not writing a new one. A fresh draft gets max+1.
-    if (seedInvoice?.invoice_number) {
-      setInvoiceNumber(String(seedInvoice.invoice_number));
-    } else {
-      setInvoiceNumber(maxNum > 0 ? String(maxNum + 1) : '1');
-    }
-    setTakenNumbers(new Set(allNums.map(r => String(r.invoice_number || '').trim()).filter(Boolean)));
-    if (seedInvoice) {
-      if (seedInvoice.title) setTitle(seedInvoice.title);
-      if (seedInvoice.invoice_date) setInvoiceDate(seedInvoice.invoice_date);
-      if (seedInvoice.due_date) setDueDate(seedInvoice.due_date);
-    }
-    // 7) Bill-to: from the reopened invoice if present, else property.
+    // 6) Next invoice number (last numeric + 1).
+    const { data: lastInv } = await supabase.from('invoices').select('invoice_number').order('created_at', { ascending: false }).limit(1);
+    const lastNum = parseInt((lastInv && lastInv[0] && lastInv[0].invoice_number) || '', 10);
+    setInvoiceNumber(Number.isFinite(lastNum) ? String(lastNum + 1) : '');
+    // 7) Bill-to defaults from the property.
     setBillTo({
-      org: seedInvoice?.bill_to_org || property.name || '',
-      contact: seedInvoice?.bill_to_contact || property.billing_contact_name || '',
-      email: seedInvoice?.bill_to_email || property.billing_email || '',
-      phone: seedInvoice?.bill_to_phone || property.billing_phone || '',
-      address: seedInvoice?.bill_to_address || property.billing_address || property.address || '',
+      org: property.name || '', contact: property.billing_contact_name || '',
+      email: property.billing_email || '', phone: property.billing_phone || '',
+      address: property.billing_address || property.address || '',
     });
     setLoading(false);
   })(); /* eslint-disable-next-line */ }, []);
@@ -17582,12 +14956,6 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
       label: l.label, service_type: l.serviceType || null, description: l.description || null,
       subsections: l.subsections.filter(s => s.included).map(s => ({ key: s.key, label: s.label, mode: s.mode, amount: subAmount(s), minutes: s.minutes, rate: s.rate })),
       amount: lineAmount(l), amount_overridden: l.amountOverride !== '' && l.amountOverride != null,
-      base_amount: baseAmount(l),
-      extra_amount: extraAmount(l),
-      extra_note: (l.extraOn && l.extraNote) ? l.extraNote : null,
-      extra_mode: l.extraOn ? (l.extraMode || 'fixed') : null,
-      extra_minutes: (l.extraOn && l.extraMode === 'time') ? (parseFloat(l.extraMinutes) || 0) : null,
-      extra_rate: (l.extraOn && l.extraMode === 'time') ? (parseFloat(l.extraRate) || 0) : null,
       qty: 1, sort_order: i, source_unit_id: l.unitId || null, source_party_id: l.partyId || null,
     }));
     if (lineRows.length) {
@@ -17638,25 +15006,11 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
       bill_to_org: billTo.org, bill_to_contact: billTo.contact, bill_to_email: billTo.email,
       bill_to_phone: billTo.phone, bill_to_address: billTo.address,
     };
-    // Must mirror what save() writes, or the preview lies about the bill.
-    // InvoiceDocument reads the DB column names (extra_amount etc.), and
-    // this mapper used to drop them — so an extra charge was invisible in
-    // the preview and only appeared once the invoice was saved.
     const previewLines = lines.map(l => ({
       id: l.key, label: l.label, service_type: l.serviceType,
       description: l.description, qty: 1, amount: lineAmount(l),
-      base_amount: baseAmount(l),
-      extra_amount: extraAmount(l),
-      extra_note: (l.extraOn && l.extraNote) ? l.extraNote : null,
-      extra_mode: l.extraOn ? (l.extraMode || 'fixed') : null,
-      extra_minutes: (l.extraOn && l.extraMode === 'time') ? (parseFloat(l.extraMinutes) || 0) : null,
-      extra_rate: (l.extraOn && l.extraMode === 'time') ? (parseFloat(l.extraRate) || 0) : null,
     }));
     return <InvoiceDocument data={{ inv: previewInv, lines: previewLines }} preview
-      saving={saving}
-      onSaveDraft={() => save('draft')}
-      onSaveSent={() => save('sent')}
-      onSavePaid={() => save('paid')}
       onBack={() => setPreviewing(false)} />;
   }
 
@@ -17689,15 +15043,7 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
         <div className="grid grid-cols-2 gap-3 mb-3">
           <label className="text-xs font-mono text-stone-500">Invoice #
             <input value={invoiceNumber} onChange={e => setInvoiceNumber(e.target.value)}
-              className={`mt-1 w-full px-3 py-2 rounded-lg border bg-white text-sm text-stone-900 ${
-                takenNumbers.has(String(invoiceNumber).trim()) ? 'border-red-400' : 'border-stone-300'}`} />
-            {/* Auto-filled with the next number, but it's a free text field —
-               so say something if you land on one that's already out there. */}
-            {takenNumbers.has(String(invoiceNumber).trim()) && (
-              <span className="block mt-1 text-[10px] text-red-600 normal-case">
-                #{invoiceNumber} is already used by another invoice.
-              </span>
-            )}
+              className="mt-1 w-full px-3 py-2 rounded-lg border border-stone-300 bg-white text-sm text-stone-900" />
           </label>
           <label className="text-xs font-mono text-stone-500">Invoice date
             <input type="date" value={invoiceDate} onChange={e => setInvoiceDate(e.target.value)}
@@ -17733,70 +15079,8 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
           )}
         </div>
 
-        {/* Reconciliation. The Done tab on the property side counts every
-           finished bedroom in this window; this draft drops the ones an
-           earlier invoice already claimed. Without this line the two
-           screens disagree for no visible reason. */}
-        {billedElsewhere.bedrooms > 0 && (
-          <div className="mb-3 p-3 rounded-2xl bg-amber-50 border border-amber-200">
-            <div className="text-xs text-amber-900 font-medium">
-              {billedElsewhere.bedrooms} more {billedElsewhere.bedrooms === 1 ? 'cleaning was' : 'cleanings were'} finished in this window but {billedElsewhere.bedrooms === 1 ? 'is' : 'are'} already billed — not shown below.
-            </div>
-            {billedElsewhere.invoices.length > 0 && (
-              <div className="text-[11px] font-mono text-amber-800/80 mt-1">
-                On {billedElsewhere.invoices.map(i => `#${i.invoice_number || '—'} (${i.status})`).join(', ')}
-              </div>
-            )}
-            <div className="text-[11px] text-amber-800/70 mt-1">
-              This is why the property's Done list can show more than this draft. To re-bill them, reopen that invoice with “Edit / add cleanings”.
-            </div>
-          </div>
-        )}
-
-        {/* Scheduled in this range but not finished. Deliberately NOT
-           billable lines: an invoice is a claim that work happened, and
-           nothing here has. Listed so the range can't quietly hide a job,
-           and dismissible so a known no-show stops nagging. */}
-        {unfinished.filter(u => !dismissed.has(u.id)).length > 0 && (
-          <div className="mb-4 rounded-2xl border-2 border-red-300 bg-red-50 overflow-hidden">
-            <div className="px-4 py-2.5 border-b border-red-200">
-              <div className="text-xs font-medium text-red-900">
-                {unfinished.filter(u => !dismissed.has(u.id)).length} cleaning{unfinished.filter(u => !dismissed.has(u.id)).length === 1 ? '' : 's'} scheduled in this range {unfinished.filter(u => !dismissed.has(u.id)).length === 1 ? 'is' : 'are'} not finished — not billed below.
-              </div>
-              <div className="text-[11px] text-red-800/70 mt-0.5">
-                Finish them in Operations and regenerate to bill them, or dismiss to hide.
-              </div>
-            </div>
-            {unfinished.filter(u => !dismissed.has(u.id)).map(u => (
-              <div key={u.id} className="px-4 py-2 flex items-center gap-2 border-b border-red-100 last:border-0">
-                <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full flex-shrink-0 ${
-                  u.started > 0 ? 'bg-amber-500 text-white' : 'bg-white border border-red-300 text-red-700'}`}>
-                  {u.started > 0 ? 'In progress' : 'Not started'}
-                </span>
-                <span className="font-mono text-sm text-stone-900 truncate">{u.label}</span>
-                {u.type && <span className="text-[10px] px-2 py-0.5 rounded-full bg-white text-stone-600 flex-shrink-0">{assignmentTypeLabel(u.type)}</span>}
-                <span className="text-[10px] font-mono text-stone-500 flex-shrink-0">
-                  {u.scheduled ? fmtDueDate(u.scheduled) : 'no date'} · {u.started}/{u.total} items started
-                </span>
-                <button onClick={() => setDismissed(prev => new Set([...prev, u.id]))}
-                  title="Hide this — doesn't change the job"
-                  className="ml-auto p-1 rounded-lg text-red-400 hover:text-red-700 hover:bg-red-100 flex-shrink-0">
-                  <X size={14} />
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
-
         {/* Lines */}
-        <div className="flex items-center justify-between mb-2">
-          <span className="text-xs uppercase tracking-wider text-stone-500 font-mono">Line items ({lines.length})</span>
-          {diag && lines.length > 0 && (
-            <span className="text-[10px] font-mono text-stone-400">
-              {diag.bedrooms} {diag.bedrooms === 1 ? 'bedroom' : 'bedrooms'} billable · {diag.doneItems} cleaned items
-            </span>
-          )}
-        </div>
+        <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2">Line items ({lines.length})</div>
         {lines.length === 0 ? (
           <div className="py-6 px-4 border-2 border-dashed border-stone-200 rounded-2xl text-sm">
             <div className="text-stone-500 mb-3 text-center">Nothing to bill in this range yet.</div>
@@ -17817,76 +15101,27 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
             )}
           </div>
         ) : (
-          <div className="space-y-4">
+          <div className="space-y-2">
             {lines.map((l, idx) => {
               const open = expanded.has(l.key);
               const amt = lineAmount(l);
-              const base = baseAmount(l);
-              const xtra = extraAmount(l);
-              // What the ticked items come to, before any override replaces
-              // it — shown next to the "Standard" header so the override is
-              // visibly a replacement rather than a mystery.
-              const baseItemsTotal = (l.subsections || []).filter(x => x.included).reduce((sum, x) => sum + subAmount(x), 0);
               const overridden = l.overrideMode === 'time'
                 || (l.amountOverride !== '' && l.amountOverride != null);
               return (
-                /* Heavy border + shadow: expanded lines run long, and a 1px
-                   hairline made it impossible to see where one apartment
-                   ended and the next began. Open lines get an amber edge so
-                   the one you're editing is unmistakable. */
-                <div key={l.key} className={`rounded-2xl overflow-hidden bg-white shadow-sm ${
-                  open ? 'border-2 border-amber-400 shadow-md' : 'border-2 border-stone-300'}`}>
-                  <div className={`flex items-center gap-2 px-4 py-3 ${open ? 'bg-amber-50 border-b-2 border-amber-200' : ''}`}>
+                <div key={l.key} className={`rounded-2xl border border-stone-200 overflow-hidden ${idx % 2 === 0 ? 'bg-white' : 'bg-stone-50'}`}>
+                  <div className="flex items-center gap-2 px-4 py-3">
                     <button onClick={() => toggleExpand(l.key)} className="flex-1 flex items-center gap-2 text-left">
                       <ChevronRight size={15} className={`text-stone-400 transition-transform ${open ? 'rotate-90' : ''}`} />
                       <span className="font-mono text-sm font-medium text-stone-900">{l.label}</span>
                       {l.serviceType && <span className="text-[10px] px-2 py-0.5 rounded-full bg-stone-100 text-stone-600">{assignmentTypeLabel ? assignmentTypeLabel(l.serviceType) : l.serviceType}</span>}
-                      {/* Two ways a line becomes "extra": the cleaner flagged
-                         it in the field (tookLonger), or you priced one here.
-                         Either way the chip should say so — a $30 extra with
-                         no chip is exactly the thing you'd miss scanning
-                         seven lines. */}
-                      {(l.tookLonger || xtra > 0) && (
-                        <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500 text-white inline-flex items-center gap-1 flex-shrink-0"
-                          title={xtra > 0 ? `Extra charge of $${xtra.toFixed(2)} on this line` : 'Cleaner marked this as taking longer — charge extra'}>
-                          <Clock size={9} /> EXTRA{xtra > 0 ? ` +$${xtra.toFixed(2)}` : ''}
-                        </span>
-                      )}
                     </button>
-                    {/* When this bedroom was actually cleaned. The invoice
-                       only bills finished work, so every line has a date —
-                       and you shouldn't have to trust the range blindly. */}
-                    {l.cleanedDays?.length > 0 && (
-                      <span className="text-[10px] font-mono text-stone-500 flex-shrink-0 inline-flex items-center gap-1 whitespace-nowrap">
-                        <Calendar size={9} className="text-stone-400" />
-                        {l.cleanedDays.length === 1
-                          ? fmtDueDate(l.cleanedDays[0])
-                          : `${fmtDueDate(l.cleanedDays[0])} → ${fmtDueDate(l.cleanedDays[l.cleanedDays.length - 1])}`}
-                      </span>
-                    )}
-                    <span className="text-right flex-shrink-0">
-                      <span className={`font-mono text-sm block ${overridden ? 'text-amber-700' : 'text-stone-900'}`}>${amt.toFixed(2)}</span>
-                      {xtra > 0 && (
-                        <span className="text-[10px] font-mono text-amber-700 block">${base.toFixed(2)} + ${xtra.toFixed(2)} extra</span>
-                      )}
-                    </span>
+                    <span className={`font-mono text-sm ${overridden ? 'text-amber-700' : 'text-stone-900'}`}>${amt.toFixed(2)}</span>
                     <button onClick={() => removeLine(l.key)} className="p-1.5 rounded-lg text-stone-300 hover:text-red-600 hover:bg-red-50">
                       <Trash2 size={14} />
                     </button>
                   </div>
                   {open && (
                     <div className="border-t border-stone-100 p-4 space-y-3">
-                      {/* Three stages, in the order they apply:
-                         1. STANDARD — the priced items
-                         2. EXTRA    — added on top
-                         3. OVERRIDE — replaces the standard total, so it
-                                       goes last where it can't be missed. */}
-                      <div className="flex items-center gap-2 mb-2">
-                        <span className="text-[10px] uppercase tracking-wider font-mono text-stone-500">1 · Standard</span>
-                        <span className="text-[10px] font-mono text-stone-400">what the items come to</span>
-                        <div className="flex-1 h-px bg-stone-200" />
-                        <span className="text-[11px] font-mono text-stone-700">${baseItemsTotal.toFixed(2)}</span>
-                      </div>
                       {l.subsections.length === 0 ? (
                         <div className="text-xs text-stone-400 font-mono">No priced items detected for this bedroom. Set a line total below, or price its items in the price book.</div>
                       ) : (() => {
@@ -17895,11 +15130,8 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
                           const sec = String(s.key || '').split(':')[0] || 'other';
                           (bySection[sec] = bySection[sec] || []).push({ s, si });
                         });
-                        const order = ['bedroom', 'vanity', 'bathroom', 'general', '__flat__', 'other'];
-                        // '__flat__' is the synthetic key for a whole-bedroom
-                        // line (nothing itemised failed). It was printing raw
-                        // as "__FLAT__", which means nothing to anyone.
-                        const secLabel = { bedroom: 'Bedroom', vanity: 'Vanity', bathroom: 'Bathroom', general: 'General', __flat__: 'Whole bedroom', other: 'Other' };
+                        const order = ['bedroom', 'vanity', 'bathroom', 'general', 'other'];
+                        const secLabel = { bedroom: 'Bedroom', vanity: 'Vanity', bathroom: 'Bathroom', general: 'General', other: 'Other' };
                         const secs = Object.keys(bySection).sort((a, b) => {
                           const ia = order.indexOf(a), ib = order.indexOf(b);
                           return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
@@ -17910,7 +15142,7 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
                               <React.Fragment key={sec}>
                                 <div className="col-span-full text-[10px] uppercase tracking-wider font-mono text-stone-400 border-b border-stone-100 pb-1 mt-1">{secLabel[sec] || sec}</div>
                                 {bySection[sec].map(({ s, si }) => (
-                                  <div key={s.key} className="flex items-center gap-1.5 min-w-0 max-w-[340px]">
+                                  <div key={s.key} className="flex items-center gap-1.5 min-w-0">
                                     <button onClick={() => updateSub(l.key, si, { included: !s.included })}
                                       className={`w-4 h-4 rounded flex items-center justify-center flex-shrink-0 ${s.included ? 'bg-stone-900 text-white' : 'border border-stone-300 text-transparent'}`}>
                                       <Check size={10} />
@@ -17921,16 +15153,10 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
                                       <Clock size={11} />
                                     </button>
                                     {s.mode === 'time' ? (
-                                      /* Was "47 × 2" with no units — unreadable.
-                                         It's an hourly RATE times MINUTES, so say
-                                         so, and show what it works out to. */
-                                      <span className="flex items-center gap-0.5 text-[11px] font-mono flex-shrink-0" title="Hourly rate × minutes">
-                                        <span className="text-stone-400">$</span>
-                                        <input type="number" step="0.01" value={s.rate} onChange={e => updateSub(l.key, si, { rate: e.target.value })} placeholder={defaultRate ? String(defaultRate) : '0'} className="w-10 px-1 py-0.5 rounded border border-stone-300 bg-white text-right" />
-                                        <span className="text-stone-400">/hr ×</span>
-                                        <input type="number" value={s.minutes} onChange={e => updateSub(l.key, si, { minutes: e.target.value })} placeholder="0" className="w-8 px-1 py-0.5 rounded border border-stone-300 bg-white text-right" />
-                                        <span className="text-stone-400">m =</span>
-                                        <span className="text-emerald-700 font-medium w-12 text-right">${subAmount(s).toFixed(2)}</span>
+                                      <span className="flex items-center gap-0.5 text-[11px] font-mono flex-shrink-0">
+                                        <input type="number" step="0.01" value={s.rate} onChange={e => updateSub(l.key, si, { rate: e.target.value })} placeholder={defaultRate ? String(defaultRate) : '0'} className="w-9 px-1 py-0.5 rounded border border-stone-300 bg-white text-right" />
+                                        <span className="text-stone-400">×</span>
+                                        <input type="number" value={s.minutes} onChange={e => updateSub(l.key, si, { minutes: e.target.value })} placeholder="m" className="w-7 px-1 py-0.5 rounded border border-stone-300 bg-white text-right" />
                                       </span>
                                     ) : (
                                       <span className="flex items-center gap-0.5 text-[11px] font-mono flex-shrink-0">
@@ -17951,77 +15177,9 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
                         <input value={l.description} onChange={e => updateLine(l.key, { description: e.target.value })}
                           className="w-full px-3 py-2 rounded-lg border border-stone-300 bg-white text-sm text-stone-700" />
                       </div>
-                      {/* EXTRA — adds on top of the standard total. */}
-                      <div className="pt-3 mt-2 border-t-2 border-amber-200">
-                        <div className="flex items-center gap-2 mb-2">
-                          <span className="text-[10px] uppercase tracking-wider font-mono text-amber-700">2 · Extra charge</span>
-                          <span className="text-[10px] font-mono text-stone-400">added on top</span>
-                          <div className="flex-1 h-px bg-amber-100" />
-                          <span className="text-[11px] font-mono text-amber-700">+${xtra.toFixed(2)}</span>
-                        </div>
-                        <div className="flex items-center justify-between mb-2 gap-2">
-                          <button onClick={() => updateLine(l.key, { extraOn: !l.extraOn, extraRate: (!l.extraOn && !l.extraRate) ? (defaultRate || '') : l.extraRate })}
-                            className={`text-[10px] font-mono px-2.5 py-1 rounded-full inline-flex items-center gap-1 ${l.extraOn ? 'bg-amber-500 text-white' : 'bg-white border border-dashed border-stone-300 text-stone-500'}`}>
-                            <Plus size={10} /> {l.extraOn ? 'Extra charge' : 'Add extra charge'}
-                          </button>
-                          {l.extraOn && (
-                            <div className="flex p-0.5 bg-stone-100 rounded-lg">
-                              <button onClick={() => updateLine(l.key, { extraMode: 'fixed' })}
-                                className={`px-2 py-1 rounded-md text-[10px] font-mono flex items-center gap-0.5 ${l.extraMode !== 'time' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
-                                <DollarSign size={10} /> Amount
-                              </button>
-                              <button onClick={() => updateLine(l.key, { extraMode: 'time', extraRate: (parseFloat(l.extraRate) > 0 ? l.extraRate : (defaultRate || 0)) })}
-                                className={`px-2 py-1 rounded-md text-[10px] font-mono flex items-center gap-0.5 ${l.extraMode === 'time' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
-                                <Clock size={10} /> Time × rate
-                              </button>
-                            </div>
-                          )}
-                        </div>
-                        {l.extraOn && (<>
-                          {l.extraMode === 'time' ? (
-                            <div className="flex items-center justify-end gap-1 text-sm font-mono text-stone-600 flex-wrap">
-                              <span className="text-stone-400">$</span>
-                              <input type="number" step="0.01" value={l.extraRate || ''}
-                                onChange={e => updateLine(l.key, { extraRate: e.target.value })}
-                                placeholder={defaultRate ? String(defaultRate) : '0.00'}
-                                className="w-16 px-2 py-1 rounded-lg border border-stone-300 bg-white text-right" />
-                              <span className="text-stone-400 text-xs">/hr ×</span>
-                              <input type="number" step="1" value={l.extraMinutes || ''}
-                                onChange={e => updateLine(l.key, { extraMinutes: e.target.value })}
-                                placeholder="min"
-                                className="w-16 px-2 py-1 rounded-lg border border-stone-300 bg-white text-right" />
-                              <span className="text-stone-400 text-xs">min =</span>
-                              <span className="text-amber-700 font-medium min-w-[56px] text-right">${xtra.toFixed(2)}</span>
-                            </div>
-                          ) : (
-                            <div className="flex items-center justify-end">
-                              <span className="flex items-center gap-1 text-sm font-mono">
-                                <span className="text-stone-400">$</span>
-                                <input type="number" step="0.01" value={l.extraAmount}
-                                  onChange={e => updateLine(l.key, { extraAmount: e.target.value })}
-                                  placeholder="0.00"
-                                  className="w-24 px-2 py-1 rounded-lg border border-amber-300 bg-white text-right" />
-                              </span>
-                            </div>
-                          )}
-                          <input value={l.extraNote || ''} onChange={e => updateLine(l.key, { extraNote: e.target.value })}
-                            placeholder="Why? Prints under the extra, e.g. “Heavy soil — 45 min over”"
-                            className="w-full mt-2 px-3 py-2 rounded-lg border border-stone-300 bg-white text-sm text-stone-700" />
-                          <div className="flex items-center justify-end gap-3 mt-2 text-[11px] font-mono">
-                            <span className="text-stone-500">Base ${base.toFixed(2)}</span>
-                            <span className="text-amber-700">Extra ${xtra.toFixed(2)}</span>
-                            <span className="text-stone-900 font-medium">Total ${amt.toFixed(2)}</span>
-                          </div>
-                        </>)}
-                      </div>
-                      <div className="pt-3 mt-2 border-t-2 border-stone-300">
-                        <div className="flex items-center gap-2 mb-2">
-                          <span className="text-[10px] uppercase tracking-wider font-mono text-stone-500">3 · Override line total</span>
-                          <span className="text-[10px] font-mono text-stone-400">replaces the standard total — the extra still applies</span>
-                          <div className="flex-1 h-px bg-stone-200" />
-                        </div>
+                      <div className="pt-2 border-t border-stone-100">
                         <div className="flex items-center justify-between mb-2">
-                          <span className="text-[11px] font-mono text-stone-500">Set a flat total</span>
+                          <span className="text-[11px] font-mono text-stone-500">Override line total</span>
                           <div className="flex p-0.5 bg-stone-100 rounded-lg">
                             <button onClick={() => updateLine(l.key, { overrideMode: 'fixed' })}
                               className={`px-2 py-1 rounded-md text-[10px] font-mono flex items-center gap-0.5 ${l.overrideMode !== 'time' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
@@ -18046,7 +15204,7 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
                               placeholder="min"
                               className="w-16 px-2 py-1 rounded-lg border border-stone-300 bg-white text-right" />
                             <span className="text-stone-400 text-xs">min =</span>
-                            <span className="text-emerald-700 font-medium min-w-[56px] text-right">${base.toFixed(2)}</span>
+                            <span className="text-emerald-700 font-medium min-w-[56px] text-right">${amt.toFixed(2)}</span>
                           </div>
                         ) : (
                           <div className="flex items-center justify-end">
@@ -18060,7 +15218,6 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
                           </div>
                         )}
                       </div>
-
                     </div>
                   )}
                 </div>
@@ -18104,7 +15261,7 @@ function fmtInvoiceDate(d) {
 // invoice + its lines and renders the polished layout matching the
 // company's PDF, with print / status / delete actions.
 // =================================================================
-function InvoiceDocument({ invoiceId, data, preview, onBack, onChanged, onEditDraft, saving = false, onSaveDraft, onSaveSent, onSavePaid }) {
+function InvoiceDocument({ invoiceId, data, preview, onBack, onChanged, onEditDraft }) {
   const [inv, setInv] = useState(null);
   const [lines, setLines] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -18150,12 +15307,6 @@ function InvoiceDocument({ invoiceId, data, preview, onBack, onChanged, onEditDr
   );
 
   const total = lines.reduce((s, l) => s + (parseFloat(l.amount) || 0), 0);
-  const extraTotal = lines.reduce((s, l) => s + (parseFloat(l.extra_amount) || 0), 0);
-  const baseTotal = lines.reduce((s, l) => {
-    const amt = parseFloat(l.amount) || 0;
-    const x = parseFloat(l.extra_amount) || 0;
-    return s + (l.base_amount != null ? (parseFloat(l.base_amount) || 0) : (amt - x));
-  }, 0);
 
   return (
     <div className="pb-28 bg-stone-100 min-h-screen">
@@ -18165,31 +15316,9 @@ function InvoiceDocument({ invoiceId, data, preview, onBack, onChanged, onEditDr
           <ArrowLeft size={16} /> {preview ? 'Back to draft' : 'Back'}
         </button>
         <div className="flex items-center gap-2 flex-wrap">
-          {preview && (
-            <>
-              <span className="text-xs font-mono text-amber-700 px-2 py-1 rounded bg-amber-50">Preview</span>
-              {onSaveDraft && (
-                <button onClick={onSaveDraft} disabled={saving}
-                  className="px-3 py-1.5 rounded-lg bg-white border border-stone-300 text-stone-700 text-xs font-medium disabled:opacity-50">
-                  {saving ? 'Saving…' : 'Save draft'}
-                </button>
-              )}
-              {onSaveSent && (
-                <button onClick={onSaveSent} disabled={saving}
-                  className="px-3 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-medium disabled:opacity-50">
-                  Save & mark sent
-                </button>
-              )}
-              {onSavePaid && (
-                <button onClick={onSavePaid} disabled={saving}
-                  className="px-3 py-1.5 rounded-lg bg-emerald-600 text-white text-xs font-medium disabled:opacity-50">
-                  Save & mark paid
-                </button>
-              )}
-            </>
-          )}
+          {preview && <span className="text-xs font-mono text-amber-700 px-2 py-1 rounded bg-amber-50">Preview — not saved</span>}
           {!preview && inv.status === 'draft' && onEditDraft && (
-            <button onClick={() => { if (confirm('Reopen this invoice to edit? Your prices, overrides and notes are kept, and any newer cleanings in the period merge in.')) onEditDraft(inv); }}
+            <button onClick={() => { if (confirm('Reopen this draft to add more cleanings? Its items are freed and it reopens in the editor so newer cleanings merge in.')) onEditDraft(inv); }}
               disabled={working} className="px-3 py-1.5 rounded-lg bg-amber-600 text-white text-xs font-medium disabled:opacity-50">Edit / add cleanings</button>
           )}
           {!preview && inv.status !== 'sent' && <button onClick={() => setStatus('sent')} disabled={working} className="px-3 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-medium disabled:opacity-50">Mark sent</button>}
@@ -18248,10 +15377,6 @@ function InvoiceDocument({ invoiceId, data, preview, onBack, onChanged, onEditDr
           </div>
           {lines.map((l, i) => {
             const amount = parseFloat(l.amount) || 0;
-            const xtra = parseFloat(l.extra_amount) || 0;
-            // base_amount is backfilled by v58; fall back for any line
-            // written before that migration ran.
-            const base = l.base_amount != null ? (parseFloat(l.base_amount) || 0) : (amount - xtra);
             const n = i + 1;
             return (
               <div key={l.id}>
@@ -18263,20 +15388,6 @@ function InvoiceDocument({ invoiceId, data, preview, onBack, onChanged, onEditDr
                       <div className="font-semibold text-stone-800">{INVOICE_TYPE_LABEL[l.service_type] || 'Cleaning'}</div>
                       <div className="text-stone-700">{l.label}</div>
                       {l.description && <div className="text-stone-500">{l.description}</div>}
-                      {/* Show the PM what they're paying for rather than one
-                         lump sum they have to take on faith. */}
-                      {xtra > 0 && (
-                        <div className="mt-1 text-stone-600" style={{ fontSize: 11 }}>
-                          <div>Base clean — ${base.toFixed(2)}</div>
-                          <div>
-                            Additional work — ${xtra.toFixed(2)}
-                            {l.extra_mode === 'time' && parseFloat(l.extra_minutes) > 0 && (
-                              <span className="text-stone-500"> ({parseFloat(l.extra_minutes)} min @ ${(parseFloat(l.extra_rate) || 0).toFixed(2)}/hr)</span>
-                            )}
-                          </div>
-                          {l.extra_note && <div className="text-stone-500 italic">{l.extra_note}</div>}
-                        </div>
-                      )}
                     </div>
                   </div>
                   <div className="text-right align-top" style={{ width: 110 }}>${amount.toFixed(2)}</div>
@@ -18295,15 +15406,10 @@ function InvoiceDocument({ invoiceId, data, preview, onBack, onChanged, onEditDr
           })}
         </div>
 
-        {/* Totals — Base / Extra / Total when anything on this invoice
-           carries an extra, otherwise just the total as before. */}
+        {/* Totals */}
         <div className="flex justify-end mt-4">
           <div className="w-64 text-sm">
-            {extraTotal > 0 && (<>
-              <div className="flex justify-between py-1 border-t border-stone-300"><span className="text-stone-600">Base cleaning:</span><span className="text-stone-800">${baseTotal.toFixed(2)}</span></div>
-              <div className="flex justify-between py-1"><span className="text-stone-600">Additional work:</span><span className="text-stone-800">${extraTotal.toFixed(2)}</span></div>
-            </>)}
-            <div className={`flex justify-between py-2 ${extraTotal > 0 ? 'border-t border-stone-300' : 'border-t border-stone-300'}`}><span className="text-stone-600">Total:</span><span className="font-medium text-stone-900">${total.toFixed(2)}</span></div>
+            <div className="flex justify-between py-2 border-t border-stone-300"><span className="text-stone-600">Total:</span><span className="font-medium text-stone-900">${total.toFixed(2)}</span></div>
             <div className="flex justify-between py-2 px-2 bg-stone-100 rounded"><span className="text-stone-700 font-medium">Amount Due (USD):</span><span className="font-bold text-stone-900">${total.toFixed(2)}</span></div>
           </div>
         </div>
@@ -18329,15 +15435,13 @@ function InvoiceList({ property, onOpen, onNew }) {
     // (done targets with no invoiced_on and completed_at older than 7 days).
     try {
       const weekAgo = new Date(Date.now() - 7 * 86400 * 1000).toISOString();
-      // Don't chase history: only flag work from this month onward.
-      const mStart = (() => { const d = new Date(); return new Date(d.getFullYear(), d.getMonth(), 1).toISOString(); })();
       const { data: propUnits } = await supabase.from('units').select('id').eq('customer_id', property.id);
       const unitIds = (propUnits || []).map(u => u.id);
       if (unitIds.length) {
         const { data: needRows, error } = await supabase.from('assignment_targets')
           .select('assignment_id, unit_id, assignment:assignments!inner(deleted_at, active)')
           .eq('status', 'done').is('invoiced_on', null).in('unit_id', unitIds)
-          .lt('completed_at', weekAgo).gte('completed_at', mStart);
+          .lt('completed_at', weekAgo);
         if (!error) {
           const jobs = new Set();
           (needRows || []).forEach(t => {
@@ -18408,646 +15512,140 @@ function InvoiceList({ property, onOpen, onNew }) {
 }
 
 // =================================================================
-// PROFIT / LOSS REPORT — one row per invoiced apartment. Owner-only.
-//
-// Reads INVOICES, not raw work blocks. Each invoice line already IS an
-// apartment we billed (unit + size + service type + amount), so a line
-// is the natural unit of profit: "F101, 2BR/2BA, charged $X".
-//
-// The pay side is matched to the SAME apartment over the SAME window
-// the invoice covers (its period_start → period_end), so charge and pay
-// always describe the same work. The old report compared invoices DATED
-// in the range against labor WORKED in the range — two different
-// windows — so invoicing at month end put the charge in one bucket and
-// the pay in another, and every week looked like a loss.
-//
-// The date range filters by the work the invoice covers (its period),
-// not by when the invoice was typed up.
-//
-// Any figure can be corrected inline. Corrections live in
-// profit_line_reviews and NEVER touch the invoice itself — an invoice
-// you already sent must not change because you fixed a number here.
+// PROFIT / LOSS REPORT — invoiced charge vs labor pay, sliced by
+// property or by person. Owner-only (lives under Money).
 // =================================================================
 function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, topToggle }) {
   const iso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-  // Remember the range across refreshes. Re-picking dates and hitting Run
-  // again after every reload is pure friction — the report is derived
-  // data, so it can just rebuild itself.
-  const SAVED_RANGE_KEY = 'tidytrack_profit_range';
-  const savedRange = (() => {
-    try { return JSON.parse(localStorage.getItem(SAVED_RANGE_KEY) || 'null'); } catch { return null; }
-  })();
-  const [start, setStart] = useState(savedRange?.start || iso(new Date(Date.now() - 29 * 86400000)));
-  const [end, setEnd] = useState(savedRange?.end || iso(new Date()));
+  const [start, setStart] = useState(iso(new Date(Date.now() - 29 * 86400000)));
+  const [end, setEnd] = useState(iso(new Date()));
+  const [slice, setSlice] = useState('property'); // 'property' | 'person'
   const [loading, setLoading] = useState(false);
-  const [groups, setGroups] = useState(null);
+  const [rows, setRows] = useState(null);
   const [totals, setTotals] = useState({ charge: 0, pay: 0 });
-  const [savingId, setSavingId] = useState(null);
-  const [cell, setCell] = useState(null);      // { id, field } being edited
-  const [cellVal, setCellVal] = useState('');
-  const [openRow, setOpenRow] = useState(null); // row showing its item breakdown
-  const [unbilled, setUnbilled] = useState(0);
-  const [unbilledDetail, setUnbilledDetail] = useState([]); // per-property uninvoiced labor
-  const [invoiceHint, setInvoiceHint] = useState([]);       // what ranges DO have invoices
-  const [runaway, setRunaway] = useState({ count: 0, pay: 0, hours: 0 }); // forgotten clock-outs
-
-  const num = (v) => { const n = Number(v); return isNaN(n) ? 0 : n; };
 
   const run = async () => {
     if (!start || !end) return;
-    try { localStorage.setItem(SAVED_RANGE_KEY, JSON.stringify({ start, end })); } catch { /* private mode */ }
-    setLoading(true); setCell(null);
+    setLoading(true);
     try {
-      // 1. Invoices whose covered period overlaps the range. Older
-      //    invoices predate period_start/period_end, so fall back to
-      //    invoice_date for those.
-      const { data: invs, error: invErr } = await supabase.from('invoices')
-        .select('id, customer_id, invoice_date, period_start, period_end, invoice_number, status, customer:customers(id, name)')
-        .or(`and(period_start.lte.${end},period_end.gte.${start}),and(period_start.is.null,invoice_date.gte.${start},invoice_date.lte.${end})`);
-      if (invErr) throw invErr;
-      const invoices = invs || [];
+      const { data: blocks } = await supabase.from('work_blocks')
+        .select('start_time, end_time, shift:shifts!inner(customer_id, is_preview, employee:employees(id, name, pay_rate_hourly), customer:customers(name))')
+        .gte('start_time', start + 'T00:00:00').lte('start_time', end + 'T23:59:59')
+        .not('end_time', 'is', null);
+      const { data: invs } = await supabase.from('invoices')
+        .select('customer_id, total, invoice_date, customer:customers(name)')
+        .gte('invoice_date', start).lte('invoice_date', end);
 
-      // Labor fetch, reused below. Always runs, even with zero invoices —
-      // "no invoices cover this range" and "nobody worked this range" are
-      // very different answers and the screen has to tell them apart.
-      const fetchBlocks = async (winStart, winEnd) => {
-        let out = []; const PAGE = 1000;
-        for (let from = 0; ; from += PAGE) {
-          const { data, error } = await supabase.from('work_blocks')
-            .select('id, unit_id, party_id, start_time, end_time, unit:units(label), shift:shifts!inner(customer_id, is_preview, employee:employees(id, name, pay_rate_hourly), customer:customers(id, name))')
-            .gte('start_time', winStart + 'T00:00:00').lte('start_time', winEnd + 'T23:59:59')
-            .not('end_time', 'is', null)
-            .range(from, from + PAGE - 1);
-          if (error || !data) break;
-          out = out.concat(data);
-          if (data.length < PAGE) break;
-          if (from > 100000) break;
-        }
-        return out.filter(b => b.shift && !b.shift.is_preview && b.unit_id);
-      };
-      const blockPay = (b) => {
+      const persons = {}; // id -> {name, rate}
+      const props = {};   // id -> name
+      const hoursPP = {}; // personId -> propId -> hours
+      (blocks || []).forEach(b => {
+        const sh = b.shift; if (!sh || sh.is_preview) return;
+        const emp = sh.employee; const pid = emp?.id; const cid = sh.customer_id;
+        if (!pid || !cid || !b.end_time) return;
         const hrs = (new Date(b.end_time) - new Date(b.start_time)) / 3600000;
-        if (hrs <= 0) return { hrs: 0, pay: 0 };
-        return { hrs, pay: hrs * num(b.shift.employee?.pay_rate_hourly) };
-      };
-      // Split off the forgotten clock-outs before any money is added up.
-      // A block longer than MAX_BLOCK_HOURS isn't a long clean, it's a
-      // block nobody closed — counting it as labor turns a normal week
-      // into a fake five-figure loss.
-      const runawayOf = (list) => list.filter(b => blockPay(b).hrs > MAX_BLOCK_HOURS);
-      const sensibleOf = (list) => list.filter(b => {
-        const h = blockPay(b).hrs;
-        return h > 0 && h <= MAX_BLOCK_HOURS;
+        if (hrs <= 0) return;
+        persons[pid] = persons[pid] || { name: emp.name, rate: Number(emp.pay_rate_hourly) || 0 };
+        props[cid] = props[cid] || (sh.customer?.name || 'Property');
+        hoursPP[pid] = hoursPP[pid] || {};
+        hoursPP[pid][cid] = (hoursPP[pid][cid] || 0) + hrs;
       });
 
-      if (invoices.length === 0) {
-        // Nothing bills this range. Show the labor that's sitting
-        // uninvoiced, and tell them which ranges DO have invoices, so the
-        // fix is "pick the right dates" not "guess".
-        const loose = await fetchBlocks(start, end);
-        const runaways = runawayOf(loose);
-        setRunaway({
-          count: runaways.length,
-          pay: runaways.reduce((s, b) => s + blockPay(b).pay, 0),
-          hours: runaways.reduce((s, b) => s + blockPay(b).hrs, 0),
-        });
-        const byProp = {};
-        let sum = 0;
-        sensibleOf(loose).forEach(b => {
-          const { hrs, pay } = blockPay(b); if (hrs <= 0) return;
-          sum += pay;
-          const cid = b.shift.customer_id || 'none';
-          byProp[cid] = byProp[cid] || { name: b.shift.customer?.name || 'No property', hours: 0, pay: 0 };
-          byProp[cid].hours += hrs; byProp[cid].pay += pay;
-        });
-        const { data: recent } = await supabase.from('invoices')
-          .select('invoice_number, invoice_date, period_start, period_end, customer:customers(name)')
-          .order('invoice_date', { ascending: false }).limit(5);
-        setUnbilledDetail(Object.values(byProp).sort((a, b) => b.pay - a.pay));
-        setInvoiceHint(recent || []);
-        setGroups([]); setTotals({ charge: 0, pay: 0 }); setUnbilled(sum);
-        setLoading(false); return;
-      }
-      setInvoiceHint([]); setUnbilledDetail([]);
-
-      // 2. Their lines. Paginated — a busy month easily clears 1000 lines.
-      const invIds = invoices.map(i => i.id);
-      let lines = [];
-      for (let i = 0; i < invIds.length; i += 50) {
-        const chunk = invIds.slice(i, i + 50);
-        const PAGE = 1000;
-        for (let from = 0; ; from += PAGE) {
-          const { data, error } = await supabase.from('invoice_lines')
-            .select('id, invoice_id, unit_id, party_id, label, service_type, description, amount, base_amount, extra_amount, extra_note, subsections')
-            .in('invoice_id', chunk).range(from, from + PAGE - 1);
-          if (error || !data) break;
-          lines = lines.concat(data);
-          if (data.length < PAGE) break;
-          if (from > 100000) break;
-        }
-      }
-
-      // 2b. Real unit + bedroom labels. invoice_lines.label is cosmetic —
-      //     the draft builder strips the building prefix off it (B2-233
-      //     becomes "233"), which is fine on a bill to one property but
-      //     useless in a report spanning several. Join to units/parties
-      //     for the real thing.
-      const lineUnitIds = [...new Set(lines.map(l => l.unit_id).filter(Boolean))];
-      const linePartyIds = [...new Set(lines.map(l => l.party_id).filter(Boolean))];
-      const unitLabelById = {};
-      for (let i = 0; i < lineUnitIds.length; i += 200) {
-        const { data } = await supabase.from('units').select('id, label').in('id', lineUnitIds.slice(i, i + 200));
-        (data || []).forEach(u => { unitLabelById[u.id] = u.label; });
-      }
-      const partyLabelById = {};
-      for (let i = 0; i < linePartyIds.length; i += 200) {
-        const { data } = await supabase.from('parties').select('id, label').in('id', linePartyIds.slice(i, i + 200));
-        (data || []).forEach(pt => { partyLabelById[pt.id] = pt.label; });
-      }
-
-      // 3. Corrections. No PostgREST embed — plain read, joined in JS.
-      let reviews = [];
-      const lineIds = lines.map(l => l.id);
-      for (let i = 0; i < lineIds.length; i += 200) {
-        const { data } = await supabase.from('profit_line_reviews')
-          .select('invoice_line_id, charged_override, paid_override, hours_override, note')
-          .in('invoice_line_id', lineIds.slice(i, i + 200));
-        reviews = reviews.concat(data || []);
-      }
-      const reviewByLine = Object.fromEntries(reviews.map(r => [r.invoice_line_id, r]));
-
-      // 4. Labor. One window wide enough to cover every invoice period
-      //    touched, then matched per line to that invoice's own period.
-      const winStart = invoices.reduce((m, i) => {
-        const s = i.period_start || i.invoice_date || start;
-        return s < m ? s : m;
-      }, start);
-      const winEnd = invoices.reduce((m, i) => {
-        const e = i.period_end || i.invoice_date || end;
-        return e > m ? e : m;
-      }, end);
-      const allBlocks = await fetchBlocks(winStart, winEnd);
-      {
-        // Same guard on the invoiced path. Restricted to the report's own
-        // range so the count matches what's on screen.
-        const inRange = allBlocks.filter(b => { const d = String(b.start_time).slice(0, 10); return d >= start && d <= end; });
-        const runaways = runawayOf(inRange);
-        setRunaway({
-          count: runaways.length,
-          pay: runaways.reduce((s, b) => s + blockPay(b).pay, 0),
-          hours: runaways.reduce((s, b) => s + blockPay(b).hrs, 0),
-        });
-      }
-      const liveBlocks = sensibleOf(allBlocks);
-
-      // 5. Build a row per invoice line.
-      const invById = Object.fromEntries(invoices.map(i => [i.id, i]));
-      const usedBlockIds = new Set();
-      const rows = lines.map(l => {
-        const inv = invById[l.invoice_id];
-        const pStart = inv?.period_start || inv?.invoice_date || start;
-        const pEnd = inv?.period_end || inv?.invoice_date || end;
-        // Match blocks at the SAME apartment inside the invoice's own
-        // period. Match on party too when the line names one, so two
-        // bedrooms billed separately don't both absorb the same labor.
-        const mine = liveBlocks.filter(b => {
-          if (b.unit_id !== l.unit_id) return false;
-          if (l.party_id && b.party_id && b.party_id !== l.party_id) return false;
-          const d = String(b.start_time).slice(0, 10);
-          return d >= pStart && d <= pEnd;
-        });
-        const byPerson = {};
-        // The dates the work actually happened. The invoice PERIOD is a
-        // billing window, not a clean date — showing only the period made
-        // it impossible to tell when this apartment was done.
-        const cleanedDays = [...new Set(mine.map(b => String(b.start_time).slice(0, 10)))].sort();
-        let pay = 0, hours = 0;
-        mine.forEach(b => {
-          usedBlockIds.add(b.id);
-          const hrs = (new Date(b.end_time) - new Date(b.start_time)) / 3600000;
-          if (hrs <= 0) return;
-          const emp = b.shift.employee; if (!emp) return;
-          const rate = num(emp.pay_rate_hourly);
-          hours += hrs; pay += hrs * rate;
-          byPerson[emp.id] = byPerson[emp.id] || { name: emp.name, hours: 0, pay: 0 };
-          byPerson[emp.id].hours += hrs;
-          byPerson[emp.id].pay += hrs * rate;
-        });
-        const rev = reviewByLine[l.id];
-        const baseCharge = num(l.amount);
-        const charge = rev && rev.charged_override != null ? num(rev.charged_override) : baseCharge;
-        const paid = rev && rev.paid_override != null ? num(rev.paid_override) : pay;
-        const hoursEff = rev && rev.hours_override != null ? num(rev.hours_override) : hours;
-        return {
-          id: l.id,
-          propertyId: inv?.customer_id,
-          propertyName: inv?.customer?.name || 'Property',
-          invoiceNumber: inv?.invoice_number,
-          invoiceStatus: inv?.status,
-          periodLabel: inv?.period_start && inv?.period_end ? `${inv.period_start} → ${inv.period_end}` : fmtInvoiceDate(inv?.invoice_date),
-          // Prefer the real unit/bedroom labels; fall back to whatever the
-          // invoice printed if this line isn't tied to a unit.
-          label: unitPartyLabel(unitLabelById[l.unit_id], partyLabelById[l.party_id]) || l.label || 'Line',
-          invoiceLabel: l.label || '',
-          serviceType: l.service_type,
-          // The saved item breakdown, so the grid can drop down and show
-          // exactly what made up the charge — same detail as the invoice.
-          subsections: Array.isArray(l.subsections) ? l.subsections : [],
-          description: l.description || '',
-          extraAmount: num(l.extra_amount),
-          extraNote: l.extra_note || '',
-          cleaners: Object.values(byPerson).sort((a, b) => b.hours - a.hours),
-          cleanedDays,
-          baseHours: hours,
-          hours: hoursEff,
-          baseCharge, basePay: pay,
-          charge, paid,
-          editedCharge: !!rev && rev.charged_override != null,
-          editedPaid: !!rev && rev.paid_override != null,
-          editedHours: !!rev && rev.hours_override != null,
-          edited: !!rev && (rev.charged_override != null || rev.paid_override != null || rev.hours_override != null),
-          note: rev?.note || '',
-        };
+      const chargeByProp = {};
+      (invs || []).forEach(v => {
+        const cid = v.customer_id; if (!cid) return;
+        props[cid] = props[cid] || (v.customer?.name || 'Property');
+        chargeByProp[cid] = (chargeByProp[cid] || 0) + (Number(v.total) || 0);
       });
 
-      // Labor in range that no invoice line claimed — usually work that
-      // hasn't been billed yet. Surfaced so a big "loss" isn't a mystery.
-      const unclaimed = liveBlocks
-        .filter(b => !usedBlockIds.has(b.id))
-        .filter(b => { const d = String(b.start_time).slice(0, 10); return d >= start && d <= end; })
-        .reduce((sum, b) => {
-          const hrs = (new Date(b.end_time) - new Date(b.start_time)) / 3600000;
-          if (hrs <= 0) return sum;
-          return sum + hrs * num(b.shift.employee?.pay_rate_hourly);
-        }, 0);
-      setUnbilled(unclaimed);
+      const hoursByProp = {};
+      Object.keys(hoursPP).forEach(pid => Object.entries(hoursPP[pid]).forEach(([cid, h]) => { hoursByProp[cid] = (hoursByProp[cid] || 0) + h; }));
 
-      const byProp = {};
-      rows.forEach(r => {
-        byProp[r.propertyId] = byProp[r.propertyId] || { id: r.propertyId, name: r.propertyName, rows: [], charge: 0, pay: 0 };
-        byProp[r.propertyId].rows.push(r);
-        byProp[r.propertyId].charge += r.charge;
-        byProp[r.propertyId].pay += r.paid;
-      });
-      const out = Object.values(byProp);
-      out.forEach(g => g.rows.sort((a, b) => (b.charge - b.paid) - (a.charge - a.paid)));
+      const out = [];
+      let tCharge = 0, tPay = 0;
+      if (slice === 'property') {
+        Object.keys(props).forEach(cid => {
+          const charge = chargeByProp[cid] || 0;
+          let pay = 0;
+          Object.keys(hoursPP).forEach(pid => { const h = hoursPP[pid][cid]; if (h) pay += h * persons[pid].rate; });
+          out.push({ id: cid, name: props[cid], charge, pay });
+          tCharge += charge; tPay += pay;
+        });
+      } else {
+        Object.keys(persons).forEach(pid => {
+          let pay = 0, charge = 0;
+          Object.entries(hoursPP[pid] || {}).forEach(([cid, h]) => {
+            pay += h * persons[pid].rate;
+            const ph = hoursByProp[cid] || 0;
+            if (ph > 0) charge += (chargeByProp[cid] || 0) * (h / ph);
+          });
+          out.push({ id: pid, name: persons[pid].name, charge, pay });
+          tCharge += charge; tPay += pay;
+        });
+      }
       out.sort((a, b) => (b.charge - b.pay) - (a.charge - a.pay));
-      setGroups(out);
-      setTotals({
-        charge: rows.reduce((s, r) => s + r.charge, 0),
-        pay: rows.reduce((s, r) => s + r.paid, 0),
-      });
+      setRows(out);
+      setTotals({ charge: tCharge, pay: tPay });
     } catch (e) {
-      alert('Could not run the report: ' + (e?.message || e));
-      setGroups([]);
+      setRows([]);
     }
     setLoading(false);
   };
-
-  // Rebuild on load if we already know the range, so a refresh lands you
-  // back on the report instead of a blank form.
-  useEffect(() => {
-    if (savedRange?.start && savedRange?.end) run();
-    /* eslint-disable-next-line */
-  }, []);
-
-  // Cell editing. One cell at a time, saved on Enter or blur — the point
-  // of a grid is that you can tab through numbers without opening a panel
-  // for each one.
-  const beginEdit = (r, field) => {
-    setCell({ id: r.id, field });
-    const cur = field === 'charge' ? r.charge : field === 'paid' ? r.paid : r.hours;
-    setCellVal(String(Number(cur).toFixed(field === 'hours' ? 2 : 2)));
-  };
-
-  const commitCell = async (r, field) => {
-    const raw = cellVal.trim();
-    setCell(null);
-    const base = field === 'charge' ? r.baseCharge : field === 'paid' ? r.basePay : r.baseHours;
-    // Blank, or back to the original figure, clears the override rather
-    // than storing a redundant one.
-    const next = raw === '' ? null : num(raw);
-    const isSame = next != null && Math.abs(next - base) < 0.005;
-    const existing = {
-      charge: r.editedCharge ? r.charge : null,
-      paid: r.editedPaid ? r.paid : null,
-      hours: r.editedHours ? r.hours : null,
-    };
-    const patch = {
-      invoice_line_id: r.id,
-      charged_override: field === 'charge' ? (next == null || isSame ? null : next) : existing.charge,
-      paid_override:    field === 'paid'   ? (next == null || isSame ? null : next) : existing.paid,
-      hours_override:   field === 'hours'  ? (next == null || isSame ? null : next) : existing.hours,
-      note: r.note || null,
-      reviewed_by: employee?.id || null,
-      reviewed_at: new Date().toISOString(),
-    };
-    const allClear = patch.charged_override == null && patch.paid_override == null && patch.hours_override == null && !patch.note;
-    setSavingId(r.id);
-    const { error } = allClear
-      ? await supabase.from('profit_line_reviews').delete().eq('invoice_line_id', r.id)
-      : await supabase.from('profit_line_reviews').upsert(patch, { onConflict: 'invoice_line_id' });
-    setSavingId(null);
-    if (error) { alert('Could not save that cell: ' + error.message); return; }
-    run();
-  };
-
-  const saveNote = async (r, text) => {
-    setSavingId(r.id);
-    const { error } = await supabase.from('profit_line_reviews').upsert({
-      invoice_line_id: r.id,
-      charged_override: r.editedCharge ? r.charge : null,
-      paid_override: r.editedPaid ? r.paid : null,
-      hours_override: r.editedHours ? r.hours : null,
-      note: text || null,
-      reviewed_by: employee?.id || null,
-      reviewed_at: new Date().toISOString(),
-    }, { onConflict: 'invoice_line_id' });
-    setSavingId(null);
-    if (error) { alert('Could not save that note: ' + error.message); return; }
-    run();
-  };
-
-  const resetRow = async (r) => {
-    setSavingId(r.id);
-    const { error } = await supabase.from('profit_line_reviews').delete().eq('invoice_line_id', r.id);
-    setSavingId(null);
-    if (error) { alert('Could not reset that row: ' + error.message); return; }
-    run();
-  };
-
-  // Every row, flat — a grid, not cards per property.
-  const allRows = (groups || []).flatMap(g => g.rows);
-
-  // Copy as TSV. Pastes straight into Excel or Sheets as real columns.
-  const copyForExcel = async () => {
-    const head = ['Property', 'Apartment', 'Type', 'Cleaned', 'Cleaners', 'Hours', 'Paid', 'Charged', 'Profit', 'Note'];
-    const body = allRows.map(r => [
-      r.propertyName, r.label, r.serviceType || '',
-      r.cleanedDays.join(' '), r.cleaners.map(c => c.name).join(', '),
-      r.hours.toFixed(2), r.paid.toFixed(2), r.charge.toFixed(2),
-      (r.charge - r.paid).toFixed(2), (r.note || '').replace(/\t|\n/g, ' '),
-    ]);
-    const tsv = [head, ...body].map(row => row.join('\t')).join('\n');
-    try {
-      await navigator.clipboard.writeText(tsv);
-      alert('Copied ' + allRows.length + ' rows. Paste straight into Excel or Sheets.');
-    } catch {
-      alert('Could not copy automatically — your browser blocked clipboard access.');
-    }
-  };
-
-  const profitTotal = totals.charge - totals.pay;
 
   return (
     <div className="min-h-screen bg-stone-50 pb-24">
       <Header name={employee.name} onSignOut={onSignOut} role={employee.role} employee={employee} onOpenMessages={onOpenMessages} onLogoClick={onLogoClick} />
       {topToggle}
-      {/* The controls stay narrow — a full-width date picker looks silly.
-         The grid gets the whole screen, because that's what a grid is for. */}
-      <div className="px-5 pt-6 space-y-5 max-w-7xl mx-auto">
-        <div className="max-w-2xl space-y-5">
-          <div>
-            <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">Report</div>
-            <h1 className="font-serif text-3xl text-stone-900">Profit / loss</h1>
-            <p className="text-sm text-stone-500 mt-1">Every invoiced apartment: what you charged, who cleaned it, what they cost.</p>
-          </div>
-
-          <div>
-            <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2">Date range</div>
-            <DateRangePicker start={start} end={end} onChange={(s, e) => { setStart(s); setEnd(e); }} />
-            <p className="text-[11px] text-stone-400 mt-1.5">Matches the work an invoice covers, not the date it was written.</p>
-          </div>
-
-          <button onClick={run} disabled={loading || !start || !end}
-            className="w-full py-4 rounded-2xl bg-stone-900 text-stone-50 font-medium disabled:opacity-50">
-            {loading ? 'Crunching…' : 'Run report'}
-          </button>
+      <div className="px-5 pt-6 space-y-5 max-w-md mx-auto">
+        <div>
+          <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">Report</div>
+          <h1 className="font-serif text-3xl text-stone-900">Profit / loss</h1>
+          <p className="text-sm text-stone-500 mt-1">What you invoiced vs. what you paid in labor.</p>
         </div>
 
-        {groups && (
-          <div className="space-y-4">
+        <div className="flex gap-1 bg-stone-100 p-1 rounded-xl">
+          <button onClick={() => { setSlice('property'); setRows(null); }} className={`flex-1 py-2 rounded-lg text-xs font-medium ${slice === 'property' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>By property</button>
+          <button onClick={() => { setSlice('person'); setRows(null); }} className={`flex-1 py-2 rounded-lg text-xs font-medium ${slice === 'person' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>By person</button>
+        </div>
+
+        <div>
+          <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2">Date range</div>
+          <DateRangePicker start={start} end={end} onChange={(s, e) => { setStart(s); setEnd(e); }} />
+        </div>
+
+        <button onClick={run} disabled={loading || !start || !end}
+          className="w-full py-4 rounded-2xl bg-stone-900 text-stone-50 font-medium disabled:opacity-50">
+          {loading ? 'Crunching…' : 'Run report'}
+        </button>
+
+        {rows && (
+          <div className="space-y-3">
             <div className="p-4 rounded-2xl bg-white border border-stone-200 grid grid-cols-3 gap-2 text-center">
-              <div><div className="text-[10px] uppercase text-stone-400 font-mono">Charged</div><div className="text-lg font-mono text-stone-900">{fmtMoney(totals.charge)}</div></div>
-              <div><div className="text-[10px] uppercase text-stone-400 font-mono">Paid</div><div className="text-lg font-mono text-stone-900">{fmtMoney(totals.pay)}</div></div>
-              <div><div className="text-[10px] uppercase text-stone-400 font-mono">Profit</div><div className={`text-lg font-mono ${profitTotal >= 0 ? 'text-emerald-700' : 'text-red-600'}`}>{fmtMoney(profitTotal)}</div></div>
+              <div><div className="text-[10px] uppercase text-stone-400 font-mono">Charged</div><div className="text-lg font-mono text-stone-900">${totals.charge.toFixed(0)}</div></div>
+              <div><div className="text-[10px] uppercase text-stone-400 font-mono">Paid</div><div className="text-lg font-mono text-stone-900">${totals.pay.toFixed(0)}</div></div>
+              <div><div className="text-[10px] uppercase text-stone-400 font-mono">Profit</div><div className={`text-lg font-mono ${totals.charge - totals.pay >= 0 ? 'text-emerald-700' : 'text-red-600'}`}>${(totals.charge - totals.pay).toFixed(0)}</div></div>
             </div>
-
-            {runaway.count > 0 && (
-              <div className="p-3 rounded-2xl bg-red-50 border border-red-200 text-[11px] text-red-900">
-                <div className="font-medium">
-                  {runaway.count} work {runaway.count === 1 ? 'block' : 'blocks'} in this range {runaway.count === 1 ? 'is' : 'are'} longer than {MAX_BLOCK_HOURS}h — {runaway.hours.toFixed(0)}h total, {fmtMoney(runaway.pay)} of "labor".
-                </div>
-                <div className="mt-1 text-red-800/80">
-                  Almost certainly someone forgot to clock out. Left in, they'd swamp every number on this page, so they're excluded above. Fix them in the timesheet and re-run.
-                </div>
-              </div>
-            )}
-
-            {unbilled > 0.005 && (
-              <div className="p-3 rounded-2xl bg-amber-50 border border-amber-200 text-[11px] text-amber-900 font-mono">
-                {fmtMoney(unbilled)} of labor in this range isn't on any invoice yet — not counted above.
-              </div>
-            )}
-
-            {groups.length === 0 ? (
-              <div className="space-y-3">
-                <div className="p-4 rounded-2xl bg-white border border-stone-200 text-center">
-                  <div className="text-sm text-stone-600">No invoices cover work in this range.</div>
-                  <div className="text-xs text-stone-400 mt-1">
-                    {unbilled > 0.005
-                      ? 'The cleaning happened — it just hasn\u2019t been billed yet, so there\u2019s nothing to compare it against.'
-                      : 'No finished cleanings in this range either.'}
+            {rows.length === 0 ? (
+              <div className="text-center py-8 text-stone-400 text-sm">No data in this range.</div>
+            ) : rows.map(r => {
+              const profit = r.charge - r.pay;
+              const margin = r.charge > 0 ? (profit / r.charge) * 100 : null;
+              return (
+                <div key={r.id} className="p-4 rounded-2xl bg-white border border-stone-200">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="font-serif text-lg text-stone-900">{r.name}</span>
+                    <span className={`text-sm font-mono font-bold ${profit >= 0 ? 'text-emerald-700' : 'text-red-600'}`}>{profit >= 0 ? '+' : ''}${profit.toFixed(2)}</span>
+                  </div>
+                  <div className="flex items-center gap-4 text-xs font-mono text-stone-600 flex-wrap">
+                    <span>Charged ${r.charge.toFixed(2)}</span>
+                    <span>Paid ${r.pay.toFixed(2)}</span>
+                    {margin != null && <span className={profit >= 0 ? 'text-emerald-700' : 'text-red-600'}>{margin.toFixed(0)}% margin</span>}
                   </div>
                 </div>
-                {unbilledDetail.length > 0 && (
-                  <div className="p-4 rounded-2xl bg-white border border-stone-200">
-                    <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2">Uninvoiced labor in this range</div>
-                    {unbilledDetail.map((u, i) => (
-                      <div key={i} className="flex items-center justify-between gap-2 py-1 text-xs font-mono">
-                        <span className="text-stone-700 truncate">{u.name}</span>
-                        <span className="text-stone-500 flex-shrink-0">{u.hours.toFixed(1)}h · {fmtMoney(u.pay)}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-                {invoiceHint.length > 0 && (
-                  <div className="p-4 rounded-2xl bg-white border border-stone-200">
-                    <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2">Your most recent invoices cover</div>
-                    {invoiceHint.map((h, i) => (
-                      <button key={i}
-                        onClick={() => {
-                          const s2 = h.period_start || h.invoice_date;
-                          const e2 = h.period_end || h.invoice_date;
-                          if (s2 && e2) { setStart(s2); setEnd(e2); }
-                        }}
-                        className="w-full flex items-center justify-between gap-2 py-1.5 text-xs font-mono hover:bg-stone-50 rounded-lg px-1 text-left">
-                        <span className="text-stone-700 truncate">
-                          {h.invoice_number ? `#${h.invoice_number} · ` : ''}{h.customer?.name || 'Property'}
-                        </span>
-                        <span className="text-amber-700 flex-shrink-0">
-                          {h.period_start && h.period_end ? `${h.period_start} \u2192 ${h.period_end}` : fmtInvoiceDate(h.invoice_date)}
-                        </span>
-                      </button>
-                    ))}
-                    <p className="text-[10px] text-stone-400 mt-2">Tap one to jump the date range to it.</p>
-                  </div>
-                )}
-              </div>
-            ) : (
-              /* THE GRID. Every invoiced apartment as a row. Hours, Paid and
-                 Charged are click-to-edit; Profit is always computed so it
-                 can never disagree with the two columns beside it. */
-              <div>
-                <div className="flex items-center justify-between gap-2 mb-2">
-                  <span className="text-xs uppercase tracking-wider text-stone-500 font-mono">
-                    {allRows.length} {allRows.length === 1 ? 'apartment' : 'apartments'}
-                  </span>
-                  <button onClick={copyForExcel}
-                    className="text-[11px] font-medium px-3 py-1.5 rounded-full bg-white border border-stone-300 text-stone-700 inline-flex items-center gap-1">
-                    <Copy size={11} /> Copy for Excel
-                  </button>
-                </div>
-                <div className="rounded-2xl border border-stone-200 bg-white overflow-x-auto">
-                  <table className="w-full text-xs" style={{ minWidth: 860 }}>
-                    <thead>
-                      <tr className="bg-stone-100 text-stone-500 font-mono text-[10px] uppercase tracking-wider">
-                        <th className="text-left px-3 py-2 font-medium">Apartment</th>
-                        <th className="text-left px-3 py-2 font-medium">Cleaned</th>
-                        <th className="text-left px-3 py-2 font-medium">Cleaner(s)</th>
-                        <th className="text-right px-3 py-2 font-medium">Hours</th>
-                        <th className="text-right px-3 py-2 font-medium">Paid</th>
-                        <th className="text-right px-3 py-2 font-medium">Charged</th>
-                        <th className="text-right px-3 py-2 font-medium">Profit</th>
-                        <th className="px-2 py-2" />
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {allRows.map((r, idx) => {
-                        const p = r.charge - r.paid;
-                        const prev = idx > 0 ? allRows[idx - 1] : null;
-                        const newProp = !prev || prev.propertyId !== r.propertyId;
-                        const editCell = (field, val, edited) => cell && cell.id === r.id && cell.field === field ? (
-                          <input autoFocus type="number" step="0.01" value={cellVal}
-                            onChange={e => setCellVal(e.target.value)}
-                            onBlur={() => commitCell(r, field)}
-                            onKeyDown={e => {
-                              if (e.key === 'Enter') commitCell(r, field);
-                              if (e.key === 'Escape') setCell(null);
-                            }}
-                            className="w-20 px-1.5 py-1 rounded border border-indigo-400 text-right font-mono text-xs" />
-                        ) : (
-                          <button onClick={() => beginEdit(r, field)} disabled={savingId === r.id}
-                            title="Click to change"
-                            className={`w-full text-right px-1.5 py-1 rounded font-mono hover:bg-indigo-50 hover:ring-1 hover:ring-indigo-200 ${edited ? 'bg-indigo-50 text-indigo-800 font-medium' : 'text-stone-700'}`}>
-                            {val}
-                          </button>
-                        );
-                        return (
-                          <React.Fragment key={r.id}>
-                            {newProp && (
-                              <tr>
-                                <td colSpan={8} className="px-3 pt-3 pb-1 bg-stone-50 border-t border-stone-200">
-                                  <span className="font-serif text-sm text-stone-900">{r.propertyName}</span>
-                                  {r.invoiceNumber && <span className="text-[10px] font-mono text-stone-400 ml-2">Inv #{r.invoiceNumber}</span>}
-                                </td>
-                              </tr>
-                            )}
-                            <tr className="border-t border-stone-100 align-top">
-                              <td className="px-3 py-2">
-                                <button onClick={() => setOpenRow(openRow === r.id ? null : r.id)}
-                                  className="text-left hover:underline" title="Show what made up this charge">
-                                  <div className="font-mono text-stone-900 flex items-center gap-1">
-                                    <ChevronRight size={11} className={`text-stone-400 transition-transform ${openRow === r.id ? 'rotate-90' : ''}`} />
-                                    {r.label}
-                                  </div>
-                                </button>
-                                {r.serviceType && <div className="text-[10px] text-stone-400 ml-4">{assignmentTypeLabel ? assignmentTypeLabel(r.serviceType) : r.serviceType}</div>}
-                                {r.note && <div className="text-[10px] text-stone-500 italic mt-0.5 ml-4">{r.note}</div>}
-                              </td>
-                              <td className="px-3 py-2 font-mono text-stone-600 whitespace-nowrap">
-                                {r.cleanedDays.length === 0 ? <span className="text-stone-400">—</span>
-                                  : r.cleanedDays.length === 1 ? fmtDueDate(r.cleanedDays[0])
-                                  : `${fmtDueDate(r.cleanedDays[0])} +${r.cleanedDays.length - 1}`}
-                              </td>
-                              <td className="px-3 py-2">
-                                {r.cleaners.length === 0 ? <span className="text-stone-400">No clocked clean</span>
-                                  : r.cleaners.map(c => (
-                                      <div key={c.name} className="font-mono text-stone-700 whitespace-nowrap">{c.name}</div>
-                                    ))}
-                              </td>
-                              <td className="px-1 py-2">{editCell('hours', r.hours.toFixed(2), r.editedHours)}</td>
-                              <td className="px-1 py-2">{editCell('paid', r.paid.toFixed(2), r.editedPaid)}</td>
-                              <td className="px-1 py-2">{editCell('charge', r.charge.toFixed(2), r.editedCharge)}</td>
-                              <td className={`px-3 py-2 text-right font-mono font-medium whitespace-nowrap ${p >= 0 ? 'text-emerald-700' : 'text-red-600'}`}>
-                                {p >= 0 ? '+' : ''}{p.toFixed(2)}
-                              </td>
-                              <td className="px-2 py-2 text-right">
-                                {r.edited && (
-                                  <button onClick={() => resetRow(r)} disabled={savingId === r.id}
-                                    title="Undo my changes to this row"
-                                    className="text-[10px] font-mono text-stone-400 hover:text-red-600">reset</button>
-                                )}
-                              </td>
-                            </tr>
-                            {openRow === r.id && (
-                              <tr className="bg-stone-50">
-                                <td colSpan={8} className="px-6 py-3">
-                                  {/* Read-only — this is what the invoice
-                                     billed. Change it on the invoice, not here. */}
-                                  <div className="text-[10px] uppercase tracking-wider font-mono text-stone-400 mb-2">
-                                    What made up the {fmtMoney(r.baseCharge)} charge
-                                  </div>
-                                  {r.subsections.length === 0 ? (
-                                    <div className="text-[11px] font-mono text-stone-400">No item breakdown saved on this line.</div>
-                                  ) : (
-                                    <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-x-6 gap-y-1">
-                                      {r.subsections.map((sub, si) => (
-                                        <div key={si} className="flex items-center justify-between gap-2 text-[11px] font-mono border-b border-stone-200 pb-0.5">
-                                          <span className="text-stone-700 truncate" title={sub.label}>{sub.label}</span>
-                                          <span className="text-stone-500 flex-shrink-0">
-                                            {sub.mode === 'time' && sub.minutes
-                                              ? `${sub.minutes}m · ${fmtMoney(sub.amount)}`
-                                              : fmtMoney(sub.amount)}
-                                          </span>
-                                        </div>
-                                      ))}
-                                    </div>
-                                  )}
-                                  {r.extraAmount > 0 && (
-                                    <div className="mt-2 text-[11px] font-mono text-amber-700">
-                                      + Extra charge {fmtMoney(r.extraAmount)}{r.extraNote ? ` — ${r.extraNote}` : ''}
-                                    </div>
-                                  )}
-                                  {r.description && (
-                                    <div className="mt-2 text-[11px] text-stone-500 italic">Prints as: “{r.description}”</div>
-                                  )}
-                                </td>
-                              </tr>
-                            )}
-                          </React.Fragment>
-                        );
-                      })}
-                      <tr className="border-t-2 border-stone-300 bg-stone-50 font-medium">
-                        <td className="px-3 py-2 font-serif text-stone-900" colSpan={3}>Total</td>
-                        <td className="px-3 py-2 text-right font-mono text-stone-700">
-                          {allRows.reduce((s2, r) => s2 + r.hours, 0).toFixed(2)}
-                        </td>
-                        <td className="px-3 py-2 text-right font-mono text-stone-900">{totals.pay.toFixed(2)}</td>
-                        <td className="px-3 py-2 text-right font-mono text-stone-900">{totals.charge.toFixed(2)}</td>
-                        <td className={`px-3 py-2 text-right font-mono font-bold ${profitTotal >= 0 ? 'text-emerald-700' : 'text-red-600'}`}>
-                          {profitTotal >= 0 ? '+' : ''}{profitTotal.toFixed(2)}
-                        </td>
-                        <td />
-                      </tr>
-                    </tbody>
-                  </table>
-                </div>
-                <p className="text-[10px] text-stone-400 mt-2">
-                  Click any Hours, Paid or Charged cell to change it. Enter saves, Esc cancels, blank restores the original.
-                  Edits only change this report — the invoice itself is untouched.
-                </p>
-              </div>
+              );
+            })}
+            {slice === 'person' && rows.length > 0 && (
+              <p className="text-[11px] text-stone-400 font-mono">Per-person "charged" splits each property's invoiced total by that person's share of hours worked there.</p>
             )}
           </div>
         )}
@@ -19248,24 +15846,12 @@ function InvoiceView({ employee, onSignOut, onOpenMessages, onLogoClick, topTogg
   };
   // "Edit draft": free this draft's cleanings and reopen the generator for
   // its period through today, so newer cleanings merge into one invoice.
-  const [seedInvoice, setSeedInvoice] = useState(null);
   const editDraft = async (inv) => {
     if (!inv) return;
-    // Capture the full invoice + its lines BEFORE freeing it, so the
-    // reopened editor can restore every price, override, extra and note.
-    // The old code deleted first and rebuilt blank — wiping all of it.
-    const { data: full } = await supabase.from('invoices').select('*').eq('id', inv.id).single();
-    const { data: savedLines } = await supabase.from('invoice_lines').select('*').eq('invoice_id', inv.id);
-    // Free this invoice's targets so they (plus any newer cleanings) flow
-    // back into the draft. Await it fully before reopening so the editor's
-    // regeneration query sees them as un-invoiced.
-    const { error: freeErr } = await supabase.from('assignment_targets').update({ invoiced_on: null }).eq('invoiced_on', inv.id);
-    if (freeErr) { alert('Could not reopen: ' + freeErr.message); return; }
     await supabase.from('invoices').delete().eq('id', inv.id);
-    setSeedInvoice({ ...(full || inv), lines: savedLines || [] });
     setSelectedId(inv.customer_id);
     setStart(inv.period_start || twoWeeksAgo);
-    setEnd(inv.period_end || today);
+    setEnd(today);
     setViewingInvoiceId(null);
     setDraftOn(true);
   };
@@ -19282,9 +15868,8 @@ function InvoiceView({ employee, onSignOut, onOpenMessages, onLogoClick, topTogg
   if (draftOn && selectedId) {
     const property = properties.find(p => p.id === selectedId);
     return <InvoiceDraftEditor property={property} start={start} end={end} employee={employee}
-      seedInvoice={seedInvoice}
-      onBack={() => { setDraftOn(false); setSeedInvoice(null); }}
-      onSaved={(inv) => { setDraftOn(false); setSeedInvoice(null); setViewingInvoiceId(inv?.id || null); }} />;
+      onBack={() => setDraftOn(false)}
+      onSaved={(inv) => { setDraftOn(false); setViewingInvoiceId(inv?.id || null); }} />;
   }
   if (invoice) {
     return <InvoicePreview invoice={invoice} showZeros={showZeros} setShowZeros={setShowZeros}
@@ -19974,12 +16559,8 @@ function ChangePinModal({ employee, onClose, onSaved }) {
     if (activePin.length !== 4 || busy) return;
     (async () => {
       if (step === 'current') {
-        // Validate current PIN through the secure function (the app can't
-        // read the stored PIN once the table is locked).
-        setBusy(true);
-        const who = await secureEmployeeSignIn(activePin);
-        setBusy(false);
-        if (!who || who.id !== employee.id) {
+        // Validate current PIN
+        if (activePin !== employee.pin) {
           setError('That\'s not your current PIN.');
           setCurrentPin('');
           return;
@@ -19992,6 +16573,11 @@ function ChangePinModal({ employee, onClose, onSaved }) {
           setNewPin('');
           return;
         }
+        if (activePin === employee.pin) {
+          setError('Your new PIN must be different from your current PIN.');
+          setNewPin('');
+          return;
+        }
         setStep('confirm');
       } else {
         // Confirm matches new
@@ -20000,19 +16586,24 @@ function ChangePinModal({ employee, onClose, onSaved }) {
           setConfirmPin('');
           return;
         }
-        // Final save: the function checks uniqueness, hashes, and writes
-        // both pin and pin_hash server-side.
+        // Final save: check uniqueness then update
         setBusy(true);
-        const res = await secureSetCredential('employee', employee.id, newPin);
+        const { data: dup } = await supabase.from('employees')
+          .select('id').eq('pin', newPin).neq('id', employee.id).maybeSingle();
+        if (dup) {
+          setBusy(false);
+          setError('That PIN is already in use by another employee. Try a different one.');
+          setConfirmPin('');
+          setNewPin('');
+          setStep('new');
+          return;
+        }
+        const { error: upErr } = await supabase.from('employees')
+          .update({ pin: newPin }).eq('id', employee.id);
         setBusy(false);
-        if (res?.error) {
-          if (res.error.includes('in use')) {
-            setError('That PIN is already in use by another employee. Try a different one.');
-            setConfirmPin(''); setNewPin(''); setStep('new');
-          } else {
-            setError('Could not save: ' + res.error);
-            setConfirmPin('');
-          }
+        if (upErr) {
+          setError('Could not save: ' + upErr.message);
+          setConfirmPin('');
           return;
         }
         alert('PIN updated! Use your new PIN next time you sign in.');
@@ -20310,8 +16901,6 @@ function ChangePortalCodeModal({ portalUser, onClose, onSaved }) {
       setError('Could not save: ' + upErr.message);
       return;
     }
-    // Hash the new code so it survives table lockdown.
-    await secureSetCredential('portal', portalUser.id, cleanNew);
     // Update local portal session so the new code is remembered
     try {
       const stored = localStorage.getItem('tidytrack_portal');
@@ -20441,9 +17030,9 @@ function PortalApp({ previewMode = false, previewEmployee = null, onExitPreview 
               localStorage.removeItem('tidytrack_portal');
             }
           } else if (parsed.code) {
-            // Old localStorage format — restore via the secure function
-            // (the app can't read portal_users by code once locked).
-            const pu = await securePortalSignIn(parsed.code);
+            // Old format — try to migrate using the saved code
+            const { data: pu } = await supabase.from('portal_users')
+              .select('*').eq('code', parsed.code.toLowerCase()).eq('active', true).maybeSingle();
             if (pu) {
               const props = await loadProperties(pu.id);
               setPortalUser(pu);
@@ -20560,9 +17149,9 @@ function PortalSignIn({ onSignIn }) {
     setError(''); setBusy(true);
     const trimmed = code.trim().toLowerCase();
 
-    // Secure server-side code check (falls back to direct query
-    // pre-lockdown so nobody's locked out during migration).
-    const user = await securePortalSignIn(trimmed);
+    // Look up the portal user by code
+    const { data: user } = await supabase.from('portal_users')
+      .select('*').eq('code', trimmed).eq('active', true).maybeSingle();
 
     if (user) {
       // Load their properties
@@ -20744,32 +17333,6 @@ function PortalDashboard({ property, portalKind, portalUser, properties, onSwitc
     onOpenUnitDay={(unitId, date) => setView({ kind: 'unit-day', unitId, date })} />;
 }
 
-// Language toggle for the PM portal header. The portal already lives
-// inside TranslationProvider, so flipping locale re-translates the whole
-// portal UI — it just never had a visible control. Persists to the
-// portal_users row so a PM's choice follows them.
-function PortalLangToggle({ portalUser }) {
-  const { locale, setLocale } = useLocale();
-  if (!isTranslateConfigured()) return null;
-  return (
-    <button
-      onClick={async () => {
-        const next = locale === 'es' ? 'en' : 'es';
-        setLocale(next);
-        if (portalUser?.id && !portalUser.__preview) {
-          try { await supabase.from('portal_users').update({ locale: next }).eq('id', portalUser.id); }
-          catch (e) { console.warn('[portal locale] save failed', e); }
-        }
-      }}
-      className="relative p-2 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-50 flex items-center gap-1"
-      title={locale === 'es' ? 'Switch to English' : 'Cambiar a Español'}
-      data-no-translate>
-      <Languages size={16} />
-      <span className="text-[10px] font-mono uppercase font-bold">{locale === 'es' ? 'ES' : 'EN'}</span>
-    </button>
-  );
-}
-
 function PortalHome({ property, portalKind, portalUser, properties, onSwitchProperty, hasMultipleProperties, onBackToPicker, onSignOut, onRefreshProperty, onOpenUnitDay }) {
   const [tab, setTab] = useState('history'); // 'history' | 'assignments'
   const [asgSub, setAsgSub] = useState('requests'); // 'requests' | 'concerns'
@@ -20852,12 +17415,12 @@ function PortalHome({ property, portalKind, portalUser, properties, onSwitchProp
 
       // Build a Set of "unit_id:party_id" keys that are currently Done.
       // Property-level Done assignments (no unit/party) cover everything
-      // under that property, so we track those separately. This is only a
-      // gate — history entries themselves come from real work blocks below,
-      // so a unit appears on a date only if it was actually cleaned then
-      // (not merely marked "done" without anyone clocking in).
+      // under that property, so we track those separately. We also collect
+      // "done entries" from completed_at so completed cleans show even when
+      // there were no photo tasks logged (e.g. quick/non-checklist cleans).
       const doneUnitParty = new Set();
       let propertyLevelDone = false;
+      const doneEntries = [];
       (doneTargets || []).forEach(t => {
         if (t.assignment?.customer_id !== property.id) return;
         if (t.assignment?.active === false || t.assignment?.deleted_at) return;
@@ -20867,9 +17430,17 @@ function PortalHome({ property, portalKind, portalUser, properties, onSwitchProp
         }
         doneUnitParty.add(`${t.unit_id || ''}:${t.party_id || ''}`);
         if (t.unit_id && t.party_id) doneUnitParty.add(`${t.unit_id}:`); // also unit-level match
+        if (t.completed_at && t.completed_at >= since && t.unit) {
+          doneEntries.push({ date: new Date(t.completed_at).toISOString().split('T')[0], unitId: t.unit_id, label: t.unit.label });
+        }
       });
 
       const byDate = {};
+      // Seed with completed cleans (so they always show, photos or not).
+      doneEntries.forEach(e => {
+        if (!byDate[e.date]) byDate[e.date] = {};
+        if (!byDate[e.date][e.unitId]) byDate[e.date][e.unitId] = { unitId: e.unitId, label: e.label, photoCount: 0, hasDamage: false, hasResolvedDamage: false };
+      });
 
       // Enrich with photos/damage from work blocks for units that are Done.
       const filtered = (blocks || []).filter(b => {
@@ -20969,7 +17540,6 @@ function PortalHome({ property, portalKind, portalUser, properties, onSwitchProp
             </div>
           </button>
           <div className="flex items-center gap-2 flex-shrink-0">
-            <PortalLangToggle portalUser={portalUser} />
             <button onClick={() => setShowMessages(true)}
               className="relative p-2 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-50"
               title="Messages">
@@ -22182,15 +18752,6 @@ const toDateKey = (d) => {
 //     past the soft pass (no last_activity_at recorded, etc).
 const STALE_IDLE_MIN = 90;   // soft auto-clockout threshold (minutes)
 const STALE_FORCE_MIN = 120; // hard force-close threshold (minutes)
-// Sanity ceiling for a SINGLE finished work block, used by the money
-// reports. The two thresholds above only fire while a block is still
-// open, and only when someone loads the owner's Daily view — so a block
-// that nobody force-closed for a week ends up stored with end_time set
-// days after start_time. Those rows are not labor, they're forgotten
-// clock-outs, and left alone they quietly wreck any profit number.
-// Eight hours is longer than any real bedroom clean but short enough to
-// catch the runaways.
-const MAX_BLOCK_HOURS = 8;
 function WhosWherePanel({ employee }) {
   const [rows, setRows] = useState([]);
   const [loaded, setLoaded] = useState(false);
@@ -22214,7 +18775,7 @@ function WhosWherePanel({ employee }) {
     const idleCutoffISO = new Date(now - STALE_IDLE_MIN * 60 * 1000).toISOString();
     const forceCutoffISO = new Date(now - STALE_FORCE_MIN * 60 * 1000).toISOString();
     try {
-      // 1. Soft auto-clockout — pull shifts past the idle cutoff and
+      // 1) Soft auto-clockout — pull shifts past the idle cutoff and
       //    set end_time per-row to their last_activity_at. We can't
       //    do this in a single UPDATE (Supabase JS doesn't support
       //    column-to-column updates) so we fetch then patch.
@@ -22233,7 +18794,7 @@ function WhosWherePanel({ employee }) {
           .eq('shift_id', s.id)
           .is('end_time', null);
       }
-      // 2. Hard force close — catch-all for anything still open beyond
+      // 2) Hard force close — catch-all for anything still open beyond
       //    the 2-hour cutoff (e.g. shift with no last_activity_at, or
       //    a work_block whose parent shift is somehow already closed).
       await supabase.from('shifts')
@@ -22462,9 +19023,7 @@ function AssignedVsCleanedView({ employee, onBack, onOpenBedroomHistory, persist
   const buildingFromLabel = (unitLabel) => {
     if (!unitLabel) return '—';
     const idx = unitLabel.indexOf('-');
-    if (idx > 0) return unitLabel.slice(0, idx);
-    const m = unitLabel.match(/^([A-Za-z]+)\d/);
-    return m ? m[1].toUpperCase() : unitLabel;
+    return idx > 0 ? unitLabel.slice(0, idx) : unitLabel;
   };
   // Status bucket for a row (matches the top summary chips).
   const statusOfRow = (r) => {
@@ -22966,7 +19525,7 @@ function AssignedVsCleanedView({ employee, onBack, onOpenBedroomHistory, persist
 
       {opened && (
         opened.assignment?.template_set_id || opened.template_section
-          ? <ChecklistAssignmentView assignment={opened.assignment} onOpenSibling={(a) => setOpened(o => ({ ...o, assignment: a }))}
+          ? <ChecklistAssignmentView assignment={opened.assignment}
               employee={employee}
               quickGlance={true}
               onClose={() => setOpened(null)}
@@ -23321,8 +19880,7 @@ function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenAssi
     (async () => {
       const { count: pAssign } = await supabase.from('assignments')
         .select('id', { count: 'exact', head: true })
-        .eq('source', 'pm').eq('pm_status', 'pending')
-        .is('deleted_at', null);
+        .eq('source', 'pm').eq('pm_status', 'pending');
       const { count: pRechecks } = await supabase.from('recheck_requests')
         .select('id', { count: 'exact', head: true })
         .eq('pm_status', 'pending');
@@ -23586,127 +20144,6 @@ function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenAssi
 // Day detail: shows all properties + units cleaned on this date
 function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit }) {
   const [data, setData] = useState(null);
-  // Open assignment per unit, so the same inline controls (done / size /
-  // assign / due date) work straight from a Daily card.
-  const [unitAsg, setUnitAsg] = useState({}); // unitId -> {id, scheduledDate, tookLonger, open, assignees[]} — NO size here, see unitSize
-  const [dTeam, setDTeam] = useState([]);
-  const [dBusy, setDBusy] = useState(null);
-  const [dAssignFor, setDAssignFor] = useState(null);
-  const [dDueFor, setDDueFor] = useState(null);
-  const [dSizeFor, setDSizeFor] = useState(null);
-  const [dBr, setDBr] = useState(''); const [dBa, setDBa] = useState('');
-  const dToday = localTodayKey();
-  const canDailyAssign = can(employee, 'assign_cleaners');
-  const canDailyDates = can(employee, 'edit_due_dates');
-  const canDailyDone = can(employee, 'mark_assignments_done');
-
-  const [unitSize, setUnitSize] = useState({}); // unitId -> {bedrooms, bathrooms} (always available)
-  const loadUnitAsg = async (unitIds) => {
-    // Scope to the units on this day. A global query hits PostgREST's
-    // 1000-row cap once there are thousands of done items, which silently
-    // drops assignments (units then look like they have none).
-    const ids = (unitIds || []).filter(Boolean);
-    if (!ids.length) { setUnitAsg({}); setUnitSize({}); return; }
-    const { data: rows } = await supabase.from('assignment_targets')
-      .select('unit_id, status, completed_at, unit:units(id, bedrooms, bathrooms), assignment:assignments!inner(id, active, deleted_at, scheduled_date, took_longer)')
-      .in('unit_id', ids)
-      .not('status', 'eq', 'blocked');
-    // Sizes come straight from units so they're always right, even for
-    // units with no assignment at all.
-    const { data: unitRows } = await supabase.from('units').select('id, bedrooms, bathrooms').in('id', ids);
-    const m = {}; const sizes = {};
-    (unitRows || []).forEach(u => { sizes[u.id] = { bedrooms: u.bedrooms, bathrooms: u.bathrooms }; });
-    (rows || []).forEach(t => {
-      const a = t.assignment;
-      if (!a || a.active === false || a.deleted_at || !t.unit_id) return;
-      const open = t.status !== 'done';
-      const prev = m[t.unit_id];
-      // Prefer an OPEN assignment; otherwise keep the most recent done one.
-      if (!prev || (open && !prev.open)) {
-        m[t.unit_id] = { id: a.id, scheduledDate: a.scheduled_date || null, tookLonger: !!a.took_longer, open, assignees: [] };
-      }
-    });
-    setUnitSize(sizes);
-    // Roster first, so assignee names resolve without a PostgREST embed.
-    const { data: emps } = await supabase.from('employees').select('id, name, role').eq('active', true).order('name');
-    const nameById = Object.fromEntries((emps || []).map(e => [e.id, e.name]));
-    const asgIds = Object.values(m).map(v => v.id);
-    if (asgIds.length) {
-      const { data: asg, error: asgErr } = await supabase.from('assignment_assignees')
-        .select('assignment_id, employee_id, status').in('assignment_id', asgIds);
-      if (asgErr) alert('Could not load who\u2019s assigned: ' + asgErr.message);
-      (asg || []).forEach(r => {
-        Object.values(m).forEach(v => {
-          if (v.id === r.assignment_id) v.assignees.push({ id: r.employee_id, name: nameById[r.employee_id] || '', requested: r.status === 'requested' });
-        });
-      });
-    }
-    setUnitAsg(m);
-    setDTeam((emps || []).filter(e => e.role !== 'owner'));
-  };
-  // Unit ids present on this day (from the loaded work blocks).
-  const dayUnitIds = React.useMemo(() => {
-    const set = new Set();
-    Object.values(data?.groups || {}).forEach(pg => {
-      Object.values(pg.units || {}).forEach(u => { if (u.unitId) set.add(u.unitId); });
-    });
-    return Array.from(set);
-  }, [data]);
-  const refreshUnitAsg = () => loadUnitAsg(dayUnitIds);
-  useEffect(() => { if (dayUnitIds.length) loadUnitAsg(dayUnitIds); /* eslint-disable-next-line */ }, [dayUnitIds.join(',')]);
-
-  const dSaveDue = async (asgId, val) => {
-    setDDueFor(null); setDBusy(asgId);
-    await supabase.from('assignments').update({ scheduled_date: val || null }).eq('id', asgId);
-    setDBusy(null); refreshUnitAsg();
-  };
-  const dCommitAssignees = async (ua, ids) => {
-    setDBusy(ua.id);
-    const error = await saveAssignees(ua.id, ua.assignees.map(a => a.id), ids, employee.id);
-    setDBusy(null);
-    if (error) { alert('Could not update who\u2019s assigned: ' + error.message); return; }
-    setDAssignFor(null);
-    refreshUnitAsg();
-  };
-  const dSaveSize = async (unitId, br, ba) => {
-    setDBusy(unitId);
-    const payload = {
-      // parseFloat on baths: 2.5 is a real size and parseInt would silently
-      // save it as 2.
-      bedrooms: br === '' ? null : parseInt(br, 10),
-      bathrooms: ba === '' ? null : parseFloat(ba),
-    };
-    // .select() so we can tell a silent 0-row update (RLS) from a real save.
-    const { data: updated, error } = await supabase.from('units')
-      .update(payload).eq('id', unitId).select('id, bedrooms, bathrooms');
-    setDBusy(null);
-    if (error) { alert('Could not save size: ' + error.message); return; }
-    if (!updated || updated.length === 0) {
-      alert('Size did not save — the database rejected the update for this apartment.');
-      return;
-    }
-    // Optimistic: reflect the saved values right away.
-    setUnitSize(prev => ({ ...prev, [unitId]: { bedrooms: updated[0].bedrooms, bathrooms: updated[0].bathrooms } }));
-    setDSizeFor(null);
-    refreshUnitAsg();
-  };
-  const dToggleExtra = async (asgId, current) => {
-    setDBusy(asgId);
-    const { data, error } = await supabase.from('assignments')
-      .update({ took_longer: !current }).eq('id', asgId).select('id, took_longer');
-    setDBusy(null);
-    if (error) { alert('Could not update the Extra flag: ' + error.message); return; }
-    if (!data || data.length === 0) { alert('Extra did not save — the database rejected the update for this job.'); return; }
-    refreshUnitAsg();
-  };
-  const dMarkDone = async (asgId, label) => {
-    if (!confirm(`Mark ${label} completed?`)) return;
-    setDBusy(asgId);
-    await supabase.from('assignment_targets')
-      .update({ status: 'done', completed_at: new Date().toISOString(), completed_by: employee.id })
-      .eq('assignment_id', asgId).neq('status', 'done');
-    setDBusy(null); refreshUnitAsg();
-  };
   // Filters — multi-select for cleaners + properties so the owner can
   // zoom into a specific person or building's day. Empty Set = "no filter".
   const [filtersOpen, setFiltersOpen] = useState(false);
@@ -24021,118 +20458,33 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit }) {
                   {/* Multi-unit: list of units */}
                   {sortedUnits.length > 0 && (
                     <div className="space-y-2">
-                      {sortedUnits.map(u => {
-                        const ua = unitAsg[u.unitId];
-                        // Size lives on the unit, NOT on the assignment. Read it
-                        // from unitSize so the pill is right even when this unit
-                        // has no open assignment (ua would be undefined).
-                        const us = unitSize[u.unitId];
-                        return (
-                        <div key={u.unitId}
+                      {sortedUnits.map(u => (
+                        <button key={u.unitId}
+                          onClick={() => onOpenUnit(propId, u.unitId, u.unitLabel, pg.property.name)}
                           className={`w-full text-left p-4 rounded-2xl border transition-colors ${
-                            u.hasDamage ? 'bg-red-50/50 border-red-200' : 'bg-white border-stone-200'
+                            u.hasDamage ? 'bg-red-50/50 border-red-200 hover:border-red-400' : 'bg-white border-stone-200 hover:border-stone-400'
                           }`}>
-                          <button onClick={() => onOpenUnit(propId, u.unitId, u.unitLabel, pg.property.name)}
-                            className="w-full text-left">
-                            <div className="flex items-center justify-between">
-                              <div className="flex-1 min-w-0">
-                                <div className="flex items-center gap-2 flex-wrap mb-1">
-                                  <span className="font-serif text-lg text-stone-900">{u.unitLabel}</span>
-                                  {u.hasDamage && (
-                                    <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-red-100 text-red-700">
-                                      ⚠ Damage
-                                    </span>
-                                  )}
-                                </div>
-                                <div className="text-xs text-stone-500 font-mono">
-                                  {fmtTimeShort(u.totalMs)} total · {u.employees.size} {u.employees.size === 1 ? 'cleaner' : 'cleaners'} · {u.photoCount} {u.photoCount === 1 ? 'photo' : 'photos'}
-                                </div>
-                                <div className="text-xs text-stone-600 mt-1">
-                                  {[...u.employees].join(', ')}
-                                </div>
+                          <div className="flex items-center justify-between">
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center gap-2 flex-wrap mb-1">
+                                <span className="font-serif text-lg text-stone-900">{u.unitLabel}</span>
+                                {u.hasDamage && (
+                                  <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-red-100 text-red-700">
+                                    ⚠ Damage
+                                  </span>
+                                )}
                               </div>
-                              <ChevronRight size={16} className="text-stone-400 flex-shrink-0 ml-2" />
+                              <div className="text-xs text-stone-500 font-mono">
+                                {fmtTimeShort(u.totalMs)} total · {u.employees.size} {u.employees.size === 1 ? 'cleaner' : 'cleaners'} · {u.photoCount} {u.photoCount === 1 ? 'photo' : 'photos'}
+                              </div>
+                              <div className="text-xs text-stone-600 mt-1">
+                                {[...u.employees].join(', ')}
+                              </div>
                             </div>
-                          </button>
-
-                          {/* Inline controls for this unit's open assignment */}
-                          <div className="flex items-center gap-1.5 flex-wrap mt-2">
-                            {dSizeFor === u.unitId ? (
-                              <span className="inline-flex items-center gap-1">
-                                <input type="number" min="0" autoFocus value={dBr} onChange={e => setDBr(e.target.value)}
-                                  className="w-10 px-1 py-0.5 rounded border border-stone-300 text-[10px] font-mono" placeholder="BR" />
-                                <span className="text-[9px] text-stone-400">BR</span>
-                                <input type="number" min="0" step="0.5" value={dBa} onChange={e => setDBa(e.target.value)}
-                                  className="w-12 px-1 py-0.5 rounded border border-stone-300 text-[10px] font-mono" placeholder="BA" />
-                                <span className="text-[9px] text-stone-400">BA</span>
-                                <button onClick={() => dSaveSize(u.unitId, dBr, dBa)} className="text-[10px] px-1.5 py-0.5 rounded bg-stone-900 text-white">Save</button>
-                                <button onClick={() => setDSizeFor(null)} className="text-[10px] px-1 text-stone-500">×</button>
-                              </span>
-                            ) : (
-                              <button onClick={() => { setDSizeFor(u.unitId); setDBr(us?.bedrooms ?? ''); setDBa(us?.bathrooms ?? ''); }}
-                                className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-stone-200 text-stone-700">
-                                {(us?.bedrooms || us?.bathrooms) ? `${us.bedrooms || 0}BR / ${us.bathrooms || 0}BA` : 'Set size'}
-                              </button>
-                            )}
-
-                            {ua ? (<>
-                              {dDueFor === ua.id ? (
-                                <input type="date" autoFocus defaultValue={ua.scheduledDate || ''}
-                                  onChange={(e) => dSaveDue(ua.id, e.target.value)} onBlur={() => setDDueFor(null)}
-                                  className="text-[10px] font-mono px-1.5 py-0.5 rounded border border-stone-400 bg-white" />
-                              ) : canDailyDates ? (
-                                <button onClick={() => setDDueFor(ua.id)}
-                                  className={`text-[10px] font-mono px-2 py-0.5 rounded-full border inline-flex items-center gap-1 ${ua.scheduledDate
-                                    ? (ua.scheduledDate < dToday ? 'bg-red-100 text-red-700 border-red-200'
-                                       : ua.scheduledDate === dToday ? 'bg-emerald-100 text-emerald-800 border-emerald-200'
-                                       : 'bg-stone-100 text-stone-600 border-stone-200')
-                                    : 'bg-white text-stone-500 border-dashed border-stone-300'}`}>
-                                  <Calendar size={9} /> {ua.scheduledDate ? fmtDueDate(ua.scheduledDate) : 'Set due date'}
-                                </button>
-                              ) : null}
-
-                              {ua.assignees.map(a => (
-                                <span key={a.id} className={`text-[10px] font-mono px-2 py-0.5 rounded-full inline-flex items-center gap-1 ${a.requested ? 'bg-amber-100 text-amber-800' : 'bg-indigo-100 text-indigo-700'}`}>
-                                  <User size={9} /> {a.name}{a.requested ? ' asked' : ''}
-                                </span>
-                              ))}
-                              {canDailyAssign && (
-                                <button onClick={() => setDAssignFor(dAssignFor === ua.id ? null : ua.id)}
-                                  className="text-[10px] font-mono px-2 py-0.5 rounded-full border border-dashed border-stone-300 text-stone-500 inline-flex items-center gap-1">
-                                  <Plus size={9} /> Assign
-                                </button>
-                              )}
-
-                              {/* Took longer → charge extra on the invoice */}
-                              <button onClick={() => dToggleExtra(ua.id, ua.tookLonger)} disabled={dBusy === ua.id}
-                                className={`text-[10px] font-mono px-2 py-0.5 rounded-full inline-flex items-center gap-1 disabled:opacity-50 ${ua.tookLonger ? 'bg-amber-500 text-white' : 'bg-white border border-dashed border-stone-300 text-stone-500'}`}>
-                                <Clock size={9} /> {ua.tookLonger ? 'Extra' : 'Mark extra'}
-                              </button>
-
-                              {canDailyDone && (ua.open ? (
-                                <button onClick={() => dMarkDone(ua.id, u.unitLabel)} disabled={dBusy === ua.id}
-                                  className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-600 text-white inline-flex items-center gap-1 disabled:opacity-50">
-                                  <Check size={9} /> Mark done
-                                </button>
-                              ) : (
-                                <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 inline-flex items-center gap-1">
-                                  <Check size={9} /> Done
-                                </span>
-                              ))}
-                            </>) : (
-                              <span className="text-[10px] font-mono text-stone-400">No open assignment</span>
-                            )}
+                            <ChevronRight size={16} className="text-stone-400 flex-shrink-0 ml-2" />
                           </div>
-
-                          {ua && canDailyAssign && dAssignFor === ua.id && (
-                            <AssignPicker key={ua.id} team={dTeam} busy={dBusy === ua.id}
-                              currentIds={ua.assignees.map(a => a.id)}
-                              onCancel={() => setDAssignFor(null)}
-                              onSave={(ids) => dCommitAssignees(ua, ids)} />
-                          )}
-                        </div>
-                        );
-                      })}
+                        </button>
+                      ))}
                     </div>
                   )}
 
@@ -24929,7 +21281,7 @@ function DailyUnitDayDetail({ date, propertyId, unitId, unitLabel, propertyName,
 // =================================================================
 // ASSIGNMENT LIST — owner/manager view of all assignments for a property
 // =================================================================
-function AssignmentList({ property, employee, onBack, onNew, onNewChecklist, onNewQuick, onOpen, embedded = false }) {
+function AssignmentList({ property, employee, onBack, onNew, onNewChecklist, onNewQuick, onOpen }) {
   const [assignments, setAssignments] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [filter, setFilter] = useState('open'); // open | all
@@ -24956,50 +21308,6 @@ function AssignmentList({ property, employee, onBack, onNew, onNewChecklist, onN
   // Track which row is currently saving a priority toggle so we can
   // disable the button + show a busy state.
   const [togglingId, setTogglingId] = useState(null);
-  // Inline due-date editing (owners / granted users).
-  const [editDateId, setEditDateId] = useState(null);
-  const canEditDates = can(employee, 'edit_due_dates');
-  const saveDue = async (id, date) => {
-    setEditDateId(null);
-    await supabase.from('assignments').update({ scheduled_date: date || null }).eq('id', id);
-    load();
-  };
-  // Assigning cleaners straight from this list.
-  const canAssignHere = can(employee, 'assign_cleaners');
-  const [teamList, setTeamList] = useState([]);
-  const [assignFor, setAssignFor] = useState(null);
-  const [assigneeMap, setAssigneeMap] = useState({}); // assignment_id -> [{id,name,requested}]
-  const loadAssignees = async (asgIds) => {
-    if (!asgIds.length) { setAssigneeMap({}); return; }
-    // No employees embed — see the note in the assignment schedule load().
-    const { data, error } = await supabase.from('assignment_assignees')
-      .select('assignment_id, employee_id, status')
-      .in('assignment_id', asgIds);
-    if (error) { alert('Could not load who\u2019s assigned: ' + error.message); return; }
-    const m = {};
-    (data || []).forEach(r => {
-      (m[r.assignment_id] = m[r.assignment_id] || []).push({ id: r.employee_id, name: rosterById[r.employee_id] || '', requested: r.status === 'requested' });
-    });
-    setAssigneeMap(m);
-  };
-  const [rosterById, setRosterById] = useState({}); // every active employee, owners included
-  useEffect(() => {
-    (async () => {
-      const { data } = await supabase.from('employees').select('id, name, role').eq('active', true).order('name');
-      setTeamList((data || []).filter(e => e.role !== 'owner'));
-      setRosterById(Object.fromEntries((data || []).map(e => [e.id, e.name])));
-    })();
-  }, []);
-  const [assignBusy, setAssignBusy] = useState(null);
-  const commitAssign = async (asgId, ids) => {
-    setAssignBusy(asgId);
-    const current = (assigneeMap[asgId] || []).map(a => a.id);
-    const error = await saveAssignees(asgId, current, ids, employee.id);
-    setAssignBusy(null);
-    if (error) { alert('Could not update who\u2019s assigned: ' + error.message); return; }
-    setAssignFor(null);
-    load();
-  };
 
   const load = async () => {
     // Pull targets so we can group by unit and surface priority/type
@@ -25010,7 +21318,6 @@ function AssignmentList({ property, employee, onBack, onNew, onNewChecklist, onN
       .is('deleted_at', null)
       .order('created_at', { ascending: false });
     setAssignments(data || []); setLoaded(true);
-    loadAssignees((data || []).map(a => a.id));
   };
   useEffect(() => { load(); }, [property.id]);
   useAssignmentSync(load, 'asgn-list');
@@ -25203,50 +21510,9 @@ function AssignmentList({ property, employee, onBack, onNew, onNewChecklist, onN
                 </span>
               )}
             </div>
-            <div className="text-xs text-stone-500 font-mono mt-1 flex items-center gap-2 flex-wrap">
-              {editDateId === a.id ? (
-                <input type="date" autoFocus value={a.scheduled_date || ''}
-                  onChange={(e) => saveDue(a.id, e.target.value)}
-                  onBlur={() => setEditDateId(null)}
-                  onClick={(e) => e.stopPropagation()}
-                  className="text-[11px] font-mono px-1.5 py-0.5 rounded border border-stone-400 bg-white" />
-              ) : canEditDates ? (
-                <button onClick={(e) => { e.stopPropagation(); setEditDateId(a.id); }}
-                  className={`px-2 py-0.5 rounded-full border flex items-center gap-1 ${a.scheduled_date
-                    ? (assignmentDueKind(a.scheduled_date) === 'overdue' ? 'bg-red-100 text-red-700 border-red-200'
-                       : assignmentDueKind(a.scheduled_date) === 'today' ? 'bg-emerald-100 text-emerald-800 border-emerald-200'
-                       : 'bg-stone-100 text-stone-600 border-stone-200')
-                    : 'bg-white text-stone-500 border-dashed border-stone-300'}`}>
-                  <Calendar size={9} /> {a.scheduled_date
-                    ? (assignmentDueKind(a.scheduled_date) === 'today' ? 'Due today'
-                       : assignmentDueKind(a.scheduled_date) === 'overdue' ? `Overdue · ${fmtDueDate(a.scheduled_date)}`
-                       : `Due ${fmtDueDate(a.scheduled_date)}`)
-                    : 'Set due date'}
-                </button>
-              ) : (
-                a.scheduled_date ? <span className="flex items-center gap-1"><Calendar size={9} /> Due {fmtDueDate(a.scheduled_date)}</span> : <span>{fmtDate(a.created_at)}</span>
-              )}
-              <span>{a.done}/{a.total} done{a.inProgress > 0 && `, ${a.inProgress} in progress`}</span>
-              {(assigneeMap[a.id] || []).map(p => (
-                <span key={p.id} className={`px-2 py-0.5 rounded-full inline-flex items-center gap-1 ${p.requested ? 'bg-amber-100 text-amber-800' : 'bg-indigo-100 text-indigo-700'}`}>
-                  <User size={9} /> {p.name}{p.requested ? ' asked' : ''}
-                </span>
-              ))}
-              {canAssignHere && (
-                <button onClick={(e) => { e.stopPropagation(); setAssignFor(assignFor === a.id ? null : a.id); }}
-                  className="px-2 py-0.5 rounded-full border border-dashed border-stone-300 text-stone-500 inline-flex items-center gap-1">
-                  <Plus size={9} /> Assign
-                </button>
-              )}
+            <div className="text-xs text-stone-500 font-mono mt-1">
+              {fmtDate(a.created_at)} · {a.done}/{a.total} done{a.inProgress > 0 && `, ${a.inProgress} in progress`}
             </div>
-            {canAssignHere && assignFor === a.id && (
-              <div onClick={(e) => e.stopPropagation()}>
-                <AssignPicker key={a.id} team={teamList} busy={assignBusy === a.id}
-                  currentIds={(assigneeMap[a.id] || []).map(x => x.id)}
-                  onCancel={() => setAssignFor(null)}
-                  onSave={(ids) => commitAssign(a.id, ids)} />
-              </div>
-            )}
             {a.notes && <div className="text-xs text-stone-600 mt-1 line-clamp-1">{a.notes}</div>}
           </div>
           {!bulkMode && <ChevronRight size={14} className="text-stone-400 flex-shrink-0 mt-1" />}
@@ -25256,8 +21522,7 @@ function AssignmentList({ property, employee, onBack, onNew, onNewChecklist, onN
   };
 
   return (
-    <div className={embedded ? '' : 'pb-24'}>
-      {!embedded && (
+    <div className="pb-24">
       <div className="flex items-center gap-3 px-5 py-4 border-b border-stone-200">
         <button onClick={onBack} className="p-2 -ml-2 rounded-full hover:bg-stone-100">
           <ArrowLeft size={20} className="text-stone-700" />
@@ -25275,7 +21540,6 @@ function AssignmentList({ property, employee, onBack, onNew, onNewChecklist, onN
           </button>
         )}
       </div>
-      )}
 
       {/* Bulk-action toolbar — sticky-ish row that appears just under
          the header whenever the owner has tapped Select. Shows the
@@ -25612,7 +21876,6 @@ const QUICK_TYPES = [
   { key: 'move_out_check',  label: 'Move-out' },
   { key: 'cleaning_check',  label: 'Cleaning check' },
   { key: 'reclean',         label: 'Re-clean' },
-  { key: 'trash_out',       label: 'Trash out' },
 ];
 function QuickAssignmentForm({ property, employee, onCancel, onSaved }) {
   const [apt, setApt] = useState('');
@@ -25622,17 +21885,8 @@ function QuickAssignmentForm({ property, employee, onCancel, onSaved }) {
   const [scheduledDate, setScheduledDate] = useState('');
   const [priority, setPriority] = useState(false);
   const [notes, setNotes] = useState('');
-  const [assignedTo, setAssignedTo] = useState('');
-  const [cleaners, setCleaners] = useState([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-
-  useEffect(() => {
-    (async () => {
-      const { data } = await supabase.from('employees').select('id, name, role').eq('active', true).order('name');
-      setCleaners((data || []).filter(e => e.role !== 'owner'));
-    })();
-  }, []);
 
   const step = (setter, val, delta, min = 0, max = 12) =>
     setter(Math.max(min, Math.min(max, (parseInt(val, 10) || 0) + delta)));
@@ -25689,7 +21943,6 @@ function QuickAssignmentForm({ property, employee, onCancel, onSaved }) {
       const { error: te } = await supabase.from('assignment_targets').insert({
         assignment_id: asg.id, unit_id: unit.id, party_id: party.id,
         status: 'pending', priority: !!priority,
-        assigned_to: assignedTo || null,
       });
       if (te) throw te;
       setBusy(false);
@@ -25753,16 +22006,6 @@ function QuickAssignmentForm({ property, employee, onCancel, onSaved }) {
           <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Target date (optional)</label>
           <input type="date" value={scheduledDate} onChange={e => setScheduledDate(e.target.value)}
             className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white text-stone-900" />
-        </div>
-
-        <div>
-          <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Assign to (optional)</label>
-          <select value={assignedTo} onChange={e => setAssignedTo(e.target.value)}
-            className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white text-stone-900 text-sm">
-            <option value="">Anyone (unassigned)</option>
-            {cleaners.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-          </select>
-          <div className="text-[11px] text-stone-500 mt-1 font-mono">Assign it to a specific cleaner — it shows up in their list.</div>
         </div>
 
         <button onClick={() => setPriority(p => !p)}
@@ -26779,9 +23022,6 @@ function ChecklistAssignmentWizard({ property, employee, actorKind = null, porta
       const next = { ...prev };
       const current = next[partyId] || { mode: 'configure', checked: {} };
       next[partyId] = { ...current, bathroomVariant: variant };
-      // Whole-bathroom means this bedroom's cleaner does everything —
-      // there's no split to mirror, so leave the partner alone.
-      if (variant === 'all') return next;
       // Find the partner bedroom (same bathroom group, different bedroom number)
       const party = parties.find(p => p.id === partyId);
       const myNum = parseInt((party?.label || '').match(/(\d+)/)?.[1] || '0', 10);
@@ -26995,19 +23235,8 @@ function ChecklistAssignmentWizard({ property, employee, actorKind = null, porta
         const variantKey = sectionKey === 'bathroom' ? current.bathroomVariant
           : sectionKey === 'general' ? current.generalVariant
           : 'default';
-        // 'all' = whole bathroom → check every bathroom item across all
-        // variants (deduped by item_key). Without this branch, Fail-all
-        // found no matching variant and checked nothing.
-        let variantItems;
-        if (sectionKey === 'bathroom' && variantKey === 'all') {
-          const seen = new Set();
-          variantItems = variantsBySection('bathroom')
-            .flatMap(v => itemsForVariant(v.id))
-            .filter(it => { if (seen.has(it.item_key)) return false; seen.add(it.item_key); return true; });
-        } else {
-          const variant = variantKey ? variantBySectionKey(sectionKey, variantKey) : null;
-          variantItems = variant ? itemsForVariant(variant.id) : [];
-        }
+        const variant = variantKey ? variantBySectionKey(sectionKey, variantKey) : null;
+        const variantItems = variant ? itemsForVariant(variant.id) : [];
         const checked = { ...(current.checked || {}) };
         variantItems.forEach(it => {
           checked[`${sectionKey}:${it.item_key}`] = true;
@@ -28057,21 +24286,8 @@ function ChecklistAssignmentWizard({ property, employee, actorKind = null, porta
     const variantKey = sectionKey === 'bathroom' ? c.bathroomVariant
       : sectionKey === 'general' ? c.generalVariant
       : 'default';
-    // 'all' = the whole bathroom: pull items from EVERY bathroom variant,
-    // deduped by item_key so a shared item (e.g. floor) isn't listed twice.
-    let items;
-    let hasVariant;
-    if (sectionKey === 'bathroom' && variantKey === 'all') {
-      const seen = new Set();
-      items = variantsBySection('bathroom')
-        .flatMap(v => itemsForVariant(v.id))
-        .filter(it => { if (seen.has(it.item_key)) return false; seen.add(it.item_key); return true; });
-      hasVariant = true; // "Entire bathroom" is a valid selection
-    } else {
-      const variant = variantKey ? variantBySectionKey(sectionKey, variantKey) : null;
-      items = variant ? itemsForVariant(variant.id) : [];
-      hasVariant = !!variant;
-    }
+    const variant = variantKey ? variantBySectionKey(sectionKey, variantKey) : null;
+    const items = variant ? itemsForVariant(variant.id) : [];
 
     return (
       <div className="space-y-3">
@@ -28125,15 +24341,10 @@ function ChecklistAssignmentWizard({ property, employee, actorKind = null, porta
               )}
             </div>
             <div className="flex gap-2">
-              {/* Whole bathroom — one cleaner does everything. Skips the
-                 tub/toilet split, which is the norm for move-outs. */}
-              <button onClick={() => setBathroomVariantWithAutofill(partyId, 'all')}
-                className={`flex-1 px-3 py-2 rounded-lg border-2 text-sm font-medium transition-colors ${c.bathroomVariant === 'all' ? 'bg-amber-50 border-amber-500 text-amber-900' : 'bg-white border-stone-200 text-stone-700'}`}>
-                Entire bathroom
-              </button>
               {variantsBySection('bathroom').map(v => (
                 <button key={v.id} onClick={() => setBathroomVariantWithAutofill(partyId, v.variant_key)}
                   className={`flex-1 px-3 py-2 rounded-lg border-2 text-sm font-medium transition-colors ${c.bathroomVariant === v.variant_key ? 'bg-amber-50 border-amber-500 text-amber-900' : 'bg-white border-stone-200 text-stone-700'}`}>
+                  {/* Rename "tub side" → "tub responsibility" per request */}
                   {v.label.replace(/ side$/i, ' responsibility')}
                 </button>
               ))}
@@ -28207,7 +24418,7 @@ function ChecklistAssignmentWizard({ property, employee, actorKind = null, porta
         {/* Items checklist — only shown when section isn't passed AND
            variant is picked (for bathroom/general). */}
         {!passed && (
-          hasVariant ? (
+          variant ? (
             <div className="rounded-xl bg-white border-2 border-stone-200">
               <div className="px-3 py-2 border-b border-stone-200 bg-stone-50 flex items-center justify-between">
                 <div className="font-serif text-sm text-stone-900 font-bold">{section.label} items</div>
@@ -28277,7 +24488,7 @@ function ChecklistAssignmentWizard({ property, employee, actorKind = null, porta
   // own bottom tab bar.
   return (
     <>
-    <div className="min-h-screen bg-stone-50 pb-[176px]">
+    <div className="min-h-screen bg-stone-50 pb-[136px]">
       <div className="px-5 py-4 border-b border-stone-200 bg-white sticky top-0 z-10">
         <div className="flex items-center gap-3 mb-3">
           <button onClick={() => { if (step > 0) setStep(step - 1); else onCancel(); }}
@@ -28366,11 +24577,13 @@ function ChecklistAssignmentWizard({ property, employee, actorKind = null, porta
         )}
       </div>
 
-      {/* Bottom action bar. Must clear the manager tab bar below it. The
-         OWNER nav is two rows (mode toggle + tabs) at ~104px, taller than
-         the ~64px single-row nav — so offset by 104px or the Next button
-         hides behind the nav (exactly what happened in Business mode). */}
-      <div className="fixed bottom-[104px] left-0 right-0 bg-white border-t border-stone-200 px-5 py-3 flex gap-2 z-30 shadow-[0_-4px_12px_rgba(0,0,0,0.06)]">
+      {/* Action bar — fixed above the manager tab bar (~64px tall)
+         when this wizard renders inside ManagerShell. z-30 matches
+      {/* Bottom action bar. Stays above the manager tab bar via the
+         z-30 + bottom-[64px] offset. Back button is on the left so the
+         user can step back one wizard step without hunting for the
+         tiny arrow at the top header. */}
+      <div className="fixed bottom-[64px] left-0 right-0 bg-white border-t border-stone-200 px-5 py-3 flex gap-2 z-30 shadow-[0_-4px_12px_rgba(0,0,0,0.06)]">
         <button
           onClick={() => { if (step > 0) setStep(step - 1); else onCancel(); }}
           className="px-4 py-3 rounded-xl bg-stone-100 hover:bg-stone-200 text-stone-700 text-sm font-medium flex items-center gap-1.5 active:scale-95">
@@ -28668,19 +24881,11 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
   const [reassignTarget, setReassignTarget] = useState(null);
   const [busy, setBusy] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
-  const [editDueId, setEditDueId] = useState(null);
-  const [liveHere, setLiveHere] = useState(false); // an open work block exists at this bedroom
-  const canEditDatesB = can(employee, 'edit_due_dates');
-  const todayKeyG = localTodayKey();
-  const saveDueB = async (id, date) => {
-    setEditDueId(null);
-    if (id) { await supabase.from('assignments').update({ scheduled_date: date || null }).eq('id', id); load(); }
-  };
 
   const load = async () => {
     let q = supabase
       .from('assignment_targets')
-      .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, deleted_at, extracted_text, spanish_translation, translation_status, template_set_id, sheet_type, bathroom_variant, general_variant, assignment_type, scheduled_date, created_at), unit:units(id, label), party:parties(id, label), starter:employees!started_by(name), completer:employees!completed_by(name), assignedTo:employees!assigned_to(id, name)');
+      .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, deleted_at, extracted_text, spanish_translation, translation_status, template_set_id, sheet_type, bathroom_variant, general_variant, assignment_type, created_at), unit:units(id, label), party:parties(id, label), starter:employees!started_by(name), completer:employees!completed_by(name), assignedTo:employees!assigned_to(id, name)');
 
     if (!showDone) q = q.not('status', 'in', '(done,blocked)');
 
@@ -28714,24 +24919,6 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
     setLoaded(true);
   };
   useEffect(() => { load(); /* eslint-disable-next-line */ }, [propertyId, unitId, partyId, showDone]);
-
-  // Is anyone in an OPEN work block at this bedroom right now? Starting a
-  // block runs the timer but deliberately doesn't flip item status to
-  // in_progress — so a bedroom being actively cleaned still reads
-  // "pending" on its items. That's confusing on the card, so we detect a
-  // live block here and let the status pill reflect it.
-  useEffect(() => {
-    if (!unitId || !partyId) { setLiveHere(false); return; }
-    let cancelled = false;
-    (async () => {
-      const { data } = await supabase.from('work_blocks')
-        .select('id, shift:shifts!inner(customer_id)')
-        .eq('unit_id', unitId).eq('party_id', partyId).is('end_time', null);
-      if (cancelled) return;
-      setLiveHere((data || []).some(b => b.shift?.customer_id === propertyId));
-    })();
-    return () => { cancelled = true; };
-  }, [propertyId, unitId, partyId]);
   useAssignmentSync(load, 'asgn-banner');
 
   const updateStatus = async (target, newStatus, statusNotes) => {
@@ -29000,19 +25187,9 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
           const anyPriority = items.some(i => i.priority);
           const statusOrder = ['pending', 'in_progress', 'paused', 'blocked', 'done'];
           const dominantStatus = statusOrder.find(s => items.some(i => i.status === s)) || 'pending';
-          // If someone has an open block here, the bedroom IS being worked
-          // even if items still read pending — show that instead.
-          const effectiveStatus = (liveHere && dominantStatus === 'pending') ? 'in_progress' : dominantStatus;
-          const statusPill = ASSIGNMENT_STATUSES[effectiveStatus] || ASSIGNMENT_STATUSES.pending;
+          const statusPill = ASSIGNMENT_STATUSES[dominantStatus] || ASSIGNMENT_STATUSES.pending;
           // Item-level rows the cleaner can act on in BULK
           const openItems = items.filter(i => i.status !== 'done');
-          // On the ready-to-start screen the big "Start cleaning" button
-          // above is the real start action. If NOTHING here is started
-          // yet, Mark complete / Block don't apply — grey them out until
-          // the cleaner starts (owners with mark_assignments_done keep
-          // them live). Matches the single-card gating.
-          const allPending = openItems.length > 0 && openItems.every(i => i.status === 'pending');
-          const bundleGated = allPending && !can(employee, 'mark_assignments_done');
           return (
             <div key={g.key} className="p-3 sm:p-4 rounded-xl bg-white border border-stone-200">
               {/* === HEADER: bedroom title + chips on right ===
@@ -29051,30 +25228,6 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
                     <span className={`text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full border ${statusPill.color}`}>
                       {statusPill.label}
                     </span>
-                    {!isAllDone && (editDueId === a?.id ? (
-                      <input type="date" autoFocus value={a?.scheduled_date || ''}
-                        onChange={(e) => saveDueB(a?.id, e.target.value)}
-                        onBlur={() => setEditDueId(null)}
-                        onClick={(e) => e.stopPropagation()}
-                        className="text-[10px] font-mono px-1.5 py-0.5 rounded border border-stone-400 bg-white" />
-                    ) : canEditDatesB ? (
-                      <button onClick={(e) => { e.stopPropagation(); setEditDueId(a?.id); }}
-                        className={`text-[10px] font-mono px-2 py-0.5 rounded-full border inline-flex items-center gap-1 ${a?.scheduled_date
-                          ? (a.scheduled_date < todayKeyG ? 'bg-red-100 text-red-700 border-red-200'
-                             : a.scheduled_date === todayKeyG ? 'bg-emerald-100 text-emerald-800 border-emerald-200'
-                             : 'bg-stone-100 text-stone-600 border-stone-200')
-                          : 'bg-white text-stone-500 border-dashed border-stone-300'}`}>
-                        <Calendar size={9} /> {a?.scheduled_date
-                          ? (a.scheduled_date < todayKeyG ? `Overdue · ${fmtDueDate(a.scheduled_date)}`
-                             : a.scheduled_date === todayKeyG ? 'Today'
-                             : fmtDueDate(a.scheduled_date))
-                          : 'Set due date'}
-                      </button>
-                    ) : (a?.scheduled_date ? (
-                      <span className="text-[10px] font-mono px-2 py-0.5 rounded-full border bg-stone-100 text-stone-600 border-stone-200 inline-flex items-center gap-1">
-                        <Calendar size={9} /> {a.scheduled_date === todayKeyG ? 'Today' : fmtDueDate(a.scheduled_date)}
-                      </span>
-                    ) : null))}
                   </div>
                   {/* Mini-row 2: View doc + History */}
                   <div className="flex items-center gap-1.5 flex-wrap justify-end">
@@ -29109,12 +25262,8 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
                 </div>
               </div>
 
-              {/* === DONE / IN PROGRESS chips ===
-                 x/x done is the clear progress signal; the separate
-                 "N pending" was redundant with it (done + pending = total),
-                 so it's dropped. Active states (in progress / paused /
-                 blocked) still show since those aren't derivable from
-                 the done count. */}
+              {/* === DONE / IN PROGRESS / PENDING chips ===
+                 Kept per request — useful glance for "how far am I?". */}
               <div className="flex flex-wrap gap-1.5 mb-3">
                 <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-stone-100 text-stone-700">
                   {counts.done}/{total} done
@@ -29122,6 +25271,11 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
                 {counts.in_progress > 0 && (
                   <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-amber-100 text-amber-800">
                     {counts.in_progress} in progress
+                  </span>
+                )}
+                {counts.pending > 0 && (
+                  <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-stone-100 text-stone-600">
+                    {counts.pending} pending
                   </span>
                 )}
                 {counts.paused > 0 && (
@@ -29182,12 +25336,9 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
                   </button>
                 )}
                 {!isAllDone && (
-                  <button onClick={() => setStatusModal({ target: rep, bulkRows: openItems })} disabled={busy || bundleGated}
-                    title={bundleGated ? 'Start cleaning before marking blocked' : ''}
-                    className={`h-9 px-3 rounded-lg text-xs font-medium flex items-center gap-1 border ${bundleGated
-                      ? 'bg-stone-100 border-stone-200 text-stone-400 cursor-not-allowed'
-                      : 'border-red-200 hover:bg-red-50 text-red-700 disabled:opacity-50'}`}>
-                    <AlertCircle size={12} /> Block
+                  <button onClick={() => setStatusModal({ target: rep, bulkRows: openItems })} disabled={busy}
+                    className="h-9 px-3 rounded-lg border border-red-200 hover:bg-red-50 text-red-700 text-xs font-medium flex items-center gap-1 disabled:opacity-50">
+                    <AlertCircle size={12} /> Blocked
                   </button>
                 )}
                 {!isAllDone && (
@@ -29228,7 +25379,7 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
 
       {opened && (
         opened.assignment?.template_set_id
-          ? <ChecklistAssignmentView assignment={opened.assignment} onOpenSibling={(a) => setOpened(o => ({ ...o, assignment: a }))}
+          ? <ChecklistAssignmentView assignment={opened.assignment}
               employee={employee}
               onClose={() => setOpened(null)}
               onOpenSheet={opened.assignment?.file_url
@@ -29319,20 +25470,20 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
               <button onClick={onGoToBedroom} disabled={busy}
                 className="block text-left w-full font-serif text-lg text-stone-900 leading-tight break-words hover:underline disabled:opacity-50">
                 <span className="font-bold">{t.unit?.label || 'No unit'}</span>
-                {partyDisplay(t.party?.label) && (
+                {t.party?.label && (
                   <>
                     <span className="text-stone-400 mx-1.5">·</span>
-                    <span className="italic">{partyDisplay(t.party?.label)}</span>
+                    <span className="italic">{t.party.label}</span>
                   </>
                 )}
               </button>
             ) : (
               <div className="font-serif text-lg text-stone-900 leading-tight break-words">
                 <span className="font-bold">{t.unit?.label || 'No unit'}</span>
-                {partyDisplay(t.party?.label) && (
+                {t.party?.label && (
                   <>
                     <span className="text-stone-400 mx-1.5">·</span>
-                    <span className="italic">{partyDisplay(t.party?.label)}</span>
+                    <span className="italic">{t.party.label}</span>
                   </>
                 )}
               </div>
@@ -29538,22 +25689,12 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
             <Play size={12} /> Reopen
           </button>
         )}
-        {(t.status === 'pending' || t.status === 'in_progress' || t.status === 'paused') && (() => {
-          // Same rule as Mark complete: you can't block work you haven't
-          // started. Keep the button visible but greyed on pending so the
-          // cleaner sees it exists — owners/managers (mark_assignments_done)
-          // can block without starting, so never disabled for them.
-          const blockDisabled = t.status === 'pending' && !canMarkDoneAlways;
-          return (
-            <button onClick={onBlocked} disabled={busy || blockDisabled}
-              title={blockDisabled ? 'Start this assignment before marking it blocked' : ''}
-              className={`h-9 px-3 rounded-lg text-xs font-medium flex items-center gap-1 border ${blockDisabled
-                ? 'bg-stone-100 border-stone-200 text-stone-400 cursor-not-allowed'
-                : 'border-red-200 hover:bg-red-50 text-red-700 disabled:opacity-50'}`}>
-              <AlertCircle size={12} /> Block
-            </button>
-          );
-        })()}
+        {(t.status === 'pending' || t.status === 'in_progress' || t.status === 'paused') && (
+          <button onClick={onBlocked} disabled={busy}
+            className="h-9 px-3 rounded-lg border border-red-200 hover:bg-red-50 text-red-700 text-xs font-medium flex items-center gap-1 disabled:opacity-50">
+            <AlertCircle size={12} /> Blocked
+          </button>
+        )}
         {onReassign && (t.unit_id || t.party_id) && (
           <button onClick={onReassign} disabled={busy}
             className="h-9 px-3 rounded-lg border border-stone-300 hover:bg-stone-50 text-stone-600 text-xs font-medium flex items-center gap-1 disabled:opacity-50">
@@ -29727,13 +25868,6 @@ function SuggestedTabContent({ propertyId, employee, onGoToBedroom, onOpenBedroo
   });
   const [reloadKey, setReloadKey] = useState(0);
   const reload = () => setReloadKey(k => k + 1);
-  const [editDueId, setEditDueId] = useState(null);
-  const canEditDatesS = can(employee, 'edit_due_dates');
-  const todayKeyS = localTodayKey();
-  const saveDueS = async (id, date) => {
-    setEditDueId(null);
-    if (id) { await supabase.from('assignments').update({ scheduled_date: date || null }).eq('id', id); reload(); }
-  };
   // Realtime: pick up workblocks opening/closing and target status
   // changes from other cleaners so the "X is here" chip + status pill
   // appear within seconds rather than after a manual refresh.
@@ -29742,12 +25876,8 @@ function SuggestedTabContent({ propertyId, employee, onGoToBedroom, onOpenBedroo
   // Label parsers — same as NextUpModal
   const buildingFromLabel = (label) => {
     if (!label) return null;
-    const s = String(label);
-    const dash = s.match(/^B(\d+)-/i);
-    if (dash) return dash[1];
-    const letter = s.match(/^([A-Za-z]+)\d/);
-    if (letter) return letter[1].toUpperCase();
-    return null;
+    const m = label.match(/^B(\d+)/i);
+    return m ? m[1] : null;
   };
   const unitNumberFromLabel = (label) => {
     if (!label) return null;
@@ -29759,7 +25889,7 @@ function SuggestedTabContent({ propertyId, employee, onGoToBedroom, onOpenBedroo
     if (!propertyId || !employee?.id) return;
     (async () => {
       setLoaded(false);
-      // 1. Anchor — cleaner's most recent block at this property
+      // 1) Anchor — cleaner's most recent block at this property
       const { data: myBlocks } = await supabase
         .from('work_blocks')
         .select('id, unit_id, party_id, end_time, start_time, unit:units(label), party:parties(label), shift:shifts!inner(customer_id, employee_id)')
@@ -29780,24 +25910,20 @@ function SuggestedTabContent({ propertyId, employee, onGoToBedroom, onOpenBedroo
         wasOpen: !recent.end_time,
       } : null;
 
-      // 2. Units + parties + full target detail + open work blocks
+      // 2) Units + parties + full target detail + open work blocks
       const [unitsRes, partiesRes, targetsRes, blocksRes] = await Promise.all([
         supabase.from('units').select('id, label, active').eq('customer_id', propertyId).eq('active', true),
         supabase.from('parties').select('id, label, unit_id, sort_order, active'),
         supabase.from('assignment_targets')
-          .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, deleted_at, assignment_type, template_set_id, sheet_type, general_variant, bathroom_variant, scheduled_date, created_at), unit:units(id, label), party:parties(id, label), starter:employees!started_by(name), completer:employees!completed_by(name), assignedTo:employees!assigned_to(id, name)')
+          .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, deleted_at, assignment_type, template_set_id, sheet_type, general_variant, bathroom_variant, created_at), unit:units(id, label), party:parties(id, label), starter:employees!started_by(name), completer:employees!completed_by(name), assignedTo:employees!assigned_to(id, name)')
           .not('status', 'in', '(done,blocked)'),
         // Open work blocks property-wide for the "who's here" chips.
         // main_section is pulled so each chip can label which section
         // the cleaner is working — relevant once cleaners split a
         // bedroom across sections.
-        // Scoped to this property server-side — an app-wide open-block
-        // query silently truncates at the 1000-row cap and the "is here"
-        // chips go missing on arbitrary cards.
         supabase.from('work_blocks')
           .select('id, unit_id, party_id, main_section, shift:shifts!inner(customer_id, employee:employees(id, name))')
-          .is('end_time', null)
-          .eq('shift.customer_id', propertyId),
+          .is('end_time', null),
       ]);
       const units = unitsRes.data || [];
       const parties = (partiesRes.data || []).filter(p => p.active !== false);
@@ -29969,9 +26095,6 @@ function SuggestedTabContent({ propertyId, employee, onGoToBedroom, onOpenBedroo
     const statusOrder = ['pending', 'in_progress', 'paused', 'blocked'];
     const dominantStatus = statusOrder.find(s => items.some(i => i.status === s)) || 'pending';
     const statusPill = ASSIGNMENT_STATUSES[dominantStatus] || ASSIGNMENT_STATUSES.pending;
-    // Done items don't get an overdue pill — overdue means unfinished
-    // past its due date, and these are finished.
-    const allDone = items.length > 0 && items.every(i => i.status === 'done');
     const goTo = () => {
       if (!onGoToBedroom) return;
       onGoToBedroom({
@@ -29989,10 +26112,8 @@ function SuggestedTabContent({ propertyId, employee, onGoToBedroom, onOpenBedroo
             <button onClick={goTo} disabled={busy}
               className="block text-left w-full font-serif text-lg text-stone-900 leading-tight break-words hover:underline disabled:opacity-50">
               <span className="font-bold">{c.unitLabel}</span>
-              {partyDisplay(c.partyLabel) && <>
-                <span className="text-stone-400 mx-1.5">·</span>
-                <span className="italic">{partyDisplay(c.partyLabel)}</span>
-              </>}
+              <span className="text-stone-400 mx-1.5">·</span>
+              <span className="italic">{c.partyLabel}</span>
             </button>
           </div>
           <div className="flex flex-col sm:flex-row sm:items-center gap-1.5 flex-shrink-0 sm:max-w-[60%]">
@@ -30006,39 +26127,6 @@ function SuggestedTabContent({ propertyId, employee, onGoToBedroom, onOpenBedroo
               <span className={`text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full border ${statusPill.color}`}>
                 {statusPill.label}
               </span>
-              {allDone ? (
-                (() => {
-                  const last = items.map(i => i.completed_at).filter(Boolean).sort().slice(-1)[0];
-                  return (
-                    <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-stone-900 text-white inline-flex items-center gap-1">
-                      <Check size={9} /> {last ? `Done ${fmtDueDate(String(last).slice(0,10))}` : 'Done'}
-                    </span>
-                  );
-                })()
-              ) : (editDueId === rep.assignment?.id ? (
-                <input type="date" autoFocus value={rep.assignment?.scheduled_date || ''}
-                  onChange={(e) => saveDueS(rep.assignment?.id, e.target.value)}
-                  onBlur={() => setEditDueId(null)}
-                  onClick={(e) => e.stopPropagation()}
-                  className="text-[10px] font-mono px-1.5 py-0.5 rounded border border-stone-400 bg-white" />
-              ) : canEditDatesS ? (
-                <button onClick={(e) => { e.stopPropagation(); setEditDueId(rep.assignment?.id); }}
-                  className={`text-[10px] font-mono px-2 py-0.5 rounded-full border inline-flex items-center gap-1 ${rep.assignment?.scheduled_date
-                    ? (rep.assignment.scheduled_date < todayKeyS ? 'bg-red-100 text-red-700 border-red-200'
-                       : rep.assignment.scheduled_date === todayKeyS ? 'bg-emerald-100 text-emerald-800 border-emerald-200'
-                       : 'bg-stone-100 text-stone-600 border-stone-200')
-                    : 'bg-white text-stone-500 border-dashed border-stone-300'}`}>
-                  <Calendar size={9} /> {rep.assignment?.scheduled_date
-                    ? (rep.assignment.scheduled_date < todayKeyS ? `Overdue · ${fmtDueDate(rep.assignment.scheduled_date)}`
-                       : rep.assignment.scheduled_date === todayKeyS ? 'Today'
-                       : fmtDueDate(rep.assignment.scheduled_date))
-                    : 'Set due date'}
-                </button>
-              ) : (rep.assignment?.scheduled_date ? (
-                <span className="text-[10px] font-mono px-2 py-0.5 rounded-full border bg-stone-100 text-stone-600 border-stone-200 inline-flex items-center gap-1">
-                  <Calendar size={9} /> {rep.assignment.scheduled_date === todayKeyS ? 'Today' : fmtDueDate(rep.assignment.scheduled_date)}
-                </span>
-              ) : null))}
             </div>
             <div className="flex items-center gap-1.5 flex-wrap justify-end">
               <button onClick={() => setOpened(rep)}
@@ -30135,7 +26223,7 @@ function SuggestedTabContent({ propertyId, employee, onGoToBedroom, onOpenBedroo
           )}
           <button onClick={() => setStatusModal({ target: rep, bulkRows: items })} disabled={busy}
             className="h-9 px-3 rounded-lg border border-red-200 hover:bg-red-50 text-red-700 text-xs font-medium flex items-center gap-1 disabled:opacity-50">
-            <AlertCircle size={12} /> Block
+            <AlertCircle size={12} /> Blocked
           </button>
           <button onClick={() => setReassignTarget(rep)} disabled={busy}
             className="h-9 px-3 rounded-lg border border-stone-300 hover:bg-stone-50 text-stone-700 text-xs font-medium flex items-center gap-1 disabled:opacity-50">
@@ -30222,7 +26310,7 @@ function SuggestedTabContent({ propertyId, employee, onGoToBedroom, onOpenBedroo
       {/* Modals */}
       {opened && (
         opened.assignment?.template_set_id
-          ? <ChecklistAssignmentView assignment={opened.assignment} onOpenSibling={(a) => setOpened(o => ({ ...o, assignment: a }))}
+          ? <ChecklistAssignmentView assignment={opened.assignment}
               employee={employee}
               onClose={() => setOpened(null)}
               onOpenSheet={opened.assignment?.file_url
@@ -30274,23 +26362,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
   // that side. Replaces the old day-of / last-3 / older quick tabs.
   const [dateFrom, setDateFrom] = useState(''); // YYYY-MM-DD inclusive start
   const [dateTo, setDateTo] = useState('');     // YYYY-MM-DD inclusive end
-  // Done view defaults to the last 2 days — that's what you're almost
-  // always looking for, and scrolling through weeks of finished work to
-  // find today's was the complaint. 'all' widens it.
-  const [doneWindow, setDoneWindow] = useState('recent'); // 'recent' | 'all'
-  const recentCutoff = (() => {
-    // "Last 2 days" = today and yesterday. -1 gives a 2-calendar-day span.
-    const d = new Date(); d.setDate(d.getDate() - 1);
-    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
-  })();
   const [filterCategories, setFilterCategories] = useState(new Set()); // task categories like 'bedroom'
-  const [editDueId, setEditDueId] = useState(null);
-  const canEditDatesT = can(employee, 'edit_due_dates');
-  const todayKeyT = localTodayKey();
-  const saveDueT = async (id, date) => {
-    setEditDueId(null);
-    if (id) { await supabase.from('assignments').update({ scheduled_date: date || null }).eq('id', id); load(); }
-  };
 
   // Track which unit-bundles are expanded on the Pending view
   const [bundleOpen, setBundleOpen] = useState({}); // { unitId: boolean }
@@ -30307,25 +26379,11 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
   // every viewer's bedroom cards reflect it within a second or two.
   const [whosHereByParty, setWhosHereByParty] = useState(new Map());
   const loadWhosHere = async () => {
-    // Scoped server-side to THIS property and paginated. This used to
-    // pull EVERY open work block app-wide and filter in JS, so once open
-    // blocks passed PostgREST's 1000-row cap an arbitrary subset came
-    // back — which is why the "X is here" chip appeared on some bedroom
-    // cards and not others.
-    let rows = []; const PAGE = 1000;
-    for (let from = 0; ; from += PAGE) {
-      const { data, error } = await supabase.from('work_blocks')
-        .select('id, party_id, main_section, shift:shifts!inner(customer_id, employee:employees(id, name))')
-        .is('end_time', null)
-        .eq('shift.customer_id', propertyId)
-        .range(from, from + PAGE - 1);
-      if (error || !data) break;
-      rows = rows.concat(data);
-      if (data.length < PAGE) break;
-      if (from > 100000) break;
-    }
+    const { data } = await supabase.from('work_blocks')
+      .select('id, party_id, main_section, shift:shifts!inner(customer_id, employee:employees(id, name))')
+      .is('end_time', null);
     const m = new Map();
-    rows.forEach(b => {
+    (data || []).forEach(b => {
       if (b.shift?.customer_id !== propertyId) return;
       if (!b.party_id) return;
       // Exclude the viewing cleaner's own workblock — they don't need
@@ -30395,7 +26453,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
     // not visible to cleaners get dropped here.
     let allRelevant = (data || []).filter(t =>
       t.assignment?.customer_id === propertyId &&
-      t.assignment?.active !== false &&
+      t.assignment?.active &&
       !t.assignment?.deleted_at &&
       (t.assignment?.source !== 'pm' || t.assignment?.pm_status === 'approved')
     );
@@ -30474,20 +26532,10 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
     } else {
       // Overdue → today → undated → upcoming, then priority, then
       // natural unit/party order, so cleaners see today's work first.
-      // Due date first, THEN building order. Anything with a date sits
-      // above anything without; undated work keeps its old natural order
-      // at the bottom.
       filtered.sort((a, b) => {
-        const da = a.assignment?.scheduled_date || '';
-        const db = b.assignment?.scheduled_date || '';
-        const ra = assignmentDueRank(da || null);
-        const rb = assignmentDueRank(db || null);
+        const ra = assignmentDueRank(a.assignment?.scheduled_date);
+        const rb = assignmentDueRank(b.assignment?.scheduled_date);
         if (ra !== rb) return ra - rb;
-        // Real chronological order inside a bucket. scheduled_date is
-        // 'YYYY-MM-DD', so a string compare is already date order.
-        // Without this every future date ties and the sort collapses
-        // straight to building order.
-        if (da !== db) return da.localeCompare(db);
         const ap = a.priority ? 1 : 0;
         const bp = b.priority ? 1 : 0;
         if (ap !== bp) return bp - ap;
@@ -30683,7 +26731,6 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
   // Apply user filters (type / cleaner / day) before grouping.
   // We build "filteredTargets" once and feed it to all downstream
   // grouping/rendering logic.
-  const isDoneTab = statusFilter === 'done' || statusFilter === 'mine_today' || statusFilter === 'recheck_passed';
   const todayKey = (() => {
     const d = new Date();
     return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
@@ -30709,11 +26756,6 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
       if (!cd) return false;
       if (dateFrom && cd < dateFrom) return false;
       if (dateTo && cd > dateTo) return false;
-    } else if (isDoneTab && doneWindow === 'recent') {
-      // Default Done view: last 2 days only. A manual range above
-      // overrides this — pick dates and you see everything you asked for.
-      const cd = t.completed_at ? new Date(t.completed_at).toISOString().slice(0, 10) : null;
-      if (!cd || cd < recentCutoff) return false;
     }
     // Category filter — checks if any task at this bedroom matches
     if (filterCategories.size > 0) {
@@ -30929,12 +26971,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
           const unitLabel = group.unit?.label || (key === 'no-unit' ? 'No unit' : key);
           const bundleHasPriority = group.items.some(t => t.priority);
           // Most-urgent due status across this apartment's jobs.
-          // Overdue only counts UNFINISHED work. A done item with a past
-          // scheduled date is not overdue — it's done. Including it made a
-          // fully-cleaned bedroom show "Overdue", which is nonsense.
-          const unitDueKinds = group.items
-            .filter(t => t.status !== 'done')
-            .map(t => assignmentDueKind(t.assignment?.scheduled_date)).filter(Boolean);
+          const unitDueKinds = group.items.map(t => assignmentDueKind(t.assignment?.scheduled_date)).filter(Boolean);
           const unitDue = unitDueKinds.includes('overdue') ? 'overdue'
             : unitDueKinds.includes('today') ? 'today'
             : unitDueKinds.includes('upcoming') ? 'upcoming' : null;
@@ -31148,13 +27185,13 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                             <div className="flex-1 min-w-0">
                               {canGoToBedroom ? (
                                 <button onClick={() => startAndGo(firstTarget)} disabled={busy}
-                                  className="block text-left w-full font-serif text-sm text-stone-900 leading-tight break-words hover:underline disabled:opacity-50">
+                                  className="block text-left w-full font-serif text-base text-stone-900 leading-tight break-words hover:underline disabled:opacity-50">
                                   <span className="font-bold">{group.unit?.label || unitLabel}</span>
                                   <span className="text-stone-400 mx-1.5">·</span>
                                   <span className="italic">{bedLabel}</span>
                                 </button>
                               ) : (
-                                <div className="font-serif text-sm text-stone-900 leading-tight break-words">
+                                <div className="font-serif text-base text-stone-900 leading-tight break-words">
                                   <span className="font-bold">{group.unit?.label || unitLabel}</span>
                                   <span className="text-stone-400 mx-1.5">·</span>
                                   <span className="italic">{bedLabel}</span>
@@ -31172,48 +27209,6 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                                 <span className={`text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full border ${statusPill.color}`}>
                                   {statusPill.label}
                                 </span>
-                                {(() => {
-                                  const asg = (newItems[0] || firstTarget)?.assignment;
-                                  const sd = asg?.scheduled_date;
-                                  // Done work has a completion date, not a due
-                                  // date. "Overdue" on a finished job is a
-                                  // contradiction — overdue means unfinished
-                                  // past its due date. Show when it finished.
-                                  const grpDone = newItems.every(t => t.status === 'done') && newItems.length > 0;
-                                  if (grpDone) {
-                                    const last = newItems
-                                      .map(t => t.completed_at).filter(Boolean).sort().slice(-1)[0];
-                                    return (
-                                      <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-stone-900 text-white inline-flex items-center gap-1">
-                                        <Check size={9} /> {last ? `Done ${fmtDueDate(String(last).slice(0,10))}` : 'Done'}
-                                      </span>
-                                    );
-                                  }
-                                  if (editDueId === asg?.id) return (
-                                    <input type="date" autoFocus value={sd || ''}
-                                      onChange={(e) => saveDueT(asg?.id, e.target.value)}
-                                      onBlur={() => setEditDueId(null)}
-                                      onClick={(e) => e.stopPropagation()}
-                                      className="text-[10px] font-mono px-1.5 py-0.5 rounded border border-stone-400 bg-white" />
-                                  );
-                                  if (canEditDatesT) return (
-                                    <button onClick={(e) => { e.stopPropagation(); setEditDueId(asg?.id); }}
-                                      className={`text-[10px] font-mono px-2 py-0.5 rounded-full border inline-flex items-center gap-1 ${sd
-                                        ? (sd < todayKeyT ? 'bg-red-100 text-red-700 border-red-200'
-                                           : sd === todayKeyT ? 'bg-emerald-100 text-emerald-800 border-emerald-200'
-                                           : 'bg-stone-100 text-stone-600 border-stone-200')
-                                        : 'bg-white text-stone-500 border-dashed border-stone-300'}`}>
-                                      <Calendar size={9} /> {sd
-                                        ? (sd < todayKeyT ? `Overdue · ${fmtDueDate(sd)}` : sd === todayKeyT ? 'Today' : fmtDueDate(sd))
-                                        : 'Set due date'}
-                                    </button>
-                                  );
-                                  return sd ? (
-                                    <span className="text-[10px] font-mono px-2 py-0.5 rounded-full border bg-stone-100 text-stone-600 border-stone-200 inline-flex items-center gap-1">
-                                      <Calendar size={9} /> {sd === todayKeyT ? 'Today' : fmtDueDate(sd)}
-                                    </span>
-                                  ) : null;
-                                })()}
                               </div>
                               <div className="flex items-center gap-1.5 flex-wrap justify-end">
                                 <button onClick={(e) => { e.stopPropagation(); setOpened(firstTarget); }}
@@ -31336,7 +27331,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                             {!allDone && (
                               <button onClick={() => setStatusModal({ target: firstTarget, bulkRows: newItems })} disabled={busy}
                                 className="h-9 px-3 rounded-lg border border-red-200 hover:bg-red-50 text-red-700 text-xs font-medium flex items-center gap-1 disabled:opacity-50">
-                                <AlertCircle size={12} /> Block
+                                <AlertCircle size={12} /> Blocked
                               </button>
                             )}
                             {!allDone && (
@@ -31454,29 +27449,6 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
         </div>
       );
     }
-    // On the "Last 2 days" view, split Today / Yesterday so the day you
-    // almost always want is visually first. All time / a manual range
-    // renders as one flat list — sub-day headers there would be noise.
-    if (doneWindow === 'recent' && !dateFrom && !dateTo) {
-      const { dayOf, last3 } = bucketByAge(items);
-      const yesterday = last3; // within the 2-day window this is just yesterday
-      return (
-        <div className="space-y-3">
-          {dayOf.length > 0 && (
-            <div>
-              <div className="text-[10px] uppercase tracking-wider font-mono text-emerald-700 mb-1.5 px-1">Today ({countBedrooms(dayOf)})</div>
-              {renderAssignmentList(dayOf)}
-            </div>
-          )}
-          {yesterday.length > 0 && (
-            <div>
-              <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1.5 px-1">Yesterday ({countBedrooms(yesterday)})</div>
-              {renderAssignmentList(yesterday)}
-            </div>
-          )}
-        </div>
-      );
-    }
     return renderAssignmentList(items);
   };
 
@@ -31519,31 +27491,29 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                   </div>
                 </div>
               )}
-              {/* Cleaner — dropdown (was a wall of chips) */}
+              {/* Cleaner — multi-select chips */}
               {availableCleaners.length > 0 && (
                 <div>
-                  <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1">Cleaner</div>
-                  <select
-                    value={filterCleaners.size === 1 ? [...filterCleaners][0] : (filterCleaners.size === 0 ? '' : '__multi__')}
-                    onChange={(e) => {
-                      const v = e.target.value;
-                      if (v === '') setFilterCleaners(new Set());
-                      else if (v !== '__multi__') setFilterCleaners(new Set([v]));
-                    }}
-                    className="w-full px-3 py-2 rounded-lg border border-stone-300 bg-white text-sm text-stone-700">
-                    <option value="">All cleaners</option>
-                    {filterCleaners.size > 1 && <option value="__multi__">{filterCleaners.size} selected</option>}
-                    {availableCleaners.map(c => (
-                      <option key={c.id} value={c.id}>{c.name}</option>
-                    ))}
-                  </select>
+                  <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1">Cleaner (started or completed)</div>
+                  <div className="flex gap-1.5 flex-wrap">
+                    {availableCleaners.map(c => {
+                      const active = filterCleaners.has(c.id);
+                      return (
+                        <button key={c.id} onClick={() => toggleCleaner(c.id)}
+                          className={`px-2.5 py-1 rounded-full text-xs font-mono flex items-center gap-1 ${active ? 'bg-stone-900 text-stone-50' : 'bg-white border border-stone-300 text-stone-600'}`}>
+                          {active && <Check size={10} />}
+                          {c.name}
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
               )}
               {/* Task category — what kind of work happened at the bedroom */}
               {availableCategories.length > 0 && (
                 <div>
                   <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1">
-                    Task category
+                    Task category (where work was logged)
                   </div>
                   <div className="flex gap-1.5 flex-wrap">
                     {availableCategories.map(c => {
@@ -31564,7 +27534,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                  Done-family tabs where completed dates exist. */}
               {isDoneView && (
                 <div>
-                  <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1">Specific range</div>
+                  <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1">Completed between</div>
                   <div className="flex gap-2 flex-wrap items-center">
                     <label className="flex items-center gap-1 text-xs font-mono text-stone-600">
                       <span className="text-stone-400">From</span>
@@ -31621,23 +27591,6 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
               </button>
             );
           })}
-        </div>
-      )}
-
-      {/* Last 2 days / All time — placed here, below the building pills
-         and directly above the results, where it's actually in view when
-         scanning the list. (It also lives inside Filters, but only power
-         users open that.) Only meaningful on the Done family of tabs. */}
-      {isDoneView && !dateFrom && !dateTo && (
-        <div className="flex p-0.5 bg-stone-100 rounded-lg mb-3 max-w-xs">
-          <button onClick={() => setDoneWindow('recent')}
-            className={`flex-1 py-1.5 rounded-md text-[11px] font-mono ${doneWindow === 'recent' ? 'bg-white shadow-sm text-stone-900 font-medium' : 'text-stone-500'}`}>
-            Last 2 days
-          </button>
-          <button onClick={() => setDoneWindow('all')}
-            className={`flex-1 py-1.5 rounded-md text-[11px] font-mono ${doneWindow === 'all' ? 'bg-white shadow-sm text-stone-900 font-medium' : 'text-stone-500'}`}>
-            All time
-          </button>
         </div>
       )}
 
@@ -31711,11 +27664,11 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                 <button onClick={() => toggleCollapse(b)}
                   className="w-full flex items-center justify-between mb-2 px-1 py-2 hover:bg-stone-50 rounded">
                   <div className="flex items-center gap-2">
-                    <Building2 size={15} className="text-stone-700" />
-                    <span className="font-serif text-sm text-stone-900 font-bold">
+                    <Building2 size={18} className="text-stone-700" />
+                    <span className="font-serif text-base text-stone-900 font-bold">
                       {b === '—' ? 'No unit' : `Building ${b.replace(/^B/i, '')}`}
                     </span>
-                    <span className="text-[10px] font-mono text-stone-500">({countBedrooms(itemsForBuilding)})</span>
+                    <span className="text-xs font-mono text-stone-500">({countBedrooms(itemsForBuilding)})</span>
                   </div>
                   <ChevronRight size={16} className={`text-stone-500 transition-transform ${collapsed ? '' : 'rotate-90'}`} />
                 </button>
@@ -31756,7 +27709,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
 
       {opened && (
         opened.assignment?.template_set_id
-          ? <ChecklistAssignmentView assignment={opened.assignment} onOpenSibling={(a) => setOpened(o => ({ ...o, assignment: a }))}
+          ? <ChecklistAssignmentView assignment={opened.assignment}
               employee={employee}
               onClose={() => setOpened(null)}
               onOpenSheet={opened.assignment?.file_url
@@ -31809,12 +27762,8 @@ function NextUpModal({ from, employeeId, onPick, onClose }) {
   // for floor, and a tiny inline regex for building.
   const buildingFromLabel = (label) => {
     if (!label) return null;
-    const s = String(label);
-    const dash = s.match(/^B(\d+)-/i);
-    if (dash) return dash[1];
-    const letter = s.match(/^([A-Za-z]+)\d/);
-    if (letter) return letter[1].toUpperCase();
-    return null;
+    const m = label.match(/^B(\d+)/i);
+    return m ? m[1] : null;
   };
   const unitNumberFromLabel = (label) => {
     if (!label) return null;
@@ -31829,7 +27778,7 @@ function NextUpModal({ from, employeeId, onPick, onClose }) {
   useEffect(() => {
     if (!from?.propertyId) return;
     (async () => {
-      // 1. Load every unit + party for the property so we can compute
+      // 1) Load every unit + party for the property so we can compute
       //    which bedrooms still have open targets and where they live.
       const [unitsRes, partiesRes, targetsRes, blocksRes] = await Promise.all([
         supabase.from('units')
@@ -32561,7 +28510,7 @@ function AssignmentViewer({ target, onClose, employee }) {
 // Status changes write directly to assignment_targets and rely on the
 // existing realtime sync to push updates to other viewers.
 // =================================================================
-function ChecklistAssignmentView({ assignment, employee, onClose, onOpenSheet, onOpenSibling, quickGlance = false }) {
+function ChecklistAssignmentView({ assignment, employee, onClose, onOpenSheet, quickGlance = false }) {
   const [targets, setTargets] = useState([]);
   const [templateInfo, setTemplateInfo] = useState({ variants: [], items: [] });
   const [otherAssignments, setOtherAssignments] = useState([]);
@@ -32616,7 +28565,7 @@ function ChecklistAssignmentView({ assignment, employee, onClose, onOpenSheet, o
     if (firstTarget?.unit_id && firstTarget?.party_id) {
       const { data: others } = await supabase
         .from('assignments')
-        .select('id, title, notes, file_url, file_kind, assignment_type, sheet_type, template_set_id, bathroom_variant, general_variant, source, pm_status, active, customer_id, targets:assignment_targets!inner(id, status, unit_id, party_id)')
+        .select('id, title, assignment_type, sheet_type, template_set_id, source, pm_status, active, customer_id, targets:assignment_targets!inner(id, status, unit_id, party_id)')
         .neq('id', assignment.id)
         .eq('targets.unit_id', firstTarget.unit_id)
         .eq('targets.party_id', firstTarget.party_id)
@@ -32938,6 +28887,7 @@ function ChecklistAssignmentView({ assignment, employee, onClose, onOpenSheet, o
          everything is done. */}
       <CleanerProgressBar
         segments={[
+          { label: 'Property', filled: true, onClick: onClose },
           { label: 'Assignment', filled: true, onClick: onClose },
           { label: 'Items', filled: doneCount > 0 || counts.in_progress > 0, isCurrent: !isAllDone },
           { label: 'Working', filled: counts.in_progress > 0 || doneCount > 0 },
@@ -32953,7 +28903,7 @@ function ChecklistAssignmentView({ assignment, employee, onClose, onOpenSheet, o
           </button>
           {onOpenSheet && assignment.file_url && (
             <button onClick={onOpenSheet}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-stone-700 hover:bg-stone-600 text-stone-50 text-xs font-medium border border-stone-500 active:scale-95 transition">
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-50 text-xs font-medium">
               <Eye size={12} /> View attachment
             </button>
           )}
@@ -33012,13 +28962,13 @@ function ChecklistAssignmentView({ assignment, employee, onClose, onOpenSheet, o
                 setBulkBusy(false);
               }}
               disabled={bulkBusy}
-              className="px-3 py-1.5 rounded-full bg-stone-700 hover:bg-stone-600 text-stone-50 text-xs font-medium border border-stone-500 active:scale-95 transition flex items-center gap-1.5 disabled:opacity-50">
+              className="px-3 py-1.5 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-50 text-xs font-medium flex items-center gap-1.5 disabled:opacity-50">
               <Pause size={12} /> Pause all
             </button>
           )}
           <button
             onClick={() => setRequestModalOpen(true)}
-            className="px-3 py-1.5 rounded-full bg-stone-700 hover:bg-stone-600 text-stone-50 text-xs font-medium border border-stone-500 active:scale-95 transition flex items-center gap-1.5">
+            className="px-3 py-1.5 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-50 text-xs font-medium flex items-center gap-1.5">
             <Plus size={12} /> Request item
           </button>
         </div>
@@ -33175,34 +29125,16 @@ function ChecklistAssignmentView({ assignment, employee, onClose, onOpenSheet, o
               Other assignments at this bedroom
             </div>
             <div className="space-y-1.5">
-              {otherAssignments.map(oa => {
-                const totalItems = (oa.targets || []).length;
-                const remaining = (oa.targets || []).filter(t => t.status !== 'done').length;
-                const typeLabel = oa.sheet_type === 'cleaning_check' ? 'Cleaning check'
-                  : oa.sheet_type === 'move_out_clean' ? 'Move-out clean'
-                  : 'Legacy upload';
-                return (
-                  <button key={oa.id} onClick={() => onOpenSibling && onOpenSibling(oa)}
-                    disabled={!onOpenSibling}
-                    className="w-full text-left p-3 rounded-xl bg-white border border-stone-200 hover:border-stone-400 hover:bg-stone-50 active:scale-[0.99] transition disabled:hover:border-stone-200 disabled:hover:bg-white">
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="font-serif text-sm text-stone-900 truncate">{oa.title || typeLabel}</div>
-                      {onOpenSibling && <ChevronRight size={14} className="text-stone-400 flex-shrink-0" />}
-                    </div>
-                    <div className="text-[10px] font-mono text-stone-500 mt-1 flex items-center gap-2 flex-wrap">
-                      <span>{typeLabel}</span>
-                      <span className="text-stone-300">·</span>
-                      <span>{totalItems} item{totalItems === 1 ? '' : 's'}</span>
-                      {remaining > 0 && (
-                        <span className="px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-800">{remaining} left</span>
-                      )}
-                      {remaining === 0 && totalItems > 0 && (
-                        <span className="px-1.5 py-0.5 rounded-full bg-emerald-100 text-emerald-800">Done</span>
-                      )}
-                    </div>
-                  </button>
-                );
-              })}
+              {otherAssignments.map(oa => (
+                <div key={oa.id} className="p-3 rounded-xl bg-white border border-stone-200">
+                  <div className="font-serif text-sm text-stone-900 mb-1">{oa.title}</div>
+                  <div className="text-[10px] font-mono text-stone-500">
+                    {oa.sheet_type === 'cleaning_check' ? 'Cleaning check'
+                      : oa.sheet_type === 'move_out_clean' ? 'Move-out clean'
+                      : 'Legacy upload'}
+                  </div>
+                </div>
+              ))}
             </div>
           </div>
         )}
@@ -33995,7 +29927,6 @@ function PortalAssignmentsTab({ property, portalKind, portalUser }) {
       .select('*, targets:assignment_targets(id, status, priority, unit:units(label), party:parties(label))')
       .eq('customer_id', property.id)
       .eq('source', 'pm')
-      .is('deleted_at', null)
       .order('created_at', { ascending: false });
     setAssignments(data || []);
     setLoaded(true);
@@ -34786,7 +30717,7 @@ function RecheckRequestModal({ assignment, property, portalUser, onClose, onSave
     if (selected.size === 0) { setError('Pick at least one item the tenant passed.'); return; }
     setError(''); setBusy(true);
     try {
-      // 1. Find the portal_user id from the URL/session — passed in
+      // 1) Find the portal_user id from the URL/session — passed in
       //    via assignment for this build we'll read from the property
       //    metadata. Simpler: leave created_by null; the owner inbox
       //    will still show the assignment + property which is enough
@@ -34798,7 +30729,7 @@ function RecheckRequestModal({ assignment, property, portalUser, onClose, onSave
         notes: notes.trim() || null,
       }).select('id').single();
       if (e1) throw e1;
-      // 2. Insert the item rows
+      // 2) Insert the item rows
       const itemRows = Array.from(selected).map(tid => ({
         recheck_request_id: req.id,
         assignment_target_id: tid,
@@ -35094,7 +31025,7 @@ function ReviewRecheckModal({ recheck, employee, onDone, onClose }) {
     try {
       const nowISO = new Date().toISOString();
       const targetIds = items.map(i => i.target?.id).filter(Boolean);
-      // 1. Mark every listed target as done + recheck_passed.
+      // 1) Mark every listed target as done + recheck_passed.
       //    completed_by stays null (no cleaner did this work) — the
       //    recheck_passed_at column distinguishes from a normal close.
       if (targetIds.length > 0) {
@@ -35108,7 +31039,7 @@ function ReviewRecheckModal({ recheck, employee, onDone, onClose }) {
           .in('id', targetIds);
         if (e1) throw e1;
       }
-      // 2. Stamp the recheck request as approved
+      // 2) Stamp the recheck request as approved
       const { error: e2 } = await supabase.from('recheck_requests')
         .update({
           pm_status: 'approved',
@@ -35277,20 +31208,6 @@ function InboxView({ employee, onBack }) {
   const [queueMode, setQueueMode] = useState(false);
   const [queueDone, setQueueDone] = useState(false);
 
-  // Discard a PM submission straight from the row — soft-delete, so it's
-  // recoverable, and reload so it leaves the queue.
-  const discardPmAssignment = async (assignment) => {
-    if (togglingAssignmentId) return;
-    if (!confirm(`Discard "${assignment.title || 'this submission'}"? It won\u2019t be cleaned or billed. This can be undone later.`)) return;
-    setTogglingAssignmentId(assignment.id);
-    const { error } = await supabase.from('assignments')
-      .update({ deleted_at: new Date().toISOString(), deleted_by: employee.id })
-      .eq('id', assignment.id);
-    setTogglingAssignmentId(null);
-    if (error) { alert('Could not discard: ' + error.message); return; }
-    load();
-  };
-
   // Flip priority on every target of an assignment from the inbox row.
   // Sweep mode: if ANY target is priority, turn all off; otherwise turn
   // all on. Lets owners flag urgent PM submissions without opening the
@@ -35324,7 +31241,6 @@ function InboxView({ employee, onBack }) {
     const { data: aData } = await supabase.from('assignments')
       .select('*, property:customers(id, name, property_type), targets:assignment_targets(id, priority, unit:units(label), party:parties(label))')
       .eq('source', 'pm').eq('pm_status', 'pending')
-      .is('deleted_at', null)
       .order('created_at', { ascending: false });
     setPendingAssignments(aData || []);
 
@@ -35549,15 +31465,7 @@ function InboxView({ employee, onBack }) {
                           )}
                         </div>
                       </div>
-                      <div className="flex flex-col items-center gap-2 flex-shrink-0">
-                        <button onClick={(e) => { e.stopPropagation(); discardPmAssignment(a); }}
-                          disabled={isToggling}
-                          title="Discard — not needed at all"
-                          className="p-1.5 rounded-lg text-stone-300 hover:text-red-600 hover:bg-red-50 disabled:opacity-50">
-                          <Trash2 size={16} />
-                        </button>
-                        <ChevronRight size={16} className="text-stone-400" />
-                      </div>
+                      <ChevronRight size={16} className="text-stone-400 flex-shrink-0" />
                     </div>
                   </div>
                 );
@@ -35811,40 +31719,6 @@ function ReviewAssignmentModal({ assignment, employee, onDone, onClose }) {
     onDone();
   };
 
-  // Already clean — no cleaning needed. Approve it (so it's a real
-  // assignment, not stuck in PM limbo) AND mark every bedroom done in one
-  // go, stamped now. It lands in the Done view like any finished job,
-  // never reaching a cleaner.
-  const markDone = async () => {
-    if (!confirm('Mark this as already cleaned? It will go straight to Done — no cleaner needed.')) return;
-    setBusy(true); setError('');
-    const nowIso = new Date().toISOString();
-    const { error: aErr } = await supabase.from('assignments').update({
-      pm_status: 'approved', approved_by: employee.id, approved_at: nowIso,
-      pm_rejection_reason: null, assignment_type: editedType, scheduled_date: editedDate || null,
-    }).eq('id', assignment.id);
-    if (aErr) { setBusy(false); setError(aErr.message); return; }
-    const { error: tErr } = await supabase.from('assignment_targets')
-      .update({ status: 'done', completed_at: nowIso, completed_by: employee.id })
-      .eq('assignment_id', assignment.id)
-      .neq('status', 'done');
-    setBusy(false);
-    if (tErr) { setError(tErr.message); return; }
-    onDone();
-  };
-
-  // Not needed at all — get rid of it. Soft-delete, so it's recoverable.
-  const discard = async () => {
-    if (!confirm('Discard this submission? It won\u2019t be cleaned or billed. This can be undone later.')) return;
-    setBusy(true); setError('');
-    const { error: e } = await supabase.from('assignments').update({
-      deleted_at: new Date().toISOString(), deleted_by: employee.id,
-    }).eq('id', assignment.id);
-    setBusy(false);
-    if (e) { setError(e.message); return; }
-    onDone();
-  };
-
   return (
     <div className="fixed inset-0 bg-stone-900/80 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
       <div className="bg-stone-50 w-full sm:max-w-lg sm:rounded-3xl rounded-t-3xl max-h-[90vh] flex flex-col">
@@ -35941,22 +31815,10 @@ function ReviewAssignmentModal({ assignment, employee, onDone, onClose }) {
                 className="w-full py-4 rounded-2xl bg-emerald-600 text-white font-medium flex items-center justify-center gap-2 disabled:opacity-50">
                 <Check size={16} /> {busy ? 'Approving…' : 'Approve & make visible to cleaners'}
               </button>
-              {/* Already clean → straight to Done, skips cleaners entirely. */}
-              <button onClick={markDone} disabled={busy}
-                className="w-full py-3 rounded-2xl bg-stone-900 text-white text-sm font-medium flex items-center justify-center gap-2 disabled:opacity-50">
-                <Check size={14} /> Already clean — mark done
+              <button onClick={() => setRejectMode(true)} disabled={busy}
+                className="w-full py-3 rounded-2xl border-2 border-red-200 text-red-700 text-sm font-medium">
+                Send back for changes
               </button>
-              <div className="flex gap-2">
-                <button onClick={() => setRejectMode(true)} disabled={busy}
-                  className="flex-1 py-3 rounded-2xl border-2 border-red-200 text-red-700 text-sm font-medium">
-                  Send back for changes
-                </button>
-                <button onClick={discard} disabled={busy}
-                  title="Discard — not needed at all"
-                  className="px-4 py-3 rounded-2xl border-2 border-stone-200 text-stone-500 hover:text-red-600 hover:border-red-200 flex items-center justify-center disabled:opacity-50">
-                  <Trash2 size={16} />
-                </button>
-              </div>
             </>
           )}
         </div>

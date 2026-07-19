@@ -106,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul18-tap2";
+const BUILD_TAG = "jul18-tap3";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -5167,6 +5167,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       employeeName={employee.name} employee={employee} onSignOut={signOutWithCleanup} onFinish={finishBlock}
       onPause={() => setActiveBlock(null)}
       onUndo={undoBlock}
+      onReopen={reopenBlock}
       newTaskName={newTaskName} setNewTaskName={setNewTaskName}
       onStartTask={startTask} onStartTasksFromPicker={startTasksFromPicker}
       onStartChecklistItems={startTasksFromChecklistItems}
@@ -8175,7 +8176,7 @@ function UndoMoveMenu({ disabled, canUndo, canMove, onUndo, onMoveBedroom, onMov
   );
 }
 
-function BlockView({ shift, block, tasks, activeTask, employeeName, employee, onSignOut, onFinish, onPause, onUndo,
+function BlockView({ shift, block, tasks, activeTask, employeeName, employee, onSignOut, onFinish, onPause, onUndo, onReopen,
   newTaskName, setNewTaskName, onStartTask, onStartTasksFromPicker, onStartChecklistItems, onReleaseTargets, onStopTask, onResumeTask, onAddPhoto,
   photoModal, onClosePhotoModal, onUploadPhoto, onSavePhotoNote, onOpenMessages, onOpenBedroomHistory,
   onMoveBlock, onMoveMultiple, onLeaveBlock, onJoinBlock, onDeletePhoto, onGoToBedroom, onSwitchProperty, cleanerTab, setCleanerTab, previewMode, busy }) {
@@ -8255,6 +8256,54 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
 
   // Quick-view popup for cleaners — peek at who else is at this property
   const [whosHereOpen, setWhosHereOpen] = useState(false);
+
+  // === Three-tab layout: New / Active / Done ===
+  // 'new'    = the task picker (start something)
+  // 'active' = the current open workblock (running task + your tasks here)
+  // 'done'   = finished workblocks at this bedroom today (yours + others)
+  // Opens on Active when a task is already running, else New.
+  const [blockTab, setBlockTab] = useState(() => activeTask ? 'active' : 'new');
+  // Auto-jump to Active the moment a task starts (activeTask becomes set).
+  useEffect(() => { if (activeTask) setBlockTab('active'); }, [activeTask]);
+
+  // Finished workblocks at THIS bedroom today — closed blocks only, mine +
+  // others, grouped by workblock. Powers the Done tab and replaces the old
+  // standalone "Tasks others did today" panel.
+  const [doneBlocks, setDoneBlocks] = useState({ list: [], loading: true });
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      if (!block?.unit_id || !block?.party_id) { if (!cancelled) setDoneBlocks({ list: [], loading: false }); return; }
+      const start = new Date(); start.setHours(0, 0, 0, 0);
+      const { data } = await supabase.from('work_blocks')
+        .select('*, unit:units(*), party:parties(*), shift:shifts!inner(id, employee:employees!inner(id, name)), tasks(id, name, category, subcategory, start_time, end_time)')
+        .eq('unit_id', block.unit_id).eq('party_id', block.party_id)
+        .gte('start_time', start.toISOString())
+        .not('end_time', 'is', null)
+        .neq('id', block.id)
+        .order('start_time', { ascending: false });
+      if (cancelled) return;
+      const list = (data || []).map(b => ({
+        ...b,
+        ownerName: b.shift?.employee?.name || 'A cleaner',
+        ownerId: b.shift?.employee?.id,
+        mine: b.shift?.employee?.id === employee?.id,
+      })).filter(b => (b.tasks || []).length > 0);
+      setDoneBlocks({ list, loading: false });
+    };
+    load();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line
+  }, [block?.id, block?.unit_id, block?.party_id, employee?.id, blockTab]);
+
+  // Reopen a finished workblock → it becomes the active block. Confirm first
+  // when it belongs to someone else (you're picking up their session).
+  const handleReopenDone = (b) => {
+    if (!onReopen) return;
+    if (!b.mine && !confirm(`Reopen ${b.ownerName}'s workblock and continue it?\n\nIt becomes your active workblock at this bedroom.`)) return;
+    setBlockTab('active');
+    onReopen(b);
+  };
 
   return (
     <div className="min-h-screen bg-stone-50 pb-24">
@@ -8392,18 +8441,51 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
         </div>
       )}
 
-      {activeTaskObj && (
-        <ActiveWorkblockCard task={activeTaskObj}
-          onStop={() => onStopTask(activeTaskObj.id)}
-          onAddPhoto={(kind) => onAddPhoto(activeTaskObj.id, kind)} />
+      {/* New / Active / Done toggle — splits the old single-scroll view so
+         the cleaner sees one thing at a time. Badges flag where the work is
+         even when looking at another tab. */}
+      <div className="mx-4 mt-4">
+        <div className="grid grid-cols-3 gap-1 p-1 bg-stone-200 rounded-2xl">
+          {[
+            { key: 'new', label: 'New', count: null },
+            { key: 'active', label: 'Active', count: tasks.length },
+            { key: 'done', label: 'Done', count: doneBlocks.list.length },
+          ].map(t => {
+            const on = blockTab === t.key;
+            return (
+              <button key={t.key} onClick={() => setBlockTab(t.key)}
+                className={`py-2.5 rounded-xl text-[11px] font-mono uppercase tracking-wider flex items-center justify-center gap-1.5 transition-colors ${on ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+                {t.key === 'active' && <span className={`w-1.5 h-1.5 rounded-full ${activeTaskObj ? 'bg-amber-600 animate-pulse' : 'bg-stone-300'}`} />}
+                {t.label}
+                {t.count > 0 && <span className={`px-1.5 py-0.5 rounded-full text-[9px] ${on ? 'bg-stone-200 text-stone-700' : 'bg-stone-300 text-stone-600'}`}>{t.count}</span>}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {blockTab === 'active' && (
+        <>
+          {activeTaskObj && (
+            <ActiveWorkblockCard task={activeTaskObj}
+              onStop={() => onStopTask(activeTaskObj.id)}
+              onAddPhoto={(kind) => onAddPhoto(activeTaskObj.id, kind)} />
+          )}
+          <div className="mx-4 mt-4 flex items-center gap-1.5 flex-wrap">
+            <span className="text-[10px] uppercase tracking-wider font-mono text-stone-400">In this workblock:</span>
+            <span className="inline-flex items-center gap-1 text-[11px] font-mono px-2 py-0.5 rounded-full bg-stone-100 text-stone-700 border border-stone-200">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" /> You
+            </span>
+            {others.map(p => (
+              <span key={p.id} className="inline-flex items-center gap-1 text-[11px] font-mono px-2 py-0.5 rounded-full bg-stone-100 text-stone-700 border border-stone-200">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" /> {p.employee?.name || '?'}
+              </span>
+            ))}
+          </div>
+        </>
       )}
 
-      {/* Blue OtherCleanersActivity card removed — it was redundant
-         with the amber OtherWorkblocksHere card above (both showed
-         "X is here right now"). OtherCleanersTasksPanel moved to the
-         very bottom of this view so it doesn't interfere with the
-         cleaning workflow. */}
-
+      {blockTab === 'new' && (
       <div className="mx-4 mt-4">
         <div className="flex items-center justify-between mb-2">
           <label className="text-xs uppercase tracking-wider text-stone-500 font-mono">Start a new task</label>
@@ -8447,12 +8529,14 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
           </div>
         )}
       </div>
+      )}
 
+      {blockTab === 'active' && (
       <div className="mx-4 mt-6">
         <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-3">Your tasks</div>
         {tasks.length === 0 ? (
           <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
-            Add a task above when you start cleaning.
+            Nothing started here yet. Tap New above to pick what to clean.
           </div>
         ) : (
           <div className="space-y-3">
@@ -8470,6 +8554,63 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
           </div>
         )}
       </div>
+      )}
+
+      {/* DONE — finished workblocks at this bedroom today (yours + others),
+         grouped by workblock and labeled by who did it. Tap play to reopen
+         one (it becomes your active workblock). Absorbs the old amber
+         "Tasks others did today" panel. */}
+      {blockTab === 'done' && (
+      <div className="mx-4 mt-4">
+        <div className="flex items-center justify-between mb-3">
+          <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">Finished workblocks here today</div>
+          {(block?.unit?.label || block?.party?.label) && (
+            <div className="text-[11px] text-stone-400 font-mono">
+              {block?.unit?.label}{block?.unit?.label && block?.party?.label ? ' · ' : ''}{block?.party?.label}
+            </div>
+          )}
+        </div>
+        {doneBlocks.loading ? (
+          <div className="text-center py-10 text-stone-400 text-sm font-mono">Loading…</div>
+        ) : doneBlocks.list.length === 0 ? (
+          <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
+            No finished workblocks here yet today.
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {doneBlocks.list.map(b => {
+              const bTasks = b.tasks || [];
+              const dur = b.end_time ? (new Date(b.end_time) - new Date(b.start_time)) : null;
+              return (
+                <div key={b.id} className="p-4 rounded-2xl bg-white border border-stone-200">
+                  <div className="flex items-start justify-between gap-3">
+                    <span className={`inline-flex items-center gap-1 text-[10px] uppercase tracking-wider font-mono px-2 py-1 rounded-full ${b.mine ? 'bg-emerald-50 text-emerald-800 border border-emerald-200' : 'bg-amber-50 text-amber-800 border border-amber-200'}`}>
+                      <User size={11} /> {b.mine ? 'You' : b.ownerName}
+                    </span>
+                    <button onClick={() => handleReopenDone(b)} disabled={busy}
+                      aria-label="Reopen workblock"
+                      className="w-9 h-9 rounded-full bg-stone-900 text-stone-50 flex items-center justify-center active:scale-95 transition-transform disabled:opacity-40">
+                      <Play size={15} />
+                    </button>
+                  </div>
+                  <div className="mt-2.5 flex flex-wrap gap-x-3 gap-y-1">
+                    {bTasks.map(t => (
+                      <span key={t.id} className="font-serif text-[15px] text-stone-900">{splitTaskName(t.name)[0] || t.name}</span>
+                    ))}
+                  </div>
+                  <div className="mt-2 text-[10px] text-stone-500 font-mono">
+                    {fmtClock(b.start_time)} – {fmtClock(b.end_time)}{dur ? ` · ${fmtTimeShort(dur)}` : ''} · {bTasks.length} task{bTasks.length === 1 ? '' : 's'}
+                  </div>
+                  <div className="mt-2 text-[10px] text-stone-500 font-mono flex items-center gap-1.5">
+                    <Play size={11} /> {b.mine ? 'Tap play to reopen and keep working' : `Tap play to reopen ${b.ownerName}'s block`}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+      )}
 
       {photoModal && (
         <PhotoModal kind={photoModal.kind}
@@ -8528,11 +8669,8 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
         )}
       </div>
 
-      {/* Tasks others did today — moved to the very bottom so it
-         doesn't interfere with the cleaner's workflow. Shows when
-         another cleaner has logged work at this bedroom earlier
-         today. */}
-      <OtherCleanersTasksPanel block={block} />
+      {/* "Tasks others did today" panel removed — its contents now live in
+         the Done tab above, grouped by workblock and labeled by cleaner. */}
 
       {/* The rest of the day, without leaving this block. The active
          block still owns the top of the screen; this just means the

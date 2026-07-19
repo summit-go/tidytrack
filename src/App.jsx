@@ -48,7 +48,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul18-switch1";
+const BUILD_TAG = "jul18-btnpass1";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -7898,7 +7898,6 @@ function PreparingBlockView({ shift, pendingStart, employeeName, employee,
          working. Tapping Property or Assignment goes back. */}
       <CleanerProgressBar
         segments={[
-          { label: 'Property', filled: true, onClick: onCancel },
           { label: 'Assignment', filled: true, onClick: onCancel },
           { label: 'Items', filled: false, isCurrent: true },
           { label: 'Working', filled: false },
@@ -7908,7 +7907,7 @@ function PreparingBlockView({ shift, pendingStart, employeeName, employee,
       <div className="bg-stone-900 text-stone-50 px-5 py-5 sticky top-0 z-10 shadow-md">
         <div className="flex items-center justify-between mb-3 gap-2 flex-wrap">
           <button onClick={onCancel}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-50 text-xs font-medium">
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-stone-700 hover:bg-stone-600 text-stone-50 text-xs font-medium border border-stone-500 active:scale-95 transition">
             <Home size={12} /> Property home
           </button>
           <div className="flex items-center gap-2 flex-wrap">
@@ -7919,7 +7918,7 @@ function PreparingBlockView({ shift, pendingStart, employeeName, employee,
                home. Doesn't touch other cleaners' work. */}
             {onSendBackToPending && (
               <button onClick={onSendBackToPending} disabled={busy}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-50 text-xs font-medium disabled:opacity-50">
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-stone-700 hover:bg-stone-600 text-stone-50 text-xs font-medium border border-stone-500 active:scale-95 transition disabled:opacity-50">
                 <ArrowLeft size={12} /> Send back to pending
               </button>
             )}
@@ -7931,7 +7930,7 @@ function PreparingBlockView({ shift, pendingStart, employeeName, employee,
                   unitId: pendingStart.unitId, unitLabel: pendingStart.unitLabel,
                   partyId: pendingStart.partyId, partyLabel: pendingStart.partyLabel
                 })}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-50 text-xs font-medium">
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-stone-700 hover:bg-stone-600 text-stone-50 text-xs font-medium border border-stone-500 active:scale-95 transition">
                 <Clock size={12} /> History
               </button>
             )}
@@ -8061,7 +8060,8 @@ function UndoMoveMenu({ disabled, canUndo, canMove, onUndo, onMoveBedroom, onMov
   return (
     <div className="mt-2 inline-block relative" data-undo-menu="root">
       <button onClick={() => setOpen(o => !o)} disabled={disabled}
-        className="text-[11px] font-mono uppercase tracking-wider px-2.5 py-1 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-200 inline-flex items-center gap-1.5 disabled:opacity-50">
+        className="text-[11px] font-mono uppercase tracking-wider pl-2 pr-3 py-1.5 rounded-full bg-stone-700 hover:bg-stone-600 text-stone-100 inline-flex items-center gap-1.5 border border-stone-500 disabled:opacity-50 active:scale-95 transition">
+        <span className="w-1.5 h-1.5 rounded-full bg-amber-400 flex-shrink-0" />
         <HelpCircle size={11} /> Something's wrong
       </button>
       {open && (
@@ -8202,7 +8202,6 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
          can finish or pause the block before navigating. */}
       <CleanerProgressBar
         segments={[
-          { label: 'Property', filled: true },
           { label: 'Assignment', filled: true },
           { label: 'Items', filled: true },
           { label: 'Working', filled: true, isCurrent: true },
@@ -8216,7 +8215,7 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
       <div className="bg-stone-900 text-stone-50 px-5 py-5 sticky top-0 z-10 shadow-md">
         <div className="flex items-center justify-between mb-3">
           <button onClick={onPause}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-50 text-xs font-medium">
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-stone-700 hover:bg-stone-600 text-stone-50 text-xs font-medium border border-stone-500 active:scale-95 transition">
             <Home size={12} /> Property home
           </button>
           {/* The multi-cleaner "leave" action lives on the big bottom
@@ -9157,7 +9156,7 @@ function ViewOnlyDashboard({ employee, property, onSignOut, onEndViewing, onOpen
             )}
           </div>
           <button onClick={() => setShowMenu(true)}
-            className="px-3 py-1.5 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-50 text-xs font-medium flex items-center gap-1.5 flex-shrink-0">
+            className="px-3 py-1.5 rounded-full bg-stone-700 hover:bg-stone-600 text-stone-50 text-xs font-medium border border-stone-500 active:scale-95 transition flex items-center gap-1.5 flex-shrink-0">
             <Menu size={12} /> More
           </button>
         </div>
@@ -32653,7 +32652,6 @@ function ChecklistAssignmentView({ assignment, employee, onClose, onOpenSheet, q
          everything is done. */}
       <CleanerProgressBar
         segments={[
-          { label: 'Property', filled: true, onClick: onClose },
           { label: 'Assignment', filled: true, onClick: onClose },
           { label: 'Items', filled: doneCount > 0 || counts.in_progress > 0, isCurrent: !isAllDone },
           { label: 'Working', filled: counts.in_progress > 0 || doneCount > 0 },
@@ -32669,7 +32667,7 @@ function ChecklistAssignmentView({ assignment, employee, onClose, onOpenSheet, q
           </button>
           {onOpenSheet && assignment.file_url && (
             <button onClick={onOpenSheet}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-50 text-xs font-medium">
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-stone-700 hover:bg-stone-600 text-stone-50 text-xs font-medium border border-stone-500 active:scale-95 transition">
               <Eye size={12} /> View attachment
             </button>
           )}
@@ -32728,13 +32726,13 @@ function ChecklistAssignmentView({ assignment, employee, onClose, onOpenSheet, q
                 setBulkBusy(false);
               }}
               disabled={bulkBusy}
-              className="px-3 py-1.5 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-50 text-xs font-medium flex items-center gap-1.5 disabled:opacity-50">
+              className="px-3 py-1.5 rounded-full bg-stone-700 hover:bg-stone-600 text-stone-50 text-xs font-medium border border-stone-500 active:scale-95 transition flex items-center gap-1.5 disabled:opacity-50">
               <Pause size={12} /> Pause all
             </button>
           )}
           <button
             onClick={() => setRequestModalOpen(true)}
-            className="px-3 py-1.5 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-50 text-xs font-medium flex items-center gap-1.5">
+            className="px-3 py-1.5 rounded-full bg-stone-700 hover:bg-stone-600 text-stone-50 text-xs font-medium border border-stone-500 active:scale-95 transition flex items-center gap-1.5">
             <Plus size={12} /> Request item
           </button>
         </div>

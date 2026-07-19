@@ -68,6 +68,22 @@ async function securePortalSignIn(code) {
   const { data } = await supabase.from('portal_users').select('*').eq('code', clean).eq('active', true).maybeSingle();
   return data || null;
 }
+
+// After a PIN/code is written (insert/update), call this so the
+// server hashes it into pin_hash / code_hash. Without it, a newly
+// set credential wouldn't verify once the tables are locked down.
+// target: 'employee' | 'portal'. Returns { ok } or { error }.
+async function secureSetCredential(target, id, value) {
+  try {
+    const { data, error } = await supabase.functions.invoke('secure-signin', {
+      body: { mode: 'set', target, id, value },
+    });
+    if (error) return { error: error.message || 'set failed' };
+    return data || { error: 'no response' };
+  } catch (e) {
+    return { error: String(e) };
+  }
+}
 const PHOTO_BUCKET = 'task-photos';
 const ASSIGNMENT_BUCKET = 'assignments';
 const PM_UPLOAD_BUCKET = 'pm-uploads';
@@ -90,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul18-securelogin1";
+const BUILD_TAG = "jul18-securewrite1";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -13095,6 +13111,17 @@ function EmployeeForm({ employee, currentUserId, currentUserRole, onCancel, onSa
     const { error: e } = isNew
       ? await supabase.from('employees').insert(payload)
       : await supabase.from('employees').update(payload).eq('id', employee.id);
+    // Hash the PIN server-side so it survives the table lockdown.
+    // For a new employee we look up the id we just created.
+    if (!e && pin) {
+      let empId = employee?.id;
+      if (isNew) {
+        const { data: created } = await supabase.from('employees')
+          .select('id').eq('pin', pin).eq('name', name.trim()).order('created_at', { ascending: false }).limit(1).maybeSingle();
+        empId = created?.id;
+      }
+      if (empId) await secureSetCredential('employee', empId, pin);
+    }
     setBusy(false);
     if (e) {
       // Belt-and-suspenders: if a race lets a duplicate through, fall back
@@ -13507,6 +13534,11 @@ function PortalUserForm({ employee, user, allProperties, onCancel, onSaved }) {
         return;
       }
       savedId = user.id;
+    }
+
+    // Hash the access code server-side so it survives table lockdown.
+    if (savedId && cleanCode) {
+      await secureSetCredential('portal', savedId, cleanCode);
     }
 
     // Sync property assignments: delete existing then insert current set
@@ -14095,6 +14127,7 @@ function QuickAddPortalUserModal({ defaultKind = 'pm', onClose, onCreated }) {
       phone: phone.trim() || null,
       active: true,
     }).select().single();
+    if (!e && data?.id) await secureSetCredential('portal', data.id, cleanCode);
     setBusy(false);
     if (e) {
       setError('Could not save: ' + e.message);
@@ -19791,6 +19824,11 @@ function ChangePinModal({ employee, onClose, onSaved }) {
         }
         const { error: upErr } = await supabase.from('employees')
           .update({ pin: newPin }).eq('id', employee.id);
+        if (!upErr) {
+          // Also store the bcrypt hash so this PIN keeps working
+          // once the table is locked to the Edge Function only.
+          await secureSetCredential('employee', employee.id, newPin);
+        }
         setBusy(false);
         if (upErr) {
           setError('Could not save: ' + upErr.message);
@@ -20092,6 +20130,8 @@ function ChangePortalCodeModal({ portalUser, onClose, onSaved }) {
       setError('Could not save: ' + upErr.message);
       return;
     }
+    // Hash the new code so it survives table lockdown.
+    await secureSetCredential('portal', portalUser.id, cleanNew);
     // Update local portal session so the new code is remembered
     try {
       const stored = localStorage.getItem('tidytrack_portal');

@@ -13,6 +13,7 @@ import {
 // =================================================================
 // 🔧 PASTE YOUR SUPABASE KEYS HERE
 // =================================================================
+// =================================================================
 const SUPABASE_URL = "https://bbaynvqnbkjyqhzhhypr.supabase.co/";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJiYXludnFuYmtqeXFoemhoeXByIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc0NzQ2MTMsImV4cCI6MjA5MzA1MDYxM30.ZXUoHFj_IwMe6rX8RxK8Dj4kAB9AS7X9xZAhQ84wDEk";
 
@@ -106,7 +107,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul18-securelock1";
+const BUILD_TAG = "jul18-tap1";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -6933,11 +6934,17 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
             return (
               <div key={j.id} className="p-3.5 rounded-2xl bg-white border border-stone-200">
                 <div className="flex items-start gap-2">
-                <button onClick={() => openJob(j)}
-                  title={here ? 'Open this job' : 'Switch to this job'}
-                  className="flex-1 min-w-0 text-left rounded-xl -m-1 p-1 hover:bg-stone-50 active:scale-[0.99] transition group">
+                <div className="flex-1 min-w-0">
+                  {/* Only the text is the tap target — not the empty width
+                     of the row. The badge + chevron sit alongside, not
+                     inside, so there's no invisible dead-zone to tap. */}
                   <div className="flex items-center justify-between gap-2">
-                    <span className="font-serif text-lg text-stone-900 truncate group-hover:underline decoration-stone-300 underline-offset-2">{unitPartyLabel(j.unitLabel, j.partyLabel) || 'Job'}</span>
+                    <button onClick={() => openJob(j)}
+                      title={here ? 'Open this job' : 'Switch to this job'}
+                      className="min-w-0 text-left rounded-lg -m-1 p-1 hover:bg-stone-50 active:scale-[0.99] transition group inline-flex items-center gap-1">
+                      <span className="font-serif text-lg text-stone-900 truncate group-hover:underline decoration-stone-300 underline-offset-2">{unitPartyLabel(j.unitLabel, j.partyLabel) || 'Job'}</span>
+                      <ChevronRight size={15} className="text-stone-300 group-hover:text-stone-500 flex-shrink-0" />
+                    </button>
                     <span className="flex items-center gap-1 flex-shrink-0">
                       {/* Size — a cleaner needs to know if it's a 1x1 or a 3x2
                          BEFORE they drive there, same as the owner cards show. */}
@@ -6947,14 +6954,13 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
                         </span>
                       )}
                       {mine && <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700">Yours</span>}
-                      <ChevronRight size={15} className="text-stone-300 group-hover:text-stone-500 flex-shrink-0" />
                     </span>
                   </div>
                   <div className="text-xs text-stone-500 font-mono mt-0.5 flex items-center gap-1">
                     <Building2 size={11} /> {j.propName}{j.type ? ` · ${assignmentTypeLabel(j.type)}` : ''}
                     {j.items > 0 && ` · ${j.items} ${j.items === 1 ? 'item' : 'items'}`}
                   </div>
-                </button>
+                </div>
                 {/* Quick glance. Sits OUTSIDE the card button on purpose —
                    tapping the card clocks you in, and peeking shouldn't. */}
                 <button onClick={(e) => { e.stopPropagation(); setPeekJob(j); }}

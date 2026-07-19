@@ -106,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul18-tap8";
+const BUILD_TAG = "jul18-tap9";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -5270,6 +5270,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
         {cleanerTab === 'more' && (
           <div className="px-4 pt-4 space-y-2">
             <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2">Account &amp; settings</div>
+            <CleanerMoreExtras employee={employee} />
             <button onClick={() => setShowMessages(true)}
               className="w-full px-4 py-3.5 rounded-2xl bg-white border border-stone-200 hover:border-stone-400 text-left flex items-center gap-3 active:scale-98">
               <MessageSquare size={18} className="text-stone-700" />
@@ -5553,6 +5554,63 @@ function WhosHerePopup({ propertyId, myEmployeeId, propertyName, onClose, onJoin
         </div>
       </div>
     </div>
+  );
+}
+
+// CleanerMoreExtras — the actions that used to live as icons in the top
+// header (language toggle, messages, who's-here). Moved into the cleaner's
+// bottom "More" tab so the top header is just the logo. Each row only shows
+// when its handler is provided (e.g. who's-here needs a property context).
+function CleanerMoreExtras({ employee, onOpenMessages, onOpenWhosHere }) {
+  const { locale, setLocale } = useLocale();
+  const unread = useUnreadCount({ employee: onOpenMessages ? employee : null });
+  const translateConfigured = isTextTranslateConfigured();
+  const toggleLocale = async () => {
+    const next = locale === 'es' ? 'en' : 'es';
+    setLocale(next);
+    if (employee?.id) {
+      try { await supabase.from('employees').update({ locale: next }).eq('id', employee.id); }
+      catch (e) { console.warn('[locale] save failed', e); }
+    }
+  };
+  return (
+    <>
+      {translateConfigured && (
+        <button onClick={toggleLocale}
+          className="w-full px-4 py-3.5 rounded-2xl bg-white border border-stone-200 hover:border-stone-400 text-left flex items-center gap-3 active:scale-98">
+          <Languages size={18} className="text-stone-700" />
+          <div className="flex-1">
+            <div className="text-sm font-medium text-stone-900">{locale === 'es' ? 'Cambiar a English' : 'Switch to Español'}</div>
+            <div className="text-xs text-stone-500">{locale === 'es' ? 'Mostrar el app en inglés' : 'Show the whole app in Spanish'}</div>
+          </div>
+          <span className="text-[10px] font-mono uppercase font-bold px-2 py-1 rounded bg-stone-100 text-stone-600">{locale === 'es' ? 'ES' : 'EN'}</span>
+        </button>
+      )}
+      {onOpenMessages && (
+        <button onClick={onOpenMessages}
+          className="w-full px-4 py-3.5 rounded-2xl bg-white border border-stone-200 hover:border-stone-400 text-left flex items-center gap-3 active:scale-98">
+          <MessageCircle size={18} className="text-stone-700" />
+          <div className="flex-1">
+            <div className="text-sm font-medium text-stone-900">Messages</div>
+            <div className="text-xs text-stone-500">Notes from the office</div>
+          </div>
+          {unread > 0 && (
+            <span className="min-w-[20px] h-5 px-1.5 rounded-full bg-amber-600 text-white text-[11px] font-mono font-bold flex items-center justify-center">{unread > 99 ? '99+' : unread}</span>
+          )}
+        </button>
+      )}
+      {onOpenWhosHere && (
+        <button onClick={onOpenWhosHere}
+          className="w-full px-4 py-3.5 rounded-2xl bg-white border border-stone-200 hover:border-stone-400 text-left flex items-center gap-3 active:scale-98">
+          <Users size={18} className="text-stone-700" />
+          <div className="flex-1">
+            <div className="text-sm font-medium text-stone-900">Who's here right now</div>
+            <div className="text-xs text-stone-500">See who else is working here</div>
+          </div>
+          <ChevronRight size={16} className="text-stone-400" />
+        </button>
+      )}
+    </>
   );
 }
 
@@ -7678,6 +7736,9 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
           )}
 
           <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 pt-3">Account &amp; settings</div>
+          <CleanerMoreExtras employee={employee}
+            onOpenMessages={onOpenMessages}
+            onOpenWhosHere={() => setWhosHereOpen(true)} />
           {onSwitchProperty && (
             <button onClick={onSwitchProperty}
               className="w-full px-4 py-3.5 rounded-2xl bg-white border border-stone-200 hover:border-stone-400 text-left flex items-center gap-3 active:scale-98">
@@ -10775,6 +10836,10 @@ async function deleteMessagePhoto(path) {
 function Header({ name, onSignOut, role, employee, onOpenMessages, onLogoClick, onBack, onOpenWhosHere, menuItems }) {
   // Messages icon in header for all signed-in roles (cleaner/manager/owner)
   const showMessagesIcon = !!(onOpenMessages && employee);
+  // Cleaners get a bare header (just the logo) — their language / messages /
+  // who's-here / sign-out live in the bottom "More" tab instead. Owners and
+  // managers keep the ⋯ menu (it also holds their admin tools).
+  const isCleaner = role !== 'owner' && role !== 'manager';
   const unread = useUnreadCount({ employee: showMessagesIcon ? employee : null });
   const { locale, setLocale } = useLocale();
   const previewCtx = React.useContext(PreviewContext);
@@ -10845,6 +10910,7 @@ function Header({ name, onSignOut, role, employee, onOpenMessages, onLogoClick, 
         {/* The owner "Preview as cleaner" button used to sit here, but it now
            lives in the bottom nav, so it's removed from the header. */}
       </div>
+      {!isCleaner && (
       <div className="flex items-center gap-2" data-no-translate>
         {/* Everything that used to sit as separate icons (language, messages,
            who's-here) now lives inside this one ⋯ menu, together with any
@@ -10921,6 +10987,7 @@ function Header({ name, onSignOut, role, employee, onOpenMessages, onLogoClick, 
           )}
         </div>
       </div>
+      )}
     </div>
   );
 }

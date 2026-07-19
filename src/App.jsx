@@ -48,7 +48,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul18-btnpass1";
+const BUILD_TAG = "jul18-cardfix1";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -6932,7 +6932,7 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
                       <Clock size={9} /> {a.name} asked
                       {canAssign && (
                         <button onClick={() => approveRequest(j, a.id)} disabled={busyId === j.id}
-                          className="ml-1 underline">approve</button>
+                          className="ml-1 px-1.5 py-0.5 rounded-full bg-amber-600 hover:bg-amber-700 text-white text-[9px] font-bold active:scale-95 transition disabled:opacity-50">approve</button>
                       )}
                     </span>
                   ))}
@@ -6985,7 +6985,10 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
                         <Check size={15} />
                       </button>
                     )}
-                    <button onClick={() => openJob(j)} className="text-[11px] font-medium text-amber-700">{onStartJob ? 'Clock in & start →' : here ? 'Start →' : 'Switch →'}</button>
+                    <button onClick={() => openJob(j)}
+                      className="text-[11px] font-medium px-3 py-1.5 rounded-full bg-amber-600 hover:bg-amber-700 text-white flex items-center gap-1 active:scale-95 transition">
+                      {onStartJob ? 'Clock in & start' : here ? 'Start' : 'Switch'} <ChevronRight size={12} />
+                    </button>
                   </div>
                 </div>
               </div>
@@ -28404,6 +28407,7 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
   const [busy, setBusy] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
   const [editDueId, setEditDueId] = useState(null);
+  const [liveHere, setLiveHere] = useState(false); // an open work block exists at this bedroom
   const canEditDatesB = can(employee, 'edit_due_dates');
   const todayKeyG = localTodayKey();
   const saveDueB = async (id, date) => {
@@ -28448,6 +28452,24 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
     setLoaded(true);
   };
   useEffect(() => { load(); /* eslint-disable-next-line */ }, [propertyId, unitId, partyId, showDone]);
+
+  // Is anyone in an OPEN work block at this bedroom right now? Starting a
+  // block runs the timer but deliberately doesn't flip item status to
+  // in_progress — so a bedroom being actively cleaned still reads
+  // "pending" on its items. That's confusing on the card, so we detect a
+  // live block here and let the status pill reflect it.
+  useEffect(() => {
+    if (!unitId || !partyId) { setLiveHere(false); return; }
+    let cancelled = false;
+    (async () => {
+      const { data } = await supabase.from('work_blocks')
+        .select('id, shift:shifts!inner(customer_id)')
+        .eq('unit_id', unitId).eq('party_id', partyId).is('end_time', null);
+      if (cancelled) return;
+      setLiveHere((data || []).some(b => b.shift?.customer_id === propertyId));
+    })();
+    return () => { cancelled = true; };
+  }, [propertyId, unitId, partyId]);
   useAssignmentSync(load, 'asgn-banner');
 
   const updateStatus = async (target, newStatus, statusNotes) => {
@@ -28716,7 +28738,10 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
           const anyPriority = items.some(i => i.priority);
           const statusOrder = ['pending', 'in_progress', 'paused', 'blocked', 'done'];
           const dominantStatus = statusOrder.find(s => items.some(i => i.status === s)) || 'pending';
-          const statusPill = ASSIGNMENT_STATUSES[dominantStatus] || ASSIGNMENT_STATUSES.pending;
+          // If someone has an open block here, the bedroom IS being worked
+          // even if items still read pending — show that instead.
+          const effectiveStatus = (liveHere && dominantStatus === 'pending') ? 'in_progress' : dominantStatus;
+          const statusPill = ASSIGNMENT_STATUSES[effectiveStatus] || ASSIGNMENT_STATUSES.pending;
           // Item-level rows the cleaner can act on in BULK
           const openItems = items.filter(i => i.status !== 'done');
           // On the ready-to-start screen the big "Start cleaning" button
@@ -28822,8 +28847,12 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
                 </div>
               </div>
 
-              {/* === DONE / IN PROGRESS / PENDING chips ===
-                 Kept per request — useful glance for "how far am I?". */}
+              {/* === DONE / IN PROGRESS chips ===
+                 x/x done is the clear progress signal; the separate
+                 "N pending" was redundant with it (done + pending = total),
+                 so it's dropped. Active states (in progress / paused /
+                 blocked) still show since those aren't derivable from
+                 the done count. */}
               <div className="flex flex-wrap gap-1.5 mb-3">
                 <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-stone-100 text-stone-700">
                   {counts.done}/{total} done
@@ -28831,11 +28860,6 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
                 {counts.in_progress > 0 && (
                   <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-amber-100 text-amber-800">
                     {counts.in_progress} in progress
-                  </span>
-                )}
-                {counts.pending > 0 && (
-                  <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-stone-100 text-stone-600">
-                    {counts.pending} pending
                   </span>
                 )}
                 {counts.paused > 0 && (

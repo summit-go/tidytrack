@@ -26,6 +26,48 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 const GOOGLE_TRANSLATE_API_KEY = "AIzaSyD7ceHPryMzs45hWJOyFNBxtOzQOEmJcSA";
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+// ============================================================
+// SECURE SIGN-IN — calls the server-side `secure-signin` Edge
+// Function, which verifies the PIN/code against its bcrypt hash
+// without ever exposing the table to the browser.
+//
+// SAFETY: if the function is unreachable or errors, we fall back
+// to the old direct query so nobody is ever locked out during
+// the migration. Once the function is proven and the table
+// policies are locked down, the fallback simply stops working
+// for attackers (the table won't be readable) but keeps this
+// code path harmless.
+// ============================================================
+async function secureEmployeeSignIn(pin) {
+  try {
+    const { data, error } = await supabase.functions.invoke('secure-signin', {
+      body: { mode: 'employee', pin },
+    });
+    if (!error && data && data.employee) return data.employee;
+    if (!error && data && data.error) return null; // valid response, wrong PIN
+  } catch (e) {
+    console.warn('[secureEmployeeSignIn] function unavailable, falling back', e);
+  }
+  // Fallback (pre-lockdown only): direct query.
+  const { data } = await supabase.from('employees').select('*').eq('pin', pin).eq('active', true).maybeSingle();
+  return data || null;
+}
+
+async function securePortalSignIn(code) {
+  const clean = (code || '').trim().toLowerCase();
+  try {
+    const { data, error } = await supabase.functions.invoke('secure-signin', {
+      body: { mode: 'portal', code: clean },
+    });
+    if (!error && data && data.portalUser) return data.portalUser;
+    if (!error && data && data.error) return null;
+  } catch (e) {
+    console.warn('[securePortalSignIn] function unavailable, falling back', e);
+  }
+  const { data } = await supabase.from('portal_users').select('*').eq('code', clean).eq('active', true).maybeSingle();
+  return data || null;
+}
 const PHOTO_BUCKET = 'task-photos';
 const ASSIGNMENT_BUCKET = 'assignments';
 const PM_UPLOAD_BUCKET = 'pm-uploads';
@@ -48,7 +90,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul18-cardfix1";
+const BUILD_TAG = "jul18-securelogin1";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -1506,7 +1548,7 @@ function SignIn({ onSignIn }) {
   }, [pin]);
   const tryLogin = async () => {
     setBusy(true);
-    const { data } = await supabase.from('employees').select('*').eq('pin', pin).eq('active', true).maybeSingle();
+    const data = await secureEmployeeSignIn(pin);
     setBusy(false);
     if (!data) {
       setError('Invalid PIN');
@@ -20298,9 +20340,9 @@ function PortalSignIn({ onSignIn }) {
     setError(''); setBusy(true);
     const trimmed = code.trim().toLowerCase();
 
-    // Look up the portal user by code
-    const { data: user } = await supabase.from('portal_users')
-      .select('*').eq('code', trimmed).eq('active', true).maybeSingle();
+    // Secure server-side code check (falls back to direct query
+    // pre-lockdown so nobody's locked out during migration).
+    const user = await securePortalSignIn(trimmed);
 
     if (user) {
       // Load their properties

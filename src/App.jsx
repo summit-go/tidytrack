@@ -25,6 +25,7 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 // =================================================================
 const GOOGLE_TRANSLATE_API_KEY = "AIzaSyD7ceHPryMzs45hWJOyFNBxtOzQOEmJcSA";
 
+
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // ============================================================
@@ -106,7 +107,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul18-tap10";
+const BUILD_TAG = "jul18-tap11";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -8632,19 +8633,16 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
           if (decision === 'done') return onFinish();
           if (decision === 'pause') return onPause();
         }} />
-      <div className="bg-stone-900 text-stone-50 px-5 py-5 sticky top-0 z-10 shadow-md">
-        {/* The "something's wrong" undo/move control now sits on the
-           assignment card below (passed as undoSlot), not floating up here. */}
-        <div className="text-xs uppercase tracking-widest text-stone-400 font-mono">Working on</div>
-        <div className="mt-1 font-mono text-3xl text-stone-50 tracking-tight">{fmtTime(blockElapsed)}</div>
+      {(others.length > 0 || block.work_notes) && (
+      <div className="bg-stone-900 text-stone-50 px-5 py-3 sticky top-0 z-10 shadow-md">
         {block.work_notes && (
-          <div className="mt-2 px-3 py-2 rounded-lg bg-stone-800 text-stone-300 text-xs italic">"{block.work_notes}"</div>
+          <div className="px-3 py-2 rounded-lg bg-stone-800 text-stone-300 text-xs italic">"{block.work_notes}"</div>
         )}
         {/* Active participants — chips with the OTHER cleaners helping in
            this block. The current cleaner is implicit. When solo, nothing
            renders. */}
         {others.length > 0 && (
-          <div className="mt-2 flex items-center gap-1.5 flex-wrap">
+          <div className={`flex items-center gap-1.5 flex-wrap ${block.work_notes ? 'mt-2' : ''}`}>
             <span className="text-[10px] uppercase tracking-wider font-mono text-stone-400">With you:</span>
             {others.map(p => (
               <span key={p.id} className="inline-flex items-center gap-1 text-[11px] font-mono px-2 py-0.5 rounded-full bg-stone-800 text-stone-100 border border-stone-700">
@@ -8654,15 +8652,14 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
             ))}
           </div>
         )}
-        {/* The apartment name, priority, bed/bath and cleaning type used to
-           be repeated up here AND on the card below. Since the card is folded
-           into this same dark block now, we show them once — on the card. */}
       </div>
+      )}
 
       {/* Assignment card, folded into the dark header as one block (dark
          variant). Sits flush under the sticky header so the bedroom info and
          the assignment read as a single dark section. */}
       <AssignmentBanner propertyId={shift.customer_id} unitId={block.unit_id} partyId={block.party_id} employee={employee} onOpenBedroomHistory={onOpenBedroomHistory} dark
+        propertyName={shift.customer?.name} elapsedMs={blockElapsed}
         undoSlot={(onUndo || canMoveBlock) ? (
           <UndoMoveMenu
             disabled={busy}
@@ -28943,7 +28940,7 @@ function AssignmentDetail({ property, assignment: assignmentInit, employee, onBa
 //   employee — current user
 //   showDone — if true, includes done assignments
 //   onUpdate — called after any status change so parent can refresh
-function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = false, onUpdate, onOpenBedroomHistory, dark = false, undoSlot = null }) {
+function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = false, onUpdate, onOpenBedroomHistory, dark = false, undoSlot = null, propertyName = null, elapsedMs = null }) {
   const [targets, setTargets] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [opened, setOpened] = useState(null);
@@ -29202,6 +29199,22 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
     <div className={dark
       ? "px-5 pt-1 pb-5 bg-stone-900 border-t border-stone-800"
       : "mx-2 sm:mx-4 mt-4 p-3 sm:p-4 rounded-2xl bg-blue-50 border-2 border-blue-200"}>
+      {/* Dark-card context header: WHERE you are (property) + how long the
+         block has been running. Always shown on the working screen so the
+         cleaner is never unsure which property/card they're on. */}
+      {dark && (
+        <div className="mb-4 pt-1">
+          <div className="text-[10px] uppercase tracking-widest text-stone-400 font-mono">Working on</div>
+          <div className="flex items-end justify-between gap-3 mt-1">
+            <div className="min-w-0">
+              {propertyName && <div className="font-serif text-2xl text-stone-50 leading-tight truncate">{propertyName}</div>}
+            </div>
+            {elapsedMs != null && (
+              <div className="font-mono text-2xl text-stone-50 tracking-tight tabular-nums flex-shrink-0">{fmtTime(elapsedMs)}</div>
+            )}
+          </div>
+        </div>
+      )}
       <div className={`flex items-center gap-2 ${collapsed ? '' : 'mb-3'}`}>
         <button onClick={() => setCollapsed(c => !c)}
           className="flex-1 min-w-0 flex items-center gap-2 active:opacity-80">
@@ -29301,25 +29314,36 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
           // them live). Matches the single-card gating.
           const allPending = openItems.length > 0 && openItems.every(i => i.status === 'pending');
           const bundleGated = allPending && !can(employee, 'mark_assignments_done');
+          // Dark theme (matches the single-assignment AssignmentCard) so both
+          // card types look identical when folded into the black header.
+          const DC = {
+            card: dark ? 'bg-stone-900 border-stone-700' : 'bg-white border-stone-200',
+            title: dark ? 'text-white' : 'text-stone-900',
+            sep: dark ? 'text-stone-500' : 'text-stone-400',
+            body: dark ? 'text-stone-200' : 'text-stone-700',
+            muted: dark ? 'text-stone-300' : 'text-stone-500',
+            chip: dark ? 'bg-stone-200 hover:bg-stone-300 text-stone-900' : 'bg-stone-100 hover:bg-stone-200 text-stone-700',
+            outlineBtn: dark ? 'border-stone-500 hover:bg-stone-700 text-stone-100' : 'border-stone-300 hover:bg-stone-50 text-stone-700',
+          };
           return (
-            <div key={g.key} className="p-3 sm:p-4 rounded-xl bg-white border border-stone-200">
+            <div key={g.key} className={`p-3 sm:p-4 rounded-xl border ${DC.card}`}>
               {/* === HEADER: bedroom title + chips on right ===
                  Layout mirrors the AssignmentList card exactly so
                  the cleaner sees the same chrome everywhere. */}
               <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-1.5 sm:gap-2 mb-2">
                 <div className="flex-1 min-w-0">
                   {(rep?.unit?.label || rep?.party?.label) ? (
-                    <div className="font-serif text-lg text-stone-900 leading-tight break-words">
+                    <div className={`font-serif text-lg ${DC.title} leading-tight break-words`}>
                       <span className="font-bold">{rep?.unit?.label || 'No unit'}</span>
                       {rep?.party?.label && (
                         <>
-                          <span className="text-stone-400 mx-1.5">·</span>
+                          <span className={`${DC.sep} mx-1.5`}>·</span>
                           <span className="italic">{rep.party.label}</span>
                         </>
                       )}
                     </div>
                   ) : (
-                    <div className="font-serif text-lg text-stone-900 font-bold">Checklist assignment</div>
+                    <div className={`font-serif text-lg ${DC.title} font-bold`}>Checklist assignment</div>
                   )}
                 </div>
                 <div className="flex flex-col sm:flex-row sm:items-center gap-1.5 flex-shrink-0 sm:max-w-[60%]">
@@ -29367,7 +29391,7 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
                   {/* Mini-row 2: View doc + History */}
                   <div className="flex items-center gap-1.5 flex-wrap justify-end">
                     <button onClick={() => setOpened(rep)}
-                      className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-100 hover:bg-stone-200 text-stone-700 flex items-center gap-1">
+                      className={`text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full ${DC.chip} flex items-center gap-1`}>
                       <Eye size={10} /> Quick glance
                     </button>
                     {onOpenBedroomHistory && rep?.unit_id && rep?.party_id && (
@@ -29375,7 +29399,7 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
                           unitId: rep.unit_id, unitLabel: rep.unit?.label,
                           partyId: rep.party_id, partyLabel: rep.party?.label
                         })} disabled={busy}
-                        className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-100 hover:bg-stone-200 text-stone-700 flex items-center gap-1 disabled:opacity-50">
+                        className={`text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full ${DC.chip} flex items-center gap-1 disabled:opacity-50`}>
                         <Clock size={10} /> History
                       </button>
                     )}
@@ -29385,13 +29409,13 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
 
               {/* === TITLE + TYPE + SECTION BREAKDOWN === */}
               <div className="mb-2">
-                <div className="font-serif text-sm text-stone-700">{a?.title || 'Checklist assignment'}</div>
+                <div className={`font-serif text-sm ${DC.body}`}>{a?.title || 'Checklist assignment'}</div>
                 {a?.assignment_type && (
                   <div className="mt-1">
                     <AssignmentTypeChip type={a.assignment_type} />
                   </div>
                 )}
-                <div className="text-[11px] font-mono text-stone-500 mt-1">
+                <div className={`text-[11px] font-mono ${DC.muted} mt-1`}>
                   {total} {total === 1 ? 'item' : 'items'}
                   {sectionBits.length > 0 && <> · {sectionBits.join(' · ')}</>}
                 </div>
@@ -29404,7 +29428,7 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
                  blocked) still show since those aren't derivable from
                  the done count. */}
               <div className="flex flex-wrap gap-1.5 mb-3">
-                <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-stone-100 text-stone-700">
+                <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full ${dark ? 'bg-stone-200 text-stone-900' : 'bg-stone-100 text-stone-700'}`}>
                   {counts.done}/{total} done
                 </span>
                 {counts.in_progress > 0 && (
@@ -29480,7 +29504,7 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
                 )}
                 {!isAllDone && (
                   <button onClick={() => setReassignTarget(rep)} disabled={busy}
-                    className="h-9 px-3 rounded-lg border border-stone-300 hover:bg-stone-50 text-stone-700 text-xs font-medium flex items-center gap-1 disabled:opacity-50">
+                    className={`h-9 px-3 rounded-lg border ${DC.outlineBtn} text-xs font-medium flex items-center gap-1 disabled:opacity-50`}>
                     <User size={12} /> Reassign
                   </button>
                 )}
@@ -29504,9 +29528,9 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
             )}
             {priorityGroups.length > 0 && restGroups.length > 0 && (
               <div className="py-1 flex items-center gap-2 px-1">
-                <div className="flex-1 h-px bg-blue-200" />
-                <span className="text-[10px] uppercase tracking-wider font-mono text-blue-700">Everything else</span>
-                <div className="flex-1 h-px bg-blue-200" />
+                <div className={`flex-1 h-px ${dark ? 'bg-stone-700' : 'bg-blue-200'}`} />
+                <span className={`text-[10px] uppercase tracking-wider font-mono ${dark ? 'text-stone-400' : 'text-blue-700'}`}>Everything else</span>
+                <div className={`flex-1 h-px ${dark ? 'bg-stone-700' : 'bg-blue-200'}`} />
               </div>
             )}
             {restGroups.map(renderGroup)}
@@ -29553,13 +29577,13 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
   // "Working on" header. Only the neutral surfaces flip; colored status /
   // priority pills and the action buttons already read fine on dark.
   const D = {
-    card: dark ? 'bg-stone-800 border-stone-700' : 'bg-white border-stone-200',
-    cardDone: dark ? 'bg-stone-800/60 border-stone-700 opacity-90' : 'bg-stone-50 border-stone-200 opacity-90',
-    title: dark ? 'text-stone-50' : 'text-stone-900',
+    card: dark ? 'bg-stone-900 border-stone-700' : 'bg-white border-stone-200',
+    cardDone: dark ? 'bg-stone-900/70 border-stone-700 opacity-90' : 'bg-stone-50 border-stone-200 opacity-90',
+    title: dark ? 'text-white' : 'text-stone-900',
     sep: dark ? 'text-stone-500' : 'text-stone-400',
-    muted: dark ? 'text-stone-400' : 'text-stone-500',
-    chip: dark ? 'bg-stone-700 hover:bg-stone-600 text-stone-100' : 'bg-stone-100 hover:bg-stone-200 text-stone-700',
-    outlineBtn: dark ? 'border-stone-600 hover:bg-stone-700 text-stone-200' : 'border-stone-300 hover:bg-stone-50 text-stone-600',
+    muted: dark ? 'text-stone-300' : 'text-stone-500',
+    chip: dark ? 'bg-stone-200 hover:bg-stone-300 text-stone-900' : 'bg-stone-100 hover:bg-stone-200 text-stone-700',
+    outlineBtn: dark ? 'border-stone-500 hover:bg-stone-700 text-stone-100' : 'border-stone-300 hover:bg-stone-50 text-stone-600',
   };
   const s = ASSIGNMENT_STATUSES[t.status] || ASSIGNMENT_STATUSES.pending;
   const isDone = t.status === 'done';

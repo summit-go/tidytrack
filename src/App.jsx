@@ -7,7 +7,7 @@ import {
   Trash2, Eye, EyeOff, LayoutDashboard, FileText, DollarSign,
   Home, Layers, User, Edit2, Copy, Printer, Calendar, HelpCircle,
   MessageCircle, MessageSquare, Settings, Languages, Menu, Square, Share2,
-  ClipboardList, Lock, Circle, MoreVertical
+  ClipboardList, Lock, Circle, MoreVertical, RotateCcw
 } from 'lucide-react';
 
 // =================================================================
@@ -106,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul18-tap3";
+const BUILD_TAG = "jul18-tap4";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -3233,12 +3233,6 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
               ? `Start 1 task (${selectedSubs.size} areas)`
               : 'Start task'}
         </button>
-        {(category || hasTargetPicks) && (
-          <button onClick={reset} disabled={busy} type="button"
-            className="px-4 py-3 rounded-xl border border-stone-300 text-stone-700 font-medium text-sm disabled:opacity-50">
-            Clear
-          </button>
-        )}
       </div>
       {editingLabel && (
         <EditItemLabelModal
@@ -6760,7 +6754,7 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
       let rows = []; const PAGE = 1000;
       for (let from = 0; ; from += PAGE) {
         const { data: page, error } = await supabase.from('assignment_targets')
-          .select('id, unit_id, party_id, status, unit:units(label, bedrooms, bathrooms), party:parties(label), assignment:assignments!inner(id, customer_id, active, deleted_at, assignment_type, scheduled_date, customer:customers(name, address))')
+          .select('id, unit_id, party_id, status, priority, unit:units(label, bedrooms, bathrooms), party:parties(label), assignment:assignments!inner(id, customer_id, active, deleted_at, assignment_type, scheduled_date, customer:customers(name, address))')
           .not('status', 'in', '(done,blocked)')
           .range(from, from + PAGE - 1);
         if (error || !page) break;
@@ -6777,9 +6771,10 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
       if (!a || a.active === false || a.deleted_at) return;
       if (!allowed.has(a.customer_id)) return;
       if (!byJob[a.id]) {
-        byJob[a.id] = { id: a.id, customerId: a.customer_id, propName: a.customer?.name || 'Property', propAddress: a.customer?.address || '', type: a.assignment_type || '', scheduledDate: a.scheduled_date || null, unitLabel: t.unit?.label || '', partyLabel: t.party?.label || '', unitId: t.unit_id, partyId: t.party_id, bedrooms: t.unit?.bedrooms, bathrooms: t.unit?.bathrooms, items: 0, hereNow: [], assignees: [], requested: [] };
+        byJob[a.id] = { id: a.id, customerId: a.customer_id, propName: a.customer?.name || 'Property', propAddress: a.customer?.address || '', type: a.assignment_type || '', scheduledDate: a.scheduled_date || null, unitLabel: t.unit?.label || '', partyLabel: t.party?.label || '', unitId: t.unit_id, partyId: t.party_id, bedrooms: t.unit?.bedrooms, bathrooms: t.unit?.bathrooms, priority: false, items: 0, hereNow: [], assignees: [], requested: [] };
       }
       byJob[a.id].items++;
+      if (t.priority) byJob[a.id].priority = true;
     });
     const ids = Object.keys(byJob);
     if (ids.length) {
@@ -6858,10 +6853,15 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
       || (sub === 'all' ? ((isMine(b) ? 1 : 0) - (isMine(a) ? 1 : 0)) : 0)
       || naturalCompare(a.propName, b.propName)
       || naturalCompare(a.unitLabel, b.unitLabel));
+  // Priority jobs float to a pinned section at the very top, regardless of
+  // date — "do these first" supersedes the date buckets. They're pulled out
+  // of the date sections below so they don't show twice.
+  const priorityJobs = list.filter(j => j.priority);
+  const datedList = list.filter(j => !j.priority);
   // Group the sorted list into date sections so the date is impossible to miss.
   const dateSections = (() => {
     const out = []; let cur = null;
-    list.forEach(j => {
+    datedList.forEach(j => {
       const key = j.scheduledDate || 'none';
       if (!cur || cur.key !== key) { cur = { key, date: j.scheduledDate || null, jobs: [] }; out.push(cur); }
       cur.jobs.push(j);
@@ -6902,6 +6902,53 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
         <div className="text-center py-10 text-stone-400 text-sm">{sub === 'mine' ? 'Nothing assigned to you right now. 🎉' : 'No open assignments.'}</div>
       ) : (
         <div className="pb-4">
+          {priorityJobs.length > 0 && (
+            <div className="mb-5">
+              <div className="flex items-center gap-2 mb-2 px-3 py-1.5 rounded-lg border-l-4 border-red-500 bg-red-50">
+                <AlertCircle size={13} className="text-red-600" />
+                <span className="text-xs uppercase tracking-wider font-mono font-bold text-red-700">Priority — do these first</span>
+                <span className="text-[10px] font-mono text-red-500 ml-auto">{priorityJobs.length}</span>
+              </div>
+              <div className="space-y-2">
+                {priorityJobs.map(j => {
+                  const here = j.customerId === currentPropertyId;
+                  const mine = isMine(j);
+                  return (
+                    <div key={j.id} className="p-3.5 rounded-2xl bg-white border-2 border-red-200">
+                      <div className="flex items-start justify-between gap-2">
+                        <button onClick={() => openJob(j)}
+                          className="min-w-0 text-left flex-1 rounded-lg -m-1 p-1 hover:bg-red-50 active:scale-[0.99] transition group">
+                          <div className="flex items-center gap-1">
+                            <span className="font-serif text-lg text-stone-900 truncate group-hover:underline decoration-stone-300 underline-offset-2">{unitPartyLabel(j.unitLabel, j.partyLabel) || 'Job'}</span>
+                            <ChevronRight size={15} className="text-stone-300 group-hover:text-stone-500 flex-shrink-0" />
+                          </div>
+                          <div className="text-xs text-stone-500 font-mono mt-0.5 flex items-center gap-1">
+                            <Building2 size={11} /> {j.propName}{j.type ? ` · ${assignmentTypeLabel(j.type)}` : ''}{j.items > 0 ? ` · ${j.items} ${j.items === 1 ? 'item' : 'items'}` : ''}
+                          </div>
+                        </button>
+                        <span className="flex items-center gap-1 flex-shrink-0">
+                          {mine && <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700">Yours</span>}
+                          <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-red-100 text-red-700 font-bold flex items-center gap-1"><AlertCircle size={9} /> Priority</span>
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-end gap-2 mt-2">
+                        {canDone && (
+                          <button onClick={() => markDone(j)} disabled={busyId === j.id}
+                            title="Mark completed" className="p-1 rounded-lg text-emerald-600 hover:bg-emerald-50 disabled:opacity-40">
+                            <Check size={15} />
+                          </button>
+                        )}
+                        <button onClick={() => openJob(j)}
+                          className="text-[11px] font-medium px-3 py-1.5 rounded-full bg-amber-600 hover:bg-amber-700 text-white flex items-center gap-1 active:scale-95 transition">
+                          {onStartJob ? 'Clock in & start' : here ? 'Start' : 'Switch'} <ChevronRight size={12} />
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
           {dateSections.map(sec => {
             const isCollapsed = collapsedDates.has(sec.key);
             return (
@@ -7236,27 +7283,31 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
          navigation. The stepper still appears inside a bedroom's flow. */}
       <div className="bg-stone-900 text-stone-50 px-5 py-5 sticky top-0 z-10 shadow-md">
         <div className="flex items-start justify-between mb-3 gap-2">
-          <div>
-            <div className="text-xs uppercase tracking-widest text-stone-400 font-mono">At property</div>
-            <div className="text-3xl font-mono font-light tracking-tight">{fmtTime(elapsed)}</div>
+          <div className="min-w-0 flex-1">
+            <div className="text-xs uppercase tracking-widest text-stone-400 font-mono">You're at</div>
+            <div className="flex items-center gap-2 mt-1">
+              <Building2 size={22} className="text-amber-400 shrink-0" />
+              <div className="font-serif text-2xl text-stone-50 leading-tight">{shift.customer?.name}</div>
+            </div>
           </div>
-          <div className="flex flex-col gap-1.5 items-end">
+          <div className="flex flex-col gap-1.5 items-end shrink-0">
             <button onClick={onClockOut} disabled={busy}
               className="px-4 py-2.5 rounded-full bg-amber-700 text-stone-50 text-sm font-medium flex items-center gap-2 active:scale-95 transition-transform disabled:opacity-50">
               <LogOut size={14} /> Clock out
             </button>
           </div>
         </div>
-        <div className="flex items-center gap-1.5 text-xs text-amber-400 font-mono">
-          <Building2 size={11} /> {shift.customer?.name}
-        </div>
         {shift.customer?.address && (
-          <div className="mt-1 text-xs text-stone-300">
+          <div className="mt-2 text-xs text-stone-300">
             <AddressLink address={shift.customer.address} className="text-stone-300" />
           </div>
         )}
-        <div className="mt-1 text-xs text-stone-400 font-mono">
-          Started {fmtClock(shift.start_time)} · {workBlocks.length} {workBlocks.length === 1 ? 'apartment cleaned' : 'apartments cleaned'}
+        <div className="mt-2 flex items-center gap-2 text-xs text-stone-400 font-mono flex-wrap">
+          <span className="inline-flex items-center gap-1 text-stone-200"><Clock size={11} /> {fmtTime(elapsed)}</span>
+          <span className="text-stone-600">·</span>
+          <span>Started {fmtClock(shift.start_time)}</span>
+          <span className="text-stone-600">·</span>
+          <span>{workBlocks.length} {workBlocks.length === 1 ? 'apartment cleaned' : 'apartments cleaned'}</span>
         </div>
       </div>
 
@@ -8132,14 +8183,15 @@ function UndoMoveMenu({ disabled, canUndo, canMove, onUndo, onMoveBedroom, onMov
     };
   }, [open]);
   return (
-    <div className="mt-2 inline-block relative" data-undo-menu="root">
+    <div className="inline-block relative" data-undo-menu="root">
       <button onClick={() => setOpen(o => !o)} disabled={disabled}
-        className="text-[11px] font-mono uppercase tracking-wider pl-2 pr-3 py-1.5 rounded-full bg-stone-700 hover:bg-stone-600 text-stone-100 inline-flex items-center gap-1.5 border border-stone-500 disabled:opacity-50 active:scale-95 transition">
-        <span className="w-1.5 h-1.5 rounded-full bg-amber-400 flex-shrink-0" />
-        <HelpCircle size={11} /> Something's wrong
+        aria-label="Something's wrong — undo this workblock or move it"
+        title="Started by mistake, or in the wrong bedroom? Fix it here"
+        className="w-8 h-8 rounded-full bg-stone-700 hover:bg-stone-600 text-stone-100 inline-flex items-center justify-center border border-stone-500 disabled:opacity-50 active:scale-95 transition">
+        <RotateCcw size={14} />
       </button>
       {open && (
-        <div className="absolute z-40 top-full left-0 mt-1 w-72 bg-stone-50 rounded-2xl shadow-xl border border-stone-200 overflow-hidden">
+        <div className="absolute z-40 top-full right-0 mt-1 w-72 bg-stone-50 rounded-2xl shadow-xl border border-stone-200 overflow-hidden">
           {canUndo && (
             <button onClick={() => { setOpen(false); onUndo(); }}
               className="w-full text-left px-4 py-3 hover:bg-stone-100 border-b border-stone-100 flex items-start gap-3">
@@ -8335,14 +8387,23 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
           if (decision === 'pause') return onPause();
         }} />
       <div className="bg-stone-900 text-stone-50 px-5 py-5 sticky top-0 z-10 shadow-md">
-        <div className="flex items-center justify-between mb-3">
-          <button onClick={onPause}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-stone-700 hover:bg-stone-600 text-stone-50 text-xs font-medium border border-stone-500 active:scale-95 transition">
-            <Home size={12} /> Property home
+        <div className="flex items-center justify-between mb-3 gap-2">
+          {/* The logo up top is the way home now — tap it to pause and go
+             back to property home. The old "Property home" button is gone. */}
+          <button onClick={handleLogoClick}
+            className="flex items-center gap-1 text-[10px] uppercase tracking-wider font-mono text-stone-400 hover:text-stone-200 active:scale-95 transition">
+            <Home size={11} /> Tap logo ↑ for home
           </button>
-          {/* The multi-cleaner "leave" action lives on the big bottom
-             button now ("I'm finished here (others stay)"), so we no
-             longer duplicate it as a small header button. */}
+          {(onUndo || canMoveBlock) && (
+            <UndoMoveMenu
+              disabled={busy}
+              canUndo={!!onUndo}
+              canMove={!!canMoveBlock}
+              onUndo={onUndo}
+              onMoveBedroom={() => { setMoveMode('bedroom'); setMoveModalOpen(true); }}
+              onMoveWorkblock={() => { setMoveMode('workblock'); setMoveModalOpen(true); }}
+            />
+          )}
         </div>
         <div className="text-xs uppercase tracking-widest text-stone-400 font-mono">Working on</div>
         <div className="font-serif text-2xl text-stone-50 leading-tight">
@@ -8363,35 +8424,14 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
             ))}
           </div>
         )}
-        {/* Consolidated "Something's wrong" menu — single button opens a
-           dropdown with three escape hatches:
-             1) Started by mistake   → undo the workblock entirely
-             2) I'm in the wrong bedroom → move the workblock to a
-                                          different bedroom (keep items)
-             3) Wrong workblock        → move the workblock + reset any
-                                          items the cleaner advanced at
-                                          this bedroom back to pending
-           Replaces the two separate inline links so the header stays
-           tidy and the three options are discoverable together. */}
-        {(onUndo || canMoveBlock) && (
-          <UndoMoveMenu
-            disabled={busy}
-            canUndo={!!onUndo}
-            canMove={!!canMoveBlock}
-            onUndo={onUndo}
-            onMoveBedroom={() => { setMoveMode('bedroom'); setMoveModalOpen(true); }}
-            onMoveWorkblock={() => { setMoveMode('workblock'); setMoveModalOpen(true); }}
-          />
-        )}
-        {/* Context chips for this bedroom — priority + cleaning types
-           pulled from the open assignments here. Shown right under
-           the title so the cleaner sees urgency at a glance. */}
-        {(bedroomContext.priority || bedroomContext.types.length > 0) && (
+        {/* The "something's wrong" undo/move control moved up into the
+           header's top row (as an undo icon), so it's no longer here. */}
+        {/* Context chip — priority only. The assignment TYPE (e.g. "Cleaning
+           check") used to show here too, but it's already on the assignment
+           card just below, so we dropped the duplicate from the header. */}
+        {bedroomContext.priority && (
           <div className="mt-2 flex items-center gap-1.5 flex-wrap">
             <PriorityChip on={bedroomContext.priority} />
-            {bedroomContext.types.map(typ => (
-              <AssignmentTypeChip key={typ} type={typ} />
-            ))}
           </div>
         )}
         {block.unit?.kind === 'townhome' && (block.unit?.bedrooms != null || block.unit?.bathrooms != null) && (
@@ -8448,8 +8488,8 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
         <div className="grid grid-cols-3 gap-1 p-1 bg-stone-200 rounded-2xl">
           {[
             { key: 'new', label: 'New', count: null },
-            { key: 'active', label: 'Active', count: tasks.length },
-            { key: 'done', label: 'Done', count: doneBlocks.list.length },
+            { key: 'active', label: 'Active', count: activeTaskObj ? 1 : 0 },
+            { key: 'done', label: 'Done', count: (tasks || []).filter(t => t.id !== activeTask).length + doneBlocks.list.length },
           ].map(t => {
             const on = blockTab === t.key;
             return (
@@ -8466,10 +8506,15 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
 
       {blockTab === 'active' && (
         <>
-          {activeTaskObj && (
+          {activeTaskObj ? (
             <ActiveWorkblockCard task={activeTaskObj}
               onStop={() => onStopTask(activeTaskObj.id)}
               onAddPhoto={(kind) => onAddPhoto(activeTaskObj.id, kind)} />
+          ) : (
+            <div className="mx-4 mt-6 text-center py-10 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
+              Nothing running right now.<br />
+              Tap <span className="font-mono text-stone-500">New</span> to start a task, or check <span className="font-mono text-stone-500">Done</span> to resume one.
+            </div>
           )}
           <div className="mx-4 mt-4 flex items-center gap-1.5 flex-wrap">
             <span className="text-[10px] uppercase tracking-wider font-mono text-stone-400">In this workblock:</span>
@@ -8528,89 +8573,111 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
             </button>
           </div>
         )}
-      </div>
-      )}
 
-      {blockTab === 'active' && (
-      <div className="mx-4 mt-6">
-        <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-3">Your tasks</div>
-        {tasks.length === 0 ? (
-          <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
-            Nothing started here yet. Tap New above to pick what to clean.
-          </div>
-        ) : (
-          <div className="space-y-3">
-            {tasks
-              // Active task is already rendered at the top of the
-              // screen with its photo buttons — skip it here so the
-              // cleaner doesn't see it twice. The list below shows
-              // paused / done tasks only.
-              .filter(t => t.id !== activeTask)
-              .map(t => (
-              <TaskCard key={t.id} task={t} isActive={false}
-                onStop={() => onStopTask(t.id)} onResume={() => onResumeTask(t.id)}
-                onAddPhoto={(kind) => onAddPhoto(t.id, kind)} />
-            ))}
-          </div>
-        )}
-      </div>
-      )}
-
-      {/* DONE — finished workblocks at this bedroom today (yours + others),
-         grouped by workblock and labeled by who did it. Tap play to reopen
-         one (it becomes your active workblock). Absorbs the old amber
-         "Tasks others did today" panel. */}
-      {blockTab === 'done' && (
-      <div className="mx-4 mt-4">
-        <div className="flex items-center justify-between mb-3">
-          <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">Finished workblocks here today</div>
-          {(block?.unit?.label || block?.party?.label) && (
-            <div className="text-[11px] text-stone-400 font-mono">
-              {block?.unit?.label}{block?.unit?.label && block?.party?.label ? ' · ' : ''}{block?.party?.label}
+        {/* Close out the whole bedroom — moved here from an always-visible
+           footer so it sits with the other "start work" controls, in New only. */}
+        <div className="mt-6">
+          <button
+            onClick={() => {
+              if (totalActive > 1 && onLeaveBlock) return onLeaveBlock();
+              if (!confirm('Finish ALL assignments in this bedroom?\n\nThis closes out every assignment here and ends your work block. Anything not marked done will be completed automatically.')) return;
+              return onFinish();
+            }}
+            disabled={busy}
+            className="w-full py-4 rounded-2xl bg-amber-700 hover:bg-amber-800 text-stone-50 text-base font-bold flex items-center justify-center gap-2 active:scale-98 transition-transform disabled:opacity-50">
+            <Check size={18} />
+            {totalActive > 1 && onLeaveBlock ? "I'm finished in this bedroom (others stay)" : 'Close out entire bedroom'}
+          </button>
+          {totalActive > 1 && onLeaveBlock && (
+            <div className="text-[11px] text-stone-500 text-center mt-1.5 font-mono">
+              {totalActive} cleaners here · the block stays open until everyone finishes
             </div>
           )}
         </div>
-        {doneBlocks.loading ? (
-          <div className="text-center py-10 text-stone-400 text-sm font-mono">Loading…</div>
-        ) : doneBlocks.list.length === 0 ? (
-          <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
-            No finished workblocks here yet today.
-          </div>
-        ) : (
-          <div className="space-y-3">
-            {doneBlocks.list.map(b => {
-              const bTasks = b.tasks || [];
-              const dur = b.end_time ? (new Date(b.end_time) - new Date(b.start_time)) : null;
-              return (
-                <div key={b.id} className="p-4 rounded-2xl bg-white border border-stone-200">
-                  <div className="flex items-start justify-between gap-3">
-                    <span className={`inline-flex items-center gap-1 text-[10px] uppercase tracking-wider font-mono px-2 py-1 rounded-full ${b.mine ? 'bg-emerald-50 text-emerald-800 border border-emerald-200' : 'bg-amber-50 text-amber-800 border border-amber-200'}`}>
-                      <User size={11} /> {b.mine ? 'You' : b.ownerName}
-                    </span>
-                    <button onClick={() => handleReopenDone(b)} disabled={busy}
-                      aria-label="Reopen workblock"
-                      className="w-9 h-9 rounded-full bg-stone-900 text-stone-50 flex items-center justify-center active:scale-95 transition-transform disabled:opacity-40">
-                      <Play size={15} />
-                    </button>
-                  </div>
-                  <div className="mt-2.5 flex flex-wrap gap-x-3 gap-y-1">
-                    {bTasks.map(t => (
-                      <span key={t.id} className="font-serif text-[15px] text-stone-900">{splitTaskName(t.name)[0] || t.name}</span>
-                    ))}
-                  </div>
-                  <div className="mt-2 text-[10px] text-stone-500 font-mono">
-                    {fmtClock(b.start_time)} – {fmtClock(b.end_time)}{dur ? ` · ${fmtTimeShort(dur)}` : ''} · {bTasks.length} task{bTasks.length === 1 ? '' : 's'}
-                  </div>
-                  <div className="mt-2 text-[10px] text-stone-500 font-mono flex items-center gap-1.5">
-                    <Play size={11} /> {b.mine ? 'Tap play to reopen and keep working' : `Tap play to reopen ${b.ownerName}'s block`}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        )}
       </div>
       )}
+
+      {/* Finished tasks in the current block now live in the Done tab
+         ("this session"), so hitting Done on a task moves it out of Active.
+         Active shows only what's running. */}
+
+      {/* DONE — everything finished at this bedroom today: your finished
+         tasks in the current (open) block, plus closed workblocks (yours
+         from earlier + other cleaners'). Tasks resume; blocks reopen. */}
+      {blockTab === 'done' && (() => {
+        const finishedHere = (tasks || []).filter(t => t.id !== activeTask);
+        const nothing = finishedHere.length === 0 && doneBlocks.list.length === 0;
+        return (
+        <div className="mx-4 mt-4">
+          <div className="flex items-center justify-between mb-3">
+            <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">Finished here today</div>
+            {(block?.unit?.label || block?.party?.label) && (
+              <div className="text-[11px] text-stone-400 font-mono">
+                {block?.unit?.label}{block?.unit?.label && block?.party?.label ? ' · ' : ''}{block?.party?.label}
+              </div>
+            )}
+          </div>
+          {doneBlocks.loading && nothing ? (
+            <div className="text-center py-10 text-stone-400 text-sm font-mono">Loading…</div>
+          ) : nothing ? (
+            <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
+              Nothing finished here yet today.
+            </div>
+          ) : (
+            <div className="space-y-4">
+              {finishedHere.length > 0 && (
+                <div>
+                  <div className="text-[10px] uppercase tracking-wider text-stone-400 font-mono mb-2">This session · tap ▶ to resume</div>
+                  <div className="space-y-3">
+                    {finishedHere.map(t => (
+                      <TaskCard key={t.id} task={t} isActive={false}
+                        onStop={() => onStopTask(t.id)} onResume={() => onResumeTask(t.id)}
+                        onAddPhoto={(kind) => onAddPhoto(t.id, kind)} />
+                    ))}
+                  </div>
+                </div>
+              )}
+              {doneBlocks.list.length > 0 && (
+                <div>
+                  <div className="text-[10px] uppercase tracking-wider text-stone-400 font-mono mb-2">Closed workblocks</div>
+                  <div className="space-y-3">
+                    {doneBlocks.list.map(b => {
+                      const bTasks = b.tasks || [];
+                      const dur = b.end_time ? (new Date(b.end_time) - new Date(b.start_time)) : null;
+                      return (
+                        <div key={b.id} className="p-4 rounded-2xl bg-white border border-stone-200">
+                          <div className="flex items-start justify-between gap-3">
+                            <span className={`inline-flex items-center gap-1 text-[10px] uppercase tracking-wider font-mono px-2 py-1 rounded-full ${b.mine ? 'bg-emerald-50 text-emerald-800 border border-emerald-200' : 'bg-amber-50 text-amber-800 border border-amber-200'}`}>
+                              <User size={11} /> {b.mine ? 'You' : b.ownerName}
+                            </span>
+                            <button onClick={() => handleReopenDone(b)} disabled={busy}
+                              aria-label="Reopen workblock"
+                              className="w-9 h-9 rounded-full bg-stone-900 text-stone-50 flex items-center justify-center active:scale-95 transition-transform disabled:opacity-40">
+                              <Play size={15} />
+                            </button>
+                          </div>
+                          <div className="mt-2.5 flex flex-wrap gap-x-3 gap-y-1">
+                            {bTasks.map(t => (
+                              <span key={t.id} className="font-serif text-[15px] text-stone-900">{splitTaskName(t.name)[0] || t.name}</span>
+                            ))}
+                          </div>
+                          <div className="mt-2 text-[10px] text-stone-500 font-mono">
+                            {fmtClock(b.start_time)} – {fmtClock(b.end_time)}{dur ? ` · ${fmtTimeShort(dur)}` : ''} · {bTasks.length} task{bTasks.length === 1 ? '' : 's'}
+                          </div>
+                          <div className="mt-2 text-[10px] text-stone-500 font-mono flex items-center gap-1.5">
+                            <Play size={11} /> {b.mine ? 'Tap play to reopen and keep working' : `Tap play to reopen ${b.ownerName}'s block`}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+        );
+      })()}
 
       {photoModal && (
         <PhotoModal kind={photoModal.kind}
@@ -8639,35 +8706,9 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
           } : null}
           onClose={() => setMoveModalOpen(false)} />
       )}
-      {/* "Finished entire assignment" — the natural endpoint of the
-         cleaning workflow. After the cleaner works through their tasks,
-         this is the next thing they see. Behavior depends on whether
-         the workblock is shared:
-           • Solo (totalActive <= 1): onFinish closes the block and
-             marks in-progress items done.
-           • Multi-cleaner (totalActive > 1): onLeaveBlock signs THIS
-             cleaner out of the shared block but keeps it open for the
-             others. The last person to leave triggers the finish +
-             pending-items prompt (handled inside leaveBlock). So one
-             cleaner finishing never kicks the others out. */}
-      <div className="mx-4 mt-6 mb-4">
-        <button
-          onClick={() => {
-            if (totalActive > 1 && onLeaveBlock) return onLeaveBlock();
-            if (!confirm('Finish ALL assignments in this bedroom?\n\nThis closes out every assignment here and ends your work block. Anything not marked done will be completed automatically.')) return;
-            return onFinish();
-          }}
-          disabled={busy}
-          className="w-full py-4 rounded-2xl bg-amber-700 hover:bg-amber-800 text-stone-50 text-base font-bold flex items-center justify-center gap-2 active:scale-98 transition-transform disabled:opacity-50">
-          <Check size={18} />
-          {totalActive > 1 && onLeaveBlock ? "I'm finished in this bedroom (others stay)" : 'Finished All Assignments'}
-        </button>
-        {totalActive > 1 && onLeaveBlock && (
-          <div className="text-[11px] text-stone-500 text-center mt-1.5 font-mono">
-            {totalActive} cleaners here · the block stays open until everyone finishes
-          </div>
-        )}
-      </div>
+      {/* The "Close out entire bedroom" button now lives inside the New tab
+         (with the task picker) instead of always-on-screen, so it can't be
+         hit by accident while a cleaner is mid-task. */}
 
       {/* "Tasks others did today" panel removed — its contents now live in
          the Done tab above, grouped by workblock and labeled by cleaner. */}
@@ -22925,7 +22966,7 @@ function AssignedVsCleanedView({ employee, onBack, onOpenBedroomHistory, persist
 
       {opened && (
         opened.assignment?.template_set_id || opened.template_section
-          ? <ChecklistAssignmentView assignment={opened.assignment}
+          ? <ChecklistAssignmentView assignment={opened.assignment} onOpenSibling={(a) => setOpened(o => ({ ...o, assignment: a }))}
               employee={employee}
               quickGlance={true}
               onClose={() => setOpened(null)}
@@ -29187,7 +29228,7 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
 
       {opened && (
         opened.assignment?.template_set_id
-          ? <ChecklistAssignmentView assignment={opened.assignment}
+          ? <ChecklistAssignmentView assignment={opened.assignment} onOpenSibling={(a) => setOpened(o => ({ ...o, assignment: a }))}
               employee={employee}
               onClose={() => setOpened(null)}
               onOpenSheet={opened.assignment?.file_url
@@ -30181,7 +30222,7 @@ function SuggestedTabContent({ propertyId, employee, onGoToBedroom, onOpenBedroo
       {/* Modals */}
       {opened && (
         opened.assignment?.template_set_id
-          ? <ChecklistAssignmentView assignment={opened.assignment}
+          ? <ChecklistAssignmentView assignment={opened.assignment} onOpenSibling={(a) => setOpened(o => ({ ...o, assignment: a }))}
               employee={employee}
               onClose={() => setOpened(null)}
               onOpenSheet={opened.assignment?.file_url
@@ -31715,7 +31756,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
 
       {opened && (
         opened.assignment?.template_set_id
-          ? <ChecklistAssignmentView assignment={opened.assignment}
+          ? <ChecklistAssignmentView assignment={opened.assignment} onOpenSibling={(a) => setOpened(o => ({ ...o, assignment: a }))}
               employee={employee}
               onClose={() => setOpened(null)}
               onOpenSheet={opened.assignment?.file_url
@@ -32520,7 +32561,7 @@ function AssignmentViewer({ target, onClose, employee }) {
 // Status changes write directly to assignment_targets and rely on the
 // existing realtime sync to push updates to other viewers.
 // =================================================================
-function ChecklistAssignmentView({ assignment, employee, onClose, onOpenSheet, quickGlance = false }) {
+function ChecklistAssignmentView({ assignment, employee, onClose, onOpenSheet, onOpenSibling, quickGlance = false }) {
   const [targets, setTargets] = useState([]);
   const [templateInfo, setTemplateInfo] = useState({ variants: [], items: [] });
   const [otherAssignments, setOtherAssignments] = useState([]);
@@ -32575,7 +32616,7 @@ function ChecklistAssignmentView({ assignment, employee, onClose, onOpenSheet, q
     if (firstTarget?.unit_id && firstTarget?.party_id) {
       const { data: others } = await supabase
         .from('assignments')
-        .select('id, title, assignment_type, sheet_type, template_set_id, source, pm_status, active, customer_id, targets:assignment_targets!inner(id, status, unit_id, party_id)')
+        .select('id, title, notes, file_url, file_kind, assignment_type, sheet_type, template_set_id, bathroom_variant, general_variant, source, pm_status, active, customer_id, targets:assignment_targets!inner(id, status, unit_id, party_id)')
         .neq('id', assignment.id)
         .eq('targets.unit_id', firstTarget.unit_id)
         .eq('targets.party_id', firstTarget.party_id)
@@ -33134,16 +33175,34 @@ function ChecklistAssignmentView({ assignment, employee, onClose, onOpenSheet, q
               Other assignments at this bedroom
             </div>
             <div className="space-y-1.5">
-              {otherAssignments.map(oa => (
-                <div key={oa.id} className="p-3 rounded-xl bg-white border border-stone-200">
-                  <div className="font-serif text-sm text-stone-900 mb-1">{oa.title}</div>
-                  <div className="text-[10px] font-mono text-stone-500">
-                    {oa.sheet_type === 'cleaning_check' ? 'Cleaning check'
-                      : oa.sheet_type === 'move_out_clean' ? 'Move-out clean'
-                      : 'Legacy upload'}
-                  </div>
-                </div>
-              ))}
+              {otherAssignments.map(oa => {
+                const totalItems = (oa.targets || []).length;
+                const remaining = (oa.targets || []).filter(t => t.status !== 'done').length;
+                const typeLabel = oa.sheet_type === 'cleaning_check' ? 'Cleaning check'
+                  : oa.sheet_type === 'move_out_clean' ? 'Move-out clean'
+                  : 'Legacy upload';
+                return (
+                  <button key={oa.id} onClick={() => onOpenSibling && onOpenSibling(oa)}
+                    disabled={!onOpenSibling}
+                    className="w-full text-left p-3 rounded-xl bg-white border border-stone-200 hover:border-stone-400 hover:bg-stone-50 active:scale-[0.99] transition disabled:hover:border-stone-200 disabled:hover:bg-white">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="font-serif text-sm text-stone-900 truncate">{oa.title || typeLabel}</div>
+                      {onOpenSibling && <ChevronRight size={14} className="text-stone-400 flex-shrink-0" />}
+                    </div>
+                    <div className="text-[10px] font-mono text-stone-500 mt-1 flex items-center gap-2 flex-wrap">
+                      <span>{typeLabel}</span>
+                      <span className="text-stone-300">·</span>
+                      <span>{totalItems} item{totalItems === 1 ? '' : 's'}</span>
+                      {remaining > 0 && (
+                        <span className="px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-800">{remaining} left</span>
+                      )}
+                      {remaining === 0 && totalItems > 0 && (
+                        <span className="px-1.5 py-0.5 rounded-full bg-emerald-100 text-emerald-800">Done</span>
+                      )}
+                    </div>
+                  </button>
+                );
+              })}
             </div>
           </div>
         )}

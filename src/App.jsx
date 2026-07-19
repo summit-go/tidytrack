@@ -13,7 +13,6 @@ import {
 // =================================================================
 // 🔧 PASTE YOUR SUPABASE KEYS HERE
 // =================================================================
-// =================================================================
 const SUPABASE_URL = "https://bbaynvqnbkjyqhzhhypr.supabase.co/";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJiYXludnFuYmtqeXFoemhoeXByIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc0NzQ2MTMsImV4cCI6MjA5MzA1MDYxM30.ZXUoHFj_IwMe6rX8RxK8Dj4kAB9AS7X9xZAhQ84wDEk";
 
@@ -107,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul18-tap1";
+const BUILD_TAG = "jul18-tap2";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -7766,11 +7765,18 @@ function OtherCleanersTasksPanel({ block }) {
 
   return (
     <div className="mx-4 mt-3 rounded-2xl bg-amber-50 border border-amber-200 overflow-hidden">
-      <div className="px-4 py-3 bg-amber-100 flex items-center gap-2">
-        <Check size={14} className="text-amber-900" />
-        <div className="text-xs uppercase tracking-wider text-amber-900 font-mono flex-1">
-          Tasks others did today ({totalTasks})
+      <div className="px-4 py-3 bg-amber-100">
+        <div className="flex items-center gap-2">
+          <Check size={14} className="text-amber-900" />
+          <div className="text-xs uppercase tracking-wider text-amber-900 font-mono flex-1">
+            Tasks others did today ({totalTasks})
+          </div>
         </div>
+        {(block?.unit?.label || block?.party?.label) && (
+          <div className="text-[11px] text-amber-800 font-mono mt-0.5 pl-6">
+            {block?.unit?.label}{block?.unit?.label && block?.party?.label ? ' · ' : ''}{block?.party?.label}
+          </div>
+        )}
       </div>
       <div className="px-4 py-3 space-y-3">
         {data.byCleaner.map(c => (
@@ -8443,7 +8449,7 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
       </div>
 
       <div className="mx-4 mt-6">
-        <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-3">Tasks for this party</div>
+        <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-3">Your tasks</div>
         {tasks.length === 0 ? (
           <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
             Add a task above when you start cleaning.

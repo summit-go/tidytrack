@@ -25,7 +25,6 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 // =================================================================
 const GOOGLE_TRANSLATE_API_KEY = "AIzaSyD7ceHPryMzs45hWJOyFNBxtOzQOEmJcSA";
 
-
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // ============================================================
@@ -107,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul18-tap11";
+const BUILD_TAG = "jul18-tap12";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -993,10 +992,13 @@ function RootRouter() {
 
 function StaffApp() {
   const [session, setSession] = useState(null);
-  // Supply-checklist gate: shown once right after a fresh PIN sign-in for
-  // cleaners. Defaults true so an auto-login / page refresh doesn't re-gate
-  // someone mid-shift — only a real PIN entry flips it to false below.
-  const [supplyConfirmed, setSupplyConfirmed] = useState(true);
+  // Supply-checklist gate: shown to cleaners before they reach their jobs.
+  // Defaults FALSE so it fires on EVERY cleaner entry — a fresh PIN login AND
+  // a remembered/auto-login session (the earlier "only on PIN" version missed
+  // remembered sessions, so the checklist often never appeared). Owners /
+  // managers never reach the gate (their shells return earlier). The gate
+  // skips itself when the item list is empty, so it can't trap anyone.
+  const [supplyConfirmed, setSupplyConfirmed] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [configError, setConfigError] = useState(false);
 
@@ -5211,7 +5213,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   if (!shift) {
     return withIdleModal(
       <div className="min-h-screen bg-stone-50 flex flex-col pb-24">
-        <Header name={employee.name} onSignOut={signOutWithCleanup} role={employee.role}
+        <Header name={employee.name} onSignOut={signOutWithCleanup} role={employee.role} cleanerView
           employee={employee} onOpenMessages={() => setShowMessages(true)}
           onOpenWhosHere={() => setWhosWorkingOpen(true)} />
         {whosWorkingOpen && (
@@ -7505,7 +7507,7 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
 
   return (
     <div className="min-h-screen bg-stone-50 pb-24">
-      <Header name={employeeName} onSignOut={onSignOut} role={employee?.role} employee={employee}
+      <Header name={employeeName} onSignOut={onSignOut} role={employee?.role} cleanerView employee={employee}
         onOpenMessages={onOpenMessages}
         onOpenWhosHere={() => setWhosHereOpen(true)} />
       {whosHereOpen && (
@@ -8263,7 +8265,7 @@ function PreparingBlockView({ shift, pendingStart, employeeName, employee,
 
   return (
     <div className="min-h-screen bg-stone-50 pb-24">
-      <Header name={employeeName} onSignOut={onSignOut} role={employee?.role} employee={employee}
+      <Header name={employeeName} onSignOut={onSignOut} role={employee?.role} cleanerView employee={employee}
         onOpenMessages={onOpenMessages} onLogoClick={handleLogoClick} />
       {/* Cleaner has navigated to a specific bedroom. They've chosen the
          property + assignment. They're about to claim items / start
@@ -8434,8 +8436,8 @@ function UndoMoveMenu({ disabled, canUndo, canMove, onUndo, onMoveBedroom, onMov
       <button onClick={() => setOpen(o => !o)} disabled={disabled}
         aria-label="Something's wrong — undo this workblock or move it"
         title="Started by mistake, or in the wrong bedroom? Fix it here"
-        className="w-8 h-8 rounded-full bg-stone-700 hover:bg-stone-600 text-stone-100 inline-flex items-center justify-center border border-stone-500 disabled:opacity-50 active:scale-95 transition">
-        <RotateCcw size={14} />
+        className="w-9 h-9 rounded-full bg-amber-500 hover:bg-amber-400 text-stone-900 inline-flex items-center justify-center border border-amber-300 disabled:opacity-50 active:scale-95 transition shadow-sm">
+        <RotateCcw size={16} strokeWidth={2.5} />
       </button>
       {open && (
         <div className="absolute z-40 top-full right-0 mt-1 w-72 bg-stone-50 rounded-2xl shadow-xl border border-stone-200 overflow-hidden">
@@ -8606,7 +8608,7 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
 
   return (
     <div className="min-h-screen bg-stone-50 pb-24">
-      <Header name={employeeName} onSignOut={onSignOut} role={employee?.role} employee={employee}
+      <Header name={employeeName} onSignOut={onSignOut} role={employee?.role} cleanerView employee={employee}
         onOpenMessages={onOpenMessages}
         onOpenWhosHere={() => setWhosHereOpen(true)}
         onLogoClick={handleLogoClick} />
@@ -8634,9 +8636,9 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
           if (decision === 'pause') return onPause();
         }} />
       {(others.length > 0 || block.work_notes) && (
-      <div className="bg-stone-900 text-stone-50 px-5 py-3 sticky top-0 z-10 shadow-md">
+      <div className="bg-slate-800 text-stone-50 px-5 py-3 sticky top-0 z-10 shadow-md">
         {block.work_notes && (
-          <div className="px-3 py-2 rounded-lg bg-stone-800 text-stone-300 text-xs italic">"{block.work_notes}"</div>
+          <div className="px-3 py-2 rounded-lg bg-slate-700 text-stone-200 text-xs italic">"{block.work_notes}"</div>
         )}
         {/* Active participants — chips with the OTHER cleaners helping in
            this block. The current cleaner is implicit. When solo, nothing
@@ -9218,7 +9220,7 @@ function SimpleShiftView({ shift, tasks, activeTask, employeeName, employee, onS
 
   return (
     <div className="min-h-screen bg-stone-50 pb-24">
-      <Header name={employeeName} onSignOut={onSignOut} role={employee?.role} employee={employee} onOpenMessages={onOpenMessages} />
+      <Header name={employeeName} onSignOut={onSignOut} role={employee?.role} cleanerView employee={employee} onOpenMessages={onOpenMessages} />
       <div className="bg-stone-900 text-stone-50 px-5 py-5 sticky top-0 z-10 shadow-md">
         <div className="flex items-start justify-between mb-3 gap-2">
           <div>
@@ -9596,7 +9598,7 @@ function ViewOnlyDashboard({ employee, property, onSignOut, onEndViewing, onOpen
   if (!property) return null;
   return (
     <div className="min-h-screen bg-stone-50 pb-24">
-      <Header name={employee.name} onSignOut={onSignOut} role={employee.role} employee={employee} onOpenMessages={onOpenMessages} />
+      <Header name={employee.name} onSignOut={onSignOut} role={employee.role} cleanerView employee={employee} onOpenMessages={onOpenMessages} />
 
       {/* View-only banner */}
       <div className="bg-amber-50 border-y border-amber-200 px-5 py-3 flex items-center gap-2">
@@ -10803,13 +10805,15 @@ async function deleteMessagePhoto(path) {
   try { await supabase.storage.from(MESSAGE_BUCKET).remove([path]); } catch {}
 }
 
-function Header({ name, onSignOut, role, employee, onOpenMessages, onLogoClick, onBack, onOpenWhosHere, menuItems }) {
+function Header({ name, onSignOut, role, employee, onOpenMessages, onLogoClick, onBack, onOpenWhosHere, menuItems, cleanerView = false }) {
   // Messages icon in header for all signed-in roles (cleaner/manager/owner)
   const showMessagesIcon = !!(onOpenMessages && employee);
   // Cleaners get a bare header (just the logo) — their language / messages /
   // who's-here / sign-out live in the bottom "More" tab instead. Owners and
-  // managers keep the ⋯ menu (it also holds their admin tools).
-  const isCleaner = role !== 'owner' && role !== 'manager';
+  // managers keep the ⋯ menu (it also holds their admin tools). cleanerView is
+  // forced by the cleaner shell so this holds even when an owner is
+  // previewing-as-cleaner or a Beta account (whose real role is owner/manager).
+  const isCleaner = cleanerView || (role !== 'owner' && role !== 'manager');
   const unread = useUnreadCount({ employee: showMessagesIcon ? employee : null });
   const { locale, setLocale } = useLocale();
   const previewCtx = React.useContext(PreviewContext);
@@ -29197,7 +29201,7 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
 
   return (
     <div className={dark
-      ? "px-5 pt-1 pb-5 bg-stone-900 border-t border-stone-800"
+      ? "px-5 pt-1 pb-5 bg-slate-800 border-t border-slate-700"
       : "mx-2 sm:mx-4 mt-4 p-3 sm:p-4 rounded-2xl bg-blue-50 border-2 border-blue-200"}>
       {/* Dark-card context header: WHERE you are (property) + how long the
          block has been running. Always shown on the working screen so the
@@ -29223,7 +29227,8 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
             {(() => {
               const groups = buildGroups(targets);
               const assignmentCount = groups.length;
-              return `${assignmentCount} assignment${assignmentCount === 1 ? '' : 's'} · ${targets.length} item${targets.length === 1 ? '' : 's'}`;
+              const doneCount = targets.filter(t => t.status === 'done').length;
+              return `${assignmentCount} assignment${assignmentCount === 1 ? '' : 's'} · ${doneCount}/${targets.length} done`;
             })()}
           </span>
           <ChevronRight size={14} className={`transition-transform ${collapsed ? '' : 'rotate-90'} ${dark ? 'text-stone-400' : 'text-blue-700'}`} />
@@ -29317,13 +29322,13 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
           // Dark theme (matches the single-assignment AssignmentCard) so both
           // card types look identical when folded into the black header.
           const DC = {
-            card: dark ? 'bg-stone-900 border-stone-700' : 'bg-white border-stone-200',
+            card: dark ? 'bg-slate-900 border-slate-600' : 'bg-white border-stone-200',
             title: dark ? 'text-white' : 'text-stone-900',
             sep: dark ? 'text-stone-500' : 'text-stone-400',
             body: dark ? 'text-stone-200' : 'text-stone-700',
             muted: dark ? 'text-stone-300' : 'text-stone-500',
             chip: dark ? 'bg-stone-200 hover:bg-stone-300 text-stone-900' : 'bg-stone-100 hover:bg-stone-200 text-stone-700',
-            outlineBtn: dark ? 'border-stone-500 hover:bg-stone-700 text-stone-100' : 'border-stone-300 hover:bg-stone-50 text-stone-700',
+            outlineBtn: dark ? 'border-slate-500 hover:bg-slate-700 text-stone-100' : 'border-stone-300 hover:bg-stone-50 text-stone-700',
           };
           return (
             <div key={g.key} className={`p-3 sm:p-4 rounded-xl border ${DC.card}`}>
@@ -29577,13 +29582,13 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
   // "Working on" header. Only the neutral surfaces flip; colored status /
   // priority pills and the action buttons already read fine on dark.
   const D = {
-    card: dark ? 'bg-stone-900 border-stone-700' : 'bg-white border-stone-200',
-    cardDone: dark ? 'bg-stone-900/70 border-stone-700 opacity-90' : 'bg-stone-50 border-stone-200 opacity-90',
+    card: dark ? 'bg-slate-900 border-slate-600' : 'bg-white border-stone-200',
+    cardDone: dark ? 'bg-slate-900/70 border-slate-700 opacity-90' : 'bg-stone-50 border-stone-200 opacity-90',
     title: dark ? 'text-white' : 'text-stone-900',
     sep: dark ? 'text-stone-500' : 'text-stone-400',
     muted: dark ? 'text-stone-300' : 'text-stone-500',
     chip: dark ? 'bg-stone-200 hover:bg-stone-300 text-stone-900' : 'bg-stone-100 hover:bg-stone-200 text-stone-700',
-    outlineBtn: dark ? 'border-stone-500 hover:bg-stone-700 text-stone-100' : 'border-stone-300 hover:bg-stone-50 text-stone-600',
+    outlineBtn: dark ? 'border-slate-500 hover:bg-slate-700 text-stone-100' : 'border-stone-300 hover:bg-stone-50 text-stone-600',
   };
   const s = ASSIGNMENT_STATUSES[t.status] || ASSIGNMENT_STATUSES.pending;
   const isDone = t.status === 'done';

@@ -106,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul18-tap9";
+const BUILD_TAG = "jul18-tap10";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -8633,28 +8633,16 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
           if (decision === 'pause') return onPause();
         }} />
       <div className="bg-stone-900 text-stone-50 px-5 py-5 sticky top-0 z-10 shadow-md">
-        <div className="flex items-center justify-end mb-3 gap-2">
-          {/* The logo up top (with its gold home badge) is the way home now,
-             so the old "tap logo for home" hint here is gone. */}
-          {(onUndo || canMoveBlock) && (
-            <UndoMoveMenu
-              disabled={busy}
-              canUndo={!!onUndo}
-              canMove={!!canMoveBlock}
-              onUndo={onUndo}
-              onMoveBedroom={() => { setMoveMode('bedroom'); setMoveModalOpen(true); }}
-              onMoveWorkblock={() => { setMoveMode('workblock'); setMoveModalOpen(true); }}
-            />
-          )}
-        </div>
+        {/* The "something's wrong" undo/move control now sits on the
+           assignment card below (passed as undoSlot), not floating up here. */}
         <div className="text-xs uppercase tracking-widest text-stone-400 font-mono">Working on</div>
-        <div className="font-serif text-2xl text-stone-50 leading-tight">
-          {block.unit?.label} · <span className="italic text-amber-400">{block.party?.label}</span>
-        </div>
-        {block.party?.full_name && <div className="text-xs text-stone-400 mt-0.5">{block.party.full_name}</div>}
-        {/* Active participants — chips with the OTHER cleaners helping
-           in this block. The current cleaner is implicit. When solo,
-           nothing renders. */}
+        <div className="mt-1 font-mono text-3xl text-stone-50 tracking-tight">{fmtTime(blockElapsed)}</div>
+        {block.work_notes && (
+          <div className="mt-2 px-3 py-2 rounded-lg bg-stone-800 text-stone-300 text-xs italic">"{block.work_notes}"</div>
+        )}
+        {/* Active participants — chips with the OTHER cleaners helping in
+           this block. The current cleaner is implicit. When solo, nothing
+           renders. */}
         {others.length > 0 && (
           <div className="mt-2 flex items-center gap-1.5 flex-wrap">
             <span className="text-[10px] uppercase tracking-wider font-mono text-stone-400">With you:</span>
@@ -8666,40 +8654,25 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
             ))}
           </div>
         )}
-        {/* The "something's wrong" undo/move control moved up into the
-           header's top row (as an undo icon), so it's no longer here. */}
-        {/* Context chip — priority only. The assignment TYPE (e.g. "Cleaning
-           check") used to show here too, but it's already on the assignment
-           card just below, so we dropped the duplicate from the header. */}
-        {bedroomContext.priority && (
-          <div className="mt-2 flex items-center gap-1.5 flex-wrap">
-            <PriorityChip on={bedroomContext.priority} />
-          </div>
-        )}
-        {block.unit?.kind === 'townhome' && (block.unit?.bedrooms != null || block.unit?.bathrooms != null) && (
-          <div className="mt-1.5 flex items-center gap-1.5 flex-wrap">
-            {block.unit.bedrooms != null && (
-              <span className="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full bg-stone-800 text-stone-200 font-mono">
-                {block.unit.bedrooms} bed
-              </span>
-            )}
-            {block.unit.bathrooms != null && (
-              <span className="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full bg-stone-800 text-stone-200 font-mono">
-                {block.unit.bathrooms} bath
-              </span>
-            )}
-          </div>
-        )}
-        <div className="mt-2 font-mono text-xl text-stone-50">{fmtTime(blockElapsed)}</div>
-        {block.work_notes && (
-          <div className="mt-2 px-3 py-2 rounded-lg bg-stone-800 text-stone-300 text-xs italic">"{block.work_notes}"</div>
-        )}
+        {/* The apartment name, priority, bed/bath and cleaning type used to
+           be repeated up here AND on the card below. Since the card is folded
+           into this same dark block now, we show them once — on the card. */}
       </div>
 
       {/* Assignment card, folded into the dark header as one block (dark
          variant). Sits flush under the sticky header so the bedroom info and
          the assignment read as a single dark section. */}
-      <AssignmentBanner propertyId={shift.customer_id} unitId={block.unit_id} partyId={block.party_id} employee={employee} onOpenBedroomHistory={onOpenBedroomHistory} dark />
+      <AssignmentBanner propertyId={shift.customer_id} unitId={block.unit_id} partyId={block.party_id} employee={employee} onOpenBedroomHistory={onOpenBedroomHistory} dark
+        undoSlot={(onUndo || canMoveBlock) ? (
+          <UndoMoveMenu
+            disabled={busy}
+            canUndo={!!onUndo}
+            canMove={!!canMoveBlock}
+            onUndo={onUndo}
+            onMoveBedroom={() => { setMoveMode('bedroom'); setMoveModalOpen(true); }}
+            onMoveWorkblock={() => { setMoveMode('workblock'); setMoveModalOpen(true); }}
+          />
+        ) : null} />
 
       {onOpenBedroomHistory && block.unit?.id && block.party?.id && (
         <div className="px-4 mt-3">
@@ -28970,7 +28943,7 @@ function AssignmentDetail({ property, assignment: assignmentInit, employee, onBa
 //   employee — current user
 //   showDone — if true, includes done assignments
 //   onUpdate — called after any status change so parent can refresh
-function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = false, onUpdate, onOpenBedroomHistory, dark = false }) {
+function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = false, onUpdate, onOpenBedroomHistory, dark = false, undoSlot = null }) {
   const [targets, setTargets] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [opened, setOpened] = useState(null);
@@ -29229,18 +29202,21 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
     <div className={dark
       ? "px-5 pt-1 pb-5 bg-stone-900 border-t border-stone-800"
       : "mx-2 sm:mx-4 mt-4 p-3 sm:p-4 rounded-2xl bg-blue-50 border-2 border-blue-200"}>
-      <button onClick={() => setCollapsed(c => !c)}
-        className={`w-full flex items-center gap-2 active:opacity-80 ${collapsed ? '' : 'mb-3'}`}>
-        <FileText size={16} className={`flex-shrink-0 ${dark ? 'text-amber-400' : 'text-blue-700'}`} />
-        <span className={`text-xs uppercase tracking-wider font-mono flex-1 text-left ${dark ? 'text-stone-300' : 'text-blue-800'}`}>
-          {(() => {
-            const groups = buildGroups(targets);
-            const assignmentCount = groups.length;
-            return `${assignmentCount} assignment${assignmentCount === 1 ? '' : 's'} · ${targets.length} item${targets.length === 1 ? '' : 's'}`;
-          })()}
-        </span>
-        <ChevronRight size={14} className={`transition-transform ${collapsed ? '' : 'rotate-90'} ${dark ? 'text-stone-400' : 'text-blue-700'}`} />
-      </button>
+      <div className={`flex items-center gap-2 ${collapsed ? '' : 'mb-3'}`}>
+        <button onClick={() => setCollapsed(c => !c)}
+          className="flex-1 min-w-0 flex items-center gap-2 active:opacity-80">
+          <FileText size={16} className={`flex-shrink-0 ${dark ? 'text-amber-400' : 'text-blue-700'}`} />
+          <span className={`text-xs uppercase tracking-wider font-mono flex-1 text-left ${dark ? 'text-stone-300' : 'text-blue-800'}`}>
+            {(() => {
+              const groups = buildGroups(targets);
+              const assignmentCount = groups.length;
+              return `${assignmentCount} assignment${assignmentCount === 1 ? '' : 's'} · ${targets.length} item${targets.length === 1 ? '' : 's'}`;
+            })()}
+          </span>
+          <ChevronRight size={14} className={`transition-transform ${collapsed ? '' : 'rotate-90'} ${dark ? 'text-stone-400' : 'text-blue-700'}`} />
+        </button>
+        {dark && undoSlot}
+      </div>
       {!collapsed && (() => {
         const groups = buildGroups(targets);
         // Split priority and non-priority so the visual divider matches
@@ -29274,7 +29250,7 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
               currentEmployeeId={employee?.id}
               canEditDates={can(employee, 'edit_due_dates')}
               onSetDueDate={async (aid, date) => { if (aid) { await supabase.from('assignments').update({ scheduled_date: date }).eq('id', aid); load(); } }}
-            onOpenBedroomHistory={onOpenBedroomHistory} />
+            onOpenBedroomHistory={onOpenBedroomHistory} dark={dark} />
         );
         // Checklist group card: ONE card representing a whole inspection
         // sheet. Shows progress + a View items button. Tapping View
@@ -29571,8 +29547,20 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
 }
 
 // Reusable card for one assignment target, used in banner + panel
-function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPending, onDone, onReopen, onBlocked, onReassign, onGoToBedroom, onOpenBedroomHistory, onTogglePriority, canMarkDone = true, canMarkDoneAlways = false, currentEmployeeId, propertyId, canEditDates = false, onSetDueDate }) {
+function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPending, onDone, onReopen, onBlocked, onReassign, onGoToBedroom, onOpenBedroomHistory, onTogglePriority, canMarkDone = true, canMarkDoneAlways = false, currentEmployeeId, propertyId, canEditDates = false, onSetDueDate, dark = false }) {
   const t = target;
+  // Dark variant — used when this card is folded into the cleaner's black
+  // "Working on" header. Only the neutral surfaces flip; colored status /
+  // priority pills and the action buttons already read fine on dark.
+  const D = {
+    card: dark ? 'bg-stone-800 border-stone-700' : 'bg-white border-stone-200',
+    cardDone: dark ? 'bg-stone-800/60 border-stone-700 opacity-90' : 'bg-stone-50 border-stone-200 opacity-90',
+    title: dark ? 'text-stone-50' : 'text-stone-900',
+    sep: dark ? 'text-stone-500' : 'text-stone-400',
+    muted: dark ? 'text-stone-400' : 'text-stone-500',
+    chip: dark ? 'bg-stone-700 hover:bg-stone-600 text-stone-100' : 'bg-stone-100 hover:bg-stone-200 text-stone-700',
+    outlineBtn: dark ? 'border-stone-600 hover:bg-stone-700 text-stone-200' : 'border-stone-300 hover:bg-stone-50 text-stone-600',
+  };
   const s = ASSIGNMENT_STATUSES[t.status] || ASSIGNMENT_STATUSES.pending;
   const isDone = t.status === 'done';
   const [editingDate, setEditingDate] = useState(false);
@@ -29611,7 +29599,7 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
   }, [t.unit_id, t.party_id, isDone, propertyId, t.status]);
 
   return (
-    <div className={`p-2.5 sm:p-3 rounded-xl border ${isDone ? 'bg-stone-50 border-stone-200 opacity-90' : 'bg-white border-stone-200'}`}>
+    <div className={`p-2.5 sm:p-3 rounded-xl border ${isDone ? D.cardDone : D.card}`}>
       {/* === HEADER ROW =================================================
          On mobile the title takes a full-width row of its own and the
          chip group (priority / status / view doc / history) drops to
@@ -29629,28 +29617,28 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
               // path as the Start / Go to this bedroom buttons).
               // Underline-on-hover hint so it reads as tappable.
               <button onClick={onGoToBedroom} disabled={busy}
-                className="block text-left w-full font-serif text-lg text-stone-900 leading-tight break-words hover:underline disabled:opacity-50">
+                className={`block text-left w-full font-serif text-lg ${D.title} leading-tight break-words hover:underline disabled:opacity-50`}>
                 <span className="font-bold">{t.unit?.label || 'No unit'}</span>
                 {partyDisplay(t.party?.label) && (
                   <>
-                    <span className="text-stone-400 mx-1.5">·</span>
+                    <span className={`${D.sep} mx-1.5`}>·</span>
                     <span className="italic">{partyDisplay(t.party?.label)}</span>
                   </>
                 )}
               </button>
             ) : (
-              <div className="font-serif text-lg text-stone-900 leading-tight break-words">
+              <div className={`font-serif text-lg ${D.title} leading-tight break-words`}>
                 <span className="font-bold">{t.unit?.label || 'No unit'}</span>
                 {partyDisplay(t.party?.label) && (
                   <>
-                    <span className="text-stone-400 mx-1.5">·</span>
+                    <span className={`${D.sep} mx-1.5`}>·</span>
                     <span className="italic">{partyDisplay(t.party?.label)}</span>
                   </>
                 )}
               </div>
             )
           ) : (
-            <div className="font-serif text-lg text-stone-900 font-bold">Whole property</div>
+            <div className={`font-serif text-lg ${D.title} font-bold`}>Whole property</div>
           )}
         </div>
         <div className="flex flex-col sm:flex-row sm:items-center gap-1.5 flex-shrink-0 sm:max-w-[60%]">
@@ -29713,7 +29701,7 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
              priority sits next to status, view doc next to history. */}
           <div className="flex items-center gap-1.5 flex-wrap justify-end">
             <button onClick={onView}
-              className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-100 hover:bg-stone-200 text-stone-700 flex items-center gap-1">
+              className={`text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full ${D.chip} flex items-center gap-1`}>
               <Eye size={10} /> Quick glance
             </button>
             {onOpenBedroomHistory && t.unit_id && t.party_id && (
@@ -29721,7 +29709,7 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
                   unitId: t.unit_id, unitLabel: t.unit?.label,
                   partyId: t.party_id, partyLabel: t.party?.label
                 })} disabled={busy}
-                className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-100 hover:bg-stone-200 text-stone-700 flex items-center gap-1 disabled:opacity-50">
+                className={`text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full ${D.chip} flex items-center gap-1 disabled:opacity-50`}>
                 <Clock size={10} /> History
               </button>
             )}
@@ -29736,11 +29724,11 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
       <div className="mb-2">
         {canGo ? (
           <button onClick={onGoToBedroom} disabled={busy}
-            className="text-left w-full font-serif text-sm text-stone-700 hover:underline disabled:opacity-50">
+            className={`text-left w-full font-serif text-sm ${dark ? 'text-stone-200' : 'text-stone-700'} hover:underline disabled:opacity-50`}>
             {t.assignment?.title}
           </button>
         ) : (
-          <div className="font-serif text-sm text-stone-700">{t.assignment?.title}</div>
+          <div className={`font-serif text-sm ${dark ? 'text-stone-200' : 'text-stone-700'}`}>{t.assignment?.title}</div>
         )}
         {(t.assignment?.assignment_type || (t.assignedTo?.name && !isDone)) && (
           <div className="mt-1 flex items-center gap-1.5 flex-wrap">
@@ -29822,7 +29810,7 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
         )}
         {onMoveToPending && t.status === 'paused' && (
           <button onClick={onMoveToPending} disabled={busy}
-            className="h-9 px-3 rounded-lg border border-stone-300 hover:bg-stone-50 text-stone-700 text-xs font-medium flex items-center gap-1 disabled:opacity-50">
+            className={`h-9 px-3 rounded-lg border ${D.outlineBtn} text-xs font-medium flex items-center gap-1 disabled:opacity-50`}>
             <ArrowLeft size={12} /> Move to pending
           </button>
         )}
@@ -29846,7 +29834,7 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
         })()}
         {(isDone || t.status === 'blocked') && (
           <button onClick={onReopen} disabled={busy}
-            className="h-9 px-3 rounded-lg border border-stone-300 hover:bg-stone-50 text-stone-700 text-xs font-medium flex items-center gap-1 disabled:opacity-50">
+            className={`h-9 px-3 rounded-lg border ${D.outlineBtn} text-xs font-medium flex items-center gap-1 disabled:opacity-50`}>
             <Play size={12} /> Reopen
           </button>
         )}
@@ -29868,7 +29856,7 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
         })()}
         {onReassign && (t.unit_id || t.party_id) && (
           <button onClick={onReassign} disabled={busy}
-            className="h-9 px-3 rounded-lg border border-stone-300 hover:bg-stone-50 text-stone-600 text-xs font-medium flex items-center gap-1 disabled:opacity-50">
+            className={`h-9 px-3 rounded-lg border ${D.outlineBtn} text-xs font-medium flex items-center gap-1 disabled:opacity-50`}>
             <Edit2 size={12} /> Reassign
           </button>
         )}

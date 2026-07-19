@@ -48,7 +48,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul18-ready2";
+const BUILD_TAG = "jul18-switch1";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -3587,6 +3587,47 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     enabled: !!shift && !shift.end_time
   });
 
+  // Switch straight to a specific pending job at ANOTHER property. The
+  // cleaner already told us which job by tapping it — so instead of the
+  // generic "clock out → confirm → pick a property → land generically"
+  // dance, we clock out here, clock into THAT job's property, and open
+  // its bedroom. One tap, no picker.
+  const [pendingBedroomAfterSwitch, setPendingBedroomAfterSwitch] = useState(null);
+  const switchToJob = async (job) => {
+    if (!job?.customerId) { switchProperty(); return; }
+    setBusy(true);
+    if (activeTask) await stopTask(activeTask, false);
+    if (activeBlock && !activeBlock.end_time) {
+      await supabase.from('work_blocks').update({ end_time: new Date().toISOString() }).eq('id', activeBlock.id);
+    }
+    if (shift?.id) await supabase.from('shifts').update({ end_time: new Date().toISOString() }).eq('id', shift.id);
+    setWorkBlocks([]); setActiveBlock(null); setTasks([]); setActiveTask(null);
+    // Clock into the job's property.
+    const { data: prop } = await supabase.from('customers').select('*').eq('id', job.customerId).single();
+    const { data: newShift, error } = await supabase.from('shifts').insert({
+      employee_id: employee.id, customer_id: job.customerId,
+      bill_rate_at_work: prop?.property_type === 'simple'
+        ? (prop?.bill_mode === 'hourly' ? prop?.bill_rate_hourly : prop?.flat_rate_amount) : null,
+      is_preview: previewMode,
+    }).select('*, customer:customers(*)').single();
+    setBusy(false);
+    if (error) { alert('Could not switch: ' + error.message); return; }
+    setShift(newShift); setClockInFlow(null);
+    // Queue the bedroom so we land on its ready-to-start screen.
+    if (job.unitId && job.partyId) {
+      setPendingBedroomAfterSwitch({ unit_id: job.unitId, party_id: job.partyId });
+    }
+  };
+  // Once the new shift is live, open the queued bedroom's ready-to-start.
+  useEffect(() => {
+    if (pendingBedroomAfterSwitch && shift?.id) {
+      const target = pendingBedroomAfterSwitch;
+      setPendingBedroomAfterSwitch(null);
+      goToBedroomForTarget(target);
+    }
+    // eslint-disable-next-line
+  }, [shift?.id, pendingBedroomAfterSwitch]);
+
   // Switch property = clock out current shift, then drop straight on the property picker.
   // Cleaner break than clock-out → home → clock-in.
   const switchProperty = async () => {
@@ -5052,7 +5093,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   }
   if (isMulti && (!activeBlock || cleanerTab !== 'home')) {
     return withIdleModal(<PropertyHub shift={shift} workBlocks={workBlocks} employeeName={employee.name} employee={employee}
-      onSignOut={signOutWithCleanup} onClockOut={clockOut} onSwitchProperty={switchProperty}
+      onSignOut={signOutWithCleanup} onClockOut={clockOut} onSwitchProperty={switchProperty} onSwitchToJob={switchToJob}
       onStartNew={startNewBlock} onReopen={reopenBlock} onEndBlock={endBlock} onGoToBedroom={goToBedroomForTarget}
       onOpenMessages={() => setShowMessages(true)}
       onOpenChangePin={() => setShowChangePin(true)}
@@ -6619,7 +6660,7 @@ function AssignmentWorkHistory({ propertyId, unitId, partyId, employee, defaultO
 // across EVERY property, so they see their whole day. Same-property
 // jobs start the clean directly; other-property jobs offer to switch.
 // =================================================================
-function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchProperty, onStartJob }) {
+function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchProperty, onSwitchToJob, onStartJob }) {
   const [sub, setSub] = useState('mine'); // 'mine' | 'all'
   const [jobs, setJobs] = useState([]);
   const [team, setTeam] = useState([]);
@@ -6633,6 +6674,7 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
   const canEditDates = can(employee, 'edit_due_dates');
   const [editDueId, setEditDueId] = useState(null);
   const [peekJob, setPeekJob] = useState(null); // read-only quick glance
+  const [collapsedDates, setCollapsedDates] = useState(new Set()); // date-group keys that are collapsed
   const saveDue = async (j, date) => {
     setEditDueId(null); setBusyId(j.id);
     const { data, error } = await supabase.from('assignments')
@@ -6768,7 +6810,7 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
     return out;
   })();
   const sectionLabel = (d) => {
-    if (!d) return 'No date set';
+    if (!d) return 'No date assigned';
     if (d < todayKey) return `Overdue · ${fmtDueDate(d)}`;
     if (d === todayKey) return `Today · ${fmtDueDate(d)}`;
     if (d === tomorrowKey) return `Tomorrow · ${fmtDueDate(d)}`;
@@ -6785,7 +6827,8 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
     // Not clocked in yet → tapping a job clocks into its property and opens it.
     if (onStartJob) { onStartJob(j); return; }
     if (j.customerId === currentPropertyId) onGoToBedroom && onGoToBedroom({ unit_id: j.unitId, party_id: j.partyId });
-    else onSwitchProperty && onSwitchProperty();
+    else if (onSwitchToJob) onSwitchToJob(j);       // direct: clock into THIS job's property + open it
+    else onSwitchProperty && onSwitchProperty();     // fallback: generic picker
   };
 
   return (
@@ -6800,14 +6843,22 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
         <div className="text-center py-10 text-stone-400 text-sm">{sub === 'mine' ? 'Nothing assigned to you right now. 🎉' : 'No open assignments.'}</div>
       ) : (
         <div className="pb-4">
-          {dateSections.map(sec => (
+          {dateSections.map(sec => {
+            const isCollapsed = collapsedDates.has(sec.key);
+            return (
             <div key={sec.key} className="mb-5">
-              {/* Date header — the list is grouped soonest-first. */}
-              <div className={`flex items-center gap-2 mb-2 px-3 py-1.5 rounded-lg border-l-4 ${
-                !sec.date ? 'border-stone-300 bg-stone-100'
-                : sec.date < todayKey ? 'border-red-500 bg-red-50'
-                : sec.date === todayKey ? 'border-emerald-500 bg-emerald-50'
-                : 'border-stone-400 bg-stone-100'}`}>
+              {/* Date header — tap to collapse/expand its jobs. */}
+              <button onClick={() => setCollapsedDates(prev => {
+                  const next = new Set(prev);
+                  if (next.has(sec.key)) next.delete(sec.key); else next.add(sec.key);
+                  return next;
+                })}
+                className={`w-full flex items-center gap-2 mb-2 px-3 py-1.5 rounded-lg border-l-4 active:scale-[0.99] transition ${
+                !sec.date ? 'border-stone-300 bg-stone-100 hover:bg-stone-200'
+                : sec.date < todayKey ? 'border-red-500 bg-red-50 hover:bg-red-100'
+                : sec.date === todayKey ? 'border-emerald-500 bg-emerald-50 hover:bg-emerald-100'
+                : 'border-stone-400 bg-stone-100 hover:bg-stone-200'}`}>
+                <ChevronRight size={13} className={`flex-shrink-0 transition-transform ${isCollapsed ? '' : 'rotate-90'} ${sec.date && sec.date < todayKey ? 'text-red-600' : sec.date === todayKey ? 'text-emerald-700' : 'text-stone-500'}`} />
                 <Calendar size={13} className={sec.date && sec.date < todayKey ? 'text-red-600' : sec.date === todayKey ? 'text-emerald-700' : 'text-stone-500'} />
                 <span className={`text-xs uppercase tracking-wider font-mono font-bold ${sectionTone(sec.date)}`}>
                   {sectionLabel(sec.date)}
@@ -6815,7 +6866,8 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
                 <span className="text-[10px] font-mono text-stone-500 ml-auto flex-shrink-0">
                   {sec.jobs.length} {sec.jobs.length === 1 ? 'job' : 'jobs'}
                 </span>
-              </div>
+              </button>
+              {!isCollapsed && (
               <div className="space-y-2">
           {sec.jobs.map(j => {
             const here = j.customerId === currentPropertyId;
@@ -6823,9 +6875,11 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
             return (
               <div key={j.id} className="p-3.5 rounded-2xl bg-white border border-stone-200">
                 <div className="flex items-start gap-2">
-                <button onClick={() => openJob(j)} className="flex-1 min-w-0 text-left">
+                <button onClick={() => openJob(j)}
+                  title={here ? 'Open this job' : 'Switch to this job'}
+                  className="flex-1 min-w-0 text-left rounded-xl -m-1 p-1 hover:bg-stone-50 active:scale-[0.99] transition group">
                   <div className="flex items-center justify-between gap-2">
-                    <span className="font-serif text-lg text-stone-900 truncate">{unitPartyLabel(j.unitLabel, j.partyLabel) || 'Job'}</span>
+                    <span className="font-serif text-lg text-stone-900 truncate group-hover:underline decoration-stone-300 underline-offset-2">{unitPartyLabel(j.unitLabel, j.partyLabel) || 'Job'}</span>
                     <span className="flex items-center gap-1 flex-shrink-0">
                       {/* Size — a cleaner needs to know if it's a 1x1 or a 3x2
                          BEFORE they drive there, same as the owner cards show. */}
@@ -6835,6 +6889,7 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
                         </span>
                       )}
                       {mine && <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700">Yours</span>}
+                      <ChevronRight size={15} className="text-stone-300 group-hover:text-stone-500 flex-shrink-0" />
                     </span>
                   </div>
                   <div className="text-xs text-stone-500 font-mono mt-0.5 flex items-center gap-1">
@@ -6937,8 +6992,10 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
             );
           })}
               </div>
+              )}
             </div>
-          ))}
+            );
+          })}
         </div>
       )}
       {peekJob && (
@@ -7015,7 +7072,7 @@ function CleanerPropertiesList({ currentPropertyId, employee, onOpenCurrent, onS
   );
 }
 
-function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onClockOut, onSwitchProperty, onStartNew, onReopen, onEndBlock, onGoToBedroom, onOpenMessages, onOpenChangePin, onOpenBedroomHistory, onJoinBlock, onUndoBlock, onMoveBlock, cleanerTab: cleanerTabProp, setCleanerTab: setCleanerTabProp, busy }) {
+function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onClockOut, onSwitchProperty, onSwitchToJob, onStartNew, onReopen, onEndBlock, onGoToBedroom, onOpenMessages, onOpenChangePin, onOpenBedroomHistory, onJoinBlock, onUndoBlock, onMoveBlock, cleanerTab: cleanerTabProp, setCleanerTab: setCleanerTabProp, busy }) {
   const [showMenu, setShowMenu] = useState(false);
   const [showAssignmentForm, setShowAssignmentForm] = useState(false);
   const [showProps, setShowProps] = useState(false); // Properties browser in More
@@ -7166,8 +7223,7 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
           )}
 
           <CleanerWorkList employee={employee} currentPropertyId={shift.customer_id}
-            onGoToBedroom={onGoToBedroom} onSwitchProperty={onSwitchProperty} />
-
+            onGoToBedroom={onGoToBedroom} onSwitchProperty={onSwitchProperty} onSwitchToJob={onSwitchToJob} />
           {false && (<>
           {homeView === 'today' && (
             <TodayApartmentsCard full propertyId={shift.customer_id} onGoToBedroom={onGoToBedroom} />
@@ -7882,6 +7938,13 @@ function PreparingBlockView({ shift, pendingStart, employeeName, employee,
           </div>
         </div>
         <div className="text-xs uppercase tracking-widest text-amber-400 font-mono">Ready to start</div>
+        {/* Property name, prominent — so a cleaner who just switched here
+           knows exactly which property they're at. */}
+        {shift?.customer?.name && (
+          <div className="flex items-center gap-1.5 text-sm text-amber-300 font-mono mt-0.5 mb-1">
+            <Building2 size={13} /> {shift.customer.name}
+          </div>
+        )}
         <div className="font-serif text-2xl text-stone-50 leading-tight">
           {pendingStart.unitLabel}
           {partyDisplay(pendingStart.partyLabel) && <> · <span className="italic text-amber-400">{partyDisplay(pendingStart.partyLabel)}</span></>}
@@ -10559,7 +10622,7 @@ function ManagerShell({ employee, onSignOut }) {
                 <TabButton tone="ops" active={tab==='daily'}         onClick={() => setTab('daily')}          icon={<Calendar size={18} />}        label="Daily" />
                 <TabButton tone="ops" active={tab==='assignments'}   onClick={() => setTab('assignments')}    icon={<FileText size={18} />}        label="Assignments" />
                 <TabButton tone="ops" active={tab==='dashboard'}     onClick={() => setTab('dashboard')}      icon={<LayoutDashboard size={18} />} label="Shifts" />
-                <TabButton tone="ops" active={false}                 onClick={() => setPreviewMode(true)}     icon={<Eye size={18} />}             label="Clean" />
+                <TabButton tone="ops" active={false}                 onClick={() => setPreviewMode(true)}     icon={<Eye size={18} />}             label="Cleaner view" />
               </div>
             ) : (
               <div className="grid gap-0.5" style={{ gridTemplateColumns: `repeat(${showMoneyTabs ? 4 : 3}, minmax(0, 1fr))` }}>
@@ -14547,7 +14610,8 @@ function UnitList({ property, employee, onBack, onEditProperty, onUnitOpen, onUn
                     </div>
                   </button>
                   <div className="px-4 pb-3 pt-0">
-                    <button onClick={() => onUnitEdit(u)} className="text-xs font-mono text-stone-500 hover:text-stone-900 flex items-center gap-1">
+                    <button onClick={() => onUnitEdit(u)}
+                      className="text-xs font-mono text-stone-600 hover:text-stone-900 flex items-center gap-1 px-2.5 py-1 rounded-lg border border-stone-200 hover:border-stone-400 hover:bg-stone-50 active:scale-95 transition">
                       <Edit2 size={11} /> Edit unit
                     </button>
                   </div>
@@ -28656,6 +28720,13 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
           const statusPill = ASSIGNMENT_STATUSES[dominantStatus] || ASSIGNMENT_STATUSES.pending;
           // Item-level rows the cleaner can act on in BULK
           const openItems = items.filter(i => i.status !== 'done');
+          // On the ready-to-start screen the big "Start cleaning" button
+          // above is the real start action. If NOTHING here is started
+          // yet, Mark complete / Block don't apply — grey them out until
+          // the cleaner starts (owners with mark_assignments_done keep
+          // them live). Matches the single-card gating.
+          const allPending = openItems.length > 0 && openItems.every(i => i.status === 'pending');
+          const bundleGated = allPending && !can(employee, 'mark_assignments_done');
           return (
             <div key={g.key} className="p-3 sm:p-4 rounded-xl bg-white border border-stone-200">
               {/* === HEADER: bedroom title + chips on right ===
@@ -28826,9 +28897,12 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
                   </button>
                 )}
                 {!isAllDone && (
-                  <button onClick={() => setStatusModal({ target: rep, bulkRows: openItems })} disabled={busy}
-                    className="h-9 px-3 rounded-lg border border-red-200 hover:bg-red-50 text-red-700 text-xs font-medium flex items-center gap-1 disabled:opacity-50">
-                    <AlertCircle size={12} /> Blocked
+                  <button onClick={() => setStatusModal({ target: rep, bulkRows: openItems })} disabled={busy || bundleGated}
+                    title={bundleGated ? 'Start cleaning before marking blocked' : ''}
+                    className={`h-9 px-3 rounded-lg text-xs font-medium flex items-center gap-1 border ${bundleGated
+                      ? 'bg-stone-100 border-stone-200 text-stone-400 cursor-not-allowed'
+                      : 'border-red-200 hover:bg-red-50 text-red-700 disabled:opacity-50'}`}>
+                    <AlertCircle size={12} /> Block
                   </button>
                 )}
                 {!isAllDone && (
@@ -29179,12 +29253,22 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
             <Play size={12} /> Reopen
           </button>
         )}
-        {(t.status === 'pending' || t.status === 'in_progress' || t.status === 'paused') && (
-          <button onClick={onBlocked} disabled={busy}
-            className="h-9 px-3 rounded-lg border border-red-200 hover:bg-red-50 text-red-700 text-xs font-medium flex items-center gap-1 disabled:opacity-50">
-            <AlertCircle size={12} /> Blocked
-          </button>
-        )}
+        {(t.status === 'pending' || t.status === 'in_progress' || t.status === 'paused') && (() => {
+          // Same rule as Mark complete: you can't block work you haven't
+          // started. Keep the button visible but greyed on pending so the
+          // cleaner sees it exists — owners/managers (mark_assignments_done)
+          // can block without starting, so never disabled for them.
+          const blockDisabled = t.status === 'pending' && !canMarkDoneAlways;
+          return (
+            <button onClick={onBlocked} disabled={busy || blockDisabled}
+              title={blockDisabled ? 'Start this assignment before marking it blocked' : ''}
+              className={`h-9 px-3 rounded-lg text-xs font-medium flex items-center gap-1 border ${blockDisabled
+                ? 'bg-stone-100 border-stone-200 text-stone-400 cursor-not-allowed'
+                : 'border-red-200 hover:bg-red-50 text-red-700 disabled:opacity-50'}`}>
+              <AlertCircle size={12} /> Block
+            </button>
+          );
+        })()}
         {onReassign && (t.unit_id || t.party_id) && (
           <button onClick={onReassign} disabled={busy}
             className="h-9 px-3 rounded-lg border border-stone-300 hover:bg-stone-50 text-stone-600 text-xs font-medium flex items-center gap-1 disabled:opacity-50">
@@ -29766,7 +29850,7 @@ function SuggestedTabContent({ propertyId, employee, onGoToBedroom, onOpenBedroo
           )}
           <button onClick={() => setStatusModal({ target: rep, bulkRows: items })} disabled={busy}
             className="h-9 px-3 rounded-lg border border-red-200 hover:bg-red-50 text-red-700 text-xs font-medium flex items-center gap-1 disabled:opacity-50">
-            <AlertCircle size={12} /> Blocked
+            <AlertCircle size={12} /> Block
           </button>
           <button onClick={() => setReassignTarget(rep)} disabled={busy}
             className="h-9 px-3 rounded-lg border border-stone-300 hover:bg-stone-50 text-stone-700 text-xs font-medium flex items-center gap-1 disabled:opacity-50">
@@ -30967,7 +31051,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                             {!allDone && (
                               <button onClick={() => setStatusModal({ target: firstTarget, bulkRows: newItems })} disabled={busy}
                                 className="h-9 px-3 rounded-lg border border-red-200 hover:bg-red-50 text-red-700 text-xs font-medium flex items-center gap-1 disabled:opacity-50">
-                                <AlertCircle size={12} /> Blocked
+                                <AlertCircle size={12} /> Block
                               </button>
                             )}
                             {!allDone && (

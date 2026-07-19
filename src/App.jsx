@@ -106,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul18-tap5";
+const BUILD_TAG = "jul18-tap7";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -992,6 +992,10 @@ function RootRouter() {
 
 function StaffApp() {
   const [session, setSession] = useState(null);
+  // Supply-checklist gate: shown once right after a fresh PIN sign-in for
+  // cleaners. Defaults true so an auto-login / page refresh doesn't re-gate
+  // someone mid-shift — only a real PIN entry flips it to false below.
+  const [supplyConfirmed, setSupplyConfirmed] = useState(true);
   const [loaded, setLoaded] = useState(false);
   const [configError, setConfigError] = useState(false);
 
@@ -1023,6 +1027,7 @@ function StaffApp() {
         try { localStorage.setItem('tidytrack_locale', employee.locale); } catch {}
       }
       await sessionStore.set({ employeeId: employee.id });
+      setSupplyConfirmed(false); // fresh PIN login → show the supply checklist
       setSession({ employee });
     }} />;
   }
@@ -1036,6 +1041,12 @@ function StaffApp() {
   }
   if (session.employee.role === 'manager' || session.employee.role === 'owner') {
     return <ManagerShell employee={session.employee} onSignOut={signOut} />;
+  }
+  // Cleaner path — gated by the supply checklist right after a fresh PIN
+  // sign-in. The gate skips itself if there are no items (or on any load
+  // error), so it never traps a cleaner.
+  if (!supplyConfirmed) {
+    return <SupplyChecklistGate employee={session.employee} onDone={() => setSupplyConfirmed(true)} onSignOut={signOut} />;
   }
   return <EmployeeApp employee={session.employee} onSignOut={signOut} />;
 }
@@ -1801,6 +1812,180 @@ const splitTaskName = (name) => {
 //   address: the raw address string
 //   icon: 'pin' (default) | 'none'
 //   className: extra classes to apply
+// =================================================================
+// SUPPLY CHECKLIST — the gate a cleaner sees right after entering their
+// PIN. They tick every supply item, then type their name to confirm they
+// gathered everything, before they reach their jobs. Items are owner-managed
+// (supply_checklist_items); each sign-off is recorded
+// (supply_checklist_confirmations).
+// =================================================================
+function SupplyChecklistGate({ employee, onDone, onSignOut }) {
+  const [items, setItems] = useState(null); // null = still loading
+  const [checked, setChecked] = useState({});
+  const [name, setName] = useState(employee?.name || '');
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const { data, error } = await supabase
+        .from('supply_checklist_items')
+        .select('id, label')
+        .eq('active', true);
+      if (cancelled) return;
+      // On any error (e.g. table not created yet) don't block the cleaner.
+      if (error) { console.warn('[supply] load failed', error); onDone(); return; }
+      const list = (data || []).slice().sort((a, b) =>
+        a.label.localeCompare(b.label, undefined, { sensitivity: 'base' }));
+      if (list.length === 0) { onDone(); return; } // nothing to confirm
+      setItems(list);
+    })();
+    return () => { cancelled = true; };
+    /* eslint-disable-next-line */
+  }, []);
+
+  if (items === null) return <Splash text="Loading…" />;
+
+  const remaining = items.filter(it => !checked[it.id]).length;
+  const allChecked = remaining === 0;
+  const canConfirm = allChecked && name.trim().length > 0 && !busy;
+
+  const confirm = async () => {
+    if (!canConfirm) return;
+    setBusy(true);
+    try {
+      await supabase.from('supply_checklist_confirmations').insert({
+        employee_id: employee?.id || null,
+        confirmed_name: name.trim(),
+      });
+    } catch (e) { console.warn('[supply] confirm save failed', e); }
+    setBusy(false);
+    onDone();
+  };
+
+  return (
+    <div className="min-h-screen bg-stone-50 flex flex-col">
+      <div className="bg-stone-900 text-stone-50 px-5 py-5">
+        <div className="text-xs uppercase tracking-widest text-stone-400 font-mono">Before you start</div>
+        <div className="font-serif text-2xl mt-0.5">Supply checklist</div>
+        <div className="text-sm text-stone-300 mt-1">Grab everything on this list, tick each one, then type your name to confirm.</div>
+      </div>
+      <div className="flex-1 overflow-y-auto px-4 py-4 space-y-2">
+        {items.map(it => {
+          const on = !!checked[it.id];
+          return (
+            <button key={it.id} onClick={() => setChecked(c => ({ ...c, [it.id]: !c[it.id] }))}
+              className={`w-full flex items-center gap-3 p-4 rounded-2xl border-2 text-left active:scale-[0.99] transition ${on ? 'bg-emerald-50 border-emerald-300' : 'bg-white border-stone-200'}`}>
+              <span className={`w-6 h-6 rounded-lg flex items-center justify-center flex-shrink-0 border-2 ${on ? 'bg-emerald-600 border-emerald-600 text-white' : 'bg-white border-stone-300'}`}>
+                {on && <Check size={16} />}
+              </span>
+              <span className={`font-serif text-lg ${on ? 'text-emerald-900 line-through decoration-emerald-400' : 'text-stone-900'}`}>{it.label}</span>
+            </button>
+          );
+        })}
+      </div>
+      <div className="border-t border-stone-200 bg-white px-4 py-4 space-y-3">
+        <div className="text-xs font-mono text-stone-500 text-center">
+          {remaining > 0 ? `${remaining} item${remaining === 1 ? '' : 's'} left to check` : 'All items checked ✓'}
+        </div>
+        <input type="text" value={name} onChange={(e) => setName(e.target.value)}
+          placeholder="Type your name to confirm"
+          className="w-full px-4 py-3 rounded-xl border-2 border-stone-300 focus:outline-none focus:border-stone-900 text-stone-900" />
+        <button onClick={confirm} disabled={!canConfirm}
+          className="w-full py-4 rounded-2xl bg-stone-900 text-stone-50 text-base font-bold disabled:opacity-40 active:scale-98 transition-transform">
+          {busy ? 'Saving…' : 'I have everything — continue'}
+        </button>
+        {onSignOut && (
+          <button onClick={onSignOut} className="w-full text-center text-xs text-stone-400 font-mono py-1">Not you? Sign out</button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// =================================================================
+// SupplyChecklistManager — owner admin for the supply checklist. Add
+// items (they save and slot in alphabetically) or remove them. Opened
+// from the owner's ⋯ menu. One shared list across all properties.
+// =================================================================
+function SupplyChecklistManager({ onClose }) {
+  const [items, setItems] = useState([]);
+  const [loaded, setLoaded] = useState(false);
+  const [newLabel, setNewLabel] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const load = async () => {
+    const { data, error } = await supabase.from('supply_checklist_items').select('id, label').eq('active', true);
+    if (error) console.warn('[supply-admin] load failed', error);
+    const list = (data || []).slice().sort((a, b) =>
+      a.label.localeCompare(b.label, undefined, { sensitivity: 'base' }));
+    setItems(list);
+    setLoaded(true);
+  };
+  useEffect(() => { load(); }, []);
+
+  const addItem = async () => {
+    const label = newLabel.trim();
+    if (!label || busy) return;
+    setBusy(true);
+    const { error } = await supabase.from('supply_checklist_items').insert({ label });
+    setBusy(false);
+    if (error) { alert('Could not add: ' + error.message); return; }
+    setNewLabel('');
+    load();
+  };
+
+  const removeItem = async (id, label) => {
+    if (!confirm(`Remove "${label}" from the supply checklist?`)) return;
+    const { error } = await supabase.from('supply_checklist_items').update({ active: false }).eq('id', id);
+    if (error) { alert('Could not remove: ' + error.message); return; }
+    load();
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/40 flex items-end sm:items-center justify-center" onClick={onClose}>
+      <div className="bg-stone-50 w-full sm:max-w-lg sm:rounded-3xl rounded-t-3xl max-h-[90vh] flex flex-col" onClick={e => e.stopPropagation()}>
+        <div className="px-5 py-4 border-b border-stone-200 flex items-start justify-between gap-3">
+          <div>
+            <div className="text-xs uppercase tracking-widest text-stone-400 font-mono">Admin</div>
+            <div className="font-serif text-xl text-stone-900">Supply checklist</div>
+            <div className="text-xs text-stone-500 mt-0.5">Every cleaner confirms this after signing in. Same list for all properties.</div>
+          </div>
+          <button onClick={onClose} className="p-1.5 rounded-full hover:bg-stone-200 text-stone-500 flex-shrink-0"><X size={20} /></button>
+        </div>
+        <div className="px-5 py-3 border-b border-stone-200 flex gap-2">
+          <input type="text" value={newLabel} onChange={e => setNewLabel(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && addItem()}
+            placeholder="Add an item…"
+            className="flex-1 px-4 py-2.5 rounded-xl border border-stone-300 focus:outline-none focus:border-stone-900 text-stone-900" />
+          <button onClick={addItem} disabled={!newLabel.trim() || busy}
+            className="px-4 rounded-xl bg-stone-900 text-stone-50 disabled:opacity-40 active:scale-95 transition-transform flex items-center gap-1">
+            <Plus size={18} /> Add
+          </button>
+        </div>
+        <div className="flex-1 overflow-y-auto px-5 py-3 space-y-1.5">
+          {!loaded ? (
+            <div className="text-center py-8 text-stone-400 text-sm">Loading…</div>
+          ) : items.length === 0 ? (
+            <div className="text-center py-8 text-stone-400 text-sm">No items yet. Add your first above.</div>
+          ) : items.map(it => (
+            <div key={it.id} className="flex items-center justify-between gap-2 p-3 rounded-xl bg-white border border-stone-200">
+              <span className="font-serif text-base text-stone-900">{it.label}</span>
+              <button onClick={() => removeItem(it.id, it.label)}
+                className="p-1.5 rounded-lg text-red-600 hover:bg-red-50 active:scale-95" title="Remove">
+                <Trash2 size={16} />
+              </button>
+            </div>
+          ))}
+        </div>
+        <div className="px-5 py-3 border-t border-stone-200 text-center text-[10px] font-mono text-stone-400">
+          {items.length} item{items.length === 1 ? '' : 's'} · sorted A→Z automatically
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // =================================================================
 function AddressLink({ address, icon = 'pin', className = '' }) {
   if (!address) return null;
@@ -8450,7 +8635,10 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
         )}
       </div>
 
-      <AssignmentBanner propertyId={shift.customer_id} unitId={block.unit_id} partyId={block.party_id} employee={employee} onOpenBedroomHistory={onOpenBedroomHistory} />
+      {/* Assignment card, folded into the dark header as one block (dark
+         variant). Sits flush under the sticky header so the bedroom info and
+         the assignment read as a single dark section. */}
+      <AssignmentBanner propertyId={shift.customer_id} unitId={block.unit_id} partyId={block.party_id} employee={employee} onOpenBedroomHistory={onOpenBedroomHistory} dark />
 
       {onOpenBedroomHistory && block.unit?.id && block.party?.id && (
         <div className="px-4 mt-3">
@@ -10597,16 +10785,15 @@ function Header({ name, onSignOut, role, employee, onOpenMessages, onLogoClick, 
 
   const logoBlock = (
     <div className="flex items-center gap-3">
-      {/* Logo sits on a cream chip so it stays visible on the steel-blue
-         header (it was invisible on black), with a small gold HOME badge so
-         it's obvious that tapping the logo takes you home. */}
-      <div className="relative rounded-xl p-1.5 shrink-0" style={{ backgroundColor: '#FAF8F4' }}>
+      {/* Logo directly on the header (no chip), with a small gold HOME badge
+         so it's obvious that tapping the logo takes you home. */}
+      <div className="relative shrink-0">
         <img
           src="https://bbaynvqnbkjyqhzhhypr.supabase.co/storage/v1/object/public/brand/unnamed%20(2).png"
           alt="Summit Clean"
-          className="h-8 w-auto object-contain"
+          className="h-10 w-auto object-contain"
         />
-        <span className="absolute -bottom-1.5 -right-1.5 w-5 h-5 rounded-full bg-amber-500 text-stone-900 flex items-center justify-center border-2 shadow-sm" style={{ borderColor: '#3E5C76' }}>
+        <span className="absolute -bottom-1 -right-1.5 w-5 h-5 rounded-full bg-amber-500 text-stone-900 flex items-center justify-center border-2 shadow-sm" style={{ borderColor: '#3E5C76' }}>
           <Home size={11} />
         </span>
       </div>
@@ -10655,14 +10842,8 @@ function Header({ name, onSignOut, role, employee, onOpenMessages, onLogoClick, 
           title="Home">
           {logoBlock}
         </button>
-        {/* Owner-only "Preview as cleaner" — sits by the logo. */}
-        {previewCtx && previewCtx.isOwner && previewCtx.onPreview && (
-          <button onClick={previewCtx.onPreview}
-            className="ml-1 px-2 py-1.5 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-50 text-[11px] font-mono flex items-center gap-1.5 active:scale-95 transition-transform"
-            title="Preview as cleaner">
-            <Eye size={12} /> <span className="hidden sm:inline">Preview</span>
-          </button>
-        )}
+        {/* The owner "Preview as cleaner" button used to sit here, but it now
+           lives in the bottom nav, so it's removed from the header. */}
       </div>
       <div className="flex items-center gap-2" data-no-translate>
         {/* Everything that used to sit as separate icons (language, messages,
@@ -23316,6 +23497,8 @@ function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenAssi
   const [inboxCounts, setInboxCounts] = useState({ pendingAssignments: 0, pendingRechecks: 0, newPhotos: 0 });
   // Owner-only modal for managing Spanish label overrides across properties.
   const [showOverrides, setShowOverrides] = useState(false);
+  // Owner admin for the supply checklist cleaners confirm at sign-in.
+  const [showSupplyChecklist, setShowSupplyChecklist] = useState(false);
   // Beta-gated demo view. Only mounts when isBetaFeaturesEnabled
   // returns true (beta tester logged in + currently in BETA view).
   const [showActivityTimeline, setShowActivityTimeline] = useState(false);
@@ -23440,6 +23623,7 @@ function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenAssi
           ...(onOpenAssignedVsCleaned ? [{ icon: <Eye size={18} />, label: 'Assigned vs cleaned', onClick: onOpenAssignedVsCleaned }] : []),
           ...(betaEnabled ? [{ icon: <Clock size={18} />, label: 'Activity timeline', onClick: () => setShowActivityTimeline(true) }] : []),
           { icon: <Languages size={18} />, label: 'Label overrides', onClick: () => setShowOverrides(true) },
+          { icon: <ClipboardList size={18} />, label: 'Supply checklist', onClick: () => setShowSupplyChecklist(true) },
         ]} />
       <div className="px-5 pt-6">
         {inboxTotal > 0 && (
@@ -23561,6 +23745,9 @@ function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenAssi
         <TranslationOverridesModal
           employee={employee}
           onClose={() => setShowOverrides(false)} />
+      )}
+      {showSupplyChecklist && (
+        <SupplyChecklistManager onClose={() => setShowSupplyChecklist(false)} />
       )}
       {showActivityTimeline && (
         <ActivityTimelineView
@@ -28668,7 +28855,7 @@ function AssignmentDetail({ property, assignment: assignmentInit, employee, onBa
 //   employee — current user
 //   showDone — if true, includes done assignments
 //   onUpdate — called after any status change so parent can refresh
-function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = false, onUpdate, onOpenBedroomHistory }) {
+function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = false, onUpdate, onOpenBedroomHistory, dark = false }) {
   const [targets, setTargets] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [opened, setOpened] = useState(null);
@@ -28924,18 +29111,20 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
   };
 
   return (
-    <div className="mx-2 sm:mx-4 mt-4 p-3 sm:p-4 rounded-2xl bg-blue-50 border-2 border-blue-200">
+    <div className={dark
+      ? "px-5 pt-1 pb-5 bg-stone-900 border-t border-stone-800"
+      : "mx-2 sm:mx-4 mt-4 p-3 sm:p-4 rounded-2xl bg-blue-50 border-2 border-blue-200"}>
       <button onClick={() => setCollapsed(c => !c)}
         className={`w-full flex items-center gap-2 active:opacity-80 ${collapsed ? '' : 'mb-3'}`}>
-        <FileText size={16} className="text-blue-700 flex-shrink-0" />
-        <span className="text-xs uppercase tracking-wider text-blue-800 font-mono flex-1 text-left">
+        <FileText size={16} className={`flex-shrink-0 ${dark ? 'text-amber-400' : 'text-blue-700'}`} />
+        <span className={`text-xs uppercase tracking-wider font-mono flex-1 text-left ${dark ? 'text-stone-300' : 'text-blue-800'}`}>
           {(() => {
             const groups = buildGroups(targets);
             const assignmentCount = groups.length;
             return `${assignmentCount} assignment${assignmentCount === 1 ? '' : 's'} · ${targets.length} item${targets.length === 1 ? '' : 's'}`;
           })()}
         </span>
-        <ChevronRight size={14} className={`text-blue-700 transition-transform ${collapsed ? '' : 'rotate-90'}`} />
+        <ChevronRight size={14} className={`transition-transform ${collapsed ? '' : 'rotate-90'} ${dark ? 'text-stone-400' : 'text-blue-700'}`} />
       </button>
       {!collapsed && (() => {
         const groups = buildGroups(targets);

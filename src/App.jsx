@@ -106,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul18-tap7";
+const BUILD_TAG = "jul18-tap8";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -23386,6 +23386,24 @@ function TranslationOverridesModal({ employee, onClose }) {
     setRows(prev => prev.filter(r => r.id !== row.id));
   };
 
+  // Inline editing — the owner can rewrite an override's label directly
+  // (previously the only option was Revert, which threw the edit away).
+  const [editId, setEditId] = useState(null);
+  const [editVal, setEditVal] = useState('');
+  const saveEdit = async (row) => {
+    const label = editVal.trim();
+    if (!label || busy) return;
+    setBusy(true);
+    const now = new Date().toISOString();
+    const { error } = await supabase.from('item_label_overrides')
+      .update({ label, edited_by: employee?.id || null, edited_at: now })
+      .eq('id', row.id);
+    setBusy(false);
+    if (error) { alert('Could not save: ' + error.message); return; }
+    setRows(prev => prev.map(r => r.id === row.id ? { ...r, label, edited_at: now } : r));
+    setEditId(null);
+  };
+
   // Derive default Spanish label (from the static dictionary) so the
   // owner can see what we'd fall back to after a revert.
   const dictionaryLabelFor = (key) => PICKER_ES?.[key] || null;
@@ -23460,11 +23478,22 @@ function TranslationOverridesModal({ employee, onClose }) {
                       <div key={r.id} className="px-4 py-3 flex items-start gap-3">
                         <div className="flex-1 min-w-0">
                           <div className="text-[10px] font-mono text-stone-500 mb-0.5 truncate">{r.template_item_key}</div>
-                          <div className="text-sm text-stone-900 truncate">
-                            <span className="text-stone-500">{enLabel}</span>
-                            <span className="text-stone-300 mx-1.5">→</span>
-                            <span className="font-medium">{r.label}</span>
-                          </div>
+                          {editId === r.id ? (
+                            <div className="flex items-center gap-1.5 mt-1">
+                              <span className="text-stone-500 text-sm flex-shrink-0">{enLabel}</span>
+                              <span className="text-stone-300 flex-shrink-0">→</span>
+                              <input autoFocus type="text" value={editVal}
+                                onChange={(e) => setEditVal(e.target.value)}
+                                onKeyDown={(e) => { if (e.key === 'Enter') saveEdit(r); if (e.key === 'Escape') setEditId(null); }}
+                                className="flex-1 min-w-0 px-2 py-1 rounded-lg border-2 border-stone-400 text-sm text-stone-900 focus:outline-none focus:border-stone-900" />
+                            </div>
+                          ) : (
+                            <div className="text-sm text-stone-900 truncate">
+                              <span className="text-stone-500">{enLabel}</span>
+                              <span className="text-stone-300 mx-1.5">→</span>
+                              <span className="font-medium">{r.label}</span>
+                            </div>
+                          )}
                           <div className="text-[10px] font-mono text-stone-400 mt-0.5 truncate">
                             {r.editor?.name || 'someone'} · {fmtDate(r.edited_at)}
                             {defLabel && defLabel !== r.label && (
@@ -23472,10 +23501,29 @@ function TranslationOverridesModal({ employee, onClose }) {
                             )}
                           </div>
                         </div>
-                        <button onClick={() => revert(r)} disabled={busy}
-                          className="text-[10px] uppercase tracking-wider font-mono px-2 py-1 rounded-full bg-stone-100 hover:bg-red-100 hover:text-red-800 text-stone-700 flex items-center gap-1 disabled:opacity-50 flex-shrink-0">
-                          <Delete size={11} /> Revert
-                        </button>
+                        {editId === r.id ? (
+                          <div className="flex items-center gap-1 flex-shrink-0">
+                            <button onClick={() => saveEdit(r)} disabled={busy || !editVal.trim()}
+                              className="text-[10px] uppercase tracking-wider font-mono px-2 py-1 rounded-full bg-emerald-600 hover:bg-emerald-700 text-white flex items-center gap-1 disabled:opacity-50">
+                              <Check size={11} /> Save
+                            </button>
+                            <button onClick={() => setEditId(null)} disabled={busy}
+                              className="text-[10px] uppercase tracking-wider font-mono px-2 py-1 rounded-full bg-stone-100 hover:bg-stone-200 text-stone-600">
+                              Cancel
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="flex items-center gap-1 flex-shrink-0">
+                            <button onClick={() => { setEditId(r.id); setEditVal(r.label); }} disabled={busy}
+                              className="text-[10px] uppercase tracking-wider font-mono px-2 py-1 rounded-full bg-stone-100 hover:bg-stone-200 text-stone-700 flex items-center gap-1 disabled:opacity-50">
+                              <Edit2 size={11} /> Edit
+                            </button>
+                            <button onClick={() => revert(r)} disabled={busy}
+                              className="text-[10px] uppercase tracking-wider font-mono px-2 py-1 rounded-full bg-stone-100 hover:bg-red-100 hover:text-red-800 text-stone-700 flex items-center gap-1 disabled:opacity-50">
+                              <Delete size={11} /> Revert
+                            </button>
+                          </div>
+                        )}
                       </div>
                     );
                   })}
@@ -31487,9 +31535,14 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                             {/* Resume: pulls paused items back to in_progress
                                so the cleaner picks up where they left off. */}
                             {newItems.some(t => t.status === 'paused') && (
-                              <button onClick={() => {
+                              <button onClick={async () => {
                                 const paused = newItems.filter(t => t.status === 'paused');
-                                bulkUpdateStatus(paused, 'in_progress');
+                                await bulkUpdateStatus(paused, 'in_progress');
+                                // Resume should drop the cleaner straight back
+                                // into the bedroom to keep working — not leave
+                                // them on the card having to tap "Go to this
+                                // bedroom" as a second step.
+                                startAndGo(firstTarget);
                               }} disabled={busy}
                                 className="h-9 px-3 rounded-lg border border-amber-300 hover:bg-amber-50 text-amber-700 text-xs font-medium flex items-center gap-1 disabled:opacity-50">
                                 <Play size={12} /> Resume

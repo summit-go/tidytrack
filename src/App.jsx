@@ -106,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul18-tap26";
+const BUILD_TAG = "jul18-tap28";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -5091,13 +5091,16 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   };
 
   const uploadPhoto = async (taskId, kind, file) => {
+    // Read the original capture time from the file's EXIF BEFORE compressing
+    // (compression strips metadata). Null when the photo has no EXIF date.
+    const takenAt = await readPhotoTakenAt(file);
     const compressed = await compressImage(file);
     const path = `${shift.id}/${taskId}/${kind}_${Date.now()}.jpg`;
     const { error: upErr } = await supabase.storage.from(PHOTO_BUCKET).upload(path, compressed, { contentType: 'image/jpeg' });
     if (upErr) { alert('Upload failed: ' + upErr.message); return; }
     const { data: { publicUrl } } = supabase.storage.from(PHOTO_BUCKET).getPublicUrl(path);
     const { data: photo, error: pErr } = await supabase.from('photos')
-      .insert({ task_id: taskId, kind, storage_path: path, public_url: publicUrl, is_preview: previewMode, taken_by: employee?.id || null }).select().single();
+      .insert({ task_id: taskId, kind, storage_path: path, public_url: publicUrl, is_preview: previewMode, taken_by: employee?.id || null, taken_at: takenAt }).select().single();
     if (pErr) { alert('Could not save photo: ' + pErr.message); return; }
     setTasks(prev => prev.map(t => t.id === taskId ? { ...t, photos: [...(t.photos || []), photo] } : t));
     // Return the new row so callers (PhotoModal) can attach a note to it
@@ -10633,24 +10636,25 @@ function PhotoModal({ kind, taskName, existing, onUpload, onSaveNote, onClose, e
   };
 
   const handleFile = async (e) => {
-    const file = e.target.files?.[0];
-    // Reset the input so picking the same file twice still triggers
-    if (inputRef.current) inputRef.current.value = '';
-    if (!file) return;
+    const files = Array.from(e.target.files || []);
+    // Reset the input so picking the same file(s) again still triggers.
+    if (e.target) e.target.value = '';
+    if (!files.length) return;
     setBusy(true);
     setError('');
     setNoteSaved(false);
+    let last = null;
+    let failed = 0;
     try {
-      const uploaded = await onUpload(file);
-      // onUpload may return the new photo so the note prompt can attach.
-      // If it doesn't, we fall back to whatever the parent passes via
-      // `existing` — the latest one is the just-uploaded photo.
-      if (uploaded && uploaded.id) {
-        setLastUploaded(uploaded);
-        setNoteDraft('');
+      // Upload each selected photo in turn (gallery multi-select or one shot).
+      for (const file of files) {
+        try {
+          const uploaded = await onUpload(file);
+          if (uploaded && uploaded.id) last = uploaded;
+        } catch (err) { failed++; console.warn('[photo] one upload failed', err); }
       }
-    } catch (err) {
-      setError(err?.message || 'Upload failed. Try again.');
+      if (last) { setLastUploaded(last); setNoteDraft(''); }
+      if (failed) setError(`${failed} photo${failed === 1 ? '' : 's'} failed to upload. The rest went through.`);
     } finally {
       setBusy(false);
     }
@@ -10782,24 +10786,29 @@ function PhotoModal({ kind, taskName, existing, onUpload, onSaveNote, onClose, e
               </div>
             </div>
           )}
-          <label className={`block w-full p-8 border-2 border-dashed rounded-2xl text-center cursor-pointer transition-colors ${busy ? 'border-amber-300 bg-amber-50 pointer-events-none' : 'border-stone-300 hover:border-stone-900'}`}>
-            {busy ? (
-              <>
-                <div className="w-8 h-8 mx-auto mb-3 border-2 border-amber-600 border-t-transparent rounded-full animate-spin" />
-                <div className="text-stone-700 font-medium">Uploading…</div>
-              </>
-            ) : (
-              <>
-                <Camera size={32} className="mx-auto mb-3 text-stone-400" />
-                <div className="text-stone-700 font-medium mb-1">
-                  {lastUploaded ? 'Take another photo' : 'Take or upload photo'}
-                </div>
-                <div className="text-xs text-stone-500">Tap to open camera</div>
-              </>
-            )}
-            <input ref={inputRef} type="file" accept="image/*" capture="environment"
-              onChange={handleFile} disabled={busy} className="hidden" />
-          </label>
+          {busy ? (
+            <div className="block w-full p-8 border-2 border-dashed border-amber-300 bg-amber-50 rounded-2xl text-center">
+              <div className="w-8 h-8 mx-auto mb-3 border-2 border-amber-600 border-t-transparent rounded-full animate-spin" />
+              <div className="text-stone-700 font-medium">Uploading…</div>
+            </div>
+          ) : (
+            <div className="space-y-2.5">
+              {/* Take a live photo with the camera. */}
+              <label className="block w-full p-6 border-2 border-dashed rounded-2xl text-center cursor-pointer transition-colors border-stone-300 hover:border-stone-900">
+                <Camera size={28} className="mx-auto mb-2 text-stone-400" />
+                <div className="text-stone-700 font-medium">{lastUploaded ? 'Take another photo' : 'Take a photo'}</div>
+                <div className="text-xs text-stone-500">Opens the camera</div>
+                <input type="file" accept="image/*" capture="environment" onChange={handleFile} disabled={busy} className="hidden" />
+              </label>
+              {/* Upload existing photos from the gallery — several at once. */}
+              <label className="block w-full p-6 border-2 border-dashed rounded-2xl text-center cursor-pointer transition-colors border-stone-300 hover:border-stone-900">
+                <ImageIcon size={28} className="mx-auto mb-2 text-stone-400" />
+                <div className="text-stone-700 font-medium">Upload from gallery</div>
+                <div className="text-xs text-stone-500">Pick one or several photos you already took</div>
+                <input type="file" accept="image/*" multiple onChange={handleFile} disabled={busy} className="hidden" />
+              </label>
+            </div>
+          )}
         </div>
         <div className="p-5 border-t border-stone-200">
           <button onClick={onClose} disabled={busy}
@@ -10816,6 +10825,59 @@ function PhotoModal({ kind, taskName, existing, onUpload, onSaveNote, onClose, e
       )}
     </div>
   );
+}
+
+// Reads the "date taken" (EXIF DateTimeOriginal) out of a JPEG the cleaner
+// uploaded, so we can show when a photo was actually shot — not just when it
+// was uploaded. Self-contained (no library). Returns an ISO-ish local string
+// or null when the file has no EXIF date (screenshots, edited/stripped
+// images, non-JPEGs). Never throws.
+async function readPhotoTakenAt(file) {
+  try {
+    if (!file || !file.arrayBuffer) return null;
+    const buf = await file.arrayBuffer();
+    const view = new DataView(buf);
+    if (view.byteLength < 4 || view.getUint16(0) !== 0xFFD8) return null; // not JPEG
+    let offset = 2;
+    while (offset + 4 < view.byteLength) {
+      const marker = view.getUint16(offset);
+      if (marker === 0xFFE1) { // APP1 (EXIF)
+        const exifStart = offset + 4;
+        if (view.getUint32(exifStart) !== 0x45786966) return null; // "Exif"
+        const tiff = exifStart + 6;
+        const little = view.getUint16(tiff) === 0x4949;
+        const u16 = (o) => view.getUint16(o, little);
+        const u32 = (o) => view.getUint32(o, little);
+        const ifd0 = tiff + u32(tiff + 4);
+        const readDate = (ifd) => {
+          const n = u16(ifd);
+          for (let i = 0; i < n; i++) {
+            const e = ifd + 2 + i * 12;
+            const tag = u16(e);
+            if (tag === 0x9003 || tag === 0x0132) { // DateTimeOriginal / DateTime
+              const valOff = tiff + u32(e + 8);
+              let s = '';
+              for (let j = 0; j < 19 && valOff + j < view.byteLength; j++) s += String.fromCharCode(view.getUint8(valOff + j));
+              const m = s.match(/^(\d{4}):(\d{2}):(\d{2})\s(\d{2}):(\d{2}):(\d{2})/);
+              if (m) return `${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}`;
+            }
+          }
+          return null;
+        };
+        // Prefer the EXIF sub-IFD's DateTimeOriginal; fall back to IFD0 DateTime.
+        const n0 = u16(ifd0);
+        let exifPtr = null;
+        for (let i = 0; i < n0; i++) {
+          const e = ifd0 + 2 + i * 12;
+          if (u16(e) === 0x8769) { exifPtr = tiff + u32(e + 8); break; }
+        }
+        return (exifPtr && readDate(exifPtr)) || readDate(ifd0);
+      }
+      if ((marker & 0xFF00) !== 0xFF00) break;
+      offset += 2 + view.getUint16(offset + 2);
+    }
+    return null;
+  } catch { return null; }
 }
 
 function compressImage(file) {
@@ -13364,9 +13426,14 @@ function PhotoZoomViewer({ photos, initialUrl, onClose, onResolveCurrent, employ
       {(photo.taken_by_employee?.name || photo.cleanerName) && (
         <div className="mt-3 max-w-md w-full px-4 py-2 rounded-xl bg-stone-800/70 text-stone-100 text-xs font-mono flex items-center justify-between gap-3">
           <span className="truncate">by {photo.taken_by_employee?.name || photo.cleanerName}</span>
-          {photo.created_at && (
-            <span className="text-stone-400 flex-shrink-0">{fmtDate(photo.created_at)}</span>
-          )}
+          <span className="text-stone-400 flex-shrink-0 text-right leading-tight">
+            {photo.taken_at && (
+              <span className="block text-stone-200">📷 Taken {new Date(photo.taken_at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}</span>
+            )}
+            {photo.created_at && (
+              <span className={`block ${photo.taken_at ? 'text-stone-500 text-[10px]' : ''}`}>{photo.taken_at ? 'Uploaded ' : ''}{fmtDate(photo.created_at)}</span>
+            )}
+          </span>
         </div>
       )}
       {/* Resolved-status pill for damage photos. Shown when the photo

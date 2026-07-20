@@ -106,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul18-tap28";
+const BUILD_TAG = "jul18-tap30";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -4297,51 +4297,46 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   // finish the block (per spec: last to leave finishes).
   const leaveBlock = async () => {
     if (!activeBlock || !employee?.id) return;
-    setBusy(true);
-    try {
-      // Mark this cleaner's participant row as left
-      const nowISO = new Date().toISOString();
-      await supabase.from('work_block_participants')
-        .update({ left_at: nowISO })
-        .eq('work_block_id', activeBlock.id)
-        .eq('employee_id', employee.id)
-        .is('left_at', null);
-      // Count remaining participants
-      const { data: remaining } = await supabase.from('work_block_participants')
-        .select('id')
-        .eq('work_block_id', activeBlock.id)
-        .is('left_at', null);
-      const count = (remaining || []).length;
-      if (count === 0) {
-        // Last to leave — finish the block. Warn if items still pending.
-        const { data: openTargets } = await supabase.from('assignment_targets')
-          .select('id')
-          .eq('unit_id', activeBlock.unit_id)
-          .eq('party_id', activeBlock.party_id)
-          .in('status', ['pending', 'in_progress', 'paused']);
-        const stillOpen = (openTargets || []).length;
-        const msg = stillOpen > 0
-          ? tt(`You're the last one in this bedroom. ${stillOpen} item${stillOpen === 1 ? ' is' : 's are'} still not done. Finish the workblock anyway?`)
-          : tt('All items done at this bedroom. Finish the workblock?');
-        if (!confirm(msg)) {
-          // Cleaner backed out — restore them as a participant
-          await supabase.from('work_block_participants')
-            .update({ left_at: null })
-            .eq('work_block_id', activeBlock.id)
-            .eq('employee_id', employee.id);
-          setBusy(false);
-          return;
-        }
-        // Stop active task + close the block
+    // Are there OTHER cleaners still active here (besides me)? That decides
+    // whether I'm just leaving (they stay) or closing the whole bedroom.
+    const { data: others } = await supabase.from('work_block_participants')
+      .select('id')
+      .eq('work_block_id', activeBlock.id)
+      .is('left_at', null)
+      .neq('employee_id', employee.id);
+    const othersCount = (others || []).length;
+    const nowISO = new Date().toISOString();
+
+    if (othersCount > 0) {
+      // Not the last one — leaving ends MY session; the block stays open.
+      if (!confirm(tt("Finished your part in this bedroom? Your session here closes and you'll go back to your assignments — the other cleaner(s) stay until they finish."))) return;
+      setBusy(true);
+      try {
+        await supabase.from('work_block_participants').update({ left_at: nowISO })
+          .eq('work_block_id', activeBlock.id).eq('employee_id', employee.id).is('left_at', null);
+      } catch (e) { setBusy(false); alert('Could not leave: ' + (e.message || e)); return; }
+    } else {
+      // Last one here — this closes out the WHOLE bedroom.
+      const { data: openTargets } = await supabase.from('assignment_targets').select('id')
+        .eq('unit_id', activeBlock.unit_id).eq('party_id', activeBlock.party_id)
+        .in('status', ['pending', 'in_progress', 'paused']);
+      const stillOpen = (openTargets || []).length;
+      const msg = stillOpen > 0
+        ? tt(`You're closing out this whole bedroom. ${stillOpen} item${stillOpen === 1 ? ' is' : 's are'} still not done — finish anyway and go back to your assignments?`)
+        : tt('Close out this whole bedroom and go back to your assignments?');
+      if (!confirm(msg)) return;
+      setBusy(true);
+      try {
+        await supabase.from('work_block_participants').update({ left_at: nowISO })
+          .eq('work_block_id', activeBlock.id).eq('employee_id', employee.id).is('left_at', null);
         if (activeTask) await stopTask(activeTask, false);
         await supabase.from('work_blocks').update({ end_time: nowISO }).eq('id', activeBlock.id);
         setWorkBlocks(prev => prev.map(b => b.id === activeBlock.id ? { ...b, end_time: nowISO } : b));
-      }
-      // Either way, drop out of the active block locally
-      setActiveBlock(null); setTasks([]); setActiveTask(null);
-    } catch (e) {
-      alert('Could not leave: ' + (e.message || e));
+      } catch (e) { setBusy(false); alert('Could not finish: ' + (e.message || e)); return; }
     }
+    // Either way: drop out locally and land on the assignments list.
+    setActiveBlock(null); setTasks([]); setActiveTask(null);
+    setCleanerTab('assignments');
     setBusy(false);
   };
 
@@ -4439,8 +4434,8 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     };
     setActiveBlock(null); setTasks([]); setActiveTask(null);
     setBusy(false);
-    // Surface the "what's next?" prompt. The modal will fetch the
-    // candidate bedrooms itself.
+    // Back to the assignments list, with the "what's next?" prompt on top.
+    setCleanerTab('assignments');
     setNextUpPrompt(finishedFrom);
   };
 
@@ -8915,19 +8910,21 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
           </div>
         )}
 
-        {/* Close out the whole bedroom — moved here from an always-visible
-           footer so it sits with the other "start work" controls, in New only. */}
+        {/* The ONE finish action for this bedroom. Solo → close everything
+           out (finishBlock warns + routes to assignments). Multiple cleaners
+           → this cleaner leaves, others stay (leaveBlock warns + routes); the
+           LAST one to leave closes the whole bedroom. No second confirm here —
+           each handler owns its own warning. */}
         <div className="mt-6">
           <button
             onClick={() => {
               if (totalActive > 1 && onLeaveBlock) return onLeaveBlock();
-              if (!confirm('Finish ALL assignments in this bedroom?\n\nThis closes out every assignment here and ends your work block. Anything not marked done will be completed automatically.')) return;
               return onFinish();
             }}
             disabled={busy}
             className="w-full py-4 rounded-2xl bg-amber-700 hover:bg-amber-800 text-stone-50 text-base font-bold flex items-center justify-center gap-2 active:scale-98 transition-transform disabled:opacity-50">
             <Check size={18} />
-            {totalActive > 1 && onLeaveBlock ? "I'm finished in this bedroom (others stay)" : 'Close out entire bedroom'}
+            I'm done here
           </button>
           {totalActive > 1 && onLeaveBlock && (
             <div className="text-[11px] text-stone-500 text-center mt-1.5 font-mono">
@@ -29579,6 +29576,15 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
             onReopen={() => updateStatus(t, 'pending')}
             onBlocked={() => setStatusModal({ target: t })}
             onReassign={() => setReassignTarget(t)}
+            onDelete={can(employee, 'upload_assignments') ? async () => {
+              if (!confirm('Delete this assignment? Use this only if it was uploaded by mistake — it removes it for everyone.')) return;
+              const { error } = await supabase.from('assignments')
+                .update({ deleted_at: new Date().toISOString(), deleted_by: employee?.id || null })
+                .eq('id', t.assignment?.id);
+              if (error) { alert('Could not delete: ' + error.message); return; }
+              if (onUpdate) onUpdate();
+              load();
+            } : null}
             onTogglePriority={togglePriority}
               canMarkDone={can(employee, 'mark_assignments_done') || t.started_by === employee?.id}
               canMarkDoneAlways={can(employee, 'mark_assignments_done')}
@@ -29839,44 +29845,9 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
                  Reassign opens the modal on the representative target
                  (template-based assignments are 1 per bedroom so this
                  is the right one to act on). */}
-              <div className="flex gap-2 flex-wrap">
-                {!isAllDone && (can(employee, 'mark_assignments_done')) && (
-                  <button onClick={async () => {
-                    if (!confirm(`Close out this entire bedroom? Marks ${openItems.length} item${openItems.length === 1 ? '' : 's'} complete and ends the work block if one is open.`)) return;
-                    await bulkUpdateStatus(openItems, 'done');
-                    // Also close any open work_block at this exact
-                    // bedroom for this property. "Close out the bedroom"
-                    // means the cleaner is done here — the timer should
-                    // stop too. We scope to (employee_id, unit_id,
-                    // party_id, customer_id) so we never touch someone
-                    // else's open block at the same bedroom.
-                    if (rep?.unit_id && rep?.party_id && employee?.id) {
-                      try {
-                        const { data: openBlocks } = await supabase
-                          .from('work_blocks')
-                          .select('id, shift:shifts!inner(employee_id, customer_id)')
-                          .eq('unit_id', rep.unit_id)
-                          .eq('party_id', rep.party_id)
-                          .is('end_time', null);
-                        const mine = (openBlocks || []).filter(b =>
-                          b.shift?.employee_id === employee.id &&
-                          b.shift?.customer_id === propertyId
-                        );
-                        if (mine.length > 0) {
-                          await supabase.from('work_blocks')
-                            .update({ end_time: new Date().toISOString() })
-                            .in('id', mine.map(b => b.id));
-                          if (onUpdate) onUpdate();
-                        }
-                      } catch (e) {
-                        console.warn('[banner mark-complete] could not close work block', e);
-                      }
-                    }
-                  }} disabled={busy}
-                    className="h-9 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-medium flex items-center gap-1 disabled:opacity-50">
-                    <Check size={12} /> Mark complete
-                  </button>
-                )}
+              <div className="flex gap-2 flex-wrap items-center">
+                {/* The owner/manager "mark complete" + "delete" actions moved
+                   to compact icons at the right end of this row (below). */}
                 {!isAllDone && (
                   <button onClick={() => setStatusModal({ target: rep, bulkRows: openItems })} disabled={busy || bundleGated}
                     title={bundleGated ? 'Start cleaning before marking blocked' : ''}
@@ -29891,6 +29862,52 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
                     className={`h-9 px-3 rounded-lg border ${DC.outlineBtn} text-xs font-medium flex items-center gap-1 disabled:opacity-50`}>
                     <User size={12} /> Reassign
                   </button>
+                )}
+                {/* Owner/manager corner actions, pushed to the right:
+                   ✓ = mark this whole assignment complete → Done section.
+                   ✕ = delete an assignment that was uploaded by mistake. */}
+                {(can(employee, 'mark_assignments_done') || can(employee, 'upload_assignments')) && (
+                  <div className="ml-auto flex items-center gap-1.5">
+                    {!isAllDone && can(employee, 'mark_assignments_done') && (
+                      <button onClick={async () => {
+                        if (!confirm('Mark this whole assignment complete? It moves to the Done section.')) return;
+                        setBusy(true);
+                        try {
+                          await bulkUpdateStatus(openItems, 'done');
+                          if (rep?.unit_id && rep?.party_id && employee?.id) {
+                            const { data: openBlocks } = await supabase.from('work_blocks')
+                              .select('id, shift:shifts!inner(employee_id, customer_id)')
+                              .eq('unit_id', rep.unit_id).eq('party_id', rep.party_id).is('end_time', null);
+                            const mine = (openBlocks || []).filter(b => b.shift?.employee_id === employee.id && b.shift?.customer_id === propertyId);
+                            if (mine.length > 0) await supabase.from('work_blocks').update({ end_time: new Date().toISOString() }).in('id', mine.map(b => b.id));
+                          }
+                          if (onUpdate) onUpdate();
+                        } catch (e) { console.warn('[card ✓] failed', e); }
+                        setBusy(false);
+                      }} disabled={busy}
+                        title="Mark this assignment complete → Done"
+                        className="w-9 h-9 rounded-lg flex items-center justify-center bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-50">
+                        <Check size={16} />
+                      </button>
+                    )}
+                    {can(employee, 'upload_assignments') && (
+                      <button onClick={async () => {
+                        if (!confirm('Delete this assignment? Use this only if it was uploaded by mistake — it removes it for everyone.')) return;
+                        setBusy(true);
+                        const { error } = await supabase.from('assignments')
+                          .update({ deleted_at: new Date().toISOString(), deleted_by: employee?.id || null })
+                          .eq('id', a?.id);
+                        setBusy(false);
+                        if (error) { alert('Could not delete: ' + error.message); return; }
+                        if (onUpdate) onUpdate();
+                        load();
+                      }} disabled={busy}
+                        title="Delete this assignment (uploaded by mistake)"
+                        className={`w-9 h-9 rounded-lg flex items-center justify-center border disabled:opacity-50 ${dark ? 'bg-slate-800 hover:bg-red-950 border-slate-600 text-red-300' : 'bg-white hover:bg-red-50 border-stone-300 text-red-600'}`}>
+                        <X size={16} />
+                      </button>
+                    )}
+                  </div>
                 )}
               </div>
             </div>
@@ -29955,7 +29972,7 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
 }
 
 // Reusable card for one assignment target, used in banner + panel
-function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPending, onDone, onReopen, onBlocked, onReassign, onGoToBedroom, onOpenBedroomHistory, onTogglePriority, canMarkDone = true, canMarkDoneAlways = false, currentEmployeeId, propertyId, canEditDates = false, onSetDueDate, dark = false }) {
+function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPending, onDone, onReopen, onBlocked, onReassign, onDelete, onGoToBedroom, onOpenBedroomHistory, onTogglePriority, canMarkDone = true, canMarkDoneAlways = false, currentEmployeeId, propertyId, canEditDates = false, onSetDueDate, dark = false }) {
   const t = target;
   // Dark variant — used when this card is folded into the cleaner's black
   // "Working on" header. Only the neutral surfaces flip; colored status /
@@ -30266,6 +30283,15 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
           <button onClick={onReassign} disabled={busy}
             className={`h-9 px-3 rounded-lg border ${D.outlineBtn} text-xs font-medium flex items-center gap-1 disabled:opacity-50`}>
             <Edit2 size={12} /> Reassign
+          </button>
+        )}
+        {/* Delete an assignment uploaded by mistake (owner/uploader only) —
+           pushed to the right end to mirror the checklist card. */}
+        {onDelete && (
+          <button onClick={onDelete} disabled={busy}
+            title="Delete this assignment (uploaded by mistake)"
+            className={`ml-auto w-9 h-9 rounded-lg flex items-center justify-center border disabled:opacity-50 ${dark ? 'bg-slate-800 hover:bg-red-950 border-slate-600 text-red-300' : 'bg-white hover:bg-red-50 border-stone-300 text-red-600'}`}>
+            <X size={16} />
           </button>
         )}
       </div>

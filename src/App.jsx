@@ -25,6 +25,7 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 // =================================================================
 const GOOGLE_TRANSLATE_API_KEY = "AIzaSyD7ceHPryMzs45hWJOyFNBxtOzQOEmJcSA";
 
+
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // ============================================================
@@ -106,7 +107,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul18-tap20";
+const BUILD_TAG = "jul18-tap21";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -1817,6 +1818,18 @@ function SupplyChecklistGate({ employee, onDone, onSignOut }) {
   const [name, setName] = useState(employee?.name || '');
   const [busy, setBusy] = useState(false);
 
+  // Built-in fallback list. If the supply_checklist_items table is missing,
+  // blocked (RLS), or empty, the gate uses THIS so the checklist ALWAYS
+  // appears — it no longer depends on any SQL being run. Owner-managed items
+  // from the table take over automatically once they exist.
+  const DEFAULT_SUPPLY_ITEMS = [
+    'all purpose', 'brush pad', 'dust pad', 'floor cleaner', 'gloves',
+    'green scrub pad', 'keys', 'Lysol', 'oven cleaner', 'paper towel',
+    'pumice stone', 'rags', 'soft scrub (white liquid)',
+    'steel wool (metal scrubbing pad)', 'Swiffer', 'vacuum',
+    'window cleaner', 'wood stain',
+  ].map((label, i) => ({ id: `default-${i}`, label }));
+
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -1825,11 +1838,15 @@ function SupplyChecklistGate({ employee, onDone, onSignOut }) {
         .select('id, label')
         .eq('active', true);
       if (cancelled) return;
-      // On any error (e.g. table not created yet) don't block the cleaner.
-      if (error) { console.warn('[supply] load failed', error); onDone(); return; }
-      const list = (data || []).slice().sort((a, b) =>
+      // Table missing / blocked / empty → show the built-in list instead of
+      // skipping. The checklist should never silently disappear.
+      if (error || !data || data.length === 0) {
+        if (error) console.warn('[supply] table load failed, using defaults', error);
+        setItems(DEFAULT_SUPPLY_ITEMS);
+        return;
+      }
+      const list = data.slice().sort((a, b) =>
         a.label.localeCompare(b.label, undefined, { sensitivity: 'base' }));
-      if (list.length === 0) { onDone(); return; } // nothing to confirm
       setItems(list);
     })();
     return () => { cancelled = true; };

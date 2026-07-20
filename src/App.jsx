@@ -106,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul18-tap18";
+const BUILD_TAG = "jul18-tap20";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -13527,6 +13527,7 @@ function EmployeeForm({ employee, currentUserId, currentUserRole, onCancel, onSa
   const [active, setActive] = useState(employee?.active ?? true);
   const [phone, setPhone] = useState(employee?.phone || '');
   const [payRate, setPayRate] = useState(employee?.pay_rate_hourly != null ? String(employee.pay_rate_hourly) : '');
+  const [showPin, setShowPin] = useState(false); // owner reveal of the current PIN
   const [smsOptIn, setSmsOptIn] = useState(employee?.sms_opt_in || false);
   const [notifyMessages, setNotifyMessages] = useState(
     employee?.notification_prefs?.messages !== false
@@ -13644,6 +13645,21 @@ function EmployeeForm({ employee, currentUserId, currentUserRole, onCancel, onSa
           <input type="text" value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Maria S."
             className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white focus:outline-none focus:border-stone-900 text-stone-900" />
         </div>
+        {!isNew && canEditOwner && employee?.pin && (
+          <div>
+            <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Current PIN</label>
+            <div className="flex items-center gap-3">
+              <span className={`font-mono text-2xl tracking-widest ${showPin ? 'text-stone-900' : 'text-stone-400'}`}>
+                {showPin ? employee.pin : '••••'}
+              </span>
+              <button type="button" onClick={() => setShowPin(s => !s)}
+                className="text-[11px] font-mono uppercase tracking-wider px-3 py-1.5 rounded-full bg-stone-100 hover:bg-stone-200 text-stone-700 flex items-center gap-1.5">
+                {showPin ? <><EyeOff size={12} /> Hide</> : <><Eye size={12} /> Show</>}
+              </button>
+            </div>
+            <p className="text-[11px] text-stone-500 mt-1 font-mono">If they forget it, read it back to them here. Or set a new one below.</p>
+          </div>
+        )}
         <div>
           <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">
             {isNew ? '4-digit PIN' : 'New PIN — leave blank to keep current'}
@@ -29127,6 +29143,16 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
   const [liveHere, setLiveHere] = useState(false); // an open work block exists at this bedroom
   const canEditDatesB = can(employee, 'edit_due_dates');
   const todayKeyG = localTodayKey();
+  // Owners/managers with this permission get a timeline dropdown on the date
+  // pill (submitted / accepted / done / due).
+  const canViewTimeline = can(employee, 'view_submission_timeline');
+  const [timelineOpenG, setTimelineOpenG] = useState(null);
+  const fmtStampG = (iso) => {
+    if (!iso) return null;
+    const d = new Date(iso);
+    if (isNaN(d)) return null;
+    return `${d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} · ${d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}`;
+  };
   const saveDueB = async (id, date) => {
     setEditDueId(null);
     if (id) { await supabase.from('assignments').update({ scheduled_date: date || null }).eq('id', id); load(); }
@@ -29135,7 +29161,7 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
   const load = async () => {
     let q = supabase
       .from('assignment_targets')
-      .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, deleted_at, extracted_text, spanish_translation, translation_status, template_set_id, sheet_type, bathroom_variant, general_variant, assignment_type, scheduled_date, created_at), unit:units(id, label), party:parties(id, label), starter:employees!started_by(name), completer:employees!completed_by(name), assignedTo:employees!assigned_to(id, name)');
+      .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, approved_at, deleted_at, extracted_text, spanish_translation, translation_status, template_set_id, sheet_type, bathroom_variant, general_variant, assignment_type, scheduled_date, created_at), unit:units(id, label), party:parties(id, label), starter:employees!started_by(name), completer:employees!completed_by(name), assignedTo:employees!assigned_to(id, name)');
 
     if (!showDone) q = q.not('status', 'in', '(done,blocked)');
 
@@ -29458,6 +29484,10 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
           };
           const total = items.length;
           const isAllDone = counts.done === total;
+          // Most recent completion across this assignment's items — the
+          // "done" point for the timeline dropdown.
+          const doneStampsG = items.map(i => i.completed_at).filter(Boolean).sort();
+          const doneAtG = doneStampsG.length ? doneStampsG[doneStampsG.length - 1] : null;
           // Section breakdown — "57 items · Bedroom (16) · Vanity (12) · …"
           const sectionCounts = {
             bedroom:  items.filter(i => (i.template_section || '').toLowerCase() === 'bedroom').length,
@@ -29539,7 +29569,65 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
                     <span className={`text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full border ${statusPill.color}`}>
                       {statusPill.label}
                     </span>
-                    {!isAllDone && (editDueId === a?.id ? (
+                    {canViewTimeline ? (
+                      editDueId === a?.id ? (
+                        <input type="date" autoFocus value={a?.scheduled_date || ''}
+                          onChange={(e) => saveDueB(a?.id, e.target.value)}
+                          onBlur={() => setEditDueId(null)}
+                          onClick={(e) => e.stopPropagation()}
+                          className="text-[10px] font-mono px-1.5 py-0.5 rounded border border-stone-400 bg-white" />
+                      ) : (
+                        <div className="relative inline-block">
+                          <button onClick={(e) => { e.stopPropagation(); setTimelineOpenG(timelineOpenG === a?.id ? null : a?.id); }}
+                            className={`text-[10px] font-mono px-2 py-0.5 rounded-full border inline-flex items-center gap-1 ${a?.scheduled_date
+                              ? (a.scheduled_date < todayKeyG ? 'bg-red-100 text-red-700 border-red-200'
+                                 : a.scheduled_date === todayKeyG ? 'bg-emerald-100 text-emerald-800 border-emerald-200'
+                                 : 'bg-stone-100 text-stone-600 border-stone-200')
+                              : 'bg-white text-stone-500 border-dashed border-stone-300'}`}>
+                            <Calendar size={9} /> {a?.scheduled_date ? fmtDueDate(a.scheduled_date) : 'Set due date'}
+                            <ChevronRight size={10} className="rotate-90 opacity-60" />
+                          </button>
+                          {timelineOpenG === a?.id && (
+                            <>
+                              <div className="fixed inset-0 z-30" onClick={(e) => { e.stopPropagation(); setTimelineOpenG(null); }} />
+                              <div className="absolute right-0 top-full mt-1 z-40 w-60 rounded-xl bg-white border border-stone-200 shadow-xl overflow-hidden text-left" onClick={(e) => e.stopPropagation()}>
+                                <div className="px-3 pt-2.5 pb-1 text-[10px] uppercase tracking-wider font-mono text-stone-400">Timeline</div>
+                                <div className="px-3 pb-2 space-y-1.5">
+                                  <div className="flex items-center justify-between gap-3">
+                                    <span className="text-[11px] text-stone-500 flex items-center gap-1.5"><FileText size={11} /> Submitted</span>
+                                    <span className={`text-[11px] font-mono ${a?.created_at ? 'text-stone-800' : 'text-stone-400'}`}>{a?.created_at ? fmtStampG(a.created_at) : '—'}</span>
+                                  </div>
+                                  <div className="flex items-center justify-between gap-3">
+                                    <span className="text-[11px] text-stone-500 flex items-center gap-1.5"><UserPlus size={11} /> Accepted</span>
+                                    <span className={`text-[11px] font-mono ${(a?.approved_at || a?.pm_status === 'approved' || !a?.pm_status) ? 'text-emerald-700' : 'text-stone-400'}`}>
+                                      {a?.approved_at ? fmtStampG(a.approved_at)
+                                        : (!a?.pm_status || a?.pm_status === 'approved') ? (a?.created_at ? `${fmtStampG(a.created_at)} · auto` : 'Auto')
+                                        : a?.pm_status === 'pending' ? 'Awaiting you'
+                                        : a?.pm_status === 'rejected' ? 'Rejected'
+                                        : 'Not yet'}
+                                    </span>
+                                  </div>
+                                  <div className="flex items-center justify-between gap-3">
+                                    <span className="text-[11px] text-stone-500 flex items-center gap-1.5"><Check size={11} /> Done</span>
+                                    <span className={`text-[11px] font-mono ${doneAtG ? 'text-stone-800' : 'text-stone-400'}`}>{doneAtG ? fmtStampG(doneAtG) : 'Not yet'}</span>
+                                  </div>
+                                  <div className="flex items-center justify-between gap-3 pt-1 border-t border-stone-100">
+                                    <span className="text-[11px] text-stone-500 flex items-center gap-1.5"><Calendar size={11} /> Due</span>
+                                    <span className="text-[11px] font-mono text-stone-800">{a?.scheduled_date ? fmtDueDate(a.scheduled_date) : '—'}</span>
+                                  </div>
+                                </div>
+                                {canEditDatesB && (
+                                  <button onClick={(e) => { e.stopPropagation(); setTimelineOpenG(null); setEditDueId(a?.id); }}
+                                    className="w-full border-t border-stone-100 px-3 py-2 text-[11px] font-mono text-stone-600 hover:bg-stone-50 text-left flex items-center gap-1.5">
+                                    <Edit2 size={11} /> Change due date
+                                  </button>
+                                )}
+                              </div>
+                            </>
+                          )}
+                        </div>
+                      )
+                    ) : (!isAllDone && (editDueId === a?.id ? (
                       <input type="date" autoFocus value={a?.scheduled_date || ''}
                         onChange={(e) => saveDueB(a?.id, e.target.value)}
                         onBlur={() => setEditDueId(null)}
@@ -29562,7 +29650,7 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
                       <span className="text-[10px] font-mono px-2 py-0.5 rounded-full border bg-stone-100 text-stone-600 border-stone-200 inline-flex items-center gap-1">
                         <Calendar size={9} /> {a.scheduled_date === todayKeyG ? 'Today' : fmtDueDate(a.scheduled_date)}
                       </span>
-                    ) : null))}
+                    ) : null)))}
                   </div>
                   {/* Mini-row 2: View doc + History */}
                   <div className="flex items-center gap-1.5 flex-wrap justify-end">

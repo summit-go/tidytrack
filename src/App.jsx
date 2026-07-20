@@ -106,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul18-tap30";
+const BUILD_TAG = "jul18-tap31";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -4387,12 +4387,11 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     if (activeTask) await stopTask(activeTask, false);
     const ts = new Date().toISOString();
     await supabase.from('work_blocks').update({ end_time: ts }).eq('id', activeBlock.id);
-    // Auto-complete bedroom-level audit: anything in_progress at this
-    // (unit, party) gets flipped to done with completed_by = current
-    // cleaner. This is the closing half of the advancePendingTargets
-    // invariant — startTask put them in_progress, finishBlock marks
-    // them done. Solves the "took pictures, marked complete, but the
-    // assignment stays in pending" cleaner-side confusion.
+    // Auto-complete on close-out: EVERY still-open target at this (unit,
+    // party) — pending, in_progress OR paused — gets flipped to done. The
+    // earlier version only caught in_progress, so an assignment the cleaner
+    // never tapped "Start" on stayed pending and lingered in All Pending
+    // after they hit "I'm done here". "Done here" means done here.
     //
     // Limited to active assignments at this customer. PM-sourced
     // assignments must be approved before they count.
@@ -4402,7 +4401,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
         .select('id, assignment:assignments!inner(customer_id, active, source, pm_status, deleted_at)')
         .eq('unit_id', activeBlock.unit_id)
         .eq('party_id', activeBlock.party_id)
-        .eq('status', 'in_progress');
+        .in('status', ['pending', 'in_progress', 'paused']);
       const ids = (inProg || [])
         .filter(t =>
           t.assignment?.customer_id === shift?.customer_id &&
@@ -30239,7 +30238,7 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
             <ArrowLeft size={12} /> Move to pending
           </button>
         )}
-        {(t.status === 'pending' || t.status === 'in_progress' || t.status === 'blocked' || t.status === 'paused') && canMarkDone && (() => {
+        {!dark && (t.status === 'pending' || t.status === 'in_progress' || t.status === 'blocked' || t.status === 'paused') && canMarkDone && (() => {
           // On Pending we keep the button VISIBLE but disabled — the
           // cleaner sees the action exists, just needs to Start first.
           // This avoids the confusing "button vanished" feeling.
@@ -30287,12 +30286,25 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
         )}
         {/* Delete an assignment uploaded by mistake (owner/uploader only) —
            pushed to the right end to mirror the checklist card. */}
-        {onDelete && (
-          <button onClick={onDelete} disabled={busy}
-            title="Delete this assignment (uploaded by mistake)"
-            className={`ml-auto w-9 h-9 rounded-lg flex items-center justify-center border disabled:opacity-50 ${dark ? 'bg-slate-800 hover:bg-red-950 border-slate-600 text-red-300' : 'bg-white hover:bg-red-50 border-stone-300 text-red-600'}`}>
-            <X size={16} />
-          </button>
+        {/* Owner/manager corner actions on the working screen:
+           ✓ = mark this assignment complete → Done. ✕ = delete a mistaken upload. */}
+        {((dark && canMarkDoneAlways && !isDone) || onDelete) && (
+          <div className="ml-auto flex items-center gap-1.5">
+            {dark && canMarkDoneAlways && !isDone && (
+              <button onClick={onDone} disabled={busy}
+                title="Mark this assignment complete → Done"
+                className="w-9 h-9 rounded-lg flex items-center justify-center bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-50">
+                <Check size={16} />
+              </button>
+            )}
+            {onDelete && (
+              <button onClick={onDelete} disabled={busy}
+                title="Delete this assignment (uploaded by mistake)"
+                className={`w-9 h-9 rounded-lg flex items-center justify-center border disabled:opacity-50 ${dark ? 'bg-slate-800 hover:bg-red-950 border-slate-600 text-red-300' : 'bg-white hover:bg-red-50 border-stone-300 text-red-600'}`}>
+                <X size={16} />
+              </button>
+            )}
+          </div>
         )}
       </div>
 
@@ -32577,7 +32589,7 @@ function NextUpModal({ from, employeeId, onPick, onClose, onSeeAssignments }) {
         supabase.from('parties')
           .select('id, label, unit_id, sort_order, active'),
         supabase.from('assignment_targets')
-          .select('unit_id, party_id, status, assignment:assignments!inner(customer_id, active, source, pm_status, deleted_at)')
+          .select('unit_id, party_id, status, assignment:assignments!inner(customer_id, active, source, pm_status, deleted_at, scheduled_date)')
           .not('status', 'in', '(done,blocked)'),
         // Open work blocks at this property so we can show "who's here"
         supabase.from('work_blocks')
@@ -32594,9 +32606,16 @@ function NextUpModal({ from, employeeId, onPick, onClose, onSeeAssignments }) {
         if (a.source === 'pm' && a.pm_status !== 'approved') return false;
         return true;
       });
-      // Bedrooms with open work (party_id set)
+      // Bedrooms with open work (party_id set) + their soonest due date.
       const bedroomsWithWork = new Set();
-      openTargets.forEach(t => { if (t.party_id) bedroomsWithWork.add(t.party_id); });
+      const dueByParty = {};
+      openTargets.forEach(t => {
+        if (t.party_id) {
+          bedroomsWithWork.add(t.party_id);
+          const d = t.assignment?.scheduled_date;
+          if (d && (!dueByParty[t.party_id] || d < dueByParty[t.party_id])) dueByParty[t.party_id] = d;
+        }
+      });
       // Map unit → unit label
       const unitMap = new Map(units.map(u => [u.id, u]));
       // Build candidate list: parties in apartments at this property
@@ -32610,6 +32629,7 @@ function NextUpModal({ from, employeeId, onPick, onClose, onSeeAssignments }) {
           return {
             partyId: p.id,
             partyLabel: p.label,
+            dueDate: dueByParty[p.id] || null,
             unitId: unit.id,
             unitLabel: unit.label,
             building: buildingFromLabel(unit.label),
@@ -32685,10 +32705,17 @@ function NextUpModal({ from, employeeId, onPick, onClose, onSeeAssignments }) {
               <div className="flex items-center justify-between gap-2">
                 <div className="flex items-center gap-2 min-w-0">
                   <span className="font-serif text-sm text-stone-900 font-bold">{c.unitLabel}</span>
-                  <span className="text-stone-400">·</span>
-                  <span className="italic text-stone-700">{c.partyLabel}</span>
+                  {partyDisplay(c.partyLabel) && (
+                    <>
+                      <span className="text-stone-400">·</span>
+                      <span className="italic text-stone-700">{partyDisplay(c.partyLabel)}</span>
+                    </>
+                  )}
                 </div>
-                <ChevronRight size={14} className="text-stone-400 flex-shrink-0" />
+                <div className="flex items-center gap-2 flex-shrink-0">
+                  <span className={`text-[11px] font-mono ${c.dueDate ? 'text-stone-500' : 'text-stone-300'}`}>{c.dueDate ? fmtDueDate(c.dueDate) : 'No date'}</span>
+                  <ChevronRight size={14} className="text-stone-400" />
+                </div>
               </div>
             </button>
           ))}
@@ -32726,7 +32753,7 @@ function NextUpModal({ from, employeeId, onPick, onClose, onSeeAssignments }) {
                     {data.otherCleaners.map((c, i) => (
                       <div key={i} className="text-sm text-stone-800">
                         <span className="font-bold">{c.name}</span>
-                        {c.partyLabel && <span className="text-stone-600"> · {c.partyLabel}</span>}
+                        {partyDisplay(c.partyLabel) && <span className="text-stone-600"> · {partyDisplay(c.partyLabel)}</span>}
                       </div>
                     ))}
                   </div>

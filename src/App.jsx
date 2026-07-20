@@ -106,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul18-tap22";
+const BUILD_TAG = "jul18-tap23";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -1856,7 +1856,14 @@ function SupplyChecklistGate({ employee, onDone, onSignOut }) {
 
   const remaining = items.filter(it => !checked[it.id]).length;
   const allChecked = remaining === 0;
-  const canConfirm = allChecked && name.trim().length > 0 && !busy;
+  // The typed name must actually match the name on the account (case- and
+  // spacing-insensitive) — a signature, not just any text. If the account has
+  // no name on file, fall back to "any non-empty".
+  const norm = (s) => (s || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  const onFile = norm(employee?.name);
+  const nameMatches = onFile ? norm(name) === onFile : name.trim().length > 0;
+  const nameTyped = name.trim().length > 0;
+  const canConfirm = allChecked && nameMatches && !busy;
 
   const confirm = async () => {
     if (!canConfirm) return;
@@ -1884,7 +1891,7 @@ function SupplyChecklistGate({ employee, onDone, onSignOut }) {
           <div className="text-xs text-stone-300 mt-0.5">Tick each item you have, then type your name to confirm.</div>
         </div>
         <div className="flex-1 overflow-y-auto px-4 py-3">
-          <div className="grid grid-cols-2 gap-2">
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
             {items.map(it => {
               const on = !!checked[it.id];
               return (
@@ -1905,7 +1912,10 @@ function SupplyChecklistGate({ employee, onDone, onSignOut }) {
           </div>
           <input type="text" value={name} onChange={(e) => setName(e.target.value)}
             placeholder="Type your name here"
-            className="w-full px-4 py-3 rounded-xl border-2 border-stone-300 focus:outline-none focus:border-stone-900 text-stone-900 placeholder:text-stone-400" />
+            className={`w-full px-4 py-3 rounded-xl border-2 focus:outline-none text-stone-900 placeholder:text-stone-400 ${nameTyped && !nameMatches ? 'border-red-400 focus:border-red-500' : nameMatches ? 'border-emerald-400 focus:border-emerald-500' : 'border-stone-300 focus:border-stone-900'}`} />
+          {nameTyped && !nameMatches && (
+            <div className="text-[11px] text-red-600 text-center font-mono -mt-1">That doesn't match the name on your account — type it exactly.</div>
+          )}
           <button onClick={confirm} disabled={!canConfirm}
             className="w-full py-3.5 rounded-2xl bg-stone-900 text-stone-50 text-base font-bold disabled:opacity-40 active:scale-98 transition-transform">
             {busy ? 'Saving…' : 'I have everything — continue'}

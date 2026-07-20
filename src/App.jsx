@@ -25,6 +25,7 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 // =================================================================
 const GOOGLE_TRANSLATE_API_KEY = "AIzaSyD7ceHPryMzs45hWJOyFNBxtOzQOEmJcSA";
 
+
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // ============================================================
@@ -106,7 +107,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul18-tap23";
+const BUILD_TAG = "jul18-tap24";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -1856,13 +1857,24 @@ function SupplyChecklistGate({ employee, onDone, onSignOut }) {
 
   const remaining = items.filter(it => !checked[it.id]).length;
   const allChecked = remaining === 0;
-  // The typed name must actually match the name on the account (case- and
-  // spacing-insensitive) — a signature, not just any text. If the account has
-  // no name on file, fall back to "any non-empty".
-  const norm = (s) => (s || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  // The typed name must plausibly match the account name — a signature, not
+  // gibberish — but WITHOUT blocking real cleaners. So: ignore case, spaces
+  // and accents (María → maria), and accept the full name OR any single part
+  // of it (so "Matias" passes for "Matias Rodriguez"). If there's no name on
+  // file, just require something typed.
+  const norm = (s) => (s || '')
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .trim().toLowerCase().replace(/\s+/g, ' ');
   const onFile = norm(employee?.name);
-  const nameMatches = onFile ? norm(name) === onFile : name.trim().length > 0;
+  const typedNorm = norm(name);
   const nameTyped = name.trim().length > 0;
+  const nameMatches = onFile
+    ? (typedNorm.length > 0 && (
+        typedNorm === onFile ||
+        onFile.split(' ').filter(Boolean).includes(typedNorm) ||
+        typedNorm.split(' ').filter(Boolean).includes(onFile)
+      ))
+    : nameTyped;
   const canConfirm = allChecked && nameMatches && !busy;
 
   const confirm = async () => {

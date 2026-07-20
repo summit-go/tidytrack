@@ -25,7 +25,6 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 // =================================================================
 const GOOGLE_TRANSLATE_API_KEY = "AIzaSyD7ceHPryMzs45hWJOyFNBxtOzQOEmJcSA";
 
-
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // ============================================================
@@ -107,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul18-tap21";
+const BUILD_TAG = "jul18-tap22";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -1815,7 +1814,7 @@ const splitTaskName = (name) => {
 function SupplyChecklistGate({ employee, onDone, onSignOut }) {
   const [items, setItems] = useState(null); // null = still loading
   const [checked, setChecked] = useState({});
-  const [name, setName] = useState(employee?.name || '');
+  const [name, setName] = useState(''); // blank — cleaner types their own name
   const [busy, setBusy] = useState(false);
 
   // Built-in fallback list. If the supply_checklist_items table is missing,
@@ -1872,41 +1871,49 @@ function SupplyChecklistGate({ employee, onDone, onSignOut }) {
     onDone();
   };
 
+  // Show each item starting with a capital letter, whatever case it's stored in.
+  const cap = (s) => (s && s.length ? s.charAt(0).toUpperCase() + s.slice(1) : s);
+
   return (
-    <div className="min-h-screen bg-stone-50 flex flex-col">
-      <div className="bg-stone-900 text-stone-50 px-5 py-5">
-        <div className="text-xs uppercase tracking-widest text-stone-400 font-mono">Before you start</div>
-        <div className="font-serif text-2xl mt-0.5">Supply checklist</div>
-        <div className="text-sm text-stone-300 mt-1">Grab everything on this list, tick each one, then type your name to confirm.</div>
-      </div>
-      <div className="flex-1 overflow-y-auto px-4 py-4 space-y-2">
-        {items.map(it => {
-          const on = !!checked[it.id];
-          return (
-            <button key={it.id} onClick={() => setChecked(c => ({ ...c, [it.id]: !c[it.id] }))}
-              className={`w-full flex items-center gap-3 p-4 rounded-2xl border-2 text-left active:scale-[0.99] transition ${on ? 'bg-emerald-50 border-emerald-300' : 'bg-white border-stone-200'}`}>
-              <span className={`w-6 h-6 rounded-lg flex items-center justify-center flex-shrink-0 border-2 ${on ? 'bg-emerald-600 border-emerald-600 text-white' : 'bg-white border-stone-300'}`}>
-                {on && <Check size={16} />}
-              </span>
-              <span className={`font-serif text-lg ${on ? 'text-emerald-900 line-through decoration-emerald-400' : 'text-stone-900'}`}>{it.label}</span>
-            </button>
-          );
-        })}
-      </div>
-      <div className="border-t border-stone-200 bg-white px-4 py-4 space-y-3">
-        <div className="text-xs font-mono text-stone-500 text-center">
-          {remaining > 0 ? `${remaining} item${remaining === 1 ? '' : 's'} left to check` : 'All items checked ✓'}
+    <div className="fixed inset-0 z-[60] bg-black/60 flex items-center justify-center p-4">
+      {/* Non-dismissible: no X, backdrop click does nothing. */}
+      <div className="bg-stone-50 w-full max-w-2xl max-h-[92vh] rounded-3xl shadow-2xl flex flex-col overflow-hidden">
+        <div className="bg-stone-900 text-stone-50 px-5 py-4 flex-shrink-0">
+          <div className="text-[10px] uppercase tracking-widest text-stone-400 font-mono">Before you start</div>
+          <div className="font-serif text-xl mt-0.5">Supply checklist</div>
+          <div className="text-xs text-stone-300 mt-0.5">Tick each item you have, then type your name to confirm.</div>
         </div>
-        <input type="text" value={name} onChange={(e) => setName(e.target.value)}
-          placeholder="Type your name to confirm"
-          className="w-full px-4 py-3 rounded-xl border-2 border-stone-300 focus:outline-none focus:border-stone-900 text-stone-900" />
-        <button onClick={confirm} disabled={!canConfirm}
-          className="w-full py-4 rounded-2xl bg-stone-900 text-stone-50 text-base font-bold disabled:opacity-40 active:scale-98 transition-transform">
-          {busy ? 'Saving…' : 'I have everything — continue'}
-        </button>
-        {onSignOut && (
-          <button onClick={onSignOut} className="w-full text-center text-xs text-stone-400 font-mono py-1">Not you? Sign out</button>
-        )}
+        <div className="flex-1 overflow-y-auto px-4 py-3">
+          <div className="grid grid-cols-2 gap-2">
+            {items.map(it => {
+              const on = !!checked[it.id];
+              return (
+                <button key={it.id} onClick={() => setChecked(c => ({ ...c, [it.id]: !c[it.id] }))}
+                  className={`w-full flex items-center gap-2.5 p-3 rounded-xl border-2 text-left active:scale-[0.99] transition ${on ? 'bg-emerald-50 border-emerald-300' : 'bg-white border-stone-200'}`}>
+                  <span className={`w-5 h-5 rounded-md flex items-center justify-center flex-shrink-0 border-2 ${on ? 'bg-emerald-600 border-emerald-600 text-white' : 'bg-white border-stone-300'}`}>
+                    {on && <Check size={13} />}
+                  </span>
+                  <span className={`font-serif text-sm leading-tight ${on ? 'text-emerald-900 line-through decoration-emerald-400' : 'text-stone-900'}`}>{cap(it.label)}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+        <div className="border-t border-stone-200 bg-white px-4 py-3 space-y-2.5 flex-shrink-0">
+          <div className="text-xs font-mono text-stone-500 text-center">
+            {remaining > 0 ? `${remaining} item${remaining === 1 ? '' : 's'} left to check` : 'All items checked ✓'}
+          </div>
+          <input type="text" value={name} onChange={(e) => setName(e.target.value)}
+            placeholder="Type your name here"
+            className="w-full px-4 py-3 rounded-xl border-2 border-stone-300 focus:outline-none focus:border-stone-900 text-stone-900 placeholder:text-stone-400" />
+          <button onClick={confirm} disabled={!canConfirm}
+            className="w-full py-3.5 rounded-2xl bg-stone-900 text-stone-50 text-base font-bold disabled:opacity-40 active:scale-98 transition-transform">
+            {busy ? 'Saving…' : 'I have everything — continue'}
+          </button>
+          {onSignOut && (
+            <button onClick={onSignOut} className="w-full text-center text-xs text-stone-400 font-mono py-0.5">Not you? Sign out</button>
+          )}
+        </div>
       </div>
     </div>
   );

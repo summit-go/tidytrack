@@ -25,6 +25,7 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 // =================================================================
 const GOOGLE_TRANSLATE_API_KEY = "AIzaSyD7ceHPryMzs45hWJOyFNBxtOzQOEmJcSA";
 
+
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // ============================================================
@@ -106,7 +107,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul18-tap34";
+const BUILD_TAG = "jul18-tap35";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -8504,22 +8505,17 @@ function PreparingBlockView({ shift, pendingStart, employeeName, employee,
           </ul>
         </div>
 
-        <button onClick={onStart} disabled={busy}
-          className="w-full py-4 rounded-2xl bg-stone-900 hover:bg-stone-800 text-stone-50 text-lg font-medium flex items-center justify-center gap-2 disabled:opacity-50 mb-3">
-          {busy ? <div className="w-5 h-5 border-2 border-stone-50 border-t-transparent rounded-full animate-spin" /> : <Play size={18} />}
-          Start cleaning
-        </button>
-        <button onClick={onCancel} disabled={busy}
-          className="w-full py-3 rounded-2xl border-2 border-stone-300 hover:bg-stone-100 text-stone-700 text-sm font-medium disabled:opacity-50 mb-3">
-          Back to assignments
-        </button>
-
-        {/* Show assignment(s) for this bedroom so the cleaner can read
-           the instructions BEFORE starting the clock. Read-only here —
-           status changes happen once they're in the real BlockView. */}
+        {/* Assignment card for this bedroom, with "Start cleaning" attached
+           to it (passed as onStartCleaning) so the primary action sits with
+           the job it starts. */}
         <AssignmentBanner propertyId={shift.customer_id}
           unitId={pendingStart.unitId} partyId={pendingStart.partyId}
-          employee={employee} workScreen />
+          employee={employee} workScreen onStartCleaning={onStart} />
+
+        <button onClick={onCancel} disabled={busy}
+          className="mt-3 w-full py-3 rounded-2xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold disabled:opacity-50 mb-3 flex items-center justify-center gap-2">
+          <ArrowLeft size={16} /> Back to assignments
+        </button>
 
         {/* What's already happened here — including anyone working it
            right now, with their photos. You should never have to start a
@@ -29261,7 +29257,7 @@ function AssignmentDetail({ property, assignment: assignmentInit, employee, onBa
 //   employee — current user
 //   showDone — if true, includes done assignments
 //   onUpdate — called after any status change so parent can refresh
-function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = false, onUpdate, onOpenBedroomHistory, dark = false, undoSlot = null, propertyName = null, elapsedMs = null, workScreen = false }) {
+function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = false, onUpdate, onOpenBedroomHistory, dark = false, undoSlot = null, propertyName = null, elapsedMs = null, workScreen = false, onStartCleaning = null }) {
   const [targets, setTargets] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [opened, setOpened] = useState(null);
@@ -29951,6 +29947,16 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
           </div>
         );
       })()}
+
+      {/* "Start cleaning" lives on the card now (prep screen). Same idea as
+         moving "Go to bedroom" onto the card — the primary action sits with
+         the assignment, not floating above it. */}
+      {onStartCleaning && (
+        <button onClick={onStartCleaning}
+          className="mt-3 w-full py-3.5 rounded-2xl bg-stone-900 hover:bg-stone-800 text-stone-50 text-base font-bold flex items-center justify-center gap-2 active:scale-98 transition-transform">
+          <Play size={18} /> Start cleaning
+        </button>
+      )}
 
       {opened && (
         opened.assignment?.template_set_id

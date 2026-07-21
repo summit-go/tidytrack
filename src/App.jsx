@@ -25,7 +25,6 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 // =================================================================
 const GOOGLE_TRANSLATE_API_KEY = "AIzaSyD7ceHPryMzs45hWJOyFNBxtOzQOEmJcSA";
 
-
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // ============================================================
@@ -107,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul18-tap35";
+const BUILD_TAG = "jul18-tap36";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -29600,7 +29599,7 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
               currentEmployeeId={employee?.id}
               canEditDates={can(employee, 'edit_due_dates')}
               onSetDueDate={async (aid, date) => { if (aid) { await supabase.from('assignments').update({ scheduled_date: date }).eq('id', aid); load(); } }}
-            onOpenBedroomHistory={onOpenBedroomHistory} dark={dark} workScreen={workScreen} />
+            onOpenBedroomHistory={onOpenBedroomHistory} dark={dark} workScreen={workScreen} onStartCleaning={onStartCleaning} />
         );
         // Checklist group card: ONE card representing a whole inspection
         // sheet. Shows progress + a View items button. Tapping View
@@ -29951,12 +29950,8 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
       {/* "Start cleaning" lives on the card now (prep screen). Same idea as
          moving "Go to bedroom" onto the card — the primary action sits with
          the assignment, not floating above it. */}
-      {onStartCleaning && (
-        <button onClick={onStartCleaning}
-          className="mt-3 w-full py-3.5 rounded-2xl bg-stone-900 hover:bg-stone-800 text-stone-50 text-base font-bold flex items-center justify-center gap-2 active:scale-98 transition-transform">
-          <Play size={18} /> Start cleaning
-        </button>
-      )}
+      {/* "Start cleaning" is now a small button in the card's own action row
+         (passed down to AssignmentCard), not a big bar here. */}
 
       {opened && (
         opened.assignment?.template_set_id
@@ -29991,7 +29986,7 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
 }
 
 // Reusable card for one assignment target, used in banner + panel
-function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPending, onDone, onReopen, onBlocked, onReassign, onDelete, onGoToBedroom, onOpenBedroomHistory, onTogglePriority, canMarkDone = true, canMarkDoneAlways = false, currentEmployeeId, propertyId, canEditDates = false, onSetDueDate, dark = false, workScreen = false }) {
+function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPending, onDone, onReopen, onBlocked, onReassign, onDelete, onGoToBedroom, onOpenBedroomHistory, onTogglePriority, canMarkDone = true, canMarkDoneAlways = false, currentEmployeeId, propertyId, canEditDates = false, onSetDueDate, dark = false, workScreen = false, onStartCleaning = null }) {
   const t = target;
   // Dark variant — used when this card is folded into the cleaner's black
   // "Working on" header. Only the neutral surfaces flip; colored status /
@@ -30051,8 +30046,8 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
          apartment labels never get cut off on a phone. From `sm:`
          and up there's enough horizontal room to put the title on
          the left and chips on the right. */}
-      <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-1.5 sm:gap-2 mb-2">
-        <div className="flex-1 min-w-0">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5 mb-2">
+        <div className="flex-shrink min-w-0 mr-1">
           {(t.unit?.label || t.party?.label) ? (
             canGo ? (
               // Bedroom title is the primary navigation target on the
@@ -30085,9 +30080,9 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
             <div className={`font-serif text-lg ${D.title} font-bold`}>Whole property</div>
           )}
         </div>
-        <div className="flex flex-col sm:flex-row sm:items-center gap-1.5 flex-shrink-0 sm:max-w-[60%]">
+        <div className="flex flex-wrap items-center gap-1.5 sm:ml-auto">
           {/* Mini-row 1: Priority + Status — right-aligned. */}
-          <div className="flex items-center gap-1.5 flex-wrap justify-end">
+          <div className="flex items-center gap-1.5 flex-wrap">
             {/* Priority toggle (gray ↔ red) when parent passes it; else
                read-only chip. */}
             {!isDone && onTogglePriority ? (
@@ -30221,6 +30216,14 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
          Blocked → Reassign. Reassign no longer has ml-auto so the
          row stays uniform. */}
       <div className="flex gap-2 flex-wrap items-center">
+        {/* Start cleaning — small, sits with the other card actions (prep
+           screen only; passed as onStartCleaning). */}
+        {onStartCleaning && !isDone && (
+          <button onClick={onStartCleaning} disabled={busy}
+            className="h-9 px-3 rounded-lg bg-stone-900 hover:bg-stone-800 text-white text-xs font-semibold flex items-center gap-1 disabled:opacity-50">
+            <Play size={13} /> Start cleaning
+          </button>
+        )}
         {/* "Go to bedroom" replaces the old "Start" — Start just flipped a
            status without taking you anywhere, which was confusing. This opens
            the bedroom (where the real "Start cleaning" lives). Only shows off

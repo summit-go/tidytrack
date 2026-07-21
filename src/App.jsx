@@ -106,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul18-tap40";
+const BUILD_TAG = "jul18-tap42";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -5391,6 +5391,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       onOpenMessages={() => setShowMessages(true)}
       onOpenBedroomHistory={setBedroomHistory}
       onJoinBlock={joinBlock}
+      onExit={() => { setActiveBlock(null); setPendingStart(null); setCleanerTab('home'); }}
       busy={busy} />);
   }
   if (isMulti && (!activeBlock || cleanerTab !== 'home')) {
@@ -5409,6 +5410,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   if (isMulti && activeBlock) {
     return withIdleModal(<BlockView shift={shift} block={activeBlock} tasks={tasks} activeTask={activeTask}
       employeeName={employee.name} employee={employee} onSignOut={signOutWithCleanup} onFinish={finishBlock}
+      onExit={() => { setActiveBlock(null); setPendingStart(null); setCleanerTab('home'); }}
       onPause={() => setActiveBlock(null)}
       onUndo={undoBlock}
       onReopen={reopenBlock}
@@ -8370,7 +8372,7 @@ function OtherWorkblocksHere({ unitId, partyId, currentBlockId, currentEmployeeI
 // would tangle the logic. Cleaner to have a dedicated screen.
 // =================================================================
 function PreparingBlockView({ shift, pendingStart, employeeName, employee,
-  onSignOut, onCancel, onStart, onSendBackToPending, onReopen, onOpenMessages, onOpenBedroomHistory, onJoinBlock, busy }) {
+  onSignOut, onCancel, onStart, onSendBackToPending, onReopen, onOpenMessages, onOpenBedroomHistory, onJoinBlock, onExit, busy }) {
   const handleLogoClick = () => onCancel();
 
   // Load priority + cleaning types for this bedroom's open assignments
@@ -8603,10 +8605,10 @@ function UndoMoveMenu({ disabled, canUndo, canMove, onUndo, onMoveBedroom, onMov
   );
 }
 
-function BlockView({ shift, block, tasks, activeTask, employeeName, employee, onSignOut, onFinish, onPause, onUndo, onReopen,
+function BlockView({ shift, block, tasks, activeTask, employeeName, employee, onSignOut, onFinish, onExit, onPause, onUndo, onReopen,
   newTaskName, setNewTaskName, onStartTask, onStartTasksFromPicker, onStartChecklistItems, onReleaseTargets, onStopTask, onResumeTask, onAddPhoto,
   photoModal, onClosePhotoModal, onUploadPhoto, onSavePhotoNote, onOpenMessages, onOpenBedroomHistory,
-  onMoveBlock, onMoveMultiple, onLeaveBlock, onJoinBlock, onDeletePhoto, onGoToBedroom, onSwitchProperty, cleanerTab, setCleanerTab, previewMode, busy }) {
+  onMoveBlock, onMoveMultiple, onLeaveBlock, onJoinBlock, onDeletePhoto, onGoToBedroom, onSwitchProperty, cleanerTab, setCleanerTab, previewMode, busy, onExit }) {
   useTick(true);
   const blockElapsed = Date.now() - new Date(block.start_time).getTime();
   const activeTaskObj = tasks.find(t => t.id === activeTask);
@@ -8787,7 +8789,7 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
       {/* Assignment card, folded into the dark header as one block (dark
          variant). Sits flush under the sticky header so the bedroom info and
          the assignment read as a single dark section. */}
-      <AssignmentBanner propertyId={shift.customer_id} unitId={block.unit_id} partyId={block.party_id} employee={employee} onOpenBedroomHistory={onOpenBedroomHistory} dark workScreen
+      <AssignmentBanner propertyId={shift.customer_id} unitId={block.unit_id} partyId={block.party_id} employee={employee} onOpenBedroomHistory={onOpenBedroomHistory} dark workScreen onExit={onExit}
         propertyName={shift.customer?.name} elapsedMs={blockElapsed}
         undoSlot={(onUndo || canMoveBlock) ? (
           <UndoMoveMenu
@@ -11722,7 +11724,27 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
   const [adjusting, setAdjusting] = useState(null); // day key being edited
   const [adjH, setAdjH] = useState('');
   const [adjM, setAdjM] = useState('');
+  const [settingPay, setSettingPay] = useState(null); // day key having a flat $ set
+  const [payAmt, setPayAmt] = useState('');
   const monthStart = (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-01`; })();
+
+  // Flat pay for a whole day/job — overrides hours x rate. Empty clears it.
+  const saveFlatPay = async (empId, dateKey, amount) => {
+    const key = `${empId}:${dateKey}`;
+    const existing = payDays[key];
+    const val = (amount === '' || amount == null) ? null : Number(amount);
+    if (val != null && (isNaN(val) || val < 0)) { setSettingPay(null); return; }
+    setPayBusy(key);
+    if (existing) {
+      await supabase.from('employee_pay_days').update({ flat_amount: val }).eq('id', existing.id);
+    } else {
+      await supabase.from('employee_pay_days').insert({
+        employee_id: empId, work_date: dateKey, flat_amount: val, created_by: currentEmployee?.id || null,
+      });
+    }
+    setPayBusy(null); setSettingPay(null);
+    await loadPay();
+  };
 
   const loadPay = async () => {
     const { data, error } = await supabase.from('employee_pay_days')
@@ -11993,9 +12015,10 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
                 </div>
               </button>
               {showMoney && (() => {
-                const owed = payOwed(d.shifts);
                 const key = `${selectedCleanerId}:${d.key}`;
                 const row = payDays[key];
+                const hasFlat = row?.flat_amount != null;
+                const owed = hasFlat ? Number(row.flat_amount) : payOwed(d.shifts);
                 const paid = !!row?.paid_at;
                 const stale = isUnpaidStale(d.key, paid);
                 return (
@@ -12003,11 +12026,26 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
                     <div className="text-xs font-mono">
                       <span className="text-stone-500">You owe </span>
                       <span className="text-stone-900 font-bold">{owed > 0 ? fmtMoney(owed) : '—'}</span>
-                      {owed === 0 && <span className="text-stone-400"> (set a pay rate)</span>}
+                      {hasFlat && <span className="text-amber-700"> · flat</span>}
+                      {owed === 0 && !hasFlat && <span className="text-stone-400"> (set a rate or flat pay)</span>}
                       {stale && <span className="text-amber-700"> · unpaid 7+ days</span>}
                     </div>
-                    <div className="flex items-center gap-1.5">
-                      {adjusting === d.key ? (
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      {settingPay === d.key ? (
+                        <span className="flex items-center gap-1">
+                          <span className="text-[11px] text-stone-500 font-mono">$</span>
+                          <input type="number" min="0" step="0.01" autoFocus value={payAmt} onChange={e => setPayAmt(e.target.value)}
+                            placeholder="0.00"
+                            className="w-20 px-1.5 py-0.5 rounded border border-stone-300 text-xs font-mono" />
+                          <button onClick={() => saveFlatPay(selectedCleanerId, d.key, payAmt)} disabled={payBusy === key}
+                            className="text-[11px] px-2 py-0.5 rounded bg-stone-900 text-white">Save</button>
+                          {hasFlat && (
+                            <button onClick={() => saveFlatPay(selectedCleanerId, d.key, '')} disabled={payBusy === key}
+                              className="text-[11px] px-1.5 text-red-600">Clear</button>
+                          )}
+                          <button onClick={() => setSettingPay(null)} className="text-[11px] px-1 text-stone-500">Cancel</button>
+                        </span>
+                      ) : adjusting === d.key ? (
                         <span className="flex items-center gap-1">
                           <input type="number" min="0" autoFocus value={adjH} onChange={e => setAdjH(e.target.value)}
                             placeholder="h"
@@ -12022,14 +12060,20 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
                           <button onClick={() => setAdjusting(null)} className="text-[11px] px-1 text-stone-500">Cancel</button>
                         </span>
                       ) : (
-                        <button onClick={() => {
-                            setAdjusting(d.key);
-                            const cur = Math.round(totalMs / 60000);
-                            setAdjH(String(Math.floor(cur / 60))); setAdjM(String(cur % 60));
-                          }}
-                          className="text-[11px] font-mono px-2 py-0.5 rounded-full bg-stone-100 text-stone-600 flex items-center gap-1">
-                          <Clock size={10} /> Adjust hours
-                        </button>
+                        <>
+                          <button onClick={() => { setSettingPay(d.key); setPayAmt(hasFlat ? String(row.flat_amount) : ''); }}
+                            className="text-[11px] font-mono px-2 py-0.5 rounded-full bg-stone-100 text-stone-600 flex items-center gap-1">
+                            <DollarSign size={10} /> {hasFlat ? 'Edit pay' : 'Set pay'}
+                          </button>
+                          <button onClick={() => {
+                              setAdjusting(d.key);
+                              const cur = Math.round(totalMs / 60000);
+                              setAdjH(String(Math.floor(cur / 60))); setAdjM(String(cur % 60));
+                            }}
+                            className="text-[11px] font-mono px-2 py-0.5 rounded-full bg-stone-100 text-stone-600 flex items-center gap-1">
+                            <Clock size={10} /> Adjust hours
+                          </button>
+                        </>
                       )}
                       <button onClick={() => togglePaid(selectedCleanerId, d.key, owed)} disabled={payBusy === key}
                         className={`text-[11px] font-mono px-2.5 py-0.5 rounded-full flex items-center gap-1 disabled:opacity-50 ${paid ? 'bg-emerald-600 text-white' : 'bg-white border border-stone-300 text-stone-600'}`}>
@@ -29256,7 +29300,7 @@ function AssignmentDetail({ property, assignment: assignmentInit, employee, onBa
 //   employee — current user
 //   showDone — if true, includes done assignments
 //   onUpdate — called after any status change so parent can refresh
-function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = false, onUpdate, onOpenBedroomHistory, dark = false, undoSlot = null, propertyName = null, elapsedMs = null, workScreen = false, onStartCleaning = null }) {
+function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = false, onUpdate, onOpenBedroomHistory, dark = false, undoSlot = null, propertyName = null, elapsedMs = null, workScreen = false, onStartCleaning = null, onExit = null }) {
   const [targets, setTargets] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [opened, setOpened] = useState(null);
@@ -29599,7 +29643,7 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
               currentEmployeeId={employee?.id}
               canEditDates={can(employee, 'edit_due_dates')}
               onSetDueDate={async (aid, date) => { if (aid) { await supabase.from('assignments').update({ scheduled_date: date }).eq('id', aid); load(); } }}
-            onOpenBedroomHistory={onOpenBedroomHistory} dark={dark} workScreen={workScreen} onStartCleaning={onStartCleaning} />
+            onOpenBedroomHistory={onOpenBedroomHistory} dark={dark} workScreen={workScreen} onStartCleaning={onStartCleaning} onExit={onExit} />
         );
         // Checklist group card: ONE card representing a whole inspection
         // sheet. Shows progress + a View items button. Tapping View
@@ -29901,6 +29945,7 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
                           if (onUpdate) onUpdate();
                         } catch (e) { console.warn('[card ✓] failed', e); }
                         setBusy(false);
+                        if (onExit) onExit();
                       }} disabled={busy}
                         title="Mark this assignment complete → Done"
                         className="w-9 h-9 rounded-lg flex items-center justify-center bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-50">
@@ -29918,6 +29963,7 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
                         if (error) { alert('Could not delete: ' + error.message); return; }
                         if (onUpdate) onUpdate();
                         load();
+                        if (onExit) onExit();
                       }} disabled={busy}
                         title="Delete this assignment (uploaded by mistake)"
                         className={`w-9 h-9 rounded-lg flex items-center justify-center border disabled:opacity-50 ${dark ? 'bg-slate-800 hover:bg-red-950 border-slate-600 text-red-300' : 'bg-white hover:bg-red-50 border-stone-300 text-red-600'}`}>
@@ -29995,7 +30041,7 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
 }
 
 // Reusable card for one assignment target, used in banner + panel
-function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPending, onDone, onReopen, onBlocked, onReassign, onDelete, onGoToBedroom, onOpenBedroomHistory, onTogglePriority, canMarkDone = true, canMarkDoneAlways = false, currentEmployeeId, propertyId, canEditDates = false, onSetDueDate, dark = false, workScreen = false, onStartCleaning = null }) {
+function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPending, onDone, onReopen, onBlocked, onReassign, onDelete, onGoToBedroom, onOpenBedroomHistory, onTogglePriority, canMarkDone = true, canMarkDoneAlways = false, currentEmployeeId, propertyId, canEditDates = false, onSetDueDate, dark = false, workScreen = false, onStartCleaning = null, onExit = null }) {
   const t = target;
   // Dark variant — used when this card is folded into the cleaner's black
   // "Working on" header. Only the neutral surfaces flip; colored status /
@@ -30237,7 +30283,7 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
            status without taking you anywhere, which was confusing. This opens
            the bedroom (where the real "Start cleaning" lives). Only shows off
            the working screen (canGo is false once you're in the bedroom). */}
-        {canGo && !isDone && (
+        {canGo && (
           <button onClick={onGoToBedroom} disabled={busy}
             className="h-9 px-3 rounded-lg bg-stone-900 hover:bg-stone-800 text-white text-xs font-medium flex items-center gap-1 disabled:opacity-50">
             Go to bedroom <ChevronRight size={13} />
@@ -30292,14 +30338,14 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
         {((canMarkDoneAlways && !isDone) || onDelete) && (
           <div className="ml-auto flex items-center gap-1.5">
             {canMarkDoneAlways && !isDone && (
-              <button onClick={() => { if (confirm('Mark this whole assignment complete? It closes out this assignment and moves it to Done.')) onDone(); }} disabled={busy}
+              <button onClick={() => { if (confirm('Mark this whole assignment complete? It closes out this assignment and moves it to Done.')) { onDone(); if (onExit) onExit(); } }} disabled={busy}
                 title="Mark this assignment complete → Done"
                 className="w-9 h-9 rounded-lg flex items-center justify-center bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-50">
                 <Check size={16} />
               </button>
             )}
             {onDelete && (
-              <button onClick={onDelete} disabled={busy}
+              <button onClick={() => { if (onDelete) { onDelete(); if (onExit) onExit(); } }} disabled={busy}
                 title="Delete this assignment (uploaded by mistake)"
                 className={`w-9 h-9 rounded-lg flex items-center justify-center border disabled:opacity-50 ${dark ? 'bg-slate-800 hover:bg-red-950 border-slate-600 text-red-300' : 'bg-white hover:bg-red-50 border-stone-300 text-red-600'}`}>
                 <X size={16} />
@@ -31052,6 +31098,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
   // timeline dropdown on the date pill — same as the other screens.
   const canViewTimelineT = can(employee, 'view_submission_timeline');
   const [timelineOpenT, setTimelineOpenT] = useState(null);
+  const [dueDraftT, setDueDraftT] = useState(''); // draft for the date picker — save is explicit now
   const fmtStampT = (iso) => {
     if (!iso) return null;
     const d = new Date(iso);
@@ -31992,7 +32039,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                                                 </div>
                                               </div>
                                               {canEditDatesT && (
-                                                <button onClick={(e) => { e.stopPropagation(); setTimelineOpenT(null); setEditDueId(asg?.id); }}
+                                                <button onClick={(e) => { e.stopPropagation(); setTimelineOpenT(null); setDueDraftT(sd || ''); setEditDueId(asg?.id); }}
                                                   className="w-full border-t border-stone-100 px-3 py-2 text-[11px] font-mono text-stone-600 hover:bg-stone-50 text-left flex items-center gap-1.5">
                                                   <Edit2 size={11} /> Change due date
                                                 </button>
@@ -32013,14 +32060,18 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                                     );
                                   }
                                   if (editDueId === asg?.id) return (
-                                    <input type="date" autoFocus value={sd || ''}
-                                      onChange={(e) => saveDueT(asg?.id, e.target.value)}
-                                      onBlur={() => setEditDueId(null)}
-                                      onClick={(e) => e.stopPropagation()}
-                                      className="text-[10px] font-mono px-1.5 py-0.5 rounded border border-stone-400 bg-white" />
+                                    <span className="inline-flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+                                      <input type="date" autoFocus defaultValue={sd || ''}
+                                        onChange={(e) => setDueDraftT(e.target.value)}
+                                        className="text-[10px] font-mono px-1.5 py-0.5 rounded border border-stone-400 bg-white" />
+                                      <button onClick={(e) => { e.stopPropagation(); saveDueT(asg?.id, dueDraftT || null); setEditDueId(null); }}
+                                        className="text-[10px] px-1.5 py-0.5 rounded bg-stone-900 text-white">Save</button>
+                                      <button onClick={(e) => { e.stopPropagation(); setEditDueId(null); }}
+                                        className="text-[10px] px-1 text-stone-500">Cancel</button>
+                                    </span>
                                   );
                                   if (canEditDatesT) return (
-                                    <button onClick={(e) => { e.stopPropagation(); setEditDueId(asg?.id); }}
+                                    <button onClick={(e) => { e.stopPropagation(); setDueDraftT(sd || ''); setEditDueId(asg?.id); }}
                                       className={`text-[10px] font-mono px-2 py-0.5 rounded-full border inline-flex items-center gap-1 ${sd
                                         ? (sd < todayKeyT ? 'bg-red-100 text-red-700 border-red-200'
                                            : sd === todayKeyT ? 'bg-emerald-100 text-emerald-800 border-emerald-200'

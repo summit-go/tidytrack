@@ -106,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul18-tap44";
+const BUILD_TAG = "jul18-tap46";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -11744,19 +11744,27 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
 
   // Flat pay for a whole day/job — overrides hours x rate. Empty clears it.
   const saveFlatPay = async (empId, dateKey, amount) => {
+    if (!empId) { alert('No cleaner id — could not save pay.'); return; }
     const key = `${empId}:${dateKey}`;
     const existing = payDays[key];
     const val = (amount === '' || amount == null) ? null : Number(amount);
     if (val != null && (isNaN(val) || val < 0)) { setSettingPay(null); return; }
     setPayBusy(key);
+    let error;
     if (existing) {
-      await supabase.from('employee_pay_days').update({ flat_amount: val }).eq('id', existing.id);
+      ({ error } = await supabase.from('employee_pay_days').update({ flat_amount: val }).eq('id', existing.id));
     } else {
-      await supabase.from('employee_pay_days').insert({
+      ({ error } = await supabase.from('employee_pay_days').insert({
         employee_id: empId, work_date: dateKey, flat_amount: val, created_by: currentEmployee?.id || null,
-      });
+      }));
     }
     setPayBusy(null); setSettingPay(null);
+    if (error) {
+      const missingCol = /flat_amount/.test(error.message || '') || error.code === '42703' || error.code === 'PGRST204';
+      alert('Could not save pay: ' + (error.message || 'unknown error')
+        + (missingCol ? '\n\nThe flat-pay column isn\'t in your database yet. Run v50_flat_pay.sql in Supabase, then try again.' : ''));
+      return;
+    }
     await loadPay();
   };
 
@@ -11856,92 +11864,29 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
     return (Date.now() - new Date(dateKey + 'T00:00:00').getTime()) > 7 * 86400000;
   };
 
-  // ---- Level 1: cleaner cards -----------------------------------------
-  if (!selectedCleanerId) {
-    const byCleaner = new Map();
-    shifts.forEach(s => {
-      const id = s.employee?.id;
-      if (!id) return;
-      if (!byCleaner.has(id)) byCleaner.set(id, { id, name: s.employee?.name || '—', shifts: [] });
-      byCleaner.get(id).shifts.push(s);
-    });
-    const cleaners = Array.from(byCleaner.values()).sort((a, b) => naturalCompare(a.name, b.name));
-    return (
-      <div className="px-5">
-        <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-3">Cleaners ({cleaners.length})</div>
-        {cleaners.length === 0 ? (
-          <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">No one worked in this period.</div>
-        ) : (
-          <div className="space-y-2">
-            {cleaners.map(c => {
-              const dayKeys = new Set(c.shifts.map(s => localDayKey(s.start_time)));
-              const totalMs = c.shifts.filter(s => s.end_time).reduce((sum, s) => sum + shiftBillableMs(s), 0);
-              const active = c.shifts.some(s => !s.end_time);
-              const billable = c.shifts.reduce((sum, s) => sum + shiftBillableAmount(s, showMoney), 0);
-              const sorted = c.shifts.map(s => new Date(s.start_time)).sort((a, b) => a - b);
-              const dayCount = dayKeys.size;
-              const rangeLabel = dayCount <= 1
-                ? fmtDate(sorted[0])
-                : `${fmtDate(sorted[0])} – ${fmtDate(sorted[sorted.length - 1])}`;
-              return (
-                <button key={c.id} onClick={() => onSelectCleaner(c.id)}
-                  className="w-full text-left p-4 rounded-2xl bg-white border border-stone-200 hover:border-stone-400 transition-colors">
-                  <div className="flex items-center justify-between mb-2">
-                    <div className="flex items-center gap-2">
-                      {active && <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />}
-                      <span className="font-serif text-lg text-stone-900">{c.name}</span>
-                    </div>
-                    <ChevronRight size={16} className="text-stone-400" />
-                  </div>
-                  <div className="flex items-center justify-between text-xs text-stone-500 font-mono">
-                    <span>{rangeLabel} · {c.shifts.length} {c.shifts.length === 1 ? 'shift' : 'shifts'} · {dayCount} {dayCount === 1 ? 'day' : 'days'} · {fmtTimeShort(totalMs)}</span>
-                    {showMoney && billable > 0 && <span className="text-emerald-700 font-medium">{fmtMoney(billable)}</span>}
-                  </div>
-                </button>
-              );
-            })}
-          </div>
-        )}
-      </div>
-    );
-  }
+  // The cleaner list + inline detail render together at the bottom now
+  // (accordion). renderCleanerDetail (below) handles one cleaner's days.
 
-  // ---- Level 2: one cleaner's days ------------------------------------
-  const cShifts = shifts.filter(s => s.employee?.id === selectedCleanerId);
-  const name = cShifts[0]?.employee?.name || 'Cleaner';
-  if (cShifts.length === 0) {
-    return (
-      <div className="px-5">
-        <button onClick={() => onSelectCleaner(null)}
-          className="flex items-center gap-1.5 text-xs font-mono text-stone-500 hover:text-stone-800 mb-3">
-          <ArrowLeft size={14} /> All cleaners
-        </button>
-        <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
-          No shifts for this cleaner in the selected dates. Try widening the date range or “All time”.
+  // ---- One cleaner's day-by-day detail, rendered INLINE under their card in
+  // the accordion below. Hoisted so the cleaner list can call it. -----------
+  function renderCleanerDetail(cShifts) {
+    const empId = cShifts[0]?.employee?.id;
+    if (!cShifts.length) {
+      return (
+        <div className="text-center py-6 text-stone-400 text-xs border-2 border-dashed border-stone-200 rounded-2xl">
+          No shifts in the selected dates.
         </div>
-      </div>
-    );
-  }
-  const byDay = new Map();
-  cShifts.forEach(s => {
-    const k = localDayKey(s.start_time);
-    if (!byDay.has(k)) byDay.set(k, { key: k, date: new Date(s.start_time), shifts: [] });
-    byDay.get(k).shifts.push(s);
-  });
-  const days = Array.from(byDay.values()).sort((a, b) => b.date - a.date);
-
-  return (
-    <div className="px-5">
-      <button onClick={() => onSelectCleaner(null)}
-        className="flex items-center gap-1.5 text-xs font-mono text-stone-500 hover:text-stone-800 mb-3">
-        <ArrowLeft size={14} /> All cleaners
-      </button>
-      <div className="flex items-center gap-2 mb-3">
-        {cShifts.some(s => !s.end_time) && <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />}
-        <span className="font-serif text-2xl text-stone-900">{name}</span>
-        <span className="text-xs text-stone-400 font-mono">· {days.length} {days.length === 1 ? 'day' : 'days'}</span>
-      </div>
-      <div className="space-y-2">
+      );
+    }
+    const byDay = new Map();
+    cShifts.forEach(s => {
+      const k = localDayKey(s.start_time);
+      if (!byDay.has(k)) byDay.set(k, { key: k, date: new Date(s.start_time), shifts: [] });
+      byDay.get(k).shifts.push(s);
+    });
+    const days = Array.from(byDay.values()).sort((a, b) => b.date - a.date);
+    return (
+      <div className="space-y-2 pt-3 mt-3 border-t border-stone-100">
         {days.map(d => {
           const totalMs = d.shifts.filter(s => s.end_time).reduce((sum, s) => sum + shiftBillableMs(s), 0);
           const billable = d.shifts.reduce((sum, s) => sum + shiftBillableAmount(s, showMoney), 0);
@@ -12029,7 +11974,7 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
                 </div>
               </button>
               {showMoney && (() => {
-                const key = `${selectedCleanerId}:${d.key}`;
+                const key = `${empId}:${d.key}`;
                 const row = payDays[key];
                 const hasFlat = row?.flat_amount != null;
                 const owed = hasFlat ? Number(row.flat_amount) : payOwed(d.shifts);
@@ -12051,10 +11996,10 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
                           <input type="number" min="0" step="0.01" autoFocus value={payAmt} onChange={e => setPayAmt(e.target.value)}
                             placeholder="0.00"
                             className="w-20 px-1.5 py-0.5 rounded border border-stone-300 text-xs font-mono" />
-                          <button onClick={() => saveFlatPay(selectedCleanerId, d.key, payAmt)} disabled={payBusy === key}
+                          <button onClick={() => saveFlatPay(empId, d.key, payAmt)} disabled={payBusy === key}
                             className="text-[11px] px-2 py-0.5 rounded bg-stone-900 text-white">Save</button>
                           {hasFlat && (
-                            <button onClick={() => saveFlatPay(selectedCleanerId, d.key, '')} disabled={payBusy === key}
+                            <button onClick={() => saveFlatPay(empId, d.key, '')} disabled={payBusy === key}
                               className="text-[11px] px-1.5 text-red-600">Clear</button>
                           )}
                           <button onClick={() => setSettingPay(null)} className="text-[11px] px-1 text-stone-500">Cancel</button>
@@ -12089,7 +12034,7 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
                           </button>
                         </>
                       )}
-                      <button onClick={() => togglePaid(selectedCleanerId, d.key, owed)} disabled={payBusy === key}
+                      <button onClick={() => togglePaid(empId, d.key, owed)} disabled={payBusy === key}
                         className={`text-[11px] font-mono px-2.5 py-0.5 rounded-full flex items-center gap-1 disabled:opacity-50 ${paid ? 'bg-emerald-600 text-white' : 'bg-white border border-stone-300 text-stone-600'}`}>
                         {paid ? <><Check size={10} /> Paid</> : 'Mark paid'}
                       </button>
@@ -12119,6 +12064,61 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
           );
         })}
       </div>
+    );
+  }
+
+  // ---- Accordion: all cleaner cards; the selected one expands INLINE so the
+  // others stay visible (no more drilling into a hidden detail page). --------
+  const byCleaner = new Map();
+  shifts.forEach(s => {
+    const id = s.employee?.id;
+    if (!id) return;
+    if (!byCleaner.has(id)) byCleaner.set(id, { id, name: s.employee?.name || '—', shifts: [] });
+    byCleaner.get(id).shifts.push(s);
+  });
+  const cleaners = Array.from(byCleaner.values()).sort((a, b) => naturalCompare(a.name, b.name));
+  return (
+    <div className="px-5">
+      <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-3">Cleaners ({cleaners.length})</div>
+      {cleaners.length === 0 ? (
+        <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">No one worked in this period.</div>
+      ) : (
+        <div className="space-y-2">
+          {cleaners.map(c => {
+            const dayKeys = new Set(c.shifts.map(s => localDayKey(s.start_time)));
+            const totalMs = c.shifts.filter(s => s.end_time).reduce((sum, s) => sum + shiftBillableMs(s), 0);
+            const active = c.shifts.some(s => !s.end_time);
+            const billable = c.shifts.reduce((sum, s) => sum + shiftBillableAmount(s, showMoney), 0);
+            const sorted = c.shifts.map(s => new Date(s.start_time)).sort((a, b) => a - b);
+            const dayCount = dayKeys.size;
+            const rangeLabel = dayCount <= 1 ? fmtDate(sorted[0]) : `${fmtDate(sorted[0])} – ${fmtDate(sorted[sorted.length - 1])}`;
+            const expanded = selectedCleanerId === c.id;
+            return (
+              <div key={c.id} className={`rounded-2xl bg-white border transition-colors ${expanded ? 'border-stone-400' : 'border-stone-200'}`}>
+                <button onClick={() => onSelectCleaner(expanded ? null : c.id)}
+                  className="w-full text-left p-4 hover:bg-stone-50 rounded-2xl transition-colors">
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="flex items-center gap-2">
+                      {active && <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />}
+                      <span className="font-serif text-lg text-stone-900">{c.name}</span>
+                    </div>
+                    <ChevronRight size={16} className={`text-stone-400 transition-transform ${expanded ? 'rotate-90' : ''}`} />
+                  </div>
+                  <div className="flex items-center justify-between text-xs text-stone-500 font-mono">
+                    <span>{rangeLabel} · {c.shifts.length} {c.shifts.length === 1 ? 'shift' : 'shifts'} · {dayCount} {dayCount === 1 ? 'day' : 'days'} · {fmtTimeShort(totalMs)}</span>
+                    {showMoney && billable > 0 && <span className="text-emerald-700 font-medium">{fmtMoney(billable)}</span>}
+                  </div>
+                </button>
+                {expanded && (
+                  <div className="px-4 pb-4">
+                    {renderCleanerDetail(c.shifts)}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

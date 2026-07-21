@@ -106,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul18-tap46";
+const BUILD_TAG = "jul18-tap47";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -11751,12 +11751,14 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
     if (val != null && (isNaN(val) || val < 0)) { setSettingPay(null); return; }
     setPayBusy(key);
     let error;
-    if (existing) {
+    if (existing?.id) {
       ({ error } = await supabase.from('employee_pay_days').update({ flat_amount: val }).eq('id', existing.id));
     } else {
-      ({ error } = await supabase.from('employee_pay_days').insert({
-        employee_id: empId, work_date: dateKey, flat_amount: val, created_by: currentEmployee?.id || null,
-      }));
+      // A row for this (employee, day) may already exist (e.g. from Mark paid)
+      // even if it's not in local state — upsert avoids the duplicate-key error.
+      ({ error } = await supabase.from('employee_pay_days')
+        .upsert({ employee_id: empId, work_date: dateKey, flat_amount: val, created_by: currentEmployee?.id || null },
+          { onConflict: 'employee_id,work_date' }));
     }
     setPayBusy(null); setSettingPay(null);
     if (error) {

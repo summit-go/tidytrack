@@ -106,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul18-tap33";
+const BUILD_TAG = "jul18-tap34";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -1147,6 +1147,16 @@ function BetaShell({ employee, onSignOut }) {
 
 function Splash({ text }) {
   return <div className="min-h-screen bg-stone-50 flex items-center justify-center text-stone-400 text-sm">{text}</div>;
+}
+
+// Tiny corner tag so we can name screens (Screen A, B, C…). Purely a
+// reference aid for talking about the app — subtle, doesn't block taps.
+function ScreenId({ id }) {
+  return (
+    <div className="fixed bottom-16 right-2 z-[45] pointer-events-none select-none text-[9px] font-mono uppercase tracking-widest text-stone-500/70 bg-white/70 border border-stone-200 px-1.5 py-0.5 rounded-md shadow-sm">
+      Screen {id}
+    </div>
+  );
 }
 
 // =================================================================
@@ -7683,6 +7693,7 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
       {/* === HOME TAB === */}
       {cleanerTab === 'home' && (
         <>
+          <ScreenId id="A" />
           {/* Paused / open work blocks — so a cleaner can always get back
              into what they were doing. (An ACTIVE block takes over the
              whole screen, so these are the paused/unfinished ones.) */}
@@ -7823,6 +7834,7 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
       {/* === ASSIGNMENTS TAB === */}
       {cleanerTab === 'assignments' && (
         <>
+          <ScreenId id="B" />
           <AssignmentsPanel propertyId={shift.customer_id} employee={employee} onGoToBedroom={onGoToBedroom} onOpenBedroomHistory={onOpenBedroomHistory} onJoinBlock={onJoinBlock} />
           {can(employee, 'upload_assignments') && (
             <div className="px-4 pt-3">
@@ -8383,6 +8395,7 @@ function PreparingBlockView({ shift, pendingStart, employeeName, employee,
 
   return (
     <div className="min-h-screen bg-stone-50 pb-24">
+      <ScreenId id="D" />
       <Header name={employeeName} onSignOut={onSignOut} role={employee?.role} cleanerView employee={employee}
         onOpenMessages={onOpenMessages} onLogoClick={handleLogoClick} />
       {/* Cleaner has navigated to a specific bedroom. They've chosen the
@@ -8726,6 +8739,7 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
 
   return (
     <div className="min-h-screen bg-stone-50 pb-24">
+      <ScreenId id="C" />
       <Header name={employeeName} onSignOut={onSignOut} role={employee?.role} cleanerView employee={employee}
         onOpenMessages={onOpenMessages}
         onOpenWhosHere={() => setWhosHereOpen(true)}
@@ -30200,32 +30214,17 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
          Order: Start → Pause → Move to pending → Done → Reopen →
          Blocked → Reassign. Reassign no longer has ml-auto so the
          row stays uniform. */}
-      <div className="flex gap-2 flex-wrap">
-        {!workScreen && (t.status === 'pending' || t.status === 'blocked' || t.status === 'in_progress' || t.status === 'paused') && (() => {
-          // "I'm on it too" only makes sense when SOMEONE ELSE is on it.
-          // If the current cleaner started this assignment, show a
-          // disabled gray "You're on it" pill so they see the state
-          // without a misleading button to "join themselves".
-          const iStartedThis = t.status === 'in_progress'
-            && currentEmployeeId
-            && t.started_by === currentEmployeeId;
-          if (iStartedThis) {
-            return (
-              <button disabled
-                className="h-9 px-3 rounded-lg bg-stone-200 text-stone-500 text-xs font-medium flex items-center gap-1 cursor-not-allowed">
-                <Check size={12} /> You're on it
-              </button>
-            );
-          }
-          const label = t.status === 'in_progress' ? "I'm on it too"
-            : t.status === 'paused' ? 'Resume' : 'Start';
-          return (
-            <button onClick={onStart} disabled={busy}
-              className="h-9 px-3 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-medium flex items-center gap-1 disabled:opacity-50">
-              <Play size={12} /> {label}
-            </button>
-          );
-        })()}
+      <div className="flex gap-2 flex-wrap items-center">
+        {/* "Go to bedroom" replaces the old "Start" — Start just flipped a
+           status without taking you anywhere, which was confusing. This opens
+           the bedroom (where the real "Start cleaning" lives). Only shows off
+           the working screen (canGo is false once you're in the bedroom). */}
+        {canGo && !isDone && (
+          <button onClick={onGoToBedroom} disabled={busy}
+            className="h-9 px-3 rounded-lg bg-stone-900 hover:bg-stone-800 text-white text-xs font-medium flex items-center gap-1 disabled:opacity-50">
+            Go to bedroom <ChevronRight size={13} />
+          </button>
+        )}
         {onPause && (t.status === 'in_progress') && (
           <button onClick={onPause} disabled={busy}
             className="h-9 px-3 rounded-lg border border-blue-200 hover:bg-blue-50 text-blue-700 text-xs font-medium flex items-center gap-1 disabled:opacity-50">
@@ -30238,24 +30237,8 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
             <ArrowLeft size={12} /> Move to pending
           </button>
         )}
-        {!workScreen && (t.status === 'pending' || t.status === 'in_progress' || t.status === 'blocked' || t.status === 'paused') && canMarkDone && (() => {
-          // On Pending we keep the button VISIBLE but disabled — the
-          // cleaner sees the action exists, just needs to Start first.
-          // This avoids the confusing "button vanished" feeling.
-          // EXCEPTION: users with full mark_assignments_done permission
-          // (owners / managers) can mark complete WITHOUT starting first,
-          // so we never disable the button for them.
-          const pendingDisabled = t.status === 'pending' && !canMarkDoneAlways;
-          return (
-            <button onClick={onDone} disabled={busy || pendingDisabled}
-              title={pendingDisabled ? 'Start this assignment before marking it complete' : ''}
-              className={`h-9 px-3 rounded-lg text-xs font-medium flex items-center gap-1 ${pendingDisabled
-                ? 'bg-stone-200 text-stone-500 cursor-not-allowed'
-                : 'bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-50'}`}>
-              <Check size={12} /> Mark complete
-            </button>
-          );
-        })()}
+        {/* "Mark complete" full button removed — the corner ✓ (permission-
+           gated, with a confirm) is the single mark-complete action now. */}
         {(isDone || t.status === 'blocked') && (
           <button onClick={onReopen} disabled={busy}
             className={`h-9 px-3 rounded-lg border ${D.outlineBtn} text-xs font-medium flex items-center gap-1 disabled:opacity-50`}>
@@ -30288,9 +30271,9 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
            pushed to the right end to mirror the checklist card. */}
         {/* Owner/manager corner actions on the working screen:
            ✓ = mark this assignment complete → Done. ✕ = delete a mistaken upload. */}
-        {((workScreen && canMarkDoneAlways && !isDone) || onDelete) && (
+        {((canMarkDoneAlways && !isDone) || onDelete) && (
           <div className="ml-auto flex items-center gap-1.5">
-            {workScreen && canMarkDoneAlways && !isDone && (
+            {canMarkDoneAlways && !isDone && (
               <button onClick={() => { if (confirm('Mark this whole assignment complete? It closes out this assignment and moves it to Done.')) onDone(); }} disabled={busy}
                 title="Mark this assignment complete → Done"
                 className="w-9 h-9 rounded-lg flex items-center justify-center bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-50">
@@ -30308,16 +30291,9 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
         )}
       </div>
 
-      {/* === PRIMARY CTA ================================================
-         "Go to this bedroom" is intentionally the only larger button
-         to stand out as the main workflow action for cleaners. Hidden
-         on Done assignments since there's nothing to do. */}
-      {canGo && !isDone && (
-        <button onClick={onGoToBedroom} disabled={busy}
-          className="mt-2 w-full px-3 py-2.5 rounded-lg bg-stone-900 hover:bg-stone-800 text-stone-50 text-sm font-medium flex items-center justify-center gap-2 disabled:opacity-50">
-          Go to this bedroom <ChevronRight size={14} />
-        </button>
-      )}
+      {/* The big full-width "Go to this bedroom" button was removed — it's now
+         a compact "Go to bedroom" button in the action row above, per the
+         card-consolidation. */}
     </div>
   );
 }

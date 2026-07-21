@@ -106,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul18-tap36";
+const BUILD_TAG = "jul18-tap37";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -30853,32 +30853,53 @@ function SuggestedTabContent({ propertyId, employee, onGoToBedroom, onOpenBedroo
         </div>
 
         {/* === Action buttons === */}
-        <div className="flex gap-2 flex-wrap mb-3">
-          {(can(employee, 'mark_assignments_done')) && (
-            <button onClick={() => {
-              if (confirm(`Mark all ${items.length} item${items.length === 1 ? '' : 's'} at ${c.unitLabel} · ${c.partyLabel} complete?`)) {
-                bulkUpdateStatus(items, 'done');
-              }
+        <div className="flex gap-2 flex-wrap items-center">
+          {/* Go to bedroom — small now, not a big bar. */}
+          <button onClick={goTo}
+            className="h-9 px-3 rounded-lg bg-stone-900 hover:bg-stone-800 text-white text-xs font-medium flex items-center gap-1">
+            Go to bedroom <ChevronRight size={13} />
+          </button>
+          {allDone ? (
+            /* Done job — the useful action is to REOPEN it (mistake / redo),
+               not to "go look at it again". */
+            can(employee, 'mark_assignments_done') && (
+              <button onClick={() => { if (confirm(`Reopen ${c.unitLabel}${c.partyLabel ? ' · ' + c.partyLabel : ''}? It goes back to Pending so it can be worked again.`)) bulkUpdateStatus(items, 'pending'); }} disabled={busy}
+                className="h-9 px-3 rounded-lg border border-amber-300 hover:bg-amber-50 text-amber-800 text-xs font-medium flex items-center gap-1 disabled:opacity-50">
+                <RotateCcw size={12} /> Reopen
+              </button>
+            )
+          ) : (
+            <>
+              {(can(employee, 'mark_assignments_done')) && (
+                <button onClick={() => { if (confirm(`Mark all ${items.length} item${items.length === 1 ? '' : 's'} at ${c.unitLabel}${c.partyLabel ? ' · ' + c.partyLabel : ''} complete?`)) bulkUpdateStatus(items, 'done'); }} disabled={busy}
+                  className="h-9 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-medium flex items-center gap-1 disabled:opacity-50">
+                  <Check size={12} /> Mark complete
+                </button>
+              )}
+              <button onClick={() => setStatusModal({ target: rep, bulkRows: items })} disabled={busy}
+                className="h-9 px-3 rounded-lg border border-red-200 hover:bg-red-50 text-red-700 text-xs font-medium flex items-center gap-1 disabled:opacity-50">
+                <AlertCircle size={12} /> Block
+              </button>
+              <button onClick={() => setReassignTarget(rep)} disabled={busy}
+                className="h-9 px-3 rounded-lg border border-stone-300 hover:bg-stone-50 text-stone-700 text-xs font-medium flex items-center gap-1 disabled:opacity-50">
+                <User size={12} /> Reassign
+              </button>
+            </>
+          )}
+          {/* Owner-only delete for an assignment uploaded by mistake. */}
+          {can(employee, 'upload_assignments') && rep.assignment?.id && (
+            <button onClick={async () => {
+              if (!confirm('Delete this assignment? Use this only if it was uploaded by mistake — it removes it for everyone.')) return;
+              const { error } = await supabase.from('assignments').update({ deleted_at: new Date().toISOString(), deleted_by: employee?.id || null }).eq('id', rep.assignment.id);
+              if (error) { alert('Could not delete: ' + error.message); return; }
+              reload();
             }} disabled={busy}
-              className="h-9 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-medium flex items-center gap-1 disabled:opacity-50">
-              <Check size={12} /> Mark complete
+              title="Delete this assignment (uploaded by mistake)"
+              className="ml-auto w-9 h-9 rounded-lg flex items-center justify-center border border-stone-300 bg-white hover:bg-red-50 text-red-600 disabled:opacity-50">
+              <X size={16} />
             </button>
           )}
-          <button onClick={() => setStatusModal({ target: rep, bulkRows: items })} disabled={busy}
-            className="h-9 px-3 rounded-lg border border-red-200 hover:bg-red-50 text-red-700 text-xs font-medium flex items-center gap-1 disabled:opacity-50">
-            <AlertCircle size={12} /> Block
-          </button>
-          <button onClick={() => setReassignTarget(rep)} disabled={busy}
-            className="h-9 px-3 rounded-lg border border-stone-300 hover:bg-stone-50 text-stone-700 text-xs font-medium flex items-center gap-1 disabled:opacity-50">
-            <User size={12} /> Reassign
-          </button>
         </div>
-
-        {/* Go to this bedroom — primary action bar */}
-        <button onClick={goTo}
-          className="w-full py-2.5 rounded-lg bg-stone-900 text-stone-50 text-sm font-medium flex items-center justify-center gap-1.5 active:scale-98 transition-transform">
-          Go to this bedroom <ChevronRight size={14} />
-        </button>
       </div>
     );
   };

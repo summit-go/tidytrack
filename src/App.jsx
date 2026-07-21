@@ -106,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul18-tap37";
+const BUILD_TAG = "jul18-tap38";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -32018,11 +32018,17 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                                         sequentially would be ugly; keeping it on
                                         one. Most apt cases have 1 assignment per
                                         bedroom in the new model anyway. */}
-                          <div className="flex gap-2 flex-wrap">
-                            {!allDone && canGoToBedroom && (
+                          <div className="flex gap-2 flex-wrap items-center">
+                            {canGoToBedroom && (
                               <button onClick={() => startAndGo(firstTarget)} disabled={busy}
-                                className="h-9 px-3 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-medium flex items-center gap-1 disabled:opacity-50">
-                                <Play size={12} /> Start
+                                className="h-9 px-3 rounded-lg bg-stone-900 hover:bg-stone-800 text-white text-xs font-medium flex items-center gap-1 disabled:opacity-50">
+                                Go to bedroom <ChevronRight size={13} />
+                              </button>
+                            )}
+                            {allDone && can(employee, 'mark_assignments_done') && (
+                              <button onClick={() => { if (confirm(`Reopen ${bedLabel}? It goes back to Pending so it can be worked again.`)) bulkUpdateStatus(newItems, 'pending'); }} disabled={busy}
+                                className="h-9 px-3 rounded-lg border border-amber-300 hover:bg-amber-50 text-amber-800 text-xs font-medium flex items-center gap-1 disabled:opacity-50">
+                                <RotateCcw size={12} /> Reopen
                               </button>
                             )}
                             {/* Pause: only visible when there's actually
@@ -32102,14 +32108,22 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                                 <User size={12} /> Reassign
                               </button>
                             )}
+                            {/* Owner-only: delete an assignment uploaded by mistake. */}
+                            {can(employee, 'upload_assignments') && firstTarget?.assignment?.id && (
+                              <button onClick={async () => {
+                                if (!confirm('Delete this assignment? Use this only if it was uploaded by mistake — it removes it for everyone.')) return;
+                                const { error } = await supabase.from('assignments').update({ deleted_at: new Date().toISOString(), deleted_by: employee?.id || null }).eq('id', firstTarget.assignment.id);
+                                if (error) { alert('Could not delete: ' + error.message); return; }
+                                load(); if (onUpdate) onUpdate();
+                              }} disabled={busy}
+                                title="Delete this assignment (uploaded by mistake)"
+                                className="ml-auto w-9 h-9 rounded-lg flex items-center justify-center border border-stone-300 bg-white hover:bg-red-50 text-red-600 disabled:opacity-50">
+                                <X size={16} />
+                              </button>
+                            )}
                           </div>
-                          {/* === Go to this bedroom (full-width bottom) === */}
-                          {canGoToBedroom && (
-                            <button onClick={() => startAndGo(firstTarget)}
-                              className="w-full mt-3 py-2.5 rounded-lg bg-stone-900 text-stone-50 text-sm font-medium flex items-center justify-center gap-1.5 active:scale-98 transition-transform">
-                              Go to this bedroom <ChevronRight size={14} />
-                            </button>
-                          )}
+                          {/* Full-width "Go to this bedroom" bar removed — it's a
+                             small button in the action row now. */}
                         </div>
                       );
                     }

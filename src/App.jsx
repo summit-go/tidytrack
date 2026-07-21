@@ -13,17 +13,7 @@ import {
 // =================================================================
 // 🔧 PASTE YOUR SUPABASE KEYS HERE
 // =================================================================
-const SUPABASE_URL = "https://bbaynvqnbkjyqhzhhypr.supabase.co/";
-const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJiYXludnFuYmtqeXFoemhoeXByIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc0NzQ2MTMsImV4cCI6MjA5MzA1MDYxM30.ZXUoHFj_IwMe6rX8RxK8Dj4kAB9AS7X9xZAhQ84wDEk";
 
-
-// =================================================================
-// 🌍 GOOGLE TRANSLATE API KEY (optional — for the Translate button)
-// Restrict the key to HTTP referrers app.gosummitclean.com + tidytrack-ten.vercel.app
-// and restrict to the Cloud Translation API only.
-// If empty, the Translate button is hidden.
-// =================================================================
-const GOOGLE_TRANSLATE_API_KEY = "AIzaSyD7ceHPryMzs45hWJOyFNBxtOzQOEmJcSA";
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
@@ -106,7 +96,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul18-tap31";
+const BUILD_TAG = "jul18-tap32";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -4336,7 +4326,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     }
     // Either way: drop out locally and land on the assignments list.
     setActiveBlock(null); setTasks([]); setActiveTask(null);
-    setCleanerTab('assignments');
+    setCleanerTab('home');
     setBusy(false);
   };
 
@@ -4434,7 +4424,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     setActiveBlock(null); setTasks([]); setActiveTask(null);
     setBusy(false);
     // Back to the assignments list, with the "what's next?" prompt on top.
-    setCleanerTab('assignments');
+    setCleanerTab('home');
     setNextUpPrompt(finishedFrom);
   };
 
@@ -5200,7 +5190,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
           from={nextUpPrompt}
           employeeId={employee?.id}
           onClose={() => setNextUpPrompt(null)}
-          onSeeAssignments={() => { setNextUpPrompt(null); setCleanerTab('assignments'); }}
+          onSeeAssignments={() => { setNextUpPrompt(null); setCleanerTab('home'); }}
           onPick={(c) => {
             setNextUpPrompt(null);
             // Reuse the existing pending-start route — no work block
@@ -7851,7 +7841,7 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
           {showProps && (
             <div className="-mx-4">
               <CleanerPropertiesList currentPropertyId={shift.customer_id} employee={employee}
-                onOpenCurrent={() => setCleanerTab('assignments')}
+                onOpenCurrent={() => setCleanerTab('home')}
                 onSwitch={() => onSwitchProperty && onSwitchProperty()} />
             </div>
           )}
@@ -8506,7 +8496,7 @@ function PreparingBlockView({ shift, pendingStart, employeeName, employee,
            status changes happen once they're in the real BlockView. */}
         <AssignmentBanner propertyId={shift.customer_id}
           unitId={pendingStart.unitId} partyId={pendingStart.partyId}
-          employee={employee} />
+          employee={employee} workScreen />
 
         {/* What's already happened here — including anyone working it
            right now, with their photos. You should never have to start a
@@ -8778,7 +8768,7 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
       {/* Assignment card, folded into the dark header as one block (dark
          variant). Sits flush under the sticky header so the bedroom info and
          the assignment read as a single dark section. */}
-      <AssignmentBanner propertyId={shift.customer_id} unitId={block.unit_id} partyId={block.party_id} employee={employee} onOpenBedroomHistory={onOpenBedroomHistory} dark
+      <AssignmentBanner propertyId={shift.customer_id} unitId={block.unit_id} partyId={block.party_id} employee={employee} onOpenBedroomHistory={onOpenBedroomHistory} dark workScreen
         propertyName={shift.customer?.name} elapsedMs={blockElapsed}
         undoSlot={(onUndo || canMoveBlock) ? (
           <UndoMoveMenu
@@ -10706,8 +10696,8 @@ function PhotoModal({ kind, taskName, existing, onUpload, onSaveNote, onClose, e
                     {/* Took-extra toggle — flags this item as extra work. */}
                     <button type="button"
                       onClick={(e) => { e.stopPropagation(); toggleExtra(p); }}
-                      className={`absolute top-1 left-1 px-1.5 py-0.5 rounded-full text-[9px] font-mono flex items-center gap-1 ${extraFlags[p.id] ? 'bg-amber-500 text-white' : 'bg-stone-900/60 text-stone-100'}`}>
-                      <Clock size={9} /> {extraFlags[p.id] ? 'Extra' : 'Mark extra'}
+                      className={`absolute top-1.5 left-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold flex items-center gap-1 shadow-md ${extraFlags[p.id] ? 'bg-amber-500 text-white border border-amber-400' : 'bg-white text-amber-700 border-2 border-amber-400'}`}>
+                      <Clock size={12} /> {extraFlags[p.id] ? 'Extra ✓' : '+ Mark extra'}
                     </button>
                     {/* Attribution + delete overlay row. Sits at the
                        bottom of the thumbnail. Trash only renders when
@@ -29247,7 +29237,7 @@ function AssignmentDetail({ property, assignment: assignmentInit, employee, onBa
 //   employee — current user
 //   showDone — if true, includes done assignments
 //   onUpdate — called after any status change so parent can refresh
-function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = false, onUpdate, onOpenBedroomHistory, dark = false, undoSlot = null, propertyName = null, elapsedMs = null }) {
+function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = false, onUpdate, onOpenBedroomHistory, dark = false, undoSlot = null, propertyName = null, elapsedMs = null, workScreen = false }) {
   const [targets, setTargets] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [opened, setOpened] = useState(null);
@@ -29590,7 +29580,7 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
               currentEmployeeId={employee?.id}
               canEditDates={can(employee, 'edit_due_dates')}
               onSetDueDate={async (aid, date) => { if (aid) { await supabase.from('assignments').update({ scheduled_date: date }).eq('id', aid); load(); } }}
-            onOpenBedroomHistory={onOpenBedroomHistory} dark={dark} />
+            onOpenBedroomHistory={onOpenBedroomHistory} dark={dark} workScreen={workScreen} />
         );
         // Checklist group card: ONE card representing a whole inspection
         // sheet. Shows progress + a View items button. Tapping View
@@ -29971,7 +29961,7 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
 }
 
 // Reusable card for one assignment target, used in banner + panel
-function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPending, onDone, onReopen, onBlocked, onReassign, onDelete, onGoToBedroom, onOpenBedroomHistory, onTogglePriority, canMarkDone = true, canMarkDoneAlways = false, currentEmployeeId, propertyId, canEditDates = false, onSetDueDate, dark = false }) {
+function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPending, onDone, onReopen, onBlocked, onReassign, onDelete, onGoToBedroom, onOpenBedroomHistory, onTogglePriority, canMarkDone = true, canMarkDoneAlways = false, currentEmployeeId, propertyId, canEditDates = false, onSetDueDate, dark = false, workScreen = false }) {
   const t = target;
   // Dark variant — used when this card is folded into the cleaner's black
   // "Working on" header. Only the neutral surfaces flip; colored status /
@@ -30201,7 +30191,7 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
          Blocked → Reassign. Reassign no longer has ml-auto so the
          row stays uniform. */}
       <div className="flex gap-2 flex-wrap">
-        {(t.status === 'pending' || t.status === 'blocked' || t.status === 'in_progress' || t.status === 'paused') && (() => {
+        {!workScreen && (t.status === 'pending' || t.status === 'blocked' || t.status === 'in_progress' || t.status === 'paused') && (() => {
           // "I'm on it too" only makes sense when SOMEONE ELSE is on it.
           // If the current cleaner started this assignment, show a
           // disabled gray "You're on it" pill so they see the state
@@ -30238,7 +30228,7 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
             <ArrowLeft size={12} /> Move to pending
           </button>
         )}
-        {!dark && (t.status === 'pending' || t.status === 'in_progress' || t.status === 'blocked' || t.status === 'paused') && canMarkDone && (() => {
+        {!workScreen && (t.status === 'pending' || t.status === 'in_progress' || t.status === 'blocked' || t.status === 'paused') && canMarkDone && (() => {
           // On Pending we keep the button VISIBLE but disabled — the
           // cleaner sees the action exists, just needs to Start first.
           // This avoids the confusing "button vanished" feeling.
@@ -30288,10 +30278,10 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
            pushed to the right end to mirror the checklist card. */}
         {/* Owner/manager corner actions on the working screen:
            ✓ = mark this assignment complete → Done. ✕ = delete a mistaken upload. */}
-        {((dark && canMarkDoneAlways && !isDone) || onDelete) && (
+        {((workScreen && canMarkDoneAlways && !isDone) || onDelete) && (
           <div className="ml-auto flex items-center gap-1.5">
-            {dark && canMarkDoneAlways && !isDone && (
-              <button onClick={onDone} disabled={busy}
+            {workScreen && canMarkDoneAlways && !isDone && (
+              <button onClick={() => { if (confirm('Mark this whole assignment complete? It closes out this assignment and moves it to Done.')) onDone(); }} disabled={busy}
                 title="Mark this assignment complete → Done"
                 className="w-9 h-9 rounded-lg flex items-center justify-center bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-50">
                 <Check size={16} />

@@ -106,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul18-tap43";
+const BUILD_TAG = "jul18-tap44";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -5410,7 +5410,21 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   if (isMulti && activeBlock) {
     return withIdleModal(<BlockView shift={shift} block={activeBlock} tasks={tasks} activeTask={activeTask}
       employeeName={employee.name} employee={employee} onSignOut={signOutWithCleanup} onFinish={finishBlock}
-      onExit={() => { setActiveBlock(null); setPendingStart(null); setCleanerTab('home'); }}
+      onExit={async () => {
+        // ✓ mark-complete / ✕ delete from the working screen should also CLOSE
+        // the timer session. Without this the block was left open (paused) and
+        // the home screen nagged you to Resume/Pause/End a session you'd
+        // already finished.
+        if (activeBlock) {
+          const nowISO = new Date().toISOString();
+          try {
+            if (activeTask) await stopTask(activeTask, false);
+            await supabase.from('work_blocks').update({ end_time: nowISO }).eq('id', activeBlock.id);
+            setWorkBlocks(prev => prev.map(b => b.id === activeBlock.id ? { ...b, end_time: nowISO } : b));
+          } catch (e) { console.warn('[onExit] could not close block', e); }
+        }
+        setActiveBlock(null); setPendingStart(null); setCleanerTab('home');
+      }}
       onPause={() => setActiveBlock(null)}
       onUndo={undoBlock}
       onReopen={reopenBlock}

@@ -106,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul18-tap38";
+const BUILD_TAG = "jul18-tap40";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -29854,6 +29854,15 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
                  (template-based assignments are 1 per bedroom so this
                  is the right one to act on). */}
               <div className="flex gap-2 flex-wrap items-center">
+                {/* Start cleaning — same small button as the single-assignment
+                   card. Was missing here, so checklist assignments had no way
+                   to start. Prep screen only (onStartCleaning). */}
+                {onStartCleaning && !isAllDone && (
+                  <button onClick={onStartCleaning} disabled={busy}
+                    className="h-9 px-3 rounded-lg bg-stone-900 hover:bg-stone-800 text-white text-xs font-semibold flex items-center gap-1 disabled:opacity-50">
+                    <Play size={13} /> Start cleaning
+                  </button>
+                )}
                 {/* The owner/manager "mark complete" + "delete" actions moved
                    to compact icons at the right end of this row (below). */}
                 {!isAllDone && (
@@ -31039,6 +31048,16 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
   const [editDueId, setEditDueId] = useState(null);
   const canEditDatesT = can(employee, 'edit_due_dates');
   const todayKeyT = localTodayKey();
+  // Owners/managers with this permission get the submitted/accepted/done/due
+  // timeline dropdown on the date pill — same as the other screens.
+  const canViewTimelineT = can(employee, 'view_submission_timeline');
+  const [timelineOpenT, setTimelineOpenT] = useState(null);
+  const fmtStampT = (iso) => {
+    if (!iso) return null;
+    const d = new Date(iso);
+    if (isNaN(d)) return null;
+    return `${d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} · ${d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}`;
+  };
   const saveDueT = async (id, date) => {
     setEditDueId(null);
     if (id) { await supabase.from('assignments').update({ scheduled_date: date || null }).eq('id', id); load(); }
@@ -31124,7 +31143,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
     for (let from = 0; ; from += PAGE) {
       const { data: page, error: pErr } = await supabase
         .from('assignment_targets')
-        .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, deleted_at, extracted_text, spanish_translation, translation_status, assignment_type, scheduled_date, sheet_type, template_set_id, bathroom_variant, general_variant, created_at), unit:units(id, label), party:parties(id, label), starter:employees!started_by(id, name), completer:employees!completed_by(id, name), assignedTo:employees!assigned_to(id, name)')
+        .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, approved_at, deleted_at, extracted_text, spanish_translation, translation_status, assignment_type, scheduled_date, sheet_type, template_set_id, bathroom_variant, general_variant, created_at), unit:units(id, label), party:parties(id, label), starter:employees!started_by(id, name), completer:employees!completed_by(id, name), assignedTo:employees!assigned_to(id, name)')
         .eq('assignment.customer_id', propertyId)
         .eq('assignment.active', true)
           .is('assignment.deleted_at', null)
@@ -31932,6 +31951,58 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                                   // contradiction — overdue means unfinished
                                   // past its due date. Show when it finished.
                                   const grpDone = newItems.every(t => t.status === 'done') && newItems.length > 0;
+                                  const doneAtT = newItems.map(t => t.completed_at).filter(Boolean).sort().slice(-1)[0] || null;
+                                  if (canViewTimelineT) {
+                                    return (
+                                      <div className="relative inline-block">
+                                        <button onClick={(e) => { e.stopPropagation(); setTimelineOpenT(timelineOpenT === asg?.id ? null : asg?.id); }}
+                                          className={`text-[10px] font-mono px-2 py-0.5 rounded-full border inline-flex items-center gap-1 ${grpDone ? 'bg-stone-900 text-white border-stone-900'
+                                            : sd ? (sd < todayKeyT ? 'bg-red-100 text-red-700 border-red-200' : sd === todayKeyT ? 'bg-emerald-100 text-emerald-800 border-emerald-200' : 'bg-stone-100 text-stone-600 border-stone-200')
+                                            : 'bg-white text-stone-500 border-dashed border-stone-300'}`}>
+                                          {grpDone ? <><Check size={9} /> {doneAtT ? `Done ${fmtDueDate(String(doneAtT).slice(0, 10))}` : 'Done'}</>
+                                            : <><Calendar size={9} /> {sd ? fmtDueDate(sd) : 'Set due date'}</>}
+                                          <ChevronRight size={10} className="rotate-90 opacity-60" />
+                                        </button>
+                                        {timelineOpenT === asg?.id && (
+                                          <>
+                                            <div className="fixed inset-0 z-30" onClick={(e) => { e.stopPropagation(); setTimelineOpenT(null); }} />
+                                            <div className="absolute right-0 top-full mt-1 z-40 w-60 rounded-xl bg-white border border-stone-200 shadow-xl overflow-hidden text-left" onClick={(e) => e.stopPropagation()}>
+                                              <div className="px-3 pt-2.5 pb-1 text-[10px] uppercase tracking-wider font-mono text-stone-400">Timeline</div>
+                                              <div className="px-3 pb-2 space-y-1.5">
+                                                <div className="flex items-center justify-between gap-3">
+                                                  <span className="text-[11px] text-stone-500 flex items-center gap-1.5"><FileText size={11} /> Submitted</span>
+                                                  <span className={`text-[11px] font-mono ${asg?.created_at ? 'text-stone-800' : 'text-stone-400'}`}>{asg?.created_at ? fmtStampT(asg.created_at) : '—'}</span>
+                                                </div>
+                                                <div className="flex items-center justify-between gap-3">
+                                                  <span className="text-[11px] text-stone-500 flex items-center gap-1.5"><UserPlus size={11} /> Accepted</span>
+                                                  <span className={`text-[11px] font-mono ${(asg?.approved_at || asg?.pm_status === 'approved' || !asg?.pm_status) ? 'text-emerald-700' : 'text-stone-400'}`}>
+                                                    {asg?.approved_at ? fmtStampT(asg.approved_at)
+                                                      : (!asg?.pm_status || asg?.pm_status === 'approved') ? (asg?.created_at ? `${fmtStampT(asg.created_at)} · auto` : 'Auto')
+                                                      : asg?.pm_status === 'pending' ? 'Awaiting you'
+                                                      : asg?.pm_status === 'rejected' ? 'Rejected' : 'Not yet'}
+                                                  </span>
+                                                </div>
+                                                <div className="flex items-center justify-between gap-3">
+                                                  <span className="text-[11px] text-stone-500 flex items-center gap-1.5"><Check size={11} /> Done</span>
+                                                  <span className={`text-[11px] font-mono ${doneAtT ? 'text-stone-800' : 'text-stone-400'}`}>{doneAtT ? fmtStampT(doneAtT) : 'Not yet'}</span>
+                                                </div>
+                                                <div className="flex items-center justify-between gap-3 pt-1 border-t border-stone-100">
+                                                  <span className="text-[11px] text-stone-500 flex items-center gap-1.5"><Calendar size={11} /> Due</span>
+                                                  <span className="text-[11px] font-mono text-stone-800">{sd ? fmtDueDate(sd) : '—'}</span>
+                                                </div>
+                                              </div>
+                                              {canEditDatesT && (
+                                                <button onClick={(e) => { e.stopPropagation(); setTimelineOpenT(null); setEditDueId(asg?.id); }}
+                                                  className="w-full border-t border-stone-100 px-3 py-2 text-[11px] font-mono text-stone-600 hover:bg-stone-50 text-left flex items-center gap-1.5">
+                                                  <Edit2 size={11} /> Change due date
+                                                </button>
+                                              )}
+                                            </div>
+                                          </>
+                                        )}
+                                      </div>
+                                    );
+                                  }
                                   if (grpDone) {
                                     const last = newItems
                                       .map(t => t.completed_at).filter(Boolean).sort().slice(-1)[0];

@@ -106,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul18-tap47";
+const BUILD_TAG = "jul18-tap48";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -11719,7 +11719,10 @@ function shiftBillableAmount(s, showMoney) {
 
 const localDayKey = (ts) => {
   const d = new Date(ts);
-  return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+  // Real ISO date in LOCAL time: "2026-07-20". The old version used
+  // getMonth() (0-indexed) unpadded, so July became "6" and the DB read it as
+  // June — which broke flat pay (saved to the wrong month) and day matching.
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 };
 
 // Shifts grouped BY CLEANER. Level 1 = one card per cleaner (no matter how
@@ -22124,8 +22127,9 @@ function PortalUnitDay({ property, unitId, date, portalUser, onBack }) {
       return;
     }
 
-    const dayStart = `${date}T00:00:00`;
-    const dayEnd = `${date}T23:59:59`;
+    const [dyY, dyM, dyD] = String(date).split("-").map(Number);
+    const dayStart = new Date(dyY, dyM - 1, dyD, 0, 0, 0, 0).toISOString();
+    const dayEnd = new Date(dyY, dyM - 1, dyD, 23, 59, 59, 999).toISOString();
 
     if (unitId) {
       const { data: u } = await supabase.from('units').select('*').eq('id', unitId).maybeSingle();
@@ -24371,8 +24375,9 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit }) {
   const [filterCategories, setFilterCategories] = useState(new Set());
 
   useEffect(() => { (async () => {
-    const dayStart = `${date}T00:00:00`;
-    const dayEnd   = `${date}T23:59:59`;
+    const [dyY, dyM, dyD] = String(date).split("-").map(Number);
+    const dayStart = new Date(dyY, dyM - 1, dyD, 0, 0, 0, 0).toISOString();
+    const dayEnd   = new Date(dyY, dyM - 1, dyD, 23, 59, 59, 999).toISOString();
 
     // Get all shifts that started this day. Include idle_seconds so the
     // per-cleaner breakdown can show clocked-in time + idle adjustments.
@@ -25322,8 +25327,9 @@ function DailyUnitDayDetail({ date, propertyId, unitId, unitLabel, propertyName,
 
   const reload = async () => {
     setLoaded(false);
-    const dayStart = `${date}T00:00:00`;
-    const dayEnd   = `${date}T23:59:59`;
+    const [dyY, dyM, dyD] = String(date).split("-").map(Number);
+    const dayStart = new Date(dyY, dyM - 1, dyD, 0, 0, 0, 0).toISOString();
+    const dayEnd   = new Date(dyY, dyM - 1, dyD, 23, 59, 59, 999).toISOString();
     const { data } = await supabase
       .from('work_blocks')
       .select('*, party:parties(label, full_name), shift:shifts!inner(id, customer_id, start_time, end_time, employee:employees(id,name), bill_rate_at_work, customer:customers(bill_rate_hourly, name)), tasks(*, photos(*, taken_by_employee:employees!taken_by(name)))')

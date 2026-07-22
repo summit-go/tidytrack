@@ -106,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul18-tap55";
+const BUILD_TAG = "jul18-tap57";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -949,6 +949,17 @@ export default function App() {
     const onHash = () => setRoute(window.location.hash || '');
     window.addEventListener('hashchange', onHash);
     return () => window.removeEventListener('hashchange', onHash);
+  }, []);
+
+  // Shrink text + spacing slightly on phones so dense cards fit more info
+  // without cramming. rem-based (Tailwind) sizes scale with the root font.
+  useEffect(() => {
+    const id = 'tt-mobile-scale';
+    if (document.getElementById(id)) return;
+    const st = document.createElement('style');
+    st.id = id;
+    st.textContent = '@media (max-width: 640px){ html{ font-size: 14.5px; } }';
+    document.head.appendChild(st);
   }, []);
 
   // Decide which screen to mount, then wrap in TranslationProvider so
@@ -12003,12 +12014,17 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
                 const stale = isUnpaidStale(d.key, paid);
                 return (
                   <div className={`px-4 py-2.5 border-t flex items-center justify-between gap-2 flex-wrap ${stale ? 'bg-amber-50 border-amber-200' : 'border-stone-100'}`}>
-                    <div className="text-xs font-mono">
-                      <span className="text-stone-500">You owe </span>
-                      <span className="text-stone-900 font-bold">{owed > 0 ? fmtMoney(owed) : '—'}</span>
-                      {hasFlat && <span className="text-amber-700"> · flat</span>}
-                      {owed === 0 && !hasFlat && <span className="text-stone-400"> (set a rate or flat pay)</span>}
-                      {stale && <span className="text-amber-700"> · unpaid 7+ days</span>}
+                    <div className="text-xs font-mono flex items-center gap-1.5 flex-wrap">
+                      {!paid && owed > 0 && (
+                        <span className="text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-800 border border-amber-200 font-bold">Owed</span>
+                      )}
+                      <span>
+                        <span className="text-stone-500">{paid ? 'Paid ' : 'You owe '}</span>
+                        <span className="text-stone-900 font-bold">{owed > 0 ? fmtMoney(owed) : '—'}</span>
+                        {hasFlat && <span className="text-amber-700"> · flat</span>}
+                        {owed === 0 && !hasFlat && <span className="text-stone-400"> (set a rate or flat pay)</span>}
+                        {stale && <span className="text-amber-700"> · unpaid 7+ days</span>}
+                      </span>
                     </div>
                     <div className="flex items-center gap-1.5 flex-wrap">
                       {settingPay === d.key ? (
@@ -16582,10 +16598,10 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
                 ['Bathroom', sec.bathroom], ['General', sec.general],
               ].filter(([, n]) => n > 0);
               return (
-              <div key={j.id} className="px-3 py-2.5 rounded-lg bg-stone-50 flex items-start justify-between gap-2">
-                <button onClick={() => { setPicked(property); setView('open'); }} className="min-w-0 flex-1 text-left">
-                  <div className="text-sm text-stone-800 truncate">{unitPartyLabel(j.unitLabel, j.partyLabel) || 'Job'}</div>
-                  <div className="text-[11px] text-stone-500 font-mono truncate">
+              <div key={j.id} className="px-3 py-2.5 rounded-lg bg-stone-50 flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2">
+                <button onClick={() => { setPicked(property); setView('open'); }} className="min-w-0 sm:flex-1 text-left">
+                  <div className="text-sm text-stone-800 font-medium">{unitPartyLabel(j.unitLabel, j.partyLabel) || 'Job'}</div>
+                  <div className="text-[11px] text-stone-500 font-mono">
                     {j.type ? assignmentTypeLabel(j.type) : 'Clean'}{j.scheduledDate ? ` · ${fmtSched(j.scheduledDate)}` : ' · no date'} · {j.count} item{j.count === 1 ? '' : 's'}
                   </div>
                   {secBits.length > 0 ? (

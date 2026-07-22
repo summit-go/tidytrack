@@ -106,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul18-tap49";
+const BUILD_TAG = "jul18-tap50";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -11285,9 +11285,9 @@ function ManagerShell({ employee, onSignOut }) {
       {showMoneyTabs && tab === 'money' && <MoneyView employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} onLogoClick={goHome} />}
 
       {/* Spacer so the two-row owner nav doesn't cover the last content. */}
-      {isOwner && <div aria-hidden className="h-20" />}
+      {isOwner && <div aria-hidden className="h-20 print:hidden" />}
 
-      <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-stone-200 px-1 py-2 z-30">
+      <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-stone-200 px-1 py-2 z-30 print:hidden">
         {isOwner ? (
           <div className="max-w-md mx-auto">
             {/* Operations / Business hat toggle — color-coded so the two
@@ -19682,10 +19682,190 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
   );
 }
 
+// =================================================================
+// INVOICE PAYMENTS REPORT — every invoice in one place, with paid/unpaid,
+// paid date, amount actually collected (can differ from the total), and a
+// note (e.g. "negotiated rate"). Read the money at a glance, mark it in.
+// =================================================================
+function InvoicePaymentsReport({ employee, onSignOut, onOpenMessages, onLogoClick, topToggle }) {
+  const [invoices, setInvoices] = useState(null);
+  const [statusFilter, setStatusFilter] = useState('unpaid'); // all | unpaid | paid
+  const [busyId, setBusyId] = useState(null);
+  const [editing, setEditing] = useState(null);
+  const [draft, setDraft] = useState({ paid_at: '', amount_paid: '', payment_note: '' });
+
+  const load = async () => {
+    const { data, error } = await supabase.from('invoices')
+      .select('id, invoice_number, customer_id, created_at, total, status, paid_at, amount_paid, payment_note, customer:customers(name)')
+      .order('created_at', { ascending: false });
+    if (error) { setInvoices([]); return; }
+    setInvoices(data || []);
+  };
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, []);
+
+  const list = (invoices || []).filter(inv => {
+    if (statusFilter === 'unpaid') return inv.status !== 'paid';
+    if (statusFilter === 'paid') return inv.status === 'paid';
+    return true;
+  });
+  const outstanding = (invoices || []).filter(i => i.status !== 'paid').reduce((s, i) => s + (Number(i.total) || 0), 0);
+  const collected = (invoices || []).filter(i => i.status === 'paid').reduce((s, i) => s + (i.amount_paid != null ? Number(i.amount_paid) : (Number(i.total) || 0)), 0);
+
+  const openEdit = (inv) => {
+    setEditing(inv.id);
+    setDraft({
+      paid_at: inv.paid_at ? String(inv.paid_at).slice(0, 10) : new Date().toISOString().slice(0, 10),
+      amount_paid: inv.amount_paid != null ? String(inv.amount_paid) : (inv.total != null ? String(inv.total) : ''),
+      payment_note: inv.payment_note || '',
+    });
+  };
+
+  const saveMarkPaid = async (inv) => {
+    setBusyId(inv.id);
+    const { error } = await supabase.from('invoices').update({
+      status: 'paid',
+      paid_at: draft.paid_at ? new Date(draft.paid_at + 'T12:00:00').toISOString() : new Date().toISOString(),
+      amount_paid: draft.amount_paid === '' ? null : Number(draft.amount_paid),
+      payment_note: draft.payment_note || null,
+    }).eq('id', inv.id);
+    setBusyId(null); setEditing(null);
+    if (error) { alert('Could not save: ' + error.message + (/amount_paid|payment_note/.test(error.message || '') ? '\n\nRun v51_invoice_payments.sql in Supabase first.' : '')); return; }
+    load();
+  };
+
+  const markUnpaid = async (inv) => {
+    if (!confirm('Mark this invoice unpaid again? It clears the paid date and amount.')) return;
+    setBusyId(inv.id);
+    const { error } = await supabase.from('invoices').update({ status: 'sent', paid_at: null, amount_paid: null }).eq('id', inv.id);
+    setBusyId(null);
+    if (error) { alert('Could not update: ' + error.message); return; }
+    load();
+  };
+
+  const fmtDay = (iso) => iso ? new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '—';
+
+  return (
+    <div className="pb-24">
+      <Header name={employee.name} onSignOut={onSignOut} role={employee.role} employee={employee} onOpenMessages={onOpenMessages} onLogoClick={onLogoClick} />
+      {topToggle}
+      <div className="px-5 pt-6">
+        <div className="text-xs uppercase tracking-widest text-stone-400 font-mono mb-3">Billing</div>
+        <h1 className="text-4xl font-light text-stone-900 tracking-tight mb-6">
+          Invoice <span className="font-serif italic text-amber-700">payments</span>
+        </h1>
+
+        <div className="grid grid-cols-2 gap-3 mb-5">
+          <div className="rounded-2xl bg-amber-50 border border-amber-200 p-4">
+            <div className="text-[10px] uppercase tracking-wider text-amber-700 font-mono">Outstanding</div>
+            <div className="text-2xl font-serif text-stone-900 mt-1">{fmtMoney(outstanding)}</div>
+          </div>
+          <div className="rounded-2xl bg-emerald-50 border border-emerald-200 p-4">
+            <div className="text-[10px] uppercase tracking-wider text-emerald-700 font-mono">Collected</div>
+            <div className="text-2xl font-serif text-stone-900 mt-1">{fmtMoney(collected)}</div>
+          </div>
+        </div>
+
+        <div className="flex gap-1 p-1 bg-stone-100 rounded-xl mb-4">
+          {['unpaid', 'paid', 'all'].map(f => (
+            <button key={f} onClick={() => setStatusFilter(f)}
+              className={`flex-1 py-2 px-3 rounded-lg text-xs font-medium capitalize transition-colors ${statusFilter === f ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+              {f}
+            </button>
+          ))}
+        </div>
+
+        {invoices === null ? (
+          <div className="text-center py-12 text-stone-400 text-sm">Loading…</div>
+        ) : list.length === 0 ? (
+          <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">No invoices here.</div>
+        ) : (
+          <div className="space-y-2">
+            {list.map(inv => {
+              const paid = inv.status === 'paid';
+              const amt = paid && inv.amount_paid != null ? Number(inv.amount_paid) : Number(inv.total) || 0;
+              const isEditing = editing === inv.id;
+              return (
+                <div key={inv.id} className={`rounded-2xl bg-white border p-4 ${paid ? 'border-emerald-200' : 'border-stone-200'}`}>
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="font-serif text-lg text-stone-900 truncate">{inv.customer?.name || 'Property'}</div>
+                      <div className="text-xs font-mono text-stone-500 mt-0.5">
+                        #{inv.invoice_number || '—'} · {fmtDay(inv.created_at)}
+                      </div>
+                    </div>
+                    <div className="text-right flex-shrink-0">
+                      <div className="font-serif text-lg text-stone-900">{fmtMoney(amt)}</div>
+                      <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full ${paid ? 'bg-emerald-600 text-white' : inv.status === 'sent' ? 'bg-amber-100 text-amber-800' : 'bg-stone-100 text-stone-500'}`}>
+                        {paid ? 'PAID' : (inv.status || 'draft').toUpperCase()}
+                      </span>
+                    </div>
+                  </div>
+
+                  {paid && !isEditing && (
+                    <div className="mt-2 text-[11px] font-mono text-stone-500 flex flex-wrap gap-x-3 gap-y-1">
+                      <span>Paid {fmtDay(inv.paid_at)}</span>
+                      {inv.amount_paid != null && Number(inv.amount_paid) !== Number(inv.total) && <span className="text-amber-700">collected {fmtMoney(inv.amount_paid)} of {fmtMoney(inv.total)}</span>}
+                      {inv.payment_note && <span className="italic">“{inv.payment_note}”</span>}
+                    </div>
+                  )}
+
+                  {isEditing ? (
+                    <div className="mt-3 pt-3 border-t border-stone-100 space-y-2">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <label className="text-[11px] font-mono text-stone-500 w-24">Paid date</label>
+                        <input type="date" value={draft.paid_at} onChange={e => setDraft(d => ({ ...d, paid_at: e.target.value }))}
+                          className="px-2 py-1 rounded border border-stone-300 text-xs font-mono" />
+                      </div>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <label className="text-[11px] font-mono text-stone-500 w-24">Amount paid</label>
+                        <span className="text-xs text-stone-500 font-mono">$</span>
+                        <input type="number" min="0" step="0.01" value={draft.amount_paid} onChange={e => setDraft(d => ({ ...d, amount_paid: e.target.value }))}
+                          placeholder={inv.total != null ? String(inv.total) : '0.00'}
+                          className="w-28 px-2 py-1 rounded border border-stone-300 text-xs font-mono" />
+                      </div>
+                      <div className="flex items-start gap-2 flex-wrap">
+                        <label className="text-[11px] font-mono text-stone-500 w-24 pt-1">Note</label>
+                        <input type="text" value={draft.payment_note} onChange={e => setDraft(d => ({ ...d, payment_note: e.target.value }))}
+                          placeholder="e.g. negotiated rate, paid by check"
+                          className="flex-1 min-w-[12rem] px-2 py-1 rounded border border-stone-300 text-xs" />
+                      </div>
+                      <div className="flex gap-2 pt-1">
+                        <button onClick={() => saveMarkPaid(inv)} disabled={busyId === inv.id}
+                          className="px-3 py-1.5 rounded-lg bg-emerald-600 text-white text-xs font-medium disabled:opacity-50">Save as paid</button>
+                        <button onClick={() => setEditing(null)} className="px-3 py-1.5 rounded-lg border border-stone-300 text-stone-600 text-xs">Cancel</button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="mt-3 flex gap-2">
+                      {!paid ? (
+                        <button onClick={() => openEdit(inv)} className="px-3 py-1.5 rounded-lg bg-stone-900 text-white text-xs font-medium flex items-center gap-1.5">
+                          <Check size={13} /> Mark paid
+                        </button>
+                      ) : (
+                        <>
+                          <button onClick={() => openEdit(inv)} className="px-3 py-1.5 rounded-lg border border-stone-300 text-stone-700 text-xs flex items-center gap-1.5">
+                            <Edit2 size={12} /> Edit payment
+                          </button>
+                          <button onClick={() => markUnpaid(inv)} disabled={busyId === inv.id} className="px-3 py-1.5 rounded-lg border border-red-200 text-red-600 text-xs disabled:opacity-50">Mark unpaid</button>
+                        </>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function MoneyView({ employee, onSignOut, onOpenMessages, onLogoClick }) {
   const [subTab, setSubTab] = useState('invoices'); // 'invoices' | 'payroll' | 'reports' | 'profit'
 
   const ChildView = subTab === 'invoices' ? InvoiceView
+    : subTab === 'payments' ? InvoicePaymentsReport
     : subTab === 'payroll' ? ExportView
     : subTab === 'profit' ? ProfitReportView
     : CleaningsReportView;
@@ -19699,6 +19879,10 @@ function MoneyView({ employee, onSignOut, onOpenMessages, onLogoClick }) {
               <button onClick={() => setSubTab('invoices')}
                 className={`flex-1 py-2 px-3 rounded-lg text-xs font-medium transition-colors flex items-center justify-center gap-1.5 ${subTab === 'invoices' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
                 <FileText size={13} /> Invoices
+              </button>
+              <button onClick={() => setSubTab('payments')}
+                className={`flex-1 py-2 px-3 rounded-lg text-xs font-medium transition-colors flex items-center justify-center gap-1.5 ${subTab === 'payments' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+                <Check size={13} /> Payments
               </button>
               <button onClick={() => setSubTab('payroll')}
                 className={`flex-1 py-2 px-3 rounded-lg text-xs font-medium transition-colors flex items-center justify-center gap-1.5 ${subTab === 'payroll' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>

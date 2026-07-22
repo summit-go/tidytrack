@@ -106,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul18-tap50";
+const BUILD_TAG = "jul18-tap52";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -19692,6 +19692,8 @@ function InvoicePaymentsReport({ employee, onSignOut, onOpenMessages, onLogoClic
   const [statusFilter, setStatusFilter] = useState('unpaid'); // all | unpaid | paid
   const [busyId, setBusyId] = useState(null);
   const [editing, setEditing] = useState(null);
+  const [viewId, setViewId] = useState(null); // invoice being viewed full-screen
+  const [glanceId, setGlanceId] = useState(null); // invoice in the quick-glance popup
   const [draft, setDraft] = useState({ paid_at: '', amount_paid: '', payment_note: '' });
 
   const load = async () => {
@@ -19733,6 +19735,17 @@ function InvoicePaymentsReport({ employee, onSignOut, onOpenMessages, onLogoClic
     load();
   };
 
+  const markPaidQuick = async (inv) => {
+    if (!confirm(`Mark invoice #${inv.invoice_number || '—'} for ${inv.customer?.name || 'this property'} (${fmtMoney(inv.total || 0)}) as PAID?\n\nRecords it as paid today for the full amount. Use "Edit payment" if you collected a different amount or need to set the date.`)) return;
+    setBusyId(inv.id);
+    const { error } = await supabase.from('invoices').update({
+      status: 'paid', paid_at: new Date().toISOString(), amount_paid: inv.total != null ? Number(inv.total) : null,
+    }).eq('id', inv.id);
+    setBusyId(null);
+    if (error) { alert('Could not mark paid: ' + error.message); return; }
+    load();
+  };
+
   const markUnpaid = async (inv) => {
     if (!confirm('Mark this invoice unpaid again? It clears the paid date and amount.')) return;
     setBusyId(inv.id);
@@ -19743,6 +19756,13 @@ function InvoicePaymentsReport({ employee, onSignOut, onOpenMessages, onLogoClic
   };
 
   const fmtDay = (iso) => iso ? new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '—';
+
+  // Open the full invoice document (with its own print / mark-sent toolbar).
+  if (viewId) {
+    return <InvoiceDocument invoiceId={viewId}
+      onBack={() => { setViewId(null); load(); }}
+      onChanged={load} onEditDraft={null} />;
+  }
 
   return (
     <div className="pb-24">
@@ -19836,17 +19856,34 @@ function InvoicePaymentsReport({ employee, onSignOut, onOpenMessages, onLogoClic
                       </div>
                     </div>
                   ) : (
-                    <div className="mt-3 flex gap-2">
+                    <div className="mt-3 flex gap-2 flex-wrap">
+                      <button onClick={() => setGlanceId(inv.id)}
+                        className="px-3 py-1.5 rounded-lg border border-stone-300 text-stone-700 text-xs flex items-center gap-1.5 hover:bg-stone-50">
+                        <Eye size={12} /> Quick glance
+                      </button>
+                      <button onClick={() => setViewId(inv.id)}
+                        className="px-3 py-1.5 rounded-lg border border-stone-300 text-stone-700 text-xs flex items-center gap-1.5 hover:bg-stone-50">
+                        <FileText size={12} /> Open full
+                      </button>
                       {!paid ? (
-                        <button onClick={() => openEdit(inv)} className="px-3 py-1.5 rounded-lg bg-stone-900 text-white text-xs font-medium flex items-center gap-1.5">
-                          <Check size={13} /> Mark paid
-                        </button>
-                      ) : (
                         <>
-                          <button onClick={() => openEdit(inv)} className="px-3 py-1.5 rounded-lg border border-stone-300 text-stone-700 text-xs flex items-center gap-1.5">
+                          <button onClick={() => markPaidQuick(inv)} disabled={busyId === inv.id}
+                            className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-medium flex items-center gap-1.5 disabled:opacity-50">
+                            <Check size={13} /> Mark paid
+                          </button>
+                          <button onClick={() => openEdit(inv)}
+                            className="px-3 py-1.5 rounded-lg border border-stone-300 text-stone-700 text-xs flex items-center gap-1.5 hover:bg-stone-50">
                             <Edit2 size={12} /> Edit payment
                           </button>
-                          <button onClick={() => markUnpaid(inv)} disabled={busyId === inv.id} className="px-3 py-1.5 rounded-lg border border-red-200 text-red-600 text-xs disabled:opacity-50">Mark unpaid</button>
+                        </>
+                      ) : (
+                        <>
+                          <button onClick={() => openEdit(inv)}
+                            className="px-3 py-1.5 rounded-lg border border-stone-300 text-stone-700 text-xs flex items-center gap-1.5 hover:bg-stone-50">
+                            <Edit2 size={12} /> Edit payment
+                          </button>
+                          <button onClick={() => markUnpaid(inv)} disabled={busyId === inv.id}
+                            className="px-3 py-1.5 rounded-lg border border-red-200 text-red-600 text-xs disabled:opacity-50 hover:bg-red-50">Mark unpaid</button>
                         </>
                       )}
                     </div>
@@ -19857,6 +19894,21 @@ function InvoicePaymentsReport({ employee, onSignOut, onOpenMessages, onLogoClic
           </div>
         )}
       </div>
+
+      {/* Quick glance — the invoice in a popup, no navigating away. */}
+      {glanceId && (
+        <div className="fixed inset-0 z-[60] bg-black/50 flex items-center justify-center p-3" onClick={() => setGlanceId(null)}>
+          <div className="bg-white rounded-2xl w-full max-w-3xl max-h-[92vh] overflow-hidden shadow-2xl flex flex-col" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-4 py-2.5 border-b border-stone-200 flex-shrink-0 bg-white">
+              <span className="text-[10px] font-mono uppercase tracking-wider text-stone-500">Quick glance · tap outside to close</span>
+              <button onClick={() => setGlanceId(null)} className="w-8 h-8 rounded-lg hover:bg-stone-100 flex items-center justify-center text-stone-500"><X size={16} /></button>
+            </div>
+            <div className="overflow-y-auto flex-1">
+              <InvoiceDocument invoiceId={glanceId} onBack={() => setGlanceId(null)} onChanged={load} onEditDraft={null} />
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

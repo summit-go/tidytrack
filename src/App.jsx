@@ -106,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul18-tap52";
+const BUILD_TAG = "jul18-tap53";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -20352,13 +20352,36 @@ function ExportView({ employee, onSignOut, onOpenMessages, onLogoClick, topToggl
   const [end, setEnd] = useState(today);
   const [busy, setBusy] = useState(false);
   const [preview, setPreview] = useState(null);
+  const [fullShifts, setFullShifts] = useState(null); // full shifts for the interactive by-cleaner view
+  const [selCleaner, setSelCleaner] = useState(null);
+  // Local-day bounds (fixes the UTC off-by-a-day that hid late-night shifts).
+  const dayBounds = (from, to) => {
+    const [fy, fm, fd] = from.split('-').map(Number);
+    const [ty, tm, td] = to.split('-').map(Number);
+    return {
+      startIso: new Date(fy, fm - 1, fd, 0, 0, 0, 0).toISOString(),
+      endIso: new Date(ty, tm - 1, td, 23, 59, 59, 999).toISOString(),
+    };
+  };
+  const loadFull = async () => {
+    const { startIso, endIso } = dayBounds(start, end);
+    const { data } = await supabase
+      .from('shifts')
+      .select('*, employee:employees(id,name,pay_rate_hourly), customer:customers(id,name,property_type,bill_rate_hourly), work_blocks(id, end_time, start_time, bill_rate_at_work, unit:units(label), party:parties(label))')
+      .eq('is_preview', false)
+      .gte('start_time', startIso).lte('start_time', endIso)
+      .order('start_time', { ascending: false });
+    setFullShifts(data || []);
+  };
   const fetchData = async () => {
     setBusy(true);
+    await loadFull();
+    const { startIso, endIso } = dayBounds(start, end);
     const { data } = await supabase
       .from('shifts')
       .select('start_time, end_time, bill_rate_at_work, idle_seconds, manual_adjustment_seconds, auto_clocked_out, adjustment_notes, employee:employees(name), customer:customers(name, property_type, bill_rate_hourly), work_blocks(start_time, end_time, bill_rate_at_work)')
-      .gte('start_time', start + 'T00:00:00')
-      .lte('start_time', end + 'T23:59:59')
+      .gte('start_time', startIso)
+      .lte('start_time', endIso)
       .eq('is_preview', false)  // Never include preview shifts in payroll
       .not('end_time', 'is', null)
       .order('start_time');
@@ -20452,20 +20475,16 @@ function ExportView({ employee, onSignOut, onOpenMessages, onLogoClick, topToggl
         {preview && preview.length > 0 && (
           <>
             <div className="mb-6">
-              <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-3">By employee</div>
-              <div className="space-y-2">
-                {Object.entries(byEmployee).map(([name, d]) => (
-                  <div key={name} className="flex items-center justify-between p-3 bg-white border border-stone-200 rounded-xl">
-                    <span className="font-serif text-base text-stone-900">{name}</span>
-                    <div className="text-right">
-                      <div className="font-mono text-sm text-stone-900">{d.hours.toFixed(2)} hrs</div>
-                      <div className="font-mono text-xs text-stone-500">
-                        {d.shifts} shifts {d.billable > 0 && <>· <span className="text-emerald-700">{fmtMoney(d.billable)}</span> billed</>}
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
+              <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-3">By employee — tap a name to see shifts, adjust hours/pay, or remove a fake one</div>
+              {fullShifts && fullShifts.length > 0 ? (
+                <div className="-mx-5">
+                  <ShiftsByCleanerView shifts={fullShifts} showMoney
+                    selectedCleanerId={selCleaner} onSelectCleaner={setSelCleaner}
+                    onOpenShift={() => {}} currentEmployee={employee} onReload={loadFull} />
+                </div>
+              ) : (
+                <div className="text-center py-8 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">No shifts in this range.</div>
+              )}
             </div>
             <button onClick={downloadCSV}
               className="w-full py-4 rounded-2xl bg-amber-700 text-stone-50 font-medium flex items-center justify-center gap-2 active:scale-98">

@@ -106,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul18-tap48";
+const BUILD_TAG = "jul18-tap49";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -11406,8 +11406,14 @@ function ManagerDashboard({ employee, onSignOut, onOpenMessages, onLogoClick }) 
         .eq('is_preview', false)
         .order('start_time', { ascending: false })
         .range(from, from + PAGE - 1);
-      if (dateFrom) q = q.gte('start_time', dateFrom + 'T00:00:00');
-      if (dateTo) q = q.lte('start_time', dateTo + 'T23:59:59');
+      if (dateFrom) {
+        const [fy, fm, fd] = dateFrom.split('-').map(Number);
+        q = q.gte('start_time', new Date(fy, fm - 1, fd, 0, 0, 0, 0).toISOString());
+      }
+      if (dateTo) {
+        const [ty, tm, td] = dateTo.split('-').map(Number);
+        q = q.lte('start_time', new Date(ty, tm - 1, td, 23, 59, 59, 999).toISOString());
+      }
       const { data, error } = await q;
       if (error) break;
       rows = rows.concat(data || []);
@@ -12053,14 +12059,29 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
                     const dur = s.end_time ? shiftBillableMs(s) : (new Date() - new Date(s.start_time));
                     const sb = shiftBillableAmount(s, showMoney);
                     return (
-                      <button key={s.id} onClick={() => onOpenShift(s)}
-                        className="w-full text-left px-4 py-2.5 hover:bg-stone-50 flex items-center justify-between text-xs font-mono text-stone-600">
-                        <span>{fmtClock(s.start_time)} {s.end_time ? `— ${fmtClock(s.end_time)}` : '— active'} · {fmtTimeShort(dur)}</span>
-                        <span className="flex items-center gap-2">
+                      <div key={s.id}
+                        className="w-full px-4 py-2.5 hover:bg-stone-50 flex items-center justify-between text-xs font-mono text-stone-600 gap-2">
+                        <button onClick={() => onOpenShift(s)} className="flex-1 text-left min-w-0 truncate">
+                          {fmtClock(s.start_time)} {s.end_time ? `— ${fmtClock(s.end_time)}` : '— active'} · {fmtTimeShort(dur)}
+                        </button>
+                        <span className="flex items-center gap-2 flex-shrink-0">
                           {showMoney && sb > 0 && <span className="text-emerald-700">{fmtMoney(sb)}</span>}
-                          <ChevronRight size={13} className="text-stone-400" />
+                          <button onClick={() => onOpenShift(s)} title="Open shift"><ChevronRight size={13} className="text-stone-400" /></button>
+                          {(currentEmployee?.role === 'owner' || currentEmployee?.role === 'manager') && (
+                            <button
+                              onClick={async () => {
+                                if (!confirm(`Delete this shift (${fmtClock(s.start_time)}${s.end_time ? `–${fmtClock(s.end_time)}` : ''})?\n\nUse this only for a fake or mistaken shift. It can't be undone.`)) return;
+                                const { error } = await supabase.from('shifts').delete().eq('id', s.id);
+                                if (error) { alert('Could not delete shift: ' + error.message + '\n\n(If it has work blocks, those may need removing first.)'); return; }
+                                if (onReload) onReload();
+                              }}
+                              title="Delete this shift (fake / mistaken)"
+                              className="w-6 h-6 rounded flex items-center justify-center text-red-500 hover:bg-red-50 hover:text-red-700">
+                              <X size={13} />
+                            </button>
+                          )}
                         </span>
-                      </button>
+                      </div>
                     );
                   })}
                 </div>

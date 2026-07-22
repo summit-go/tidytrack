@@ -106,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul18-tap57";
+const BUILD_TAG = "jul18-tap58";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -14989,6 +14989,9 @@ function PropertyForm({ property, currentUserRole, onCancel, onSaved, onManageAs
   const [active, setActive] = useState(property?.active ?? true);
   const [bedrooms, setBedrooms] = useState(property?.bedrooms ?? null);
   const [bathrooms, setBathrooms] = useState(property?.bathrooms ?? null);
+  // Which assignment-upload styles THIS property's PM can see in their portal.
+  const [pmMethods, setPmMethods] = useState(property?.pm_upload_methods || { quick: false, checklist: true, legacy: false });
+  const togglePmMethod = (k) => setPmMethods(m => ({ ...(m || {}), [k]: !(m || {})[k] }));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const canEditMoney = currentUserRole === 'owner';
@@ -15067,6 +15070,7 @@ function PropertyForm({ property, currentUserRole, onCancel, onSaved, onManageAs
       portal_start_date: portalStartDate || null,
       bedrooms: type === 'simple' ? bedrooms : null,
       bathrooms: type === 'simple' ? bathrooms : null,
+      pm_upload_methods: pmMethods,
       active
     };
     let savedRow = null;
@@ -15261,6 +15265,32 @@ function PropertyForm({ property, currentUserRole, onCancel, onSaved, onManageAs
                   ? <>The property manager will only see cleanings from <strong>{new Date(portalStartDate + 'T12:00:00').toLocaleDateString('en-US', { month:'long', day:'numeric', year:'numeric' })}</strong> forward.</>
                   : <>If set, only cleanings from this date forward will be visible to the property manager. Useful for hiding old test data or starting fresh with a new client.</>}
               </p>
+            </div>
+          )}
+
+          {/* Which upload styles this property's PM sees in their portal. */}
+          {portalCode && (
+            <div className="mt-4 pt-4 border-t border-stone-200">
+              <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-1 block">PM assignment uploads</label>
+              <p className="text-xs text-stone-500 mb-2">Pick which ways this property's PM can create assignments in their portal. Off = hidden from them.</p>
+              <div className="space-y-2">
+                {[
+                  { k: 'quick', label: 'Quick assignment', desc: 'Fast builder — no cleaner picker. Lands as a draft for your approval.' },
+                  { k: 'checklist', label: 'Checklist wizard', desc: 'The structured "New assignment" with bedroom items.' },
+                  { k: 'legacy', label: 'Legacy file upload', desc: 'Upload a file or photo as the source.' },
+                ].map(m => (
+                  <button type="button" key={m.k} onClick={() => togglePmMethod(m.k)}
+                    className={`w-full flex items-center justify-between gap-3 p-3 rounded-xl border-2 text-left transition-colors ${pmMethods?.[m.k] ? 'border-emerald-400 bg-emerald-50' : 'border-stone-200 bg-white'}`}>
+                    <span className="min-w-0">
+                      <span className="block text-sm font-medium text-stone-900">{m.label}</span>
+                      <span className="block text-[11px] text-stone-500">{m.desc}</span>
+                    </span>
+                    <span className={`w-5 h-5 rounded-md flex items-center justify-center flex-shrink-0 border-2 ${pmMethods?.[m.k] ? 'bg-emerald-600 border-emerald-600 text-white' : 'bg-white border-stone-300'}`}>
+                      {pmMethods?.[m.k] && <Check size={13} />}
+                    </span>
+                  </button>
+                ))}
+              </div>
             </div>
           )}
 
@@ -26594,7 +26624,8 @@ const QUICK_TYPES = [
   { key: 'reclean',         label: 'Re-clean' },
   { key: 'trash_out',       label: 'Trash out' },
 ];
-function QuickAssignmentForm({ property, employee, onCancel, onSaved }) {
+function QuickAssignmentForm({ property, employee, portalUser = null, portalKind = null, onCancel, onSaved }) {
+  const isPM = portalKind === 'pm' || !!portalUser; // PMs: no cleaner picker, saves as a draft for owner approval
   const [apt, setApt] = useState('');
   const [bedrooms, setBedrooms] = useState(2);
   const [bathrooms, setBathrooms] = useState(2);
@@ -26608,11 +26639,12 @@ function QuickAssignmentForm({ property, employee, onCancel, onSaved }) {
   const [error, setError] = useState('');
 
   useEffect(() => {
+    if (isPM) return; // PMs don't assign cleaners
     (async () => {
       const { data } = await supabase.from('employees').select('id, name, role').eq('active', true).order('name');
       setCleaners((data || []).filter(e => e.role !== 'owner'));
     })();
-  }, []);
+  }, [isPM]);
 
   const step = (setter, val, delta, min = 0, max = 12) =>
     setter(Math.max(min, Math.min(max, (parseInt(val, 10) || 0) + delta)));
@@ -26662,14 +26694,15 @@ function QuickAssignmentForm({ property, employee, onCancel, onSaved }) {
       }
       const { data: asg, error: ae } = await supabase.from('assignments').insert({
         customer_id: property.id, title, notes: notes.trim() || null,
-        uploaded_by: employee.id, active: true, assignment_type: cleanType,
+        uploaded_by: isPM ? null : employee.id, active: true, assignment_type: cleanType,
         scheduled_date: scheduledDate || null,
+        ...(isPM ? { source: 'pm', pm_status: 'pending' } : {}),
       }).select().single();
       if (ae) throw ae;
       const { error: te } = await supabase.from('assignment_targets').insert({
         assignment_id: asg.id, unit_id: unit.id, party_id: party.id,
         status: 'pending', priority: !!priority,
-        assigned_to: assignedTo || null,
+        assigned_to: isPM ? null : (assignedTo || null),
       });
       if (te) throw te;
       setBusy(false);
@@ -26735,6 +26768,7 @@ function QuickAssignmentForm({ property, employee, onCancel, onSaved }) {
             className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white text-stone-900" />
         </div>
 
+        {!isPM && (
         <div>
           <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Assign to (optional)</label>
           <select value={assignedTo} onChange={e => setAssignedTo(e.target.value)}
@@ -26744,6 +26778,7 @@ function QuickAssignmentForm({ property, employee, onCancel, onSaved }) {
           </select>
           <div className="text-[11px] text-stone-500 mt-1 font-mono">Assign it to a specific cleaner — it shows up in their list.</div>
         </div>
+        )}
 
         <button onClick={() => setPriority(p => !p)}
           className={`w-full px-4 py-3 rounded-xl border-2 text-sm font-medium flex items-center justify-between transition-colors ${priority ? 'bg-red-50 border-red-400 text-red-800' : 'bg-white border-stone-200 text-stone-600'}`}>
@@ -35237,6 +35272,13 @@ function PortalAssignmentsTab({ property, portalKind, portalUser }) {
   const [search, setSearch] = useState('');
 
   const allowLegacy = !!portalUser?.allow_legacy_uploads;
+  // Per-property control of which upload styles this PM sees. Unconfigured
+  // (null) keeps the old default: checklist on, quick off, legacy following
+  // the per-PM allow_legacy_uploads flag.
+  const pmm = property?.pm_upload_methods;
+  const showQuick = pmm ? !!pmm.quick : false;
+  const showChecklist = pmm ? !!pmm.checklist : true;
+  const showLegacy = pmm ? !!pmm.legacy : allowLegacy;
 
   const load = async () => {
     const { data } = await supabase.from('assignments')
@@ -35255,6 +35297,12 @@ function PortalAssignmentsTab({ property, portalKind, portalUser }) {
       employee={null}                          /* no staff employee in PM context */
       actorKind={portalKind || 'pm'}
       portalUser={portalUser}
+      onCancel={() => setView({ kind: 'list' })}
+      onSaved={() => { setView({ kind: 'list' }); load(); }} />;
+  }
+  if (view.kind === 'quick') {
+    return <QuickAssignmentForm property={property} employee={null}
+      portalKind={portalKind || 'pm'} portalUser={portalUser}
       onCancel={() => setView({ kind: 'list' })}
       onSaved={() => { setView({ kind: 'list' }); load(); }} />;
   }
@@ -35309,32 +35357,38 @@ function PortalAssignmentsTab({ property, portalKind, portalUser }) {
         </p>
       </div>
 
-      {/* Primary upload — the new checklist wizard. This is the
-         recommended path for every PM. Maps the assignment to specific
-         bedroom items with structured templates instead of a free-form
-         file upload. */}
-      <button onClick={() => setView({ kind: 'wizard' })}
-        className="w-full py-4 rounded-2xl bg-stone-900 text-stone-50 font-medium flex items-center justify-center gap-2">
-        <Plus size={18} /> New assignment
-      </button>
+      {/* Quick assignment — enabled per-property. Fast builder, no cleaner
+         picker; lands as a draft for owner approval. */}
+      {showQuick && (
+        <button onClick={() => setView({ kind: 'quick' })}
+          className="w-full py-4 rounded-2xl bg-stone-900 text-stone-50 font-medium flex items-center justify-center gap-2">
+          <Building2 size={18} /> Quick assignment
+        </button>
+      )}
 
-      {/* Legacy upload — greyed out by default. Owner can re-enable it
-         per-PM via portalUser.allow_legacy_uploads. We always show the
-         button so PMs see this exists but understand it's gated behind
-         owner permission. */}
-      <button onClick={() => allowLegacy && setView({ kind: 'new' })}
-        disabled={!allowLegacy}
-        title={allowLegacy
-          ? 'Upload a file or photo as the source for an assignment (legacy flow).'
-          : 'Disabled by the owner. Ask them to enable legacy uploads for your account if you need this option.'}
-        className={`w-full py-2.5 rounded-xl text-xs font-medium flex items-center justify-center gap-1.5 border ${allowLegacy
-          ? 'bg-stone-50 border-stone-300 text-stone-700 hover:bg-stone-100'
-          : 'bg-stone-100 border-stone-200 text-stone-400 cursor-not-allowed'}`}>
-        <FileText size={12} />
-        {allowLegacy
-          ? 'Legacy file upload'
-          : 'Legacy file upload (disabled by owner)'}
-      </button>
+      {/* Checklist wizard — structured "New assignment". Shown per-property. */}
+      {showChecklist && (
+        <button onClick={() => setView({ kind: 'wizard' })}
+          className={`w-full py-4 rounded-2xl font-medium flex items-center justify-center gap-2 ${showQuick ? 'border-2 border-stone-300 bg-white text-stone-700' : 'bg-stone-900 text-stone-50'}`}>
+          <Plus size={18} /> New assignment
+        </button>
+      )}
+
+      {/* Legacy upload — shown per-property (falls back to the per-PM flag
+         when the property hasn't been configured). */}
+      {showLegacy && (
+        <button onClick={() => setView({ kind: 'new' })}
+          title="Upload a file or photo as the source for an assignment (legacy flow)."
+          className="w-full py-2.5 rounded-xl text-xs font-medium flex items-center justify-center gap-1.5 border bg-stone-50 border-stone-300 text-stone-700 hover:bg-stone-100">
+          <FileText size={12} /> Legacy file upload
+        </button>
+      )}
+
+      {!showQuick && !showChecklist && !showLegacy && (
+        <div className="text-center py-4 text-xs text-stone-400 border-2 border-dashed border-stone-200 rounded-xl">
+          Assignment uploads aren't enabled for this property. Ask Summit Clean to turn one on.
+        </div>
+      )}
 
       {/* Search — filters across title, unit, bedroom, notes. PMs don't
          need cleaner/category filters but search by apartment/building

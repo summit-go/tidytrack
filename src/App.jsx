@@ -106,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul18-tap58";
+const BUILD_TAG = "jul18-tap59";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -21995,6 +21995,10 @@ function PortalHome({ property, portalKind, portalUser, properties, onSwitchProp
                 className={`flex-1 py-2 px-2 rounded-lg text-xs font-medium ${asgSub === 'requests' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
                 Assignments
               </button>
+              <button onClick={() => setAsgSub('schedule')}
+                className={`flex-1 py-2 px-2 rounded-lg text-xs font-medium ${asgSub === 'schedule' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+                Schedule
+              </button>
               <button onClick={() => setAsgSub('concerns')}
                 className={`flex-1 py-2 px-2 rounded-lg text-xs font-medium ${asgSub === 'concerns' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
                 Concerns
@@ -22003,11 +22007,15 @@ function PortalHome({ property, portalKind, portalUser, properties, onSwitchProp
             <p className="text-[11px] text-stone-400 font-mono mt-2 px-1">
               {asgSub === 'requests'
                 ? 'Request a cleaning for the team.'
+                : asgSub === 'schedule'
+                ? "What's coming up for your property, and what was done recently."
                 : 'Send us photos or a message — e.g. a resident complaint or something that needs attention.'}
             </p>
           </div>
           {asgSub === 'requests'
             ? <PortalAssignmentsTab property={property} portalKind={portalKind} portalUser={portalUser} />
+            : asgSub === 'schedule'
+            ? <PortalScheduleTab property={property} />
             : <PortalPhotoUploadTab property={property} portalKind={portalKind} />}
         </div>
       )}
@@ -35261,6 +35269,118 @@ function PortalPhotoUploadTab({ property, portalKind }) {
 // Property manager creates/edits/submits assignment drafts; once
 // approved they become read-only.
 // =================================================================
+// =================================================================
+// PM SCHEDULE — what's coming up for this property (upcoming assignments
+// by due date), with a toggle to peek at what was done the last 3 days.
+// =================================================================
+function PortalScheduleTab({ property }) {
+  const [rows, setRows] = useState(null);
+  const [showRecent, setShowRecent] = useState(false);
+  const todayKey = localTodayKey();
+
+  const load = async () => {
+    const { data } = await supabase.from('assignments')
+      .select('id, title, assignment_type, scheduled_date, targets:assignment_targets(id, status, completed_at, unit:units(label), party:parties(label))')
+      .eq('customer_id', property.id)
+      .is('deleted_at', null);
+    setRows(data || []);
+  };
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, [property.id]);
+
+  const fmtDay = (key) => {
+    if (!key) return '';
+    const [y, m, d] = String(key).slice(0, 10).split('-').map(Number);
+    const dt = new Date(y, m - 1, d);
+    return dt.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+  };
+
+  // Upcoming: assignments with a due date today-or-later, still open.
+  const upcomingByDate = {};
+  (rows || []).forEach(a => {
+    if (!a.scheduled_date || String(a.scheduled_date).slice(0, 10) < todayKey) return;
+    const anyOpen = (a.targets || []).some(t => t.status !== 'done');
+    if (!anyOpen) return;
+    const k = String(a.scheduled_date).slice(0, 10);
+    (upcomingByDate[k] = upcomingByDate[k] || []).push(a);
+  });
+  const upcomingDates = Object.keys(upcomingByDate).sort();
+
+  // Recently done: targets completed in the last 3 days.
+  const cutoff = new Date(); cutoff.setDate(cutoff.getDate() - 3);
+  const recent = [];
+  (rows || []).forEach(a => {
+    (a.targets || []).forEach(t => {
+      if (t.status === 'done' && t.completed_at && new Date(t.completed_at) >= cutoff) {
+        recent.push({ ...t, aType: a.assignment_type, aTitle: a.title });
+      }
+    });
+  });
+  recent.sort((x, y) => new Date(y.completed_at) - new Date(x.completed_at));
+
+  const label = (unit, party) => unitPartyLabel(unit?.label, party?.label) || 'Job';
+
+  if (rows === null) return <div className="px-5 py-10 text-center text-stone-400 text-sm">Loading…</div>;
+
+  return (
+    <div className="px-5 pt-5 pb-24 space-y-5">
+      <div>
+        <h2 className="font-serif text-2xl text-stone-900 mb-1">Upcoming</h2>
+        <p className="text-sm text-stone-600">Scheduled work for {property.name}.</p>
+      </div>
+
+      {upcomingDates.length === 0 ? (
+        <div className="text-center py-10 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
+          Nothing scheduled ahead right now.
+        </div>
+      ) : (
+        <div className="space-y-4">
+          {upcomingDates.map(dk => (
+            <div key={dk}>
+              <div className={`text-xs uppercase tracking-wider font-mono mb-2 ${dk === todayKey ? 'text-emerald-700' : 'text-stone-500'}`}>
+                {dk === todayKey ? 'Today · ' : ''}{fmtDay(dk)}
+              </div>
+              <div className="space-y-2">
+                {upcomingByDate[dk].map(a => (
+                  <div key={a.id} className="rounded-2xl bg-white border border-stone-200 p-4">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-serif text-base text-stone-900">{(a.targets || []).map(t => label(t.unit, t.party)).join(', ') || (a.title || 'Job')}</span>
+                      {a.assignment_type && <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-orange-100 text-orange-800">{assignmentTypeLabel(a.assignment_type)}</span>}
+                    </div>
+                    <div className="text-[11px] text-stone-500 font-mono mt-1">
+                      {(a.targets || []).length} item{(a.targets || []).length === 1 ? '' : 's'}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Recently done — collapsed by default so it doesn't compete with History. */}
+      <button onClick={() => setShowRecent(v => !v)}
+        className="w-full flex items-center justify-between px-4 py-3 rounded-2xl bg-stone-100 text-stone-700 text-sm font-medium">
+        <span>Recently done · last 3 days{recent.length ? ` (${recent.length})` : ''}</span>
+        <ChevronRight size={16} className={`transition-transform ${showRecent ? 'rotate-90' : ''}`} />
+      </button>
+      {showRecent && (
+        recent.length === 0 ? (
+          <div className="text-center py-6 text-stone-400 text-xs">Nothing completed in the last 3 days.</div>
+        ) : (
+          <div className="space-y-2">
+            {recent.map(t => (
+              <div key={t.id} className="rounded-xl bg-white border border-stone-200 px-4 py-3 flex items-center justify-between gap-2">
+                <span className="font-serif text-sm text-stone-900">{label(t.unit, t.party)}{t.aType ? <span className="text-[10px] font-mono text-stone-400"> · {assignmentTypeLabel(t.aType)}</span> : null}</span>
+                <span className="text-[11px] font-mono text-emerald-700 flex items-center gap-1"><Check size={11} /> {fmtDay(String(t.completed_at).slice(0, 10))}</span>
+              </div>
+            ))}
+          </div>
+        )
+      )}
+    </div>
+  );
+}
+
 function PortalAssignmentsTab({ property, portalKind, portalUser }) {
   const [assignments, setAssignments] = useState([]);
   const [loaded, setLoaded] = useState(false);

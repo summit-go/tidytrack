@@ -106,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul18-tap53";
+const BUILD_TAG = "jul18-tap55";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -836,7 +836,17 @@ const greetingForTime = () => {
 // Falls back to raw duration for shifts without these fields.
 const shiftBillableMs = (shift) => {
   if (!shift?.start_time) return 0;
-  const rawMs = (shift.end_time ? new Date(shift.end_time) : new Date()) - new Date(shift.start_time);
+  const start = new Date(shift.start_time);
+  const actualEnd = shift.end_time ? new Date(shift.end_time) : new Date();
+  let end = actualEnd;
+  // We never work past 10pm, so anything beyond 10pm of the start day is a
+  // forgotten clock-out — cap it there. Only applies when the shift STARTED
+  // before 10pm, so a genuine late shift (e.g. 10:10pm–10:39pm) is untouched.
+  // Catches both still-running shifts AND completed ones with a bad end time
+  // (like a clock-out at 12:11am the next day showing 33 hours).
+  const cap10pm = new Date(start.getFullYear(), start.getMonth(), start.getDate(), 22, 0, 0, 0);
+  if (start < cap10pm && actualEnd > cap10pm) end = cap10pm;
+  const rawMs = end - start;
   const idleSec = shift.idle_seconds || 0;
   const adjSec = shift.manual_adjustment_seconds || 0;
   return Math.max(0, rawMs - idleSec * 1000 + adjSec * 1000);
@@ -11914,7 +11924,7 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
                 <div className="flex items-center justify-between mb-1.5">
                   <div className="flex items-center gap-2">
                     {active && <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />}
-                    <span className="font-serif text-base text-stone-900">{fmtDate(d.date)}</span>
+                    <span className="font-serif text-lg text-stone-900">{d.date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</span>
                   </div>
                   {multi
                     ? <ChevronRight size={15} className={`text-stone-400 transition-transform ${expanded ? 'rotate-90' : ''}`} />
@@ -12109,30 +12119,46 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
       {cleaners.length === 0 ? (
         <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">No one worked in this period.</div>
       ) : (
-        <div className="space-y-2">
+        <div className="space-y-3">
           {cleaners.map(c => {
             const dayKeys = new Set(c.shifts.map(s => localDayKey(s.start_time)));
             const totalMs = c.shifts.filter(s => s.end_time).reduce((sum, s) => sum + shiftBillableMs(s), 0);
             const active = c.shifts.some(s => !s.end_time);
-            const billable = c.shifts.reduce((sum, s) => sum + shiftBillableAmount(s, showMoney), 0);
             const sorted = c.shifts.map(s => new Date(s.start_time)).sort((a, b) => a - b);
             const dayCount = dayKeys.size;
             const rangeLabel = dayCount <= 1 ? fmtDate(sorted[0]) : `${fmtDate(sorted[0])} – ${fmtDate(sorted[sorted.length - 1])}`;
             const expanded = selectedCleanerId === c.id;
+            // Owe / Paid totals — recomputed live from payDays, so marking a
+            // day paid instantly moves that amount from Owe to Paid.
+            let cOwe = 0, cPaid = 0;
+            if (showMoney) {
+              const cDayMap = {};
+              c.shifts.forEach(s => { const k = localDayKey(s.start_time); (cDayMap[k] = cDayMap[k] || []).push(s); });
+              Object.entries(cDayMap).forEach(([k, ds]) => {
+                const row = payDays[`${c.id}:${k}`];
+                const amt = row?.flat_amount != null ? Number(row.flat_amount) : payOwed(ds);
+                if (row?.paid_at) cPaid += amt; else cOwe += amt;
+              });
+            }
             return (
-              <div key={c.id} className={`rounded-2xl bg-white border transition-colors ${expanded ? 'border-stone-400' : 'border-stone-200'}`}>
+              <div key={c.id} className={`rounded-2xl bg-white shadow-sm border-2 transition-colors ${expanded ? 'border-stone-800' : 'border-stone-200'}`}>
                 <button onClick={() => onSelectCleaner(expanded ? null : c.id)}
                   className="w-full text-left p-4 hover:bg-stone-50 rounded-2xl transition-colors">
-                  <div className="flex items-center justify-between mb-2">
-                    <div className="flex items-center gap-2">
-                      {active && <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />}
-                      <span className="font-serif text-lg text-stone-900">{c.name}</span>
+                  <div className="flex items-center justify-between mb-2 gap-2">
+                    <div className="flex items-center gap-2 min-w-0">
+                      {active && <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse flex-shrink-0" />}
+                      <span className="font-serif text-xl text-stone-900 truncate">{c.name}</span>
                     </div>
-                    <ChevronRight size={16} className={`text-stone-400 transition-transform ${expanded ? 'rotate-90' : ''}`} />
+                    <ChevronRight size={18} className={`text-stone-400 transition-transform flex-shrink-0 ${expanded ? 'rotate-90' : ''}`} />
                   </div>
-                  <div className="flex items-center justify-between text-xs text-stone-500 font-mono">
+                  <div className="flex items-center justify-between text-xs text-stone-500 font-mono gap-2 flex-wrap">
                     <span>{rangeLabel} · {c.shifts.length} {c.shifts.length === 1 ? 'shift' : 'shifts'} · {dayCount} {dayCount === 1 ? 'day' : 'days'} · {fmtTimeShort(totalMs)}</span>
-                    {showMoney && billable > 0 && <span className="text-emerald-700 font-medium">{fmtMoney(billable)}</span>}
+                    {showMoney && (
+                      <span className="flex items-center gap-2 flex-shrink-0">
+                        {cPaid > 0 && <span className="text-emerald-700 font-medium">Paid {fmtMoney(cPaid)}</span>}
+                        <span className={cOwe > 0 ? 'text-amber-700 font-bold' : 'text-stone-400'}>Owe {fmtMoney(cOwe)}</span>
+                      </span>
+                    )}
                   </div>
                 </button>
                 {expanded && (

@@ -106,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul22-tap65";
+const BUILD_TAG = "jul22-tap66";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -5222,7 +5222,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     if (notesEn) payload.notes_en = notesEn;
     let { error } = await supabase.from('photos').update(payload).eq('id', photoId);
     if (error && notesEn) {
-      // notes_en column not there yet (migration v48 not run) — don't lose
+      // notes_en column not there yet (migration v59 not run) — don't lose
       // the cleaner's note over it.
       console.warn('[photo note] notes_en unavailable, saving original only', error);
       delete payload.notes_en;
@@ -11899,8 +11899,11 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
     const n = new Set(prev); n.has(k) ? n.delete(k) : n.add(k); return n;
   });
 
-  // Pay tracking (v47). One row per cleaner per work day.
-  const [payDays, setPayDays] = useState({}); // `${empId}:${dateKey}` -> row
+  // Pay tracking. One row per cleaner per work day PER PROPERTY (v60) —
+  // pay terms differ by property (Carriage Cove is hourly, Bridges and
+  // Citifront are a flat rate per cleaning), so a single bundled day
+  // total couldn't represent what's actually owed.
+  const [payDays, setPayDays] = useState({}); // `${empId}:${dateKey}:${custId}` -> row
   const [payBusy, setPayBusy] = useState(null);
   const [adjusting, setAdjusting] = useState(null); // day key being edited
   const [adjH, setAdjH] = useState('');
@@ -11908,12 +11911,29 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
   const [settingPay, setSettingPay] = useState(null); // day key having a flat $ set
   const [payAmt, setPayAmt] = useState('');
   const monthStart = (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-01`; })();
+  const payKey = (empId, dateKey, custId) => `${empId}:${dateKey}:${custId}`;
+  // Split one day's shifts by property. Every shift carries exactly one
+  // customer_id, so these groups never overlap.
+  const groupByProperty = (dayShifts) => {
+    const m = new Map();
+    (dayShifts || []).forEach(s => {
+      const cid = s.customer?.id || s.customer_id;
+      if (!cid) return;
+      if (!m.has(cid)) m.set(cid, { id: cid, name: s.customer?.name || 'Property', shifts: [] });
+      m.get(cid).shifts.push(s);
+    });
+    return Array.from(m.values()).sort((a, b) => naturalCompare(a.name, b.name));
+  };
 
   // Flat pay for a whole day/job — overrides hours x rate. Empty clears it.
-  const saveFlatPay = async (empId, dateKey, amount) => {
+  const saveFlatPay = async (empId, dateKey, custId, amount) => {
     if (!empId) { alert('No cleaner id — could not save pay.'); return; }
-    const key = `${empId}:${dateKey}`;
+    const key = payKey(empId, dateKey, custId);
     const existing = payDays[key];
+    // Pre-split day rows (custId null) are still fully editable — they're
+    // updated by row id, so they never need a property. Only creating a
+    // brand-new row requires one.
+    if (!custId && !existing?.id) { alert('No property on these shifts — could not save pay.'); return; }
     const val = (amount === '' || amount == null) ? null : Number(amount);
     if (val != null && (isNaN(val) || val < 0)) { setSettingPay(null); return; }
     setPayBusy(key);
@@ -11924,14 +11944,14 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
       // A row for this (employee, day) may already exist (e.g. from Mark paid)
       // even if it's not in local state — upsert avoids the duplicate-key error.
       ({ error } = await supabase.from('employee_pay_days')
-        .upsert({ employee_id: empId, work_date: dateKey, flat_amount: val, created_by: currentEmployee?.id || null },
-          { onConflict: 'employee_id,work_date' }));
+        .upsert({ employee_id: empId, work_date: dateKey, customer_id: custId, flat_amount: val, created_by: currentEmployee?.id || null },
+          { onConflict: 'employee_id,work_date,customer_id' }));
     }
     setPayBusy(null); setSettingPay(null);
     if (error) {
-      const missingCol = /flat_amount/.test(error.message || '') || error.code === '42703' || error.code === 'PGRST204';
+      const missingCol = /flat_amount|customer_id/.test(error.message || '') || error.code === '42703' || error.code === 'PGRST204' || error.code === '42P10';
       alert('Could not save pay: ' + (error.message || 'unknown error')
-        + (missingCol ? '\n\nThe flat-pay column isn\'t in your database yet. Run v50_flat_pay.sql in Supabase, then try again.' : ''));
+        + (missingCol ? '\n\nPer-property pay isn\'t in your database yet. Run v60_pay_per_property.sql in Supabase, then try again.' : ''));
       return;
     }
     await loadPay();
@@ -11942,7 +11962,7 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
       .select('*').gte('work_date', monthStart);
     if (error) return; // table not created yet
     const m = {};
-    (data || []).forEach(r => { m[`${r.employee_id}:${r.work_date}`] = r; });
+    (data || []).forEach(r => { m[payKey(r.employee_id, r.work_date, r.customer_id)] = r; });
     setPayDays(m);
   };
   useEffect(() => { loadPay(); /* eslint-disable-next-line */ }, []);
@@ -11953,9 +11973,10 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
     const ms = dayShifts.filter(s => s.end_time).reduce((sum, s) => sum + shiftBillableMs(s), 0);
     return (ms / 3600000) * rate;
   };
-  const togglePaid = async (empId, dateKey, amount) => {
-    const key = `${empId}:${dateKey}`;
+  const togglePaid = async (empId, dateKey, custId, amount) => {
+    const key = payKey(empId, dateKey, custId);
     const existing = payDays[key];
+    if (!custId && !existing?.id) { alert('No property on these shifts — could not save pay.'); return; }
     setPayBusy(key);
     if (existing?.paid_at) {
       await supabase.from('employee_pay_days').update({ paid_at: null }).eq('id', existing.id);
@@ -11963,7 +11984,8 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
       await supabase.from('employee_pay_days').update({ paid_at: new Date().toISOString(), amount }).eq('id', existing.id);
     } else {
       await supabase.from('employee_pay_days').insert({
-        employee_id: empId, work_date: dateKey, paid_at: new Date().toISOString(),
+        employee_id: empId, work_date: dateKey, customer_id: custId,
+        paid_at: new Date().toISOString(),
         amount, created_by: currentEmployee?.id || null,
       });
     }
@@ -12143,79 +12165,215 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
                 </div>
               </button>
               {showMoney && (() => {
-                const key = `${empId}:${d.key}`;
-                const row = payDays[key];
-                const hasFlat = row?.flat_amount != null;
-                const owed = hasFlat ? Number(row.flat_amount) : payOwed(d.shifts);
-                const paid = !!row?.paid_at;
-                const stale = isUnpaidStale(d.key, paid);
+                // Pay terms differ per property — Carriage Cove is hourly,
+                // Bridges and Citifront are a flat rate per cleaning — so the
+                // day is split into one payable strip per property instead of
+                // a single bundled total. Each strip is set and marked paid
+                // independently; the day total at the bottom just adds them up.
+                // A day that already has a pre-split pay row keeps the old
+                // bundled strip. Per-property pay starts from days that have
+                // no record yet — nothing historical is rewritten or hidden.
+                const legacyRow = payDays[payKey(empId, d.key, null)];
+                if (legacyRow) {
+                  const hasFlat = legacyRow.flat_amount != null;
+                  const owed = hasFlat ? Number(legacyRow.flat_amount) : payOwed(d.shifts);
+                  const paid = !!legacyRow.paid_at;
+                  const key = payKey(empId, d.key, null);
+                  const stale = isUnpaidStale(d.key, paid);
+                  return (
+                    <div className={`px-4 py-2.5 border-t flex items-center justify-between gap-2 flex-wrap ${stale ? 'bg-amber-50 border-amber-200' : 'border-stone-100'}`}>
+                      <div className="text-xs font-mono flex items-center gap-1.5 flex-wrap">
+                        {!paid && owed > 0 && (
+                          <span className="text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-800 border border-amber-200 font-bold">Owed</span>
+                        )}
+                        <span>
+                          <span className="text-stone-500">{paid ? 'Paid ' : 'You owe '}</span>
+                          <span className="text-stone-900 font-bold">{owed > 0 ? fmtMoney(owed) : '—'}</span>
+                          {hasFlat && <span className="text-amber-700"> · flat</span>}
+                          {stale && <span className="text-amber-700"> · unpaid 7+ days</span>}
+                        </span>
+                        <span className="text-[10px] text-stone-400">· whole day (recorded before per-property pay)</span>
+                      </div>
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        {settingPay === key ? (
+                          <span className="flex items-center gap-1">
+                            <span className="text-[11px] text-stone-500 font-mono">$</span>
+                            <input type="number" min="0" step="0.01" autoFocus value={payAmt} onChange={e => setPayAmt(e.target.value)}
+                              placeholder="0.00"
+                              className="w-20 px-1.5 py-0.5 rounded border border-stone-300 text-xs font-mono" />
+                            <button onClick={() => saveFlatPay(empId, d.key, null, payAmt)} disabled={payBusy === key}
+                              className="text-[11px] px-2 py-0.5 rounded bg-stone-900 text-white">Save</button>
+                            {hasFlat && (
+                              <button onClick={() => saveFlatPay(empId, d.key, null, '')} disabled={payBusy === key}
+                                className="text-[11px] px-1.5 text-red-600">Clear</button>
+                            )}
+                            <button onClick={() => setSettingPay(null)} className="text-[11px] px-1 text-stone-500">Cancel</button>
+                          </span>
+                        ) : adjusting === key ? (
+                          <span className="flex items-center gap-1">
+                            <input type="number" min="0" autoFocus value={adjH} onChange={e => setAdjH(e.target.value)}
+                              placeholder="h"
+                              className="w-12 px-1.5 py-0.5 rounded border border-stone-300 text-xs font-mono" />
+                            <span className="text-[10px] text-stone-400">h</span>
+                            <input type="number" min="0" max="59" value={adjM} onChange={e => setAdjM(e.target.value)}
+                              placeholder="m"
+                              className="w-12 px-1.5 py-0.5 rounded border border-stone-300 text-xs font-mono" />
+                            <span className="text-[10px] text-stone-400">m</span>
+                            <button onClick={() => saveAdjust(d.shifts, adjH, adjM)} disabled={payBusy === 'adj'}
+                              className="text-[11px] px-2 py-0.5 rounded bg-stone-900 text-white">Save</button>
+                            <button onClick={() => setAdjusting(null)} className="text-[11px] px-1 text-stone-500">Cancel</button>
+                          </span>
+                        ) : (
+                          <>
+                            <button onClick={() => { setSettingPay(key); setPayAmt(hasFlat ? String(legacyRow.flat_amount) : ''); }}
+                              className="text-[11px] font-mono px-2 py-0.5 rounded-full bg-stone-100 text-stone-600 flex items-center gap-1">
+                              <DollarSign size={10} /> {hasFlat ? 'Edit pay' : 'Set pay'}
+                            </button>
+                            <button onClick={() => {
+                                setAdjusting(key);
+                                const cur = Math.round(totalMs / 60000);
+                                setAdjH(String(Math.floor(cur / 60))); setAdjM(String(cur % 60));
+                              }}
+                              className="text-[11px] font-mono px-2 py-0.5 rounded-full bg-stone-100 text-stone-600 flex items-center gap-1">
+                              <Clock size={10} /> Adjust hours
+                            </button>
+                          </>
+                        )}
+                        <button onClick={() => togglePaid(empId, d.key, null, owed)} disabled={payBusy === key}
+                          className={`text-[11px] font-mono px-2.5 py-0.5 rounded-full flex items-center gap-1 disabled:opacity-50 ${paid ? 'bg-emerald-600 text-white' : 'bg-white border border-stone-300 text-stone-600'}`}>
+                          {paid ? <><Check size={10} /> Paid</> : 'Mark paid'}
+                        </button>
+                      </div>
+                    </div>
+                  );
+                }
+                const propGroups = groupByProperty(d.shifts);
+                if (propGroups.length === 0) {
+                  return (
+                    <div className="px-4 py-2.5 border-t border-stone-100 text-[11px] font-mono text-stone-400">
+                      No property on these shifts — pay can't be split.
+                    </div>
+                  );
+                }
+                let dayOwed = 0, dayPaid = 0;
+                const strips = propGroups.map(pg => {
+                  const key = payKey(empId, d.key, pg.id);
+                  const row = payDays[key];
+                  const hasFlat = row?.flat_amount != null;
+                  const owed = hasFlat ? Number(row.flat_amount) : payOwed(pg.shifts);
+                  const paid = !!row?.paid_at;
+                  if (paid) dayPaid += owed; else dayOwed += owed;
+                  const pMs = pg.shifts.filter(s => s.end_time)
+                    .reduce((sum, s) => sum + shiftBillableMs(s), 0);
+                  const pBlocks = pg.shifts.reduce((n, s) => n + (s.work_blocks?.length || 0), 0);
+                  // Distinct apartments touched here — the number you'd
+                  // multiply by when you pay a flat rate per cleaning.
+                  const apts = new Set();
+                  pg.shifts.forEach(s => (s.work_blocks || []).forEach(b => {
+                    if (b.unit?.label) apts.add(b.unit.label);
+                  }));
+                  return { pg, key, row, hasFlat, owed, paid, pMs, pBlocks,
+                           aptCount: apts.size, stale: isUnpaidStale(d.key, paid) };
+                });
                 return (
-                  <div className={`px-4 py-2.5 border-t flex items-center justify-between gap-2 flex-wrap ${stale ? 'bg-amber-50 border-amber-200' : 'border-stone-100'}`}>
-                    <div className="text-xs font-mono flex items-center gap-1.5 flex-wrap">
-                      {!paid && owed > 0 && (
-                        <span className="text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-800 border border-amber-200 font-bold">Owed</span>
-                      )}
-                      <span>
-                        <span className="text-stone-500">{paid ? 'Paid ' : 'You owe '}</span>
-                        <span className="text-stone-900 font-bold">{owed > 0 ? fmtMoney(owed) : '—'}</span>
-                        {hasFlat && <span className="text-amber-700"> · flat</span>}
-                        {owed === 0 && !hasFlat && <span className="text-stone-400"> (set a rate or flat pay)</span>}
-                        {stale && <span className="text-amber-700"> · unpaid 7+ days</span>}
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-1.5 flex-wrap">
-                      {settingPay === d.key ? (
-                        <span className="flex items-center gap-1">
-                          <span className="text-[11px] text-stone-500 font-mono">$</span>
-                          <input type="number" min="0" step="0.01" autoFocus value={payAmt} onChange={e => setPayAmt(e.target.value)}
-                            placeholder="0.00"
-                            className="w-20 px-1.5 py-0.5 rounded border border-stone-300 text-xs font-mono" />
-                          <button onClick={() => saveFlatPay(empId, d.key, payAmt)} disabled={payBusy === key}
-                            className="text-[11px] px-2 py-0.5 rounded bg-stone-900 text-white">Save</button>
-                          {hasFlat && (
-                            <button onClick={() => saveFlatPay(empId, d.key, '')} disabled={payBusy === key}
-                              className="text-[11px] px-1.5 text-red-600">Clear</button>
+                  <div className="border-t border-stone-100">
+                    {strips.map(st => (
+                      <div key={st.key}
+                        className={`px-4 py-2.5 border-b last:border-b-0 ${st.stale ? 'bg-amber-50 border-amber-200' : 'border-stone-100'}`}>
+                        <div className="flex items-start justify-between gap-2 mb-1.5 flex-wrap">
+                          <div className="min-w-0">
+                            <div className="text-xs font-mono text-amber-800 flex items-center gap-1.5">
+                              <Building2 size={11} className="flex-shrink-0" />
+                              <span className="truncate">{st.pg.name}</span>
+                            </div>
+                            <div className="text-[10px] font-mono text-stone-400 mt-0.5">
+                              {fmtTimeShort(st.pMs)}
+                              {st.aptCount > 0 && ` · ${st.aptCount} ${st.aptCount === 1 ? 'apartment' : 'apartments'}`}
+                              {` · ${st.pBlocks} ${st.pBlocks === 1 ? 'block' : 'blocks'}`}
+                            </div>
+                          </div>
+                          <div className="text-xs font-mono flex items-center gap-1.5 flex-shrink-0">
+                            {!st.paid && st.owed > 0 && (
+                              <span className="text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-800 border border-amber-200 font-bold">Owed</span>
+                            )}
+                            <span>
+                              <span className="text-stone-500">{st.paid ? 'Paid ' : 'You owe '}</span>
+                              <span className="text-stone-900 font-bold">{st.owed > 0 ? fmtMoney(st.owed) : '—'}</span>
+                              {st.hasFlat
+                                ? <span className="text-amber-700"> · flat</span>
+                                : st.owed > 0 ? <span className="text-stone-400"> · hourly</span> : null}
+                              {st.owed === 0 && !st.hasFlat && <span className="text-stone-400"> (set a rate or flat pay)</span>}
+                              {st.stale && <span className="text-amber-700"> · unpaid 7+ days</span>}
+                            </span>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-1.5 flex-wrap justify-end">
+                          {settingPay === st.key ? (
+                            <span className="flex items-center gap-1">
+                              <span className="text-[11px] text-stone-500 font-mono">$</span>
+                              <input type="number" min="0" step="0.01" autoFocus value={payAmt} onChange={e => setPayAmt(e.target.value)}
+                                placeholder="0.00"
+                                className="w-20 px-1.5 py-0.5 rounded border border-stone-300 text-xs font-mono" />
+                              <button onClick={() => saveFlatPay(empId, d.key, st.pg.id, payAmt)} disabled={payBusy === st.key}
+                                className="text-[11px] px-2 py-0.5 rounded bg-stone-900 text-white">Save</button>
+                              {st.hasFlat && (
+                                <button onClick={() => saveFlatPay(empId, d.key, st.pg.id, '')} disabled={payBusy === st.key}
+                                  className="text-[11px] px-1.5 text-red-600">Clear</button>
+                              )}
+                              <button onClick={() => setSettingPay(null)} className="text-[11px] px-1 text-stone-500">Cancel</button>
+                            </span>
+                          ) : adjusting === st.key ? (
+                            <span className="flex items-center gap-1">
+                              <input type="number" min="0" autoFocus value={adjH} onChange={e => setAdjH(e.target.value)}
+                                placeholder="h"
+                                className="w-12 px-1.5 py-0.5 rounded border border-stone-300 text-xs font-mono" />
+                              <span className="text-[10px] text-stone-400">h</span>
+                              <input type="number" min="0" max="59" value={adjM} onChange={e => setAdjM(e.target.value)}
+                                placeholder="m"
+                                className="w-12 px-1.5 py-0.5 rounded border border-stone-300 text-xs font-mono" />
+                              <span className="text-[10px] text-stone-400">m</span>
+                              <button onClick={() => saveAdjust(st.pg.shifts, adjH, adjM)} disabled={payBusy === 'adj'}
+                                className="text-[11px] px-2 py-0.5 rounded bg-stone-900 text-white">Save</button>
+                              <button onClick={() => setAdjusting(null)} className="text-[11px] px-1 text-stone-500">Cancel</button>
+                            </span>
+                          ) : (
+                            <>
+                              <button onClick={() => { setSettingPay(st.key); setPayAmt(st.hasFlat ? String(st.row.flat_amount) : ''); }}
+                                className="text-[11px] font-mono px-2 py-0.5 rounded-full bg-stone-100 text-stone-600 flex items-center gap-1">
+                                <DollarSign size={10} /> {st.hasFlat ? 'Edit pay' : 'Set pay'}
+                              </button>
+                              <button onClick={() => {
+                                  setAdjusting(st.key);
+                                  const cur = Math.round(st.pMs / 60000);
+                                  setAdjH(String(Math.floor(cur / 60))); setAdjM(String(cur % 60));
+                                }}
+                                className="text-[11px] font-mono px-2 py-0.5 rounded-full bg-stone-100 text-stone-600 flex items-center gap-1">
+                                <Clock size={10} /> Adjust hours
+                              </button>
+                            </>
                           )}
-                          <button onClick={() => setSettingPay(null)} className="text-[11px] px-1 text-stone-500">Cancel</button>
-                        </span>
-                      ) : adjusting === d.key ? (
-                        <span className="flex items-center gap-1">
-                          <input type="number" min="0" autoFocus value={adjH} onChange={e => setAdjH(e.target.value)}
-                            placeholder="h"
-                            className="w-12 px-1.5 py-0.5 rounded border border-stone-300 text-xs font-mono" />
-                          <span className="text-[10px] text-stone-400">h</span>
-                          <input type="number" min="0" max="59" value={adjM} onChange={e => setAdjM(e.target.value)}
-                            placeholder="m"
-                            className="w-12 px-1.5 py-0.5 rounded border border-stone-300 text-xs font-mono" />
-                          <span className="text-[10px] text-stone-400">m</span>
-                          <button onClick={() => saveAdjust(d.shifts, adjH, adjM)} disabled={payBusy === 'adj'}
-                            className="text-[11px] px-2 py-0.5 rounded bg-stone-900 text-white">Save</button>
-                          <button onClick={() => setAdjusting(null)} className="text-[11px] px-1 text-stone-500">Cancel</button>
-                        </span>
-                      ) : (
-                        <>
-                          <button onClick={() => { setSettingPay(d.key); setPayAmt(hasFlat ? String(row.flat_amount) : ''); }}
-                            className="text-[11px] font-mono px-2 py-0.5 rounded-full bg-stone-100 text-stone-600 flex items-center gap-1">
-                            <DollarSign size={10} /> {hasFlat ? 'Edit pay' : 'Set pay'}
+                          <button onClick={() => togglePaid(empId, d.key, st.pg.id, st.owed)} disabled={payBusy === st.key}
+                            className={`text-[11px] font-mono px-2.5 py-0.5 rounded-full flex items-center gap-1 disabled:opacity-50 ${st.paid ? 'bg-emerald-600 text-white' : 'bg-white border border-stone-300 text-stone-600'}`}>
+                            {st.paid ? <><Check size={10} /> Paid</> : 'Mark paid'}
                           </button>
-                          <button onClick={() => {
-                              setAdjusting(d.key);
-                              const cur = Math.round(totalMs / 60000);
-                              setAdjH(String(Math.floor(cur / 60))); setAdjM(String(cur % 60));
-                            }}
-                            className="text-[11px] font-mono px-2 py-0.5 rounded-full bg-stone-100 text-stone-600 flex items-center gap-1">
-                            <Clock size={10} /> Adjust hours
-                          </button>
-                        </>
-                      )}
-                      <button onClick={() => togglePaid(empId, d.key, owed)} disabled={payBusy === key}
-                        className={`text-[11px] font-mono px-2.5 py-0.5 rounded-full flex items-center gap-1 disabled:opacity-50 ${paid ? 'bg-emerald-600 text-white' : 'bg-white border border-stone-300 text-stone-600'}`}>
-                        {paid ? <><Check size={10} /> Paid</> : 'Mark paid'}
-                      </button>
-                    </div>
+                        </div>
+                      </div>
+                    ))}
+                    {strips.length > 1 && (
+                      <div className="px-4 py-2 bg-stone-50 border-t border-stone-200 flex items-center justify-between gap-2 text-xs font-mono">
+                        <span className="text-[10px] uppercase tracking-wider text-stone-500">Day total · {strips.length} properties</span>
+                        <span className="flex items-center gap-2">
+                          {dayPaid > 0 && <span className="text-emerald-700">Paid {fmtMoney(dayPaid)}</span>}
+                          <span className={dayOwed > 0 ? 'text-stone-900 font-bold' : 'text-stone-400'}>
+                            {dayOwed > 0 ? `Owe ${fmtMoney(dayOwed)}` : 'All paid'}
+                          </span>
+                        </span>
+                      </div>
+                    )}
                   </div>
                 );
               })()}
+
               {multi && expanded && (
                 <div className="border-t border-stone-100 divide-y divide-stone-100">
                   {d.shifts.slice().sort((a, b) => new Date(a.start_time) - new Date(b.start_time)).map(s => {
@@ -12285,12 +12443,22 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
             // day paid instantly moves that amount from Owe to Paid.
             let cOwe = 0, cPaid = 0;
             if (showMoney) {
+              // Sum the same per-property buckets the detail view pays out of,
+              // so the header number always equals the strips underneath it.
               const cDayMap = {};
               c.shifts.forEach(s => { const k = localDayKey(s.start_time); (cDayMap[k] = cDayMap[k] || []).push(s); });
               Object.entries(cDayMap).forEach(([k, ds]) => {
-                const row = payDays[`${c.id}:${k}`];
-                const amt = row?.flat_amount != null ? Number(row.flat_amount) : payOwed(ds);
-                if (row?.paid_at) cPaid += amt; else cOwe += amt;
+                const legacy = payDays[payKey(c.id, k, null)];
+                if (legacy) {
+                  const amt = legacy.flat_amount != null ? Number(legacy.flat_amount) : payOwed(ds);
+                  if (legacy.paid_at) cPaid += amt; else cOwe += amt;
+                  return;
+                }
+                groupByProperty(ds).forEach(pg => {
+                  const row = payDays[payKey(c.id, k, pg.id)];
+                  const amt = row?.flat_amount != null ? Number(row.flat_amount) : payOwed(pg.shifts);
+                  if (row?.paid_at) cPaid += amt; else cOwe += amt;
+                });
               });
             }
             return (

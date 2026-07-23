@@ -106,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul18-tap63";
+const BUILD_TAG = "jul18-tap64";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -22015,7 +22015,7 @@ function PortalHome({ property, portalKind, portalUser, properties, onSwitchProp
           {asgSub === 'requests'
             ? <PortalAssignmentsTab property={property} portalKind={portalKind} portalUser={portalUser} />
             : asgSub === 'schedule'
-            ? <PortalScheduleTab property={property} />
+            ? <PortalScheduleTab property={property} onOpenUnitDay={onOpenUnitDay} />
             : <PortalPhotoUploadTab property={property} portalKind={portalKind} />}
         </div>
       )}
@@ -35273,14 +35273,15 @@ function PortalPhotoUploadTab({ property, portalKind }) {
 // PM SCHEDULE — what's coming up for this property (upcoming assignments
 // by due date), with a toggle to peek at what was done the last 3 days.
 // =================================================================
-function PortalScheduleTab({ property }) {
+function PortalScheduleTab({ property, onOpenUnitDay }) {
   const [rows, setRows] = useState(null);
   const [showRecent, setShowRecent] = useState(false);
+  const [attach, setAttach] = useState(null); // { url, kind, title } being viewed
   const todayKey = localTodayKey();
 
   const load = async () => {
     const { data, error } = await supabase.from('assignments')
-      .select('id, title, assignment_type, scheduled_date, targets:assignment_targets(id, status, completed_at, template_section, unit:units(label), party:parties(label))')
+      .select('id, title, assignment_type, scheduled_date, file_url, file_kind, targets:assignment_targets(id, status, completed_at, template_section, unit_id, unit:units(label), party:parties(label))')
       .eq('customer_id', property.id)
       .is('deleted_at', null);
     if (error) { console.error('[schedule] load failed', error); }
@@ -35318,7 +35319,15 @@ function PortalScheduleTab({ property }) {
     if (!times.length) return;
     const last = new Date(Math.max(...times));
     if (last < cutoff) return;
-    recent.push({ id: a.id, title: label(ts[0]?.unit, ts[0]?.party) || a.title || 'Job', type: a.assignment_type, when: last, items: ts.length });
+    recent.push({
+      id: a.id,
+      title: label(ts[0]?.unit, ts[0]?.party) || a.title || 'Job',
+      type: a.assignment_type,
+      when: last,
+      items: ts.length,
+      unitId: ts[0]?.unit_id || null,
+      dayKey: localDayKey(last),
+    });
   });
   recent.sort((x, y) => y.when - x.when);
 
@@ -35371,6 +35380,14 @@ function PortalScheduleTab({ property }) {
                           ))}
                         </div>
                       )}
+                      {a.file_url && (
+                        <div className="mt-3 flex justify-end">
+                          <button onClick={() => setAttach({ url: a.file_url, kind: a.file_kind, title })}
+                            className="px-3 py-1.5 rounded-lg bg-stone-100 hover:bg-stone-200 text-stone-700 text-xs font-medium flex items-center gap-1.5">
+                            {a.file_kind === 'pdf' ? <FileText size={12} /> : <ImageIcon size={12} />} View attachment
+                          </button>
+                        </div>
+                      )}
                     </div>
                   );
                 })}
@@ -35391,14 +35408,49 @@ function PortalScheduleTab({ property }) {
           <div className="text-center py-6 text-stone-400 text-xs">Nothing completed in the last 3 days.</div>
         ) : (
           <div className="space-y-2">
-            {recent.map(r => (
-              <div key={r.id} className="rounded-xl bg-white border border-stone-200 px-4 py-3 flex items-center justify-between gap-2">
-                <span className="font-serif text-sm text-stone-900">{r.title}{r.type ? <span className="text-[10px] font-mono text-stone-400"> · {assignmentTypeLabel(r.type)}</span> : null}</span>
-                <span className="text-[11px] font-mono text-emerald-700 flex items-center gap-1"><Check size={11} /> {r.when.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</span>
-              </div>
-            ))}
+            {recent.map(r => {
+              const canOpen = !!(onOpenUnitDay && r.unitId);
+              return (
+                <button key={r.id} onClick={() => canOpen && onOpenUnitDay(r.unitId, r.dayKey)}
+                  disabled={!canOpen}
+                  className={`w-full text-left rounded-xl bg-white border border-stone-200 px-4 py-3 flex items-center justify-between gap-2 ${canOpen ? 'hover:border-stone-400 active:scale-[0.99] transition' : ''}`}>
+                  <span className="min-w-0">
+                    <span className="block font-serif text-sm text-stone-900 truncate">{r.title}</span>
+                    <span className="block text-[11px] font-mono text-stone-500 mt-0.5">
+                      {r.type ? assignmentTypeLabel(r.type) : 'Clean'} · {r.items} item{r.items === 1 ? '' : 's'}
+                      {canOpen && <span className="text-stone-400"> · tap for photos & details</span>}
+                    </span>
+                  </span>
+                  <span className="flex items-center gap-1.5 flex-shrink-0">
+                    <span className="text-[11px] font-mono text-emerald-700 flex items-center gap-1">
+                      <Check size={11} /> {r.when.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                    </span>
+                    {canOpen && <ChevronRight size={14} className="text-stone-400" />}
+                  </span>
+                </button>
+              );
+            })}
           </div>
         )
+      )}
+      {/* Attachment viewer — the file tied to an upcoming assignment. */}
+      {attach && (
+        <div className="fixed inset-0 z-[60] bg-black/70 flex items-center justify-center p-3" onClick={() => setAttach(null)}>
+          <div className="bg-white rounded-2xl w-full max-w-3xl max-h-[92vh] overflow-hidden flex flex-col" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-4 py-2.5 border-b border-stone-200">
+              <span className="font-serif text-base text-stone-900 truncate">{attach.title}</span>
+              <div className="flex items-center gap-2 flex-shrink-0">
+                <a href={attach.url} target="_blank" rel="noreferrer" className="text-[11px] font-mono text-stone-500 underline">Open</a>
+                <button onClick={() => setAttach(null)} className="w-8 h-8 rounded-lg hover:bg-stone-100 flex items-center justify-center text-stone-500"><X size={16} /></button>
+              </div>
+            </div>
+            <div className="overflow-auto flex-1 bg-stone-100 flex items-start justify-center">
+              {attach.kind === 'pdf'
+                ? <iframe src={attach.url} title="Attachment" className="w-full h-[80vh]" />
+                : <img src={attach.url} alt="Attachment" className="max-w-full" />}
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

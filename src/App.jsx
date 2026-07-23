@@ -106,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul18-tap61";
+const BUILD_TAG = "jul18-tap62";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -35279,10 +35279,11 @@ function PortalScheduleTab({ property }) {
   const todayKey = localTodayKey();
 
   const load = async () => {
-    const { data } = await supabase.from('assignments')
-      .select('id, title, assignment_type, scheduled_date, targets:assignment_targets(id, status, completed_at, section, unit:units(label), party:parties(label))')
+    const { data, error } = await supabase.from('assignments')
+      .select('id, title, assignment_type, scheduled_date, targets:assignment_targets(id, status, completed_at, template_section, unit:units(label), party:parties(label))')
       .eq('customer_id', property.id)
       .is('deleted_at', null);
+    if (error) { console.error('[schedule] load failed', error); }
     setRows(data || []);
   };
   useEffect(() => { load(); /* eslint-disable-next-line */ }, [property.id]);
@@ -35347,7 +35348,7 @@ function PortalScheduleTab({ property }) {
                   const title = label(ts[0]?.unit, ts[0]?.party) || a.title || 'Job';
                   const byCat = {};
                   const secLabel = { bedroom: 'Bedroom', vanity: 'Vanity', bathroom: 'Bathroom', general: 'General' };
-                  ts.forEach(t => { const l = secLabel[t.section] || (t.section ? t.section.charAt(0).toUpperCase() + t.section.slice(1) : 'Other'); byCat[l] = (byCat[l] || 0) + 1; });
+                  ts.forEach(t => { const l = secLabel[t.template_section] || (t.template_section ? t.template_section.charAt(0).toUpperCase() + t.template_section.slice(1) : 'Other'); byCat[l] = (byCat[l] || 0) + 1; });
                   const cats = Object.entries(byCat);
                   return (
                     <div key={a.id} className="rounded-2xl bg-white border border-stone-200 p-4">

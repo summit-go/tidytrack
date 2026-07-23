@@ -106,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul18-tap64";
+const BUILD_TAG = "jul22-tap65";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -114,6 +114,26 @@ const assignmentTypeMeta = (value) =>
 // anywhere a bedroom/assignment is named so the cleaner can see at a
 // glance what kind of clean is expected. Returns null when no type
 // is set (don't render an empty chip).
+// =================================================================
+// PHOTO BUCKETS
+// Every cleaner photo carries a `kind`. 'cannot_clean' is the newest:
+// the room couldn't be cleaned at all — resident wouldn't let them in,
+// door locked, pets loose, belongings covering everything. It travels
+// through the same pipes as damage (PMs and owner see it, it can be
+// resolved) but it's YELLOW rather than red, because nothing is broken.
+// The work simply didn't happen, and someone needs to decide what next.
+// =================================================================
+const KIND_CANNOT = 'cannot_clean';
+const PHOTO_KIND_LABELS = {
+  before: 'Before',
+  after: 'After',
+  damage: 'Damage',
+  [KIND_CANNOT]: "Couldn't clean",
+};
+const photoKindLabel = (k) => PHOTO_KIND_LABELS[k] || k || 'Other';
+// Kinds that represent a problem someone has to see and clear.
+const FLAG_KINDS = ['damage', KIND_CANNOT];
+
 function AssignmentTypeChip({ type, size = 'sm' }) {
   if (!type) return null;
   const meta = assignmentTypeMeta(type);
@@ -1170,13 +1190,55 @@ function Splash({ text }) {
   return <div className="min-h-screen bg-stone-50 flex items-center justify-center text-stone-400 text-sm">{text}</div>;
 }
 
-// Tiny corner tag so we can name screens (Screen A, B, C…). Purely a
-// reference aid for talking about the app — subtle, doesn't block taps.
+// Corner screen tag. Every named screen renders one so a bug report can
+// say "OW-ASGN is broken" instead of "the assignments page". Codes are
+// role-prefixed: CL- cleaner, OW- owner/staff, PM- portal. The build tag
+// rides along so a screenshot also tells us which deploy it came from.
+// pointer-events-none so it can never swallow a tap, and print:hidden so
+// it stays out of PM printouts.
 function ScreenId({ id }) {
   return (
-    <div className="fixed bottom-16 right-2 z-[45] pointer-events-none select-none text-[9px] font-mono uppercase tracking-widest text-stone-500/70 bg-white/70 border border-stone-200 px-1.5 py-0.5 rounded-md shadow-sm">
-      Screen {id}
+    <div className="fixed bottom-16 right-2 z-[45] pointer-events-none select-none print:hidden flex items-center gap-1.5 px-2 py-1 rounded-lg bg-stone-900/90 border border-amber-400/50 shadow-lg">
+      <span className="text-[10px] font-mono font-bold uppercase tracking-widest text-amber-300 leading-none">{id}</span>
+      <span className="text-[9px] font-mono text-stone-400 leading-none">{BUILD_TAG}</span>
     </div>
+  );
+}
+
+// =================================================================
+// DUE-DATE EDITOR — the one inline date control used everywhere an
+// assignment's due date can be changed.
+//
+// It replaces the old pattern of a bare <input type="date" autoFocus>
+// that saved on the first onChange and closed itself on blur. On mobile
+// Chrome that combination meant simply *opening* the native picker on an
+// assignment with no due date could commit today's date and dismiss the
+// field before you'd chosen anything — and there was no way to back out.
+//
+// Now nothing is written until Save is tapped. Cancel leaves the date
+// untouched, Clear removes it. Clicks are stopped from bubbling so the
+// row underneath doesn't also open.
+// =================================================================
+function DueDateEditor({ value, onSave, onCancel, compact = false }) {
+  const [draft, setDraft] = useState(value || '');
+  const txt = compact ? 'text-[10px]' : 'text-[11px]';
+  const stop = (e) => { e.stopPropagation(); e.preventDefault(); };
+  return (
+    <span className="inline-flex items-center gap-1 flex-wrap align-middle"
+      onClick={(e) => e.stopPropagation()}>
+      <input type="date" autoFocus value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onClick={(e) => e.stopPropagation()}
+        className={`${txt} font-mono px-1.5 py-0.5 rounded border border-stone-400 bg-white`} />
+      <button onClick={(e) => { stop(e); onSave(draft || ''); }}
+        className={`${txt} font-mono px-2 py-0.5 rounded bg-stone-900 text-white`}>Save</button>
+      {value ? (
+        <button onClick={(e) => { stop(e); onSave(''); }}
+          className={`${txt} font-mono px-2 py-0.5 rounded bg-white border border-stone-300 text-stone-600`}>Clear</button>
+      ) : null}
+      <button onClick={(e) => { stop(e); onCancel(); }}
+        className={`${txt} font-mono px-1.5 py-0.5 text-stone-500`}>Cancel</button>
+    </span>
   );
 }
 
@@ -5136,16 +5198,41 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   // damage photo flow so cleaners can describe what's broken. Optional —
   // an empty note is fine and we no-op out of the DB write to keep
   // request volume down.
-  const savePhotoNote = async (photoId, noteText) => {
+  const savePhotoNote = async (photoId, noteText, kind = null) => {
     if (!photoId) return;
     const trimmed = (noteText || '').trim();
-    const { error } = await supabase.from('photos')
-      .update({ notes: trimmed || null }).eq('id', photoId);
+    // "Couldn't clean" notes are read by PMs, who read English. Cleaners
+    // mostly write Spanish. Translate ONCE here at save time and store the
+    // English alongside the original — the cleaner's own words are never
+    // overwritten, and PM screens don't pay for a translation on every view.
+    let notesEn = null;
+    if (trimmed && kind === KIND_CANNOT && isTextTranslateConfigured()) {
+      try {
+        const [res] = await translateText([trimmed], 'en');
+        if (res && res.detectedSourceLanguage !== 'en' && res.translatedText) {
+          notesEn = res.translatedText;
+        }
+      } catch (e) {
+        // Never block the note on a translation failure — the PM can still
+        // hit the Translate button by hand.
+        console.warn('[photo note] auto-translate failed, saving original only', e);
+      }
+    }
+    const payload = { notes: trimmed || null };
+    if (notesEn) payload.notes_en = notesEn;
+    let { error } = await supabase.from('photos').update(payload).eq('id', photoId);
+    if (error && notesEn) {
+      // notes_en column not there yet (migration v48 not run) — don't lose
+      // the cleaner's note over it.
+      console.warn('[photo note] notes_en unavailable, saving original only', error);
+      delete payload.notes_en;
+      ({ error } = await supabase.from('photos').update(payload).eq('id', photoId));
+    }
     if (error) throw error;
     // Mirror the update into local state so the note shows immediately
     setTasks(prev => prev.map(t => ({
       ...t,
-      photos: (t.photos || []).map(p => p.id === photoId ? { ...p, notes: trimmed || null } : p)
+      photos: (t.photos || []).map(p => p.id === photoId ? { ...p, ...payload } : p)
     })));
   };
 
@@ -6892,13 +6979,14 @@ function AssignmentWorkHistory({ propertyId, unitId, partyId, employee, defaultO
   }, [show, unitId, partyId, propertyId]);
 
   const photosOf = (b) => (b.tasks || []).flatMap(t => (t.photos || []).filter(p => !p.deleted_at));
-  // Photos already carry kind = before | after | damage. Dumping them in
-  // one grid throws that away — and before/after IS the point when you're
-  // deciding whether a bedroom needs redoing.
+  // Photos already carry a kind. Dumping them in one grid throws that
+  // away — and before/after IS the point when you're deciding whether a
+  // bedroom needs redoing.
   const PHOTO_GROUPS = [
     { key: 'before', label: 'Before', cls: 'bg-stone-200 text-stone-700' },
     { key: 'after',  label: 'After',  cls: 'bg-emerald-100 text-emerald-800' },
     { key: 'damage', label: 'Damage', cls: 'bg-red-100 text-red-700' },
+    { key: KIND_CANNOT, label: "Couldn't clean", cls: 'bg-yellow-100 text-yellow-800' },
   ];
   const photoGrid = (pics) => {
     const groups = PHOTO_GROUPS
@@ -7430,9 +7518,8 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
                      the permission (submitted / accepted / due); otherwise a
                      tappable date (edit) or read-only date. */}
                   {editDueId === j.id ? (
-                    <input type="date" autoFocus defaultValue={j.scheduledDate || ''}
-                      onChange={(e) => saveDue(j, e.target.value)} onBlur={() => setEditDueId(null)}
-                      className="text-[11px] font-mono px-1.5 py-0.5 rounded border border-stone-400 bg-white" />
+                    <DueDateEditor value={j.scheduledDate || ''}
+                      onSave={(d) => saveDue(j, d)} onCancel={() => setEditDueId(null)} />
                   ) : canViewTimeline ? (
                     <div className="relative">
                       <button onClick={() => setTimelineOpen(timelineOpen === j.id ? null : j.id)} disabled={busyId === j.id}
@@ -7730,7 +7817,7 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
       {/* === HOME TAB === */}
       {cleanerTab === 'home' && (
         <>
-          <ScreenId id="A" />
+          <ScreenId id="CL-A" />
           {/* Paused / open work blocks — so a cleaner can always get back
              into what they were doing. (An ACTIVE block takes over the
              whole screen, so these are the paused/unfinished ones.) */}
@@ -7871,7 +7958,7 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
       {/* === ASSIGNMENTS TAB === */}
       {cleanerTab === 'assignments' && (
         <>
-          <ScreenId id="B" />
+          <ScreenId id="CL-B" />
           <AssignmentsPanel propertyId={shift.customer_id} employee={employee} onGoToBedroom={onGoToBedroom} onOpenBedroomHistory={onOpenBedroomHistory} onJoinBlock={onJoinBlock} />
           {can(employee, 'upload_assignments') && (
             <div className="px-4 pt-3">
@@ -8078,8 +8165,9 @@ function OtherCleanersActivity({ block, myEmployeeId }) {
           });
         });
       });
-      // Sort: group by kind (before → after → damage → other), then oldest-first within each kind
-      const KIND_ORDER = { before: 0, after: 1, damage: 2 };
+      // Sort: group by kind (before → after → damage → couldn't clean → other),
+      // then oldest-first within each kind
+      const KIND_ORDER = { before: 0, after: 1, damage: 2, [KIND_CANNOT]: 3 };
       photos.sort((a, b) => {
         const aOrder = KIND_ORDER[a.kind] ?? 99;
         const bOrder = KIND_ORDER[b.kind] ?? 99;
@@ -8432,7 +8520,7 @@ function PreparingBlockView({ shift, pendingStart, employeeName, employee,
 
   return (
     <div className="min-h-screen bg-stone-50 pb-24">
-      <ScreenId id="D" />
+      <ScreenId id="CL-D" />
       <Header name={employeeName} onSignOut={onSignOut} role={employee?.role} cleanerView employee={employee}
         onOpenMessages={onOpenMessages} onLogoClick={handleLogoClick} />
       {/* Cleaner has navigated to a specific bedroom. They've chosen the
@@ -8771,7 +8859,7 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
 
   return (
     <div className="min-h-screen bg-stone-50 pb-24">
-      <ScreenId id="C" />
+      <ScreenId id="CL-C" />
       <Header name={employeeName} onSignOut={onSignOut} role={employee?.role} cleanerView employee={employee}
         onOpenMessages={onOpenMessages}
         onOpenWhosHere={() => setWhosHereOpen(true)}
@@ -9945,11 +10033,8 @@ function ViewOnlyAssignmentsPanel({ propertyId, employee, onOpenBedroomHistory }
                           <Check size={9} /> {t.completed_at ? `Done ${fmtDueDate(String(t.completed_at).slice(0,10))}` : 'Done'}
                         </span>
                       ) : editDateId === a.id ? (
-                        <input type="date" autoFocus value={a.scheduled_date || ''}
-                          onChange={(e) => saveDue(a.id, e.target.value)}
-                          onBlur={() => setEditDateId(null)}
-                          onClick={(e) => e.stopPropagation()}
-                          className="text-[10px] font-mono px-1.5 py-0.5 rounded border border-stone-400 bg-white" />
+                        <DueDateEditor compact value={a.scheduled_date || ''}
+                          onSave={(d) => saveDue(a.id, d)} onCancel={() => setEditDateId(null)} />
                       ) : canEditDates ? (
                         <button onClick={(e) => { e.stopPropagation(); setEditDateId(a.id); }}
                           className={`text-[10px] font-mono px-2 py-0.5 rounded-full border flex items-center gap-1 ${a.scheduled_date
@@ -10488,6 +10573,7 @@ function ActiveWorkblockCard({ task, onStop, onAddPhoto }) {
   const before = photos.filter(p => p.kind === 'before');
   const after  = photos.filter(p => p.kind === 'after');
   const damage = photos.filter(p => p.kind === 'damage');
+  const cannot = photos.filter(p => p.kind === KIND_CANNOT);
   // Headline = the section label (Bedroom / Bathroom / etc.) when the
   // task has a category, else the freeform task name. If multi-item we
   // append the count rather than spelling out every item.
@@ -10514,6 +10600,7 @@ function ActiveWorkblockCard({ task, onStop, onAddPhoto }) {
             {fmtTime(elapsed)}
             {itemCount > 1 && <> · {itemCount} items</>}
             {damage.length > 0 && <span className="ml-2 text-red-700 font-bold">⚠ {damage.length} damage</span>}
+            {cannot.length > 0 && <span className="ml-2 text-yellow-700 font-bold">⚠ {cannot.length} couldn't clean</span>}
           </div>
           {/* Subsection chips — what's actually being worked in this
              block. Previously the count said "4 items" but you had
@@ -10536,7 +10623,9 @@ function ActiveWorkblockCard({ task, onStop, onAddPhoto }) {
           <Pause size={14} /> Done
         </button>
       </div>
-      <div className="grid grid-cols-3 gap-2">
+      {/* Four buckets, 2x2 rather than four cramped across — these are
+         thumb targets on a phone, often with gloves on. */}
+      <div className="grid grid-cols-2 gap-2">
         <button onClick={() => onAddPhoto('before')}
           style={{ touchAction: 'manipulation' }}
           className="px-2 py-3 rounded-xl bg-white hover:bg-amber-100 border border-amber-200 text-stone-700 text-xs font-medium flex items-center justify-center gap-1.5 active:scale-95 transition-transform">
@@ -10552,6 +10641,11 @@ function ActiveWorkblockCard({ task, onStop, onAddPhoto }) {
           className="px-2 py-3 rounded-xl bg-red-50 hover:bg-red-100 border border-red-200 text-red-700 text-xs font-medium flex items-center justify-center gap-1.5 active:scale-95 transition-transform">
           <Camera size={13} /> Damage {damage.length > 0 && <span className="font-mono">({damage.length})</span>}
         </button>
+        <button onClick={() => onAddPhoto(KIND_CANNOT)}
+          style={{ touchAction: 'manipulation' }}
+          className="px-2 py-3 rounded-xl bg-yellow-50 hover:bg-yellow-100 border border-yellow-300 text-yellow-800 text-xs font-medium flex items-center justify-center gap-1.5 active:scale-95 transition-transform">
+          <Camera size={13} /> Couldn't clean {cannot.length > 0 && <span className="font-mono">({cannot.length})</span>}
+        </button>
       </div>
     </div>
   );
@@ -10566,6 +10660,7 @@ function TaskCard({ task, isActive, onStop, onResume, onAddPhoto }) {
   const before = photos.filter(p => p.kind === 'before');
   const after  = photos.filter(p => p.kind === 'after');
   const damage = photos.filter(p => p.kind === 'damage');
+  const cannot = photos.filter(p => p.kind === KIND_CANNOT);
   const isDone = !!task.end_time;
   return (
     <div className={`rounded-2xl p-4 border-2 transition-all ${isActive ? 'border-amber-300 bg-amber-50/50' : 'border-stone-200 bg-white'}`}
@@ -10599,6 +10694,11 @@ function TaskCard({ task, isActive, onStop, onResume, onAddPhoto }) {
                 ⚠ {damage.length}
               </span>
             )}
+            {cannot.length > 0 && (
+              <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-yellow-100 text-yellow-800 flex-shrink-0">
+                ⚠ {cannot.length} blocked
+              </span>
+            )}
           </div>
           {task.category && (
             <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1">
@@ -10624,7 +10724,7 @@ function TaskCard({ task, isActive, onStop, onResume, onAddPhoto }) {
         )}
       </div>
       {/* Spacer so the Done button is well-separated from the photo grid below — prevents ghost taps on iOS */}
-      <div className="grid grid-cols-3 gap-2 mt-2">
+      <div className="grid grid-cols-2 gap-2 mt-2">
         <button onClick={() => onAddPhoto('before')}
           style={{ touchAction: 'manipulation' }}
           className="px-2 py-3 rounded-xl bg-stone-100 hover:bg-stone-200 text-stone-700 text-xs font-medium flex items-center justify-center gap-1.5 active:scale-95 transition-transform">
@@ -10639,6 +10739,11 @@ function TaskCard({ task, isActive, onStop, onResume, onAddPhoto }) {
           style={{ touchAction: 'manipulation' }}
           className="px-2 py-3 rounded-xl bg-red-50 hover:bg-red-100 text-red-700 text-xs font-medium flex items-center justify-center gap-1.5 active:scale-95 transition-transform">
           <Camera size={13} /> Damage {damage.length > 0 && <span className="font-mono">({damage.length})</span>}
+        </button>
+        <button onClick={() => onAddPhoto(KIND_CANNOT)}
+          style={{ touchAction: 'manipulation' }}
+          className="px-2 py-3 rounded-xl bg-yellow-50 hover:bg-yellow-100 text-yellow-800 text-xs font-medium flex items-center justify-center gap-1.5 active:scale-95 transition-transform">
+          <Camera size={13} /> Couldn't clean {cannot.length > 0 && <span className="font-mono">({cannot.length})</span>}
         </button>
       </div>
     </div>
@@ -10661,6 +10766,17 @@ function PhotoModal({ kind, taskName, existing, onUpload, onSaveNote, onClose, e
   const [zoomPhoto, setZoomPhoto] = useState(null);
   const inputRef = useRef(null);
   const existingPhotos = Array.isArray(existing) ? existing : [];
+  // "Couldn't clean" gets its own yellow treatment so a cleaner glancing
+  // at the sheet knows immediately which bucket they're in.
+  const isCannot = kind === KIND_CANNOT;
+  const tone = isCannot
+    ? { box: 'bg-yellow-50 border-yellow-300', label: 'text-yellow-900',
+        input: 'border-yellow-400 focus:border-yellow-600', btn: 'bg-yellow-600 hover:bg-yellow-700' }
+    : kind === 'damage'
+      ? { box: 'bg-amber-50 border-amber-200', label: 'text-amber-800',
+          input: 'border-amber-300 focus:border-amber-600', btn: 'bg-amber-700 hover:bg-amber-800' }
+      : { box: 'bg-stone-50 border-stone-200', label: 'text-stone-700',
+          input: 'border-stone-300 focus:border-stone-600', btn: 'bg-stone-700 hover:bg-stone-800' };
 
   // "Took extra" flag per photo — cleaner marks a photo of an item
   // (tub, fridge, oven…) that took extra work. Shows for owner + PM.
@@ -10707,7 +10823,7 @@ function PhotoModal({ kind, taskName, existing, onUpload, onSaveNote, onClose, e
     setSavingNote(true);
     setError('');
     try {
-      await onSaveNote(lastUploaded.id, noteDraft.trim());
+      await onSaveNote(lastUploaded.id, noteDraft.trim(), kind);
       setNoteSaved(true);
       // Keep the textarea contents so the user can see what they just
       // saved. The "Saved" indicator goes away when they upload another.
@@ -10725,7 +10841,9 @@ function PhotoModal({ kind, taskName, existing, onUpload, onSaveNote, onClose, e
         style={{ touchAction: 'manipulation' }}>
         <div className="flex items-center justify-between p-5 border-b border-stone-200">
           <div>
-            <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">{kind} photo</div>
+            <div className={`text-xs uppercase tracking-wider font-mono ${isCannot ? 'text-yellow-700 font-bold' : 'text-stone-500'}`}>
+              {photoKindLabel(kind)} photo
+            </div>
             <div className="font-serif text-xl text-stone-900">{taskName}</div>
           </div>
           <button onClick={onClose} disabled={busy}
@@ -10734,6 +10852,16 @@ function PhotoModal({ kind, taskName, existing, onUpload, onSaveNote, onClose, e
           </button>
         </div>
         <div className="flex-1 overflow-y-auto p-5">
+          {/* One-line explainer for the newest bucket — it's the only one
+             whose meaning isn't obvious from the word alone. */}
+          {isCannot && (
+            <div className="mb-4 p-3 rounded-xl bg-yellow-50 border border-yellow-300 text-[13px] text-yellow-900">
+              Use this when you <span className="font-bold">could not clean</span> the room —
+              someone wouldn't let you in, the door was locked, pets were loose, or it was
+              too full to work in. Take a photo of what stopped you, then add a note if you
+              can. Your manager and the property manager both see it.
+            </div>
+          )}
           {existingPhotos.length > 0 && (
             <div className="grid grid-cols-2 gap-2 mb-4">
               {existingPhotos.map(p => {
@@ -10797,26 +10925,34 @@ function PhotoModal({ kind, taskName, existing, onUpload, onSaveNote, onClose, e
              image. Damage notes use the most assertive copy since
              they're the highest-priority reason to add one. */}
           {lastUploaded && onSaveNote && (
-            <div className={`mb-3 p-3 rounded-xl border ${kind === 'damage' ? 'bg-amber-50 border-amber-200' : 'bg-stone-50 border-stone-200'}`}>
-              <div className={`text-xs uppercase tracking-wider font-mono mb-1.5 ${kind === 'damage' ? 'text-amber-800' : 'text-stone-700'}`}>
+            <div className={`mb-3 p-3 rounded-xl border ${tone.box}`}>
+              <div className={`text-xs uppercase tracking-wider font-mono mb-1.5 ${tone.label}`}>
                 Add a note (optional)
               </div>
+              {isCannot && (
+                <div className="text-[11px] text-yellow-800 mb-1.5">
+                  Write it in whatever language you like — we translate it to English for the
+                  property manager automatically.
+                </div>
+              )}
               <textarea
                 value={noteDraft}
                 onChange={(e) => { setNoteDraft(e.target.value); setNoteSaved(false); }}
                 disabled={savingNote}
                 rows={3}
-                placeholder={kind === 'damage'
+                placeholder={isCannot
+                  ? 'What stopped you? Which room? Did anyone tell you something?'
+                  : kind === 'damage'
                   ? "What's damaged? Where exactly? Any context that helps the PM understand."
                   : kind === 'before'
                     ? 'Any details about the state when you started.'
                     : kind === 'after'
                       ? 'Any details about what you cleaned or special handling.'
                       : 'A short note about this photo.'}
-                className={`w-full px-3 py-2 rounded-lg border bg-white text-sm focus:outline-none resize-none disabled:opacity-60 ${kind === 'damage' ? 'border-amber-300 focus:border-amber-600' : 'border-stone-300 focus:border-stone-600'}`} />
+                className={`w-full px-3 py-2 rounded-lg border bg-white text-sm focus:outline-none resize-none disabled:opacity-60 ${tone.input}`} />
               <div className="mt-2 flex items-center gap-2">
                 <button onClick={saveNote} disabled={savingNote || !noteDraft.trim()}
-                  className={`px-3 py-1.5 rounded-lg text-white text-xs font-medium disabled:opacity-50 ${kind === 'damage' ? 'bg-amber-700 hover:bg-amber-800' : 'bg-stone-700 hover:bg-stone-800'}`}>
+                  className={`px-3 py-1.5 rounded-lg text-white text-xs font-medium disabled:opacity-50 ${tone.btn}`}>
                   {savingNote ? 'Saving…' : noteSaved ? 'Saved' : 'Save note'}
                 </button>
                 {noteSaved && (
@@ -11542,6 +11678,7 @@ function ManagerDashboard({ employee, onSignOut, onOpenMessages, onLogoClick }) 
 
   return (
     <div className="pb-24">
+      <ScreenId id="OW-SHIFTS" />
       <Header name={employee.name} onSignOut={onSignOut} role={employee.role} employee={employee} onOpenMessages={onOpenMessages} onLogoClick={onLogoClick} />
       <div className="px-5 pt-6">
         <div className="text-xs uppercase tracking-widest text-stone-400 font-mono mb-4">
@@ -13337,6 +13474,7 @@ function TaskDetail({ task, compact, employee }) {
   const before = (task.photos || []).filter(p => p.kind === 'before');
   const after  = (task.photos || []).filter(p => p.kind === 'after');
   const damage = (task.photos || []).filter(p => p.kind === 'damage');
+  const cannot = (task.photos || []).filter(p => p.kind === KIND_CANNOT);
   const dur = (task.end_time ? new Date(task.end_time) : new Date()) - new Date(task.start_time);
   return (
     <div className={compact ? '' : 'p-4 rounded-2xl bg-white border border-stone-200'}>
@@ -13349,6 +13487,11 @@ function TaskDetail({ task, compact, employee }) {
                 ⚠ Damage reported
               </span>
             )}
+            {cannot.length > 0 && (
+              <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-yellow-100 text-yellow-800 border border-yellow-300">
+                ⚠ Couldn't clean
+              </span>
+            )}
           </div>
           <div className="text-xs text-stone-500 font-mono">
             {fmtClock(task.start_time)}{task.end_time && ` — ${fmtClock(task.end_time)}`} · {fmtTimeShort(dur)}
@@ -13356,11 +13499,12 @@ function TaskDetail({ task, compact, employee }) {
         </div>
         {!task.end_time && <span className="px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 text-xs font-mono">live</span>}
       </div>
-      {(before.length > 0 || after.length > 0 || damage.length > 0) && (
-        <div className="grid grid-cols-3 gap-2 mt-2">
+      {(before.length > 0 || after.length > 0 || damage.length > 0 || cannot.length > 0) && (
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-2">
           <PhotoColumn label="Before" photos={before} employee={employee} />
           <PhotoColumn label="After"  photos={after} employee={employee} />
           <PhotoColumn label="Damage" photos={damage} highlight="red" employee={employee} />
+          <PhotoColumn label="Couldn't clean" photos={cannot} highlight="yellow" employee={employee} />
         </div>
       )}
     </div>
@@ -13370,21 +13514,28 @@ function TaskDetail({ task, compact, employee }) {
 function PhotoColumn({ label, photos, highlight, employee }) {
   const [zoom, setZoom] = useState(null);
   const isDamage = highlight === 'red';
+  const isCannot = highlight === 'yellow';
+  const headCls  = isDamage ? 'text-red-700 font-semibold'
+                 : isCannot ? 'text-yellow-800 font-semibold' : 'text-stone-500';
+  const countCls = isDamage ? 'text-red-700' : isCannot ? 'text-yellow-800' : 'text-stone-400';
+  const emptyCls = isDamage ? 'border-red-200 text-red-200'
+                 : isCannot ? 'border-yellow-300 text-yellow-300' : 'border-stone-200 text-stone-300';
+  const ringCls  = isDamage ? 'ring-2 ring-red-400' : isCannot ? 'ring-2 ring-yellow-400' : '';
   return (
     <div>
-      <div className={`text-xs uppercase tracking-wider font-mono mb-1 flex items-center gap-1.5 ${isDamage ? 'text-red-700 font-semibold' : 'text-stone-500'}`}>
+      <div className={`text-xs uppercase tracking-wider font-mono mb-1 flex items-center gap-1.5 ${headCls}`}>
         {label}
-        <span className={`font-mono ${isDamage ? 'text-red-700' : 'text-stone-400'}`}>({photos.length})</span>
+        <span className={`font-mono ${countCls}`}>({photos.length})</span>
       </div>
       {photos.length === 0 ? (
-        <div className={`aspect-square rounded-lg border-2 border-dashed flex items-center justify-center ${isDamage ? 'border-red-200 text-red-200' : 'border-stone-200 text-stone-300'}`}>
+        <div className={`aspect-square rounded-lg border-2 border-dashed flex items-center justify-center ${emptyCls}`}>
           <Camera size={18} />
         </div>
       ) : (
         <div className="grid grid-cols-2 gap-1">
           {photos.slice(0, 4).map((p, i) => (
             <button key={p.id} onClick={() => setZoom(p.public_url)}
-              className={`aspect-square rounded overflow-hidden relative ${isDamage ? 'ring-2 ring-red-400' : ''}`}>
+              className={`aspect-square rounded overflow-hidden relative ${ringCls}`}>
               <img loading="lazy" src={p.public_url} alt="" className="w-full h-full object-cover" />
               {/* If we hide some, show a "+N" overlay on the last visible thumbnail */}
               {i === 3 && photos.length > 4 && (
@@ -13518,12 +13669,12 @@ function PhotoZoomViewer({ photos, initialUrl, onClose, onResolveCurrent, employ
     : baseRaw;
   // Owner-side inline resolve flow. Only when:
   //   • caller passed an owner/manager employee
-  //   • photo is a damage photo
+  //   • photo is a flagged kind (damage or couldn't-clean)
   //   • photo isn't already resolved
   //   • caller didn't already wire onResolveCurrent (PM portal does)
   const canSelfResolve = !!employee
     && (employee.role === 'owner' || employee.role === 'manager')
-    && photo.kind === 'damage'
+    && FLAG_KINDS.includes(photo.kind)
     && !photo.resolved_at
     && !onResolveCurrent;
   const selfResolve = async () => {
@@ -13570,10 +13721,18 @@ function PhotoZoomViewer({ photos, initialUrl, onClose, onResolveCurrent, employ
       {/* Resolved-status pill for damage photos. Shown when the photo
          already has resolved_at (either from server load or our own
          optimistic update). */}
-      {photo.kind === 'damage' && photo.resolved_at && (
+      {FLAG_KINDS.includes(photo.kind) && photo.resolved_at && (
         <div className="mt-3 max-w-md w-full px-4 py-2 rounded-xl bg-emerald-900/70 text-emerald-100 text-xs font-mono flex items-center gap-2">
           <Check size={12} />
           <span className="truncate">Resolved {fmtDate(photo.resolved_at)}</span>
+        </div>
+      )}
+      {/* Which bucket this came from — matters most for couldn't-clean,
+         where the photo alone doesn't explain why it's here. */}
+      {photo.kind === KIND_CANNOT && (
+        <div className="mt-3 max-w-md w-full px-4 py-2 rounded-xl bg-yellow-500/20 border border-yellow-500/40 text-yellow-100 text-xs font-mono flex items-center gap-2">
+          <AlertCircle size={12} />
+          <span>Couldn't clean — the room was not cleaned</span>
         </div>
       )}
       {/* Show the cleaner's note when one is attached — useful for
@@ -13581,7 +13740,23 @@ function PhotoZoomViewer({ photos, initialUrl, onClose, onResolveCurrent, employ
       {photo.notes && photo.notes.trim() && (
         <div className="mt-3 max-w-md w-full px-4 py-2.5 rounded-xl bg-stone-800/90 text-stone-100 text-sm">
           <div className="text-[10px] uppercase tracking-wider text-stone-400 font-mono mb-0.5">Note</div>
-          <div className="whitespace-pre-wrap break-words">{photo.notes}</div>
+          {/* When the cleaner wrote in another language we stored an English
+             translation at save time. Lead with the English, but keep the
+             cleaner's own words underneath — a translation is never the
+             record, just the convenience. */}
+          {photo.notes_en && photo.notes_en.trim() && photo.notes_en.trim() !== photo.notes.trim() ? (
+            <>
+              <div className="whitespace-pre-wrap break-words">{photo.notes_en}</div>
+              <div className="mt-2 pt-2 border-t border-stone-700">
+                <div className="text-[10px] uppercase tracking-wider text-stone-500 font-mono mb-0.5 flex items-center gap-1">
+                  <Languages size={9} /> Cleaner's original
+                </div>
+                <div className="whitespace-pre-wrap break-words text-stone-300 text-[13px]">{photo.notes}</div>
+              </div>
+            </>
+          ) : (
+            <div className="whitespace-pre-wrap break-words">{photo.notes}</div>
+          )}
         </div>
       )}
       <div className="mt-4 flex items-center gap-3 flex-wrap justify-center">
@@ -13656,6 +13831,7 @@ function EmployeeAdmin({ employee, onSignOut, onOpenMessages, onLogoClick }) {
   const activeCount = employees.filter(e => e.active).length;
   return (
     <div className="pb-24">
+      <ScreenId id="OW-TEAM" />
       <Header name={employee.name} onSignOut={onSignOut} role={employee.role} employee={employee} onOpenMessages={onOpenMessages} onLogoClick={onLogoClick} />
       <div className="px-5 pt-6">
         <div className="text-xs uppercase tracking-widest text-stone-400 font-mono mb-3">Admin</div>
@@ -14570,6 +14746,7 @@ function PropertyAdmin({ employee, onSignOut, onOpenMessages, onLogoClick }) {
   const activeCount = props.filter(p => p.active).length;
   return (
     <div className="pb-24">
+      <ScreenId id="OW-PROPS" />
       <Header name={employee.name} onSignOut={onSignOut} role={employee.role} employee={employee} onOpenMessages={onOpenMessages} onLogoClick={onLogoClick} />
       <div className="px-5 pt-6">
         <div className="text-xs uppercase tracking-widest text-stone-400 font-mono mb-3">Admin</div>
@@ -16650,9 +16827,8 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
                 <div className="flex items-center gap-1.5 flex-wrap mt-2">
                   {/* Due date */}
                   {editDueJob === j.id ? (
-                    <input type="date" autoFocus defaultValue={j.scheduledDate || ''}
-                      onChange={(e) => saveJobDue(j, e.target.value)} onBlur={() => setEditDueJob(null)}
-                      className="text-[10px] font-mono px-1.5 py-0.5 rounded border border-stone-400 bg-white" />
+                    <DueDateEditor compact value={j.scheduledDate || ''}
+                      onSave={(d) => saveJobDue(j, d)} onCancel={() => setEditDueJob(null)} />
                   ) : canEditJobDates ? (
                     <button onClick={() => setEditDueJob(j.id)}
                       className={`text-[10px] font-mono px-2 py-0.5 rounded-full border inline-flex items-center gap-1 ${j.scheduledDate
@@ -16757,6 +16933,7 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
 
   return (
     <div className="pb-24">
+      <ScreenId id="OW-ASGN" />
       <Header name={employee.name} onSignOut={onSignOut} role={employee.role} employee={employee} onOpenMessages={onOpenMessages} onLogoClick={onLogoClick} />
       <div className="px-5 pt-6">
         <div className="text-xs uppercase tracking-widest text-stone-400 font-mono mb-3">Manage</div>
@@ -19995,6 +20172,7 @@ function MoneyView({ employee, onSignOut, onOpenMessages, onLogoClick }) {
     : CleaningsReportView;
   return (
     <div>
+      <ScreenId id="OW-MONEY" />
       <ChildView employee={employee} onSignOut={onSignOut}
         onOpenMessages={onOpenMessages} onLogoClick={onLogoClick}
         topToggle={
@@ -21836,13 +22014,17 @@ function PortalHome({ property, portalKind, portalUser, properties, onSwitchProp
         const date = new Date(b.start_time).toISOString().split('T')[0];
         if (!byDate[date]) byDate[date] = {};
         const u = b.unit;
-        if (!byDate[date][u.id]) byDate[date][u.id] = { unitId: u.id, label: u.label, photoCount: 0, hasDamage: false, hasResolvedDamage: false };
+        if (!byDate[date][u.id]) byDate[date][u.id] = { unitId: u.id, label: u.label, photoCount: 0, hasDamage: false, hasResolvedDamage: false, hasCannot: false, hasResolvedCannot: false };
         (b.tasks || []).forEach(t => (t.photos || []).forEach(p => {
           // Track active and resolved damage separately. Active damage drives
           // the red badge; resolved damage powers the "past damage" sub-view.
           if (p.kind === 'damage') {
             if (p.resolved_at) byDate[date][u.id].hasResolvedDamage = true;
             else byDate[date][u.id].hasDamage = true;
+          }
+          if (p.kind === KIND_CANNOT) {
+            if (p.resolved_at) byDate[date][u.id].hasResolvedCannot = true;
+            else byDate[date][u.id].hasCannot = true;
           }
           byDate[date][u.id].photoCount++;
         }));
@@ -21878,17 +22060,21 @@ function PortalHome({ property, portalKind, portalUser, properties, onSwitchProp
           return hasWork && hasDoneAssignment;
         })
         .map(s => {
-          let photoCount = 0, hasDamage = false, hasResolvedDamage = false;
+          let photoCount = 0, hasDamage = false, hasResolvedDamage = false, hasCannot = false, hasResolvedCannot = false;
           (s.tasks || []).forEach(t => (t.photos || []).forEach(p => {
             photoCount++;
             if (p.kind === 'damage') {
               if (p.resolved_at) hasResolvedDamage = true;
               else hasDamage = true;
             }
+            if (p.kind === KIND_CANNOT) {
+              if (p.resolved_at) hasResolvedCannot = true;
+              else hasCannot = true;
+            }
           }));
           return {
             date: new Date(s.start_time).toISOString().split('T')[0],
-            units: [{ unitId: null, label: 'Cleaning visit', photoCount, hasDamage, hasResolvedDamage }]
+            units: [{ unitId: null, label: 'Cleaning visit', photoCount, hasDamage, hasResolvedDamage, hasCannot, hasResolvedCannot }]
           };
         });
       setGroups(out);
@@ -22116,6 +22302,7 @@ function PortalHistoryTab({ property, groups, loaded, filter, setFilter, onOpenU
   const damageCount = filteredGroups.reduce((sum, g) => sum + g.units.filter(u => u.hasDamage).length, 0);
   const resolvedDamageCount = filteredGroups.reduce((sum, g) => sum + g.units.filter(u => u.hasResolvedDamage).length, 0);
   const totalCleanings = filteredGroups.reduce((sum, g) => sum + g.units.length, 0);
+  const cannotCount = filteredGroups.reduce((sum, g) => sum + g.units.filter(u => u.hasCannot).length, 0);
   // Build the list of damage entries (date + unit) for the expandable view
   const damageEntries = [];
   const resolvedDamageEntries = [];
@@ -22128,6 +22315,7 @@ function PortalHistoryTab({ property, groups, loaded, filter, setFilter, onOpenU
 
   return (
     <div className="px-5 pt-6">
+      <ScreenId id="PM-HOME" />
       {/* Sticky damage indicator — pins to the top of the viewport when the
          PM scrolls past the stats row, so they never lose sight of active
          damage while reviewing the cleaning history below. Hidden when no
@@ -22400,19 +22588,32 @@ function PortalHistoryTab({ property, groups, loaded, filter, setFilter, onOpenU
                     className={`w-full text-left p-4 rounded-2xl border transition-colors relative overflow-hidden ${
                       u.hasDamage
                         ? 'bg-red-50 border-red-300 hover:border-red-500 border-l-4 border-l-red-600'
-                        : u.hasResolvedDamage
-                          ? 'bg-white border-stone-200 hover:border-stone-400 border-l-4 border-l-emerald-500'
-                          : 'bg-white border-stone-200 hover:border-stone-400'
+                        : u.hasCannot
+                          ? 'bg-yellow-50 border-yellow-300 hover:border-yellow-500 border-l-4 border-l-yellow-500'
+                          : (u.hasResolvedDamage || u.hasResolvedCannot)
+                            ? 'bg-white border-stone-200 hover:border-stone-400 border-l-4 border-l-emerald-500'
+                            : 'bg-white border-stone-200 hover:border-stone-400'
                     }`}>
                     <div className="flex items-center justify-between gap-3">
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2 flex-wrap">
                           {u.hasDamage && <AlertCircle size={16} className="text-red-600 flex-shrink-0" />}
-                          {!u.hasDamage && u.hasResolvedDamage && <Check size={16} className="text-emerald-600 flex-shrink-0" />}
+                          {!u.hasDamage && u.hasCannot && <AlertCircle size={16} className="text-yellow-600 flex-shrink-0" />}
+                          {!u.hasDamage && !u.hasCannot && (u.hasResolvedDamage || u.hasResolvedCannot) && <Check size={16} className="text-emerald-600 flex-shrink-0" />}
                           <span className={`font-serif text-lg ${u.hasDamage ? 'text-red-900' : 'text-stone-900'}`}>{u.label}</span>
                           {u.hasDamage && (
                             <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-red-600 text-white font-bold">
                               ⚠ Damage
+                            </span>
+                          )}
+                          {u.hasCannot && (
+                            <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-yellow-500 text-stone-900 font-bold">
+                              ⚠ Couldn't clean
+                            </span>
+                          )}
+                          {!u.hasDamage && !u.hasCannot && u.hasResolvedCannot && (
+                            <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 border border-emerald-300">
+                              Couldn't clean · resolved
                             </span>
                           )}
                           {!u.hasDamage && u.hasResolvedDamage && (
@@ -22427,11 +22628,11 @@ function PortalHistoryTab({ property, groups, loaded, filter, setFilter, onOpenU
                             </span>
                           )}
                         </div>
-                        <div className={`text-xs font-mono mt-1 ${u.hasDamage ? 'text-red-700' : 'text-stone-500'}`}>
-                          {u.photoCount} {u.photoCount === 1 ? 'photo' : 'photos'}{u.hasDamage ? ' · tap to resolve' : ''}
+                        <div className={`text-xs font-mono mt-1 ${u.hasDamage ? 'text-red-700' : u.hasCannot ? 'text-yellow-800' : 'text-stone-500'}`}>
+                          {u.photoCount} {u.photoCount === 1 ? 'photo' : 'photos'}{(u.hasDamage || u.hasCannot) ? ' · tap to resolve' : ''}
                         </div>
                       </div>
-                      <ChevronRight size={16} className={`flex-shrink-0 ${u.hasDamage ? 'text-red-600' : 'text-stone-400'}`} />
+                      <ChevronRight size={16} className={`flex-shrink-0 ${u.hasDamage ? 'text-red-600' : u.hasCannot ? 'text-yellow-600' : 'text-stone-400'}`} />
                     </div>
                   </button>
                 ))}
@@ -22551,6 +22752,8 @@ function PortalUnitDay({ property, unitId, date, portalUser, onBack }) {
   const allAfter = [];
   const allDamageActive = []; // unresolved damage — shows in red banner
   const allDamageResolved = []; // resolved damage — collapsed history below
+  const allCannotActive = [];   // unresolved "couldn't clean" — yellow banner
+  const allCannotResolved = []; // resolved "couldn't clean" — collapsed below
   visibleBlocks.forEach(b => (b.tasks || []).forEach(t => (t.photos || []).forEach(p => {
     const enriched = {
       ...p,
@@ -22565,11 +22768,15 @@ function PortalUnitDay({ property, unitId, date, portalUser, onBack }) {
       if (p.resolved_at) allDamageResolved.push(enriched);
       else allDamageActive.push(enriched);
     }
+    else if (p.kind === KIND_CANNOT) {
+      if (p.resolved_at) allCannotResolved.push(enriched);
+      else allCannotActive.push(enriched);
+    }
   })));
 
   // Build a flat lookup so the toolbar can find selected photos and
   // their context for download/share filename tagging.
-  const allPhotos = [...allBefore, ...allAfter, ...allDamageActive, ...allDamageResolved];
+  const allPhotos = [...allBefore, ...allAfter, ...allDamageActive, ...allDamageResolved, ...allCannotActive, ...allCannotResolved];
   const photoContext = (p) => ({
     propertyName: property.name,
     unitLabel: unit?.label || null,
@@ -22608,7 +22815,7 @@ function PortalUnitDay({ property, unitId, date, portalUser, onBack }) {
       : { resolved_at: null, resolved_by: null, resolved_by_kind: null };
     const { error } = await supabase.from('photos').update(payload).eq('id', photo.id);
     if (error) {
-      alert('Could not update damage status: ' + error.message);
+      alert('Could not update status: ' + error.message);
       return;
     }
     // Update in place via block mutation
@@ -22625,6 +22832,7 @@ function PortalUnitDay({ property, unitId, date, portalUser, onBack }) {
 
   return (
     <div className="min-h-screen bg-stone-50 pb-12">
+      <ScreenId id="PM-DAY" />
       <style>{`
         @media print {
           body { background: white !important; }
@@ -22724,6 +22932,24 @@ function PortalUnitDay({ property, unitId, date, portalUser, onBack }) {
                 onReopen={(p) => setPhotoResolution(p, false)}
               />
             )}
+            {allCannotActive.length > 0 && (
+              <PortalPhotoSection
+                label="Couldn't clean"
+                photos={allCannotActive}
+                highlight="yellow"
+                description="Rooms the cleaner was not able to clean. Tap a photo to read the note and resolve."
+                onResolve={(p) => setPhotoResolution(p, true)}
+                selectMode={selectMode} selectedIds={selectedIds} onToggleSelect={toggleSelectOne}
+              />
+            )}
+            {allCannotResolved.length > 0 && (
+              <ResolvedDamageHistory
+                photos={allCannotResolved}
+                title="Resolved — couldn't clean"
+                blurb="Rooms previously reported as not cleanable that have been marked resolved."
+                onReopen={(p) => setPhotoResolution(p, false)}
+              />
+            )}
             <PortalPhotoSection label="Before cleaning" photos={allBefore}
               selectMode={selectMode} selectedIds={selectedIds} onToggleSelect={toggleSelectOne} />
             <PortalPhotoSection label="After cleaning"  photos={allAfter}
@@ -22745,7 +22971,7 @@ function PortalUnitDay({ property, unitId, date, portalUser, onBack }) {
           // and baño tasks.
           (() => {
             const sectionMap = new Map();
-            const sectionAll = [...allBefore, ...allAfter, ...allDamageActive, ...allDamageResolved];
+            const sectionAll = [...allBefore, ...allAfter, ...allDamageActive, ...allDamageResolved, ...allCannotActive, ...allCannotResolved];
 
             // Figure out if task names are useful for grouping — i.e. are
             // there multiple distinct task names? If there's only one task
@@ -22767,13 +22993,17 @@ function PortalUnitDay({ property, unitId, date, portalUser, onBack }) {
 
             sectionAll.forEach(p => {
               const key = buildKey(p);
-              if (!sectionMap.has(key)) sectionMap.set(key, { before: [], after: [], damage: [], damageResolved: [] });
+              if (!sectionMap.has(key)) sectionMap.set(key, { before: [], after: [], damage: [], damageResolved: [], cannot: [], cannotResolved: [] });
               const bucket = sectionMap.get(key);
               if (p.kind === 'before') bucket.before.push(p);
               else if (p.kind === 'after') bucket.after.push(p);
               else if (p.kind === 'damage') {
                 if (p.resolved_at) bucket.damageResolved.push(p);
                 else bucket.damage.push(p);
+              }
+              else if (p.kind === KIND_CANNOT) {
+                if (p.resolved_at) bucket.cannotResolved.push(p);
+                else bucket.cannot.push(p);
               }
             });
             // Order: bedroom > bathroom > vanity > general > others alphabetical, "Other" last
@@ -22796,12 +23026,20 @@ function PortalUnitDay({ property, unitId, date, portalUser, onBack }) {
                 <div className="flex items-baseline justify-between pb-2 border-b border-stone-200">
                   <h2 className="font-serif text-2xl text-stone-900">{sectionLabel}</h2>
                   <span className="text-[11px] font-mono text-stone-500">
-                    {buckets.before.length + buckets.after.length + buckets.damage.length + buckets.damageResolved.length} photos
+                    {buckets.before.length + buckets.after.length + buckets.damage.length + buckets.damageResolved.length + buckets.cannot.length + buckets.cannotResolved.length} photos
                   </span>
                 </div>
                 {buckets.damageResolved.length > 0 && (
                   <ResolvedDamageHistory
                     photos={buckets.damageResolved}
+                    onReopen={(p) => setPhotoResolution(p, false)}
+                  />
+                )}
+                {buckets.cannotResolved.length > 0 && (
+                  <ResolvedDamageHistory
+                    photos={buckets.cannotResolved}
+                    title="Resolved — couldn't clean"
+                    blurb="Rooms previously reported as not cleanable that have been marked resolved."
                     onReopen={(p) => setPhotoResolution(p, false)}
                   />
                 )}
@@ -22824,6 +23062,16 @@ function PortalUnitDay({ property, unitId, date, portalUser, onBack }) {
                     <PortalPhotoSection label="Damage" photos={[]} highlight="red" compact />
                   )}
                 </div>
+                {/* Couldn't-clean sits on its own row rather than squeezing a
+                   fourth column in — it's the exception, not a routine bucket. */}
+                {buckets.cannot.length > 0 && (
+                  <PortalPhotoSection
+                    label="Couldn't clean" photos={buckets.cannot} highlight="yellow"
+                    description="Not cleaned. Tap to read the note and resolve."
+                    onResolve={(p) => setPhotoResolution(p, true)}
+                    selectMode={selectMode} selectedIds={selectedIds} onToggleSelect={toggleSelectOne}
+                  />
+                )}
               </div>
             ));
           })()
@@ -22860,7 +23108,7 @@ function PortalUnitDay({ property, unitId, date, portalUser, onBack }) {
           </div>
         )}
 
-        {allBefore.length === 0 && allAfter.length === 0 && allDamageActive.length === 0 && allDamageResolved.length === 0 && (
+        {allBefore.length === 0 && allAfter.length === 0 && allDamageActive.length === 0 && allDamageResolved.length === 0 && allCannotActive.length === 0 && allCannotResolved.length === 0 && (
           <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
             No photos recorded for this date.
           </div>
@@ -22915,7 +23163,7 @@ function PortalUnitDay({ property, unitId, date, portalUser, onBack }) {
 // were marked by mistake. Always inline (not collapsed) so the
 // history stays in context.
 // =================================================================
-function ResolvedDamageHistory({ photos, onReopen }) {
+function ResolvedDamageHistory({ photos, onReopen, title = 'Resolved damage', blurb = null }) {
   const [zoom, setZoom] = useState(null);
   if (!photos.length) return null;
   return (
@@ -22923,12 +23171,12 @@ function ResolvedDamageHistory({ photos, onReopen }) {
       <div className="flex items-baseline justify-between mb-3 pb-2 border-b border-stone-200">
         <h3 className="font-serif text-xl flex items-center gap-2 text-stone-700">
           <Check size={16} className="text-emerald-600" />
-          Resolved damage
+          {title}
         </h3>
         <span className="text-xs font-mono text-stone-500">{photos.length}</span>
       </div>
       <p className="text-[11px] text-stone-500 italic mb-3">
-        Previously flagged damage that's been marked resolved. Tap "Re-open" if it should still be active.
+        {blurb || "Previously flagged damage that's been marked resolved."} Tap "Re-open" if it should still be active.
       </p>
       <div className="grid grid-cols-3 sm:grid-cols-4 gap-2">
         {photos.map(p => (
@@ -22962,6 +23210,16 @@ function ResolvedDamageHistory({ photos, onReopen }) {
 function PortalPhotoSection({ label, photos, highlight, description, onResolve, selectMode, selectedIds, onToggleSelect, compact }) {
   const [zoom, setZoom] = useState(null);
   const isDamage = highlight === 'red';
+  const isCannot = highlight === 'yellow';
+  // Both red and yellow are "flagged" — they get the emphatic header rule,
+  // the ring on each thumbnail, and the Resolve button.
+  const flagged  = isDamage || isCannot;
+  const headRule = isDamage ? 'pb-1.5 border-b-2 border-red-200'
+                 : isCannot ? 'pb-1.5 border-b-2 border-yellow-300' : '';
+  const headText = isDamage ? 'text-red-800' : isCannot ? 'text-yellow-800' : 'text-stone-900';
+  const emptyCls = isDamage ? 'border-red-100 text-red-200'
+                 : isCannot ? 'border-yellow-200 text-yellow-300' : 'border-stone-200 text-stone-300';
+  const ringCls  = isDamage ? 'ring-2 ring-red-400' : isCannot ? 'ring-2 ring-yellow-400' : '';
   // `compact` is set when this section sits inside a 3-column side-by-side
   // wrapper (by-section view: Before | After | Damage). The inner grid
   // adapts to whatever width the parent gives us:
@@ -22974,13 +23232,13 @@ function PortalPhotoSection({ label, photos, highlight, description, onResolve, 
   if (photos.length === 0) {
     return (
       <div>
-        <div className={`flex items-baseline justify-between mb-2 ${isDamage ? 'pb-1.5 border-b-2 border-red-200' : ''}`}>
-          <h3 className={`font-serif text-base flex items-center gap-1.5 ${isDamage ? 'text-red-800' : 'text-stone-900'}`}>
-            {isDamage && '⚠'} {label}
+        <div className={`flex items-baseline justify-between mb-2 ${headRule}`}>
+          <h3 className={`font-serif text-base flex items-center gap-1.5 ${headText}`}>
+            {flagged && '⚠'} {label}
           </h3>
           <span className="text-[10px] font-mono text-stone-400">0</span>
         </div>
-        <div className={`aspect-square rounded-lg border-2 border-dashed flex items-center justify-center ${isDamage ? 'border-red-100 text-red-200' : 'border-stone-200 text-stone-300'}`}>
+        <div className={`aspect-square rounded-lg border-2 border-dashed flex items-center justify-center ${emptyCls}`}>
           <Camera size={18} />
         </div>
       </div>
@@ -22990,20 +23248,22 @@ function PortalPhotoSection({ label, photos, highlight, description, onResolve, 
   const kindBadge = (p) => {
     const k = p.kind || (label.toLowerCase().includes('before') ? 'before' :
                         label.toLowerCase().includes('after') ? 'after' :
-                        label.toLowerCase().includes('damage') ? 'damage' : null);
+                        label.toLowerCase().includes('damage') ? 'damage' :
+                        label.toLowerCase().includes("couldn't") ? KIND_CANNOT : null);
     if (!k) return null;
-    const bg = k === 'damage' ? 'bg-red-600' : k === 'before' ? 'bg-blue-600' : k === 'after' ? 'bg-emerald-600' : 'bg-stone-700';
+    const bg = k === 'damage' ? 'bg-red-600' : k === KIND_CANNOT ? 'bg-yellow-600'
+             : k === 'before' ? 'bg-blue-600' : k === 'after' ? 'bg-emerald-600' : 'bg-stone-700';
     return (
       <span className={`absolute top-0.5 left-0.5 px-1 py-0.5 rounded text-white text-[8px] font-mono uppercase tracking-wider ${bg}/90`}>
-        {k}
+        {photoKindLabel(k)}
       </span>
     );
   };
   return (
     <div>
-      <div className={`flex items-baseline justify-between mb-2 ${isDamage ? 'pb-1.5 border-b-2 border-red-200' : ''}`}>
-        <h3 className={`font-serif text-base flex items-center gap-1.5 ${isDamage ? 'text-red-800' : 'text-stone-900'}`}>
-          {isDamage && '⚠'} {label}
+      <div className={`flex items-baseline justify-between mb-2 ${headRule}`}>
+        <h3 className={`font-serif text-base flex items-center gap-1.5 ${headText}`}>
+          {flagged && '⚠'} {label}
         </h3>
         <span className="text-[10px] font-mono text-stone-500">{photos.length}</span>
       </div>
@@ -23015,7 +23275,7 @@ function PortalPhotoSection({ label, photos, highlight, description, onResolve, 
             <div key={p.id} className="relative">
               <button
                 onClick={() => selectMode ? onToggleSelect(p.id) : setZoom(p)}
-                className={`relative aspect-square w-full rounded-lg overflow-hidden ${isDamage ? 'ring-2 ring-red-400' : ''} ${isSelected ? 'ring-4 ring-stone-900' : ''}`}>
+                className={`relative aspect-square w-full rounded-lg overflow-hidden ${ringCls} ${isSelected ? 'ring-4 ring-stone-900' : ''}`}>
                 <img loading="lazy" src={p.public_url} alt="" className="w-full h-full object-cover" />
                 {kindBadge(p)}
                 {p.took_extra && (
@@ -23034,7 +23294,7 @@ function PortalPhotoSection({ label, photos, highlight, description, onResolve, 
                   </span>
                 )}
               </button>
-              {onResolve && isDamage && !selectMode && (
+              {onResolve && flagged && !selectMode && (
                 <button onClick={() => onResolve(p)}
                   className="mt-1 w-full px-1 py-0.5 rounded bg-emerald-700 hover:bg-emerald-800 text-white text-[9px] font-mono active:scale-95">
                   Resolve
@@ -23047,7 +23307,7 @@ function PortalPhotoSection({ label, photos, highlight, description, onResolve, 
       {zoom && (
         <PhotoZoomViewer photos={photos} initialUrl={zoom.public_url}
           onClose={() => setZoom(null)}
-          onResolveCurrent={onResolve && isDamage ? (p) => { onResolve(p); setZoom(null); } : null} />
+          onResolveCurrent={onResolve && flagged ? (p) => { onResolve(p); setZoom(null); } : null} />
       )}
     </div>
   );
@@ -23983,7 +24243,7 @@ function ActivityTimelineView({ employee, onClose }) {
           .gte('start_time', startISO).lte('start_time', endISO),
         supabase.from('photos')
           .select('id, created_at, kind, taken_by_employee:employees!taken_by(id, name), task:tasks(work_block:work_blocks(unit:units(label), party:parties(label), shift:shifts(customer:customers(name))))')
-          .eq('kind', 'damage')
+          .in('kind', FLAG_KINDS)
           .gte('created_at', startISO).lte('created_at', endISO)
           .is('deleted_at', null),
         supabase.from('recheck_requests')
@@ -24028,14 +24288,17 @@ function ActivityTimelineView({ employee, onClose }) {
           });
         }
       });
-      // Damage photos
+      // Flagged photos — damage and couldn't-clean both land here.
       (photosR.data || []).forEach(p => {
         const cleaner = p.taken_by_employee?.name || 'A cleaner';
         const where = `${p.task?.work_block?.unit?.label || ''} · ${p.task?.work_block?.party?.label || ''}`;
+        const isCannot = p.kind === KIND_CANNOT;
         all.push({
-          ts: p.created_at, kind: 'damage',
+          ts: p.created_at, kind: isCannot ? KIND_CANNOT : 'damage',
           actor: cleaner,
-          title: `⚠ ${cleaner} flagged damage at ${where}`,
+          title: isCannot
+            ? `⚠ ${cleaner} couldn't clean ${where}`
+            : `⚠ ${cleaner} flagged damage at ${where}`,
           body: p.task?.work_block?.shift?.customer?.name || '',
         });
       });
@@ -24065,6 +24328,7 @@ function ActivityTimelineView({ employee, onClose }) {
       case 'block_start':  return { Icon: Camera, color: 'bg-blue-100 text-blue-700' };
       case 'block_end':    return { Icon: Check,  color: 'bg-emerald-100 text-emerald-700' };
       case 'damage':       return { Icon: ImageIcon, color: 'bg-red-100 text-red-700' };
+      case KIND_CANNOT:    return { Icon: AlertCircle, color: 'bg-yellow-100 text-yellow-800' };
       case 'recheck':      return { Icon: Eye,    color: 'bg-amber-100 text-amber-700' };
       default:             return { Icon: Clock,  color: 'bg-stone-100 text-stone-500' };
     }
@@ -24374,17 +24638,21 @@ function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenAssi
       // to the red dot on the calendar.
       const { data: damagePhotos } = await supabase
         .from('photos')
-        .select('task_id, resolved_at, tasks!inner(shift_id, work_block_id, shifts(start_time), work_blocks(shift_id, shifts(start_time)))')
-        .eq('kind', 'damage')
+        .select('kind, task_id, resolved_at, tasks!inner(shift_id, work_block_id, shifts(start_time), work_blocks(shift_id, shifts(start_time)))')
+        .in('kind', FLAG_KINDS)
         .is('resolved_at', null);
       if (cancelled) return;
 
       // Build a set of date keys that have at least one damage photo
       const damageDays = new Set();
+      const cannotDays = new Set();
       (damagePhotos || []).forEach(p => {
         const startTime = p.tasks?.shifts?.start_time
           || p.tasks?.work_blocks?.shifts?.start_time;
-        if (startTime) damageDays.add(toDateKey(new Date(startTime)));
+        if (!startTime) return;
+        const key = toDateKey(new Date(startTime));
+        if (p.kind === KIND_CANNOT) cannotDays.add(key);
+        else damageDays.add(key);
       });
 
       // Build per-day counts from shifts alone
@@ -24401,7 +24669,8 @@ function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenAssi
         final[k] = {
           shiftCount: v.shiftCount,
           propertyCount: v.properties.size,
-          hasDamage: damageDays.has(k)
+          hasDamage: damageDays.has(k),
+          hasCannot: cannotDays.has(k)
         };
       });
       if (cancelled) return;
@@ -24438,6 +24707,7 @@ function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenAssi
 
   return (
     <div className="pb-24">
+      <ScreenId id="OW-DAILY" />
       <Header name={employee.name} onSignOut={onSignOut} role={employee.role} employee={employee} onOpenMessages={onOpenMessages} onLogoClick={onLogoClick}
         onOpenWhosHere={() => setWhosWhereOpen(true)}
         menuItems={[
@@ -24523,6 +24793,7 @@ function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenAssi
                 className={`aspect-square rounded-xl flex flex-col items-center justify-center text-sm relative transition-all ${
                   !a ? (isFuture ? 'text-stone-300' : 'text-stone-400 hover:bg-stone-50') :
                   a.hasDamage ? 'bg-red-50 border-2 border-red-300 text-red-900 hover:border-red-500 active:scale-95' :
+                  a.hasCannot ? 'bg-yellow-50 border-2 border-yellow-400 text-yellow-900 hover:border-yellow-600 active:scale-95' :
                   'bg-amber-50 border-2 border-amber-300 text-amber-900 hover:border-amber-500 active:scale-95'
                 } ${isToday ? 'ring-2 ring-stone-900 ring-offset-1' : ''}`}>
                 <div className={`font-mono ${a ? 'font-bold' : ''}`}>{cell.day}</div>
@@ -24533,6 +24804,9 @@ function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenAssi
                 )}
                 {a?.hasDamage && (
                   <div className="absolute top-0.5 right-0.5 w-1.5 h-1.5 rounded-full bg-red-500" />
+                )}
+                {a?.hasCannot && (
+                  <div className={`absolute top-0.5 ${a?.hasDamage ? 'right-2.5' : 'right-0.5'} w-1.5 h-1.5 rounded-full bg-yellow-500`} />
                 )}
               </button>
             );
@@ -24789,7 +25063,7 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit }) {
           if (!propGroup.units[uId]) {
             propGroup.units[uId] = {
               unitId: uId, unitLabel: b.unit.label,
-              employees: new Set(), totalMs: 0, hasDamage: false, photoCount: 0, blocks: []
+              employees: new Set(), totalMs: 0, hasDamage: false, hasCannot: false, photoCount: 0, blocks: []
             };
           }
           const ug = propGroup.units[uId];
@@ -24806,6 +25080,7 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit }) {
             (t.photos || []).forEach(p => {
               ug.photoCount++;
               if (p.kind === 'damage') ug.hasDamage = true;
+              if (p.kind === KIND_CANNOT) ug.hasCannot = true;
             });
           });
         });
@@ -24829,6 +25104,7 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit }) {
 
   return (
     <div className="pb-24">
+      <ScreenId id="OW-DAY" />
       <div className="bg-stone-900 text-stone-50 px-5 pt-5 pb-6">
         <button onClick={onBack} className="flex items-center gap-2 text-stone-400 text-sm mb-4 hover:text-stone-50">
           <ArrowLeft size={16} /> Back to calendar
@@ -25047,7 +25323,9 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit }) {
                         return (
                         <div key={u.unitId}
                           className={`w-full text-left p-4 rounded-2xl border transition-colors ${
-                            u.hasDamage ? 'bg-red-50/50 border-red-200' : 'bg-white border-stone-200'
+                            u.hasDamage ? 'bg-red-50/50 border-red-200'
+                              : u.hasCannot ? 'bg-yellow-50/60 border-yellow-300'
+                              : 'bg-white border-stone-200'
                           }`}>
                           <button onClick={() => onOpenUnit(propId, u.unitId, u.unitLabel, pg.property.name)}
                             className="w-full text-left">
@@ -25058,6 +25336,11 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit }) {
                                   {u.hasDamage && (
                                     <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-red-100 text-red-700">
                                       ⚠ Damage
+                                    </span>
+                                  )}
+                                  {u.hasCannot && (
+                                    <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-yellow-200 text-yellow-900 font-bold">
+                                      ⚠ Couldn't clean
                                     </span>
                                   )}
                                 </div>
@@ -25094,9 +25377,8 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit }) {
 
                             {ua ? (<>
                               {dDueFor === ua.id ? (
-                                <input type="date" autoFocus defaultValue={ua.scheduledDate || ''}
-                                  onChange={(e) => dSaveDue(ua.id, e.target.value)} onBlur={() => setDDueFor(null)}
-                                  className="text-[10px] font-mono px-1.5 py-0.5 rounded border border-stone-400 bg-white" />
+                                <DueDateEditor compact value={ua.scheduledDate || ''}
+                                  onSave={(d) => dSaveDue(ua.id, d)} onCancel={() => setDDueFor(null)} />
                               ) : canDailyDates ? (
                                 <button onClick={() => setDDueFor(ua.id)}
                                   className={`text-[10px] font-mono px-2 py-0.5 rounded-full border inline-flex items-center gap-1 ${ua.scheduledDate
@@ -25204,9 +25486,9 @@ function DayPhotoTabs({ photos, isStaff }) {
   const [activeTab, setActiveTab] = useState('all');
 
   // Bucket photos by kind
-  const byKind = { before: [], after: [], damage: [], other: [] };
+  const byKind = { before: [], after: [], damage: [], [KIND_CANNOT]: [], other: [] };
   photos.forEach(p => {
-    const k = p.kind === 'before' || p.kind === 'after' || p.kind === 'damage' ? p.kind : 'other';
+    const k = byKind[p.kind] ? p.kind : 'other';
     byKind[k].push(p);
   });
   // Sort each bucket oldest-first
@@ -25219,6 +25501,7 @@ function DayPhotoTabs({ photos, isStaff }) {
     { id: 'before', label: 'Before', count: byKind.before.length },
     { id: 'after',  label: 'After',  count: byKind.after.length },
     { id: 'damage', label: 'Damage', count: byKind.damage.length },
+    { id: KIND_CANNOT, label: "Couldn't clean", count: byKind[KIND_CANNOT].length },
   ].filter(t => t.id === 'all' || t.count > 0); // hide kinds with no photos
 
   // Build the visible list based on active tab
@@ -25228,7 +25511,8 @@ function DayPhotoTabs({ photos, isStaff }) {
       ...byKind.before.map(p => ({ ...p, _kindLabel: 'Before' })),
       ...byKind.after.map(p => ({ ...p, _kindLabel: 'After' })),
       ...byKind.damage.map(p => ({ ...p, _kindLabel: 'Damage' })),
-      ...byKind.other.map(p => ({ ...p, _kindLabel: p.kind || 'Other' })),
+      ...byKind[KIND_CANNOT].map(p => ({ ...p, _kindLabel: "Couldn't clean" })),
+      ...byKind.other.map(p => ({ ...p, _kindLabel: photoKindLabel(p.kind) })),
     ];
   } else {
     visible = byKind[activeTab] || [];
@@ -25241,6 +25525,8 @@ function DayPhotoTabs({ photos, isStaff }) {
           const isActive = activeTab === tab.id;
           const colorClass = tab.id === 'damage'
             ? (isActive ? 'bg-red-100 text-red-900 ring-1 ring-red-300' : 'text-red-700 hover:bg-red-50')
+            : tab.id === KIND_CANNOT
+            ? (isActive ? 'bg-yellow-100 text-yellow-900 ring-1 ring-yellow-400' : 'text-yellow-800 hover:bg-yellow-50')
             : tab.id === 'before'
             ? (isActive ? 'bg-blue-100 text-blue-900 ring-1 ring-blue-300' : 'text-blue-700 hover:bg-blue-50')
             : tab.id === 'after'
@@ -25272,11 +25558,12 @@ function DayPhotoTabs({ photos, isStaff }) {
                 {p.kind && activeTab === 'all' && (
                   <div className={`absolute top-1 left-1 px-1 py-0.5 rounded text-white text-[8px] uppercase tracking-wider ${
                     p.kind === 'damage' ? 'bg-red-700/85' :
+                    p.kind === KIND_CANNOT ? 'bg-yellow-600/90' :
                     p.kind === 'before' ? 'bg-blue-700/85' :
                     p.kind === 'after' ? 'bg-emerald-700/85' :
                     'bg-black/70'
                   }`}>
-                    {p.kind}
+                    {photoKindLabel(p.kind)}
                   </div>
                 )}
                 {isStaff && p.cleanerName && (
@@ -25415,6 +25702,7 @@ function BedroomHistoryView({ propertyId, propertyName, unitId, unitLabel, party
 
   return (
     <div className="fixed inset-0 z-40 bg-stone-50 overflow-y-auto">
+      <ScreenId id="OW-BR-HIST" />
       <div className="pb-24 min-h-screen">
       <div className="flex items-center gap-3 px-5 py-4 border-b border-stone-200 bg-white sticky top-0 z-10">
         <button onClick={onBack} className="p-2 -ml-2 rounded-full hover:bg-stone-100">
@@ -25762,6 +26050,7 @@ function DailyUnitDayDetail({ date, propertyId, unitId, unitLabel, propertyName,
 
   return (
     <div className="pb-24">
+      <ScreenId id="OW-UNIT-DAY" />
       <style>{`
         @media print {
           body { background: white !important; }
@@ -26223,11 +26512,8 @@ function AssignmentList({ property, employee, onBack, onNew, onNewChecklist, onN
             </div>
             <div className="text-xs text-stone-500 font-mono mt-1 flex items-center gap-2 flex-wrap">
               {editDateId === a.id ? (
-                <input type="date" autoFocus value={a.scheduled_date || ''}
-                  onChange={(e) => saveDue(a.id, e.target.value)}
-                  onBlur={() => setEditDateId(null)}
-                  onClick={(e) => e.stopPropagation()}
-                  className="text-[11px] font-mono px-1.5 py-0.5 rounded border border-stone-400 bg-white" />
+                <DueDateEditor value={a.scheduled_date || ''}
+                  onSave={(d) => saveDue(a.id, d)} onCancel={() => setEditDateId(null)} />
               ) : canEditDates ? (
                 <button onClick={(e) => { e.stopPropagation(); setEditDateId(a.id); }}
                   className={`px-2 py-0.5 rounded-full border flex items-center gap-1 ${a.scheduled_date
@@ -26275,6 +26561,7 @@ function AssignmentList({ property, employee, onBack, onNew, onNewChecklist, onN
 
   return (
     <div className={embedded ? '' : 'pb-24'}>
+      <ScreenId id="OW-ASGN-LIST" />
       {!embedded && (
       <div className="flex items-center gap-3 px-5 py-4 border-b border-stone-200">
         <button onClick={onBack} className="p-2 -ml-2 rounded-full hover:bg-stone-100">
@@ -26709,7 +26996,7 @@ function QuickAssignmentForm({ property, employee, portalUser = null, portalKind
       if (ae) throw ae;
       const { error: te } = await supabase.from('assignment_targets').insert({
         assignment_id: asg.id, unit_id: unit.id, party_id: party.id,
-        status: 'pending', priority: !!priority,
+        status: 'pending', priority: isPM ? false : !!priority,
         assigned_to: isPM ? null : (assignedTo || null),
       });
       if (te) throw te;
@@ -26734,6 +27021,7 @@ function QuickAssignmentForm({ property, employee, portalUser = null, portalKind
 
   return (
     <div className="min-h-screen bg-stone-50 pb-28">
+      <ScreenId id={isPM ? 'PM-QUICK' : 'OW-QUICK'} />
       <div className="flex items-center gap-3 px-5 py-4 border-b border-stone-200 sticky top-0 bg-stone-50 z-10">
         <button onClick={onCancel} className="p-2 -ml-2 rounded-full hover:bg-stone-100">
           <ArrowLeft size={20} className="text-stone-700" />
@@ -26788,11 +27076,16 @@ function QuickAssignmentForm({ property, employee, portalUser = null, portalKind
         </div>
         )}
 
+        {/* Urgent is an internal scheduling lever — PMs don't get it,
+           otherwise every request comes in flagged urgent. Owner/staff
+           still see it here. */}
+        {!isPM && (
         <button onClick={() => setPriority(p => !p)}
           className={`w-full px-4 py-3 rounded-xl border-2 text-sm font-medium flex items-center justify-between transition-colors ${priority ? 'bg-red-50 border-red-400 text-red-800' : 'bg-white border-stone-200 text-stone-600'}`}>
           <span>Mark urgent (sorts to top for cleaners)</span>
           <span className={`w-5 h-5 rounded-md flex items-center justify-center ${priority ? 'bg-red-600 text-white' : 'border-2 border-stone-300'}`}>{priority && <Check size={12} />}</span>
         </button>
+        )}
 
         <div>
           <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Notes (optional)</label>
@@ -29530,6 +29823,7 @@ function AssignmentDetail({ property, assignment: assignmentInit, employee, onBa
 
   return (
     <div className="pb-24">
+      <ScreenId id="OW-ASGN-DET" />
       <div className="flex items-center gap-3 px-5 py-4 border-b border-stone-200">
         <button onClick={onBack} className="p-2 -ml-2 rounded-full hover:bg-stone-100">
           <ArrowLeft size={20} className="text-stone-700" />
@@ -30132,11 +30426,8 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
                     </span>
                     {canViewTimeline ? (
                       editDueId === a?.id ? (
-                        <input type="date" autoFocus value={a?.scheduled_date || ''}
-                          onChange={(e) => saveDueB(a?.id, e.target.value)}
-                          onBlur={() => setEditDueId(null)}
-                          onClick={(e) => e.stopPropagation()}
-                          className="text-[10px] font-mono px-1.5 py-0.5 rounded border border-stone-400 bg-white" />
+                        <DueDateEditor compact value={a?.scheduled_date || ''}
+                          onSave={(d) => saveDueB(a?.id, d)} onCancel={() => setEditDueId(null)} />
                       ) : (
                         <div className="relative inline-block">
                           <button onClick={(e) => { e.stopPropagation(); setTimelineOpenG(timelineOpenG === a?.id ? null : a?.id); }}
@@ -30189,11 +30480,8 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
                         </div>
                       )
                     ) : (!isAllDone && (editDueId === a?.id ? (
-                      <input type="date" autoFocus value={a?.scheduled_date || ''}
-                        onChange={(e) => saveDueB(a?.id, e.target.value)}
-                        onBlur={() => setEditDueId(null)}
-                        onClick={(e) => e.stopPropagation()}
-                        className="text-[10px] font-mono px-1.5 py-0.5 rounded border border-stone-400 bg-white" />
+                      <DueDateEditor compact value={a?.scheduled_date || ''}
+                        onSave={(d) => saveDueB(a?.id, d)} onCancel={() => setEditDueId(null)} />
                     ) : canEditDatesB ? (
                       <button onClick={(e) => { e.stopPropagation(); setEditDueId(a?.id); }}
                         className={`text-[10px] font-mono px-2 py-0.5 rounded-full border inline-flex items-center gap-1 ${a?.scheduled_date
@@ -30551,10 +30839,9 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
                 : fmtDueDate(localDate);
               if (editingDate && canEditDates) {
                 return (
-                  <input type="date" autoFocus value={localDate}
-                    onChange={(e) => commitDate(e.target.value)}
-                    onBlur={() => setEditingDate(false)}
-                    className="text-[10px] font-mono px-1.5 py-0.5 rounded-lg border border-stone-400 bg-white" />
+                  <DueDateEditor compact value={localDate}
+                    onSave={(d) => { commitDate(d); setEditingDate(false); }}
+                    onCancel={() => setEditingDate(false)} />
                 );
               }
               if (canEditDates) {
@@ -31185,11 +31472,8 @@ function SuggestedTabContent({ propertyId, employee, onGoToBedroom, onOpenBedroo
                   );
                 })()
               ) : (editDueId === rep.assignment?.id ? (
-                <input type="date" autoFocus value={rep.assignment?.scheduled_date || ''}
-                  onChange={(e) => saveDueS(rep.assignment?.id, e.target.value)}
-                  onBlur={() => setEditDueId(null)}
-                  onClick={(e) => e.stopPropagation()}
-                  className="text-[10px] font-mono px-1.5 py-0.5 rounded border border-stone-400 bg-white" />
+                <DueDateEditor compact value={rep.assignment?.scheduled_date || ''}
+                  onSave={(d) => saveDueS(rep.assignment?.id, d)} onCancel={() => setEditDueId(null)} />
               ) : canEditDatesS ? (
                 <button onClick={(e) => { e.stopPropagation(); setEditDueId(rep.assignment?.id); }}
                   className={`text-[10px] font-mono px-2 py-0.5 rounded-full border inline-flex items-center gap-1 ${rep.assignment?.scheduled_date
@@ -35093,6 +35377,7 @@ function PortalPhotoUploadTab({ property, portalKind }) {
 
   return (
     <div className="px-5 pt-6 space-y-5">
+      <ScreenId id="PM-PHOTOS" />
       <div>
         <h2 className="font-serif text-2xl text-stone-900 mb-1">Send a photo</h2>
         <p className="text-sm text-stone-600">
@@ -35335,6 +35620,7 @@ function PortalScheduleTab({ property, onOpenUnitDay }) {
 
   return (
     <div className="px-5 pt-5 pb-24 space-y-5">
+      <ScreenId id="PM-SCHED" />
       <div>
         <h2 className="font-serif text-2xl text-stone-900 mb-1">Upcoming</h2>
         <p className="text-sm text-stone-600">Scheduled work for {property.name}.</p>
@@ -35545,6 +35831,7 @@ function PortalAssignmentsTab({ property, portalKind, portalUser }) {
 
   return (
     <div className="px-5 pt-6 space-y-5">
+      <ScreenId id="PM-ASGN" />
       <div>
         <h2 className="font-serif text-2xl text-stone-900 mb-1">Your assignments</h2>
         <p className="text-sm text-stone-600">
@@ -35933,6 +36220,7 @@ function PortalAssignmentForm({ property, assignment, portalKind, onCancel, onSa
 
   return (
     <div className="min-h-screen bg-stone-50 pb-12">
+      <ScreenId id="PM-ASGN-NEW" />
       <div className="flex items-center gap-3 px-5 py-4 border-b border-stone-200">
         <button onClick={onCancel} className="p-2 -ml-2 rounded-full hover:bg-stone-100">
           <ArrowLeft size={20} className="text-stone-700" />
@@ -36438,6 +36726,7 @@ function PortalAssignmentDetail({ property, assignment, portalUser, onBack, onEd
 
   return (
     <div className="min-h-screen bg-stone-50 pb-12">
+      <ScreenId id="PM-ASGN-DET" />
       <div className="flex items-center gap-3 px-5 py-4 border-b border-stone-200">
         <button onClick={onBack} className="p-2 -ml-2 rounded-full hover:bg-stone-100">
           <ArrowLeft size={20} className="text-stone-700" />
@@ -36916,6 +37205,7 @@ function InboxView({ employee, onBack }) {
 
   return (
     <div className="pb-24">
+      <ScreenId id="OW-INBOX" />
       <div className="flex items-center gap-3 px-5 py-4 border-b border-stone-200">
         <button onClick={onBack} className="p-2 -ml-2 rounded-full hover:bg-stone-100">
           <ArrowLeft size={20} className="text-stone-700" />

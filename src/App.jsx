@@ -106,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul18-tap62";
+const BUILD_TAG = "jul18-tap63";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -35295,6 +35295,8 @@ function PortalScheduleTab({ property }) {
     return dt.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
   };
 
+  const label = (unit, party) => unitPartyLabel(unit?.label, party?.label) || 'Job';
+
   // Upcoming: assignments with a due date today-or-later, still open.
   const upcomingByDate = {};
   (rows || []).forEach(a => {
@@ -35319,8 +35321,6 @@ function PortalScheduleTab({ property }) {
     recent.push({ id: a.id, title: label(ts[0]?.unit, ts[0]?.party) || a.title || 'Job', type: a.assignment_type, when: last, items: ts.length });
   });
   recent.sort((x, y) => y.when - x.when);
-
-  const label = (unit, party) => unitPartyLabel(unit?.label, party?.label) || 'Job';
 
   if (rows === null) return <div className="px-5 py-10 text-center text-stone-400 text-sm">Loading…</div>;
 

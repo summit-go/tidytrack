@@ -25,6 +25,7 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 // =================================================================
 const GOOGLE_TRANSLATE_API_KEY = "AIzaSyD7ceHPryMzs45hWJOyFNBxtOzQOEmJcSA";
 
+
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // ============================================================
@@ -106,7 +107,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul22-tap66";
+const BUILD_TAG = "jul22-tap67";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -179,6 +180,17 @@ function buildTargetTitle(unitLabel, partyLabel) {
 // Abbreviate "Bedroom" -> "BR" in space-tight card labels so titles like
 // "B1-201 · Bedroom 4" fit without wrapping. Display-only — the stored
 // party label is untouched. e.g. "Bedroom 4" -> "BR 4".
+// "2x2" / "1x1.5" apartment size, the way Allan and the PMs say it out
+// loud. Returns null when the unit has no size on file, so callers can
+// just skip the chip rather than render "0x0".
+function unitSizeLabel(unit) {
+  if (!unit) return null;
+  const { bedrooms: br, bathrooms: ba } = unit;
+  if (br == null && ba == null) return null;
+  const n = (v) => (v == null ? '?' : String(Number(v)));
+  return `${n(br)}x${n(ba)}`;
+}
+
 function shortenBedroom(label) {
   if (!label) return label;
   return String(label).replace(/\bBedroom\b/gi, 'BR');
@@ -22029,6 +22041,15 @@ function PortalDashboard({ property, portalKind, portalUser, properties, onSwitc
   const [view, setView] = useState({ kind: 'home' });
   // 'home' (recent activity), 'unit-day' (drill into one unit's day), 'all-photos' (gallery)
 
+  // Where the PM was standing when they drilled into a unit-day. PortalHome
+  // unmounts while the day detail is open, so if this state lived inside it
+  // Back would drop them on the default History tab instead of the tab they
+  // actually left from (the Schedule → Recently done bug).
+  const [homeTab, setHomeTab] = useState('history');
+  const [homeAsgSub, setHomeAsgSub] = useState('requests');
+  const [schedRecentOpen, setSchedRecentOpen] = useState(false);
+  const [homeFilter, setHomeFilter] = useState('7d'); // History range: 7d / 30d / 1y
+
   if (view.kind === 'unit-day') {
     return <PortalUnitDay property={property} unitId={view.unitId} date={view.date}
       portalUser={portalUser}
@@ -22040,6 +22061,10 @@ function PortalDashboard({ property, portalKind, portalUser, properties, onSwitc
     hasMultipleProperties={hasMultipleProperties} onBackToPicker={onBackToPicker}
     onSignOut={onSignOut}
     onRefreshProperty={onRefreshProperty}
+    tab={homeTab} setTab={setHomeTab}
+    asgSub={homeAsgSub} setAsgSub={setHomeAsgSub}
+    filter={homeFilter} setFilter={setHomeFilter}
+    schedRecentOpen={schedRecentOpen} setSchedRecentOpen={setSchedRecentOpen}
     onOpenUnitDay={(unitId, date) => setView({ kind: 'unit-day', unitId, date })} />;
 }
 
@@ -22069,12 +22094,24 @@ function PortalLangToggle({ portalUser }) {
   );
 }
 
-function PortalHome({ property, portalKind, portalUser, properties, onSwitchProperty, hasMultipleProperties, onBackToPicker, onSignOut, onRefreshProperty, onOpenUnitDay }) {
-  const [tab, setTab] = useState('history'); // 'history' | 'assignments'
-  const [asgSub, setAsgSub] = useState('requests'); // 'requests' | 'concerns'
+function PortalHome({ property, portalKind, portalUser, properties, onSwitchProperty, hasMultipleProperties, onBackToPicker, onSignOut, onRefreshProperty, onOpenUnitDay,
+  tab: tabProp, setTab: setTabProp, asgSub: asgSubProp, setAsgSub: setAsgSubProp,
+  filter: filterProp, setFilter: setFilterProp,
+  schedRecentOpen, setSchedRecentOpen }) {
+  // Tab state is owned by PortalDashboard when it passes it down, so a trip
+  // into a unit-day and back returns the PM to where they were. The local
+  // fallbacks keep this component standalone if it's ever mounted directly.
+  const [ownTab, setOwnTab] = useState('history');        // 'history' | 'assignments'
+  const [ownAsgSub, setOwnAsgSub] = useState('requests'); // 'requests' | 'schedule' | 'concerns'
+  const tab = tabProp !== undefined ? tabProp : ownTab;
+  const setTab = setTabProp || setOwnTab;
+  const asgSub = asgSubProp !== undefined ? asgSubProp : ownAsgSub;
+  const setAsgSub = setAsgSubProp || setOwnAsgSub;
   const [groups, setGroups] = useState([]);
   const [loaded, setLoaded] = useState(false);
-  const [filter, setFilter] = useState('7d');
+  const [ownFilter, setOwnFilter] = useState('7d');
+  const filter = filterProp !== undefined ? filterProp : ownFilter;
+  const setFilter = setFilterProp || setOwnFilter;
   const [showWelcome, setShowWelcome] = useState(false);
   const [showChangeCode, setShowChangeCode] = useState(false);
   const [showMessages, setShowMessages] = useState(false);
@@ -22369,7 +22406,8 @@ function PortalHome({ property, portalKind, portalUser, properties, onSwitchProp
           {asgSub === 'requests'
             ? <PortalAssignmentsTab property={property} portalKind={portalKind} portalUser={portalUser} />
             : asgSub === 'schedule'
-            ? <PortalScheduleTab property={property} onOpenUnitDay={onOpenUnitDay} />
+            ? <PortalScheduleTab property={property} onOpenUnitDay={onOpenUnitDay}
+                recentOpen={schedRecentOpen} setRecentOpen={setSchedRecentOpen} />
             : <PortalPhotoUploadTab property={property} portalKind={portalKind} />}
         </div>
       )}
@@ -35726,15 +35764,20 @@ function PortalPhotoUploadTab({ property, portalKind }) {
 // PM SCHEDULE — what's coming up for this property (upcoming assignments
 // by due date), with a toggle to peek at what was done the last 3 days.
 // =================================================================
-function PortalScheduleTab({ property, onOpenUnitDay }) {
+function PortalScheduleTab({ property, onOpenUnitDay, recentOpen, setRecentOpen }) {
   const [rows, setRows] = useState(null);
-  const [showRecent, setShowRecent] = useState(false);
+  // Whether "Recently done" is expanded is owned by PortalDashboard when
+  // provided, so opening a job from that list and pressing Back reopens the
+  // list instead of collapsing it.
+  const [ownRecent, setOwnRecent] = useState(false);
+  const showRecent = recentOpen !== undefined ? recentOpen : ownRecent;
+  const toggleRecent = () => (setRecentOpen ? setRecentOpen(!showRecent) : setOwnRecent(v => !v));
   const [attach, setAttach] = useState(null); // { url, kind, title } being viewed
   const todayKey = localTodayKey();
 
   const load = async () => {
     const { data, error } = await supabase.from('assignments')
-      .select('id, title, assignment_type, scheduled_date, file_url, file_kind, targets:assignment_targets(id, status, completed_at, template_section, unit_id, unit:units(label), party:parties(label))')
+      .select('id, title, assignment_type, scheduled_date, file_url, file_kind, targets:assignment_targets(id, status, completed_at, template_section, unit_id, unit:units(label, bedrooms, bathrooms), party:parties(label))')
       .eq('customer_id', property.id)
       .is('deleted_at', null);
     if (error) { console.error('[schedule] load failed', error); }
@@ -35775,6 +35818,7 @@ function PortalScheduleTab({ property, onOpenUnitDay }) {
     recent.push({
       id: a.id,
       title: label(ts[0]?.unit, ts[0]?.party) || a.title || 'Job',
+      size: unitSizeLabel(ts[0]?.unit),
       type: a.assignment_type,
       when: last,
       items: ts.length,
@@ -35809,6 +35853,7 @@ function PortalScheduleTab({ property, onOpenUnitDay }) {
                 {upcomingByDate[dk].map(a => {
                   const ts = a.targets || [];
                   const title = label(ts[0]?.unit, ts[0]?.party) || a.title || 'Job';
+                  const size = unitSizeLabel(ts[0]?.unit);
                   const byCat = {};
                   const secLabel = { bedroom: 'Bedroom', vanity: 'Vanity', bathroom: 'Bathroom', general: 'General' };
                   ts.forEach(t => { const l = secLabel[t.template_section] || (t.template_section ? t.template_section.charAt(0).toUpperCase() + t.template_section.slice(1) : 'Other'); byCat[l] = (byCat[l] || 0) + 1; });
@@ -35817,7 +35862,14 @@ function PortalScheduleTab({ property, onOpenUnitDay }) {
                     <div key={a.id} className="rounded-2xl bg-white border border-stone-200 p-4">
                       <div className="flex items-start justify-between gap-2">
                         <div className="min-w-0">
-                          <div className="font-serif text-lg text-stone-900">{title}</div>
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="font-serif text-lg text-stone-900">{title}</span>
+                            {size && (
+                              <span className="text-[10px] font-mono px-1.5 py-0.5 rounded-md bg-stone-100 text-stone-700 border border-stone-200 flex-shrink-0">
+                                {size}
+                              </span>
+                            )}
+                          </div>
                           <div className="text-[11px] text-stone-500 font-mono mt-0.5">
                             {a.assignment_type ? assignmentTypeLabel(a.assignment_type) : 'Clean'} · {ts.length} item{ts.length === 1 ? '' : 's'}
                           </div>
@@ -35852,7 +35904,7 @@ function PortalScheduleTab({ property, onOpenUnitDay }) {
       )}
 
       {/* Recently done — collapsed by default so it doesn't compete with History. */}
-      <button onClick={() => setShowRecent(v => !v)}
+      <button onClick={toggleRecent}
         className="w-full flex items-center justify-between px-4 py-3 rounded-2xl bg-stone-100 text-stone-700 text-sm font-medium">
         <span>Recently done · last 3 days{recent.length ? ` (${recent.length})` : ''}</span>
         <ChevronRight size={16} className={`transition-transform ${showRecent ? 'rotate-90' : ''}`} />
@@ -35869,7 +35921,14 @@ function PortalScheduleTab({ property, onOpenUnitDay }) {
                   disabled={!canOpen}
                   className={`w-full text-left rounded-xl bg-white border border-stone-200 px-4 py-3 flex items-center justify-between gap-2 ${canOpen ? 'hover:border-stone-400 active:scale-[0.99] transition' : ''}`}>
                   <span className="min-w-0">
-                    <span className="block font-serif text-sm text-stone-900 truncate">{r.title}</span>
+                    <span className="flex items-center gap-2 flex-wrap">
+                      <span className="font-serif text-sm text-stone-900 truncate">{r.title}</span>
+                      {r.size && (
+                        <span className="text-[10px] font-mono px-1.5 py-0.5 rounded-md bg-stone-100 text-stone-700 border border-stone-200 flex-shrink-0">
+                          {r.size}
+                        </span>
+                      )}
+                    </span>
                     <span className="block text-[11px] font-mono text-stone-500 mt-0.5">
                       {r.type ? assignmentTypeLabel(r.type) : 'Clean'} · {r.items} item{r.items === 1 ? '' : 's'}
                       {canOpen && <span className="text-stone-400"> · tap for photos & details</span>}

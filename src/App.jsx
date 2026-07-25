@@ -25,7 +25,6 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 // =================================================================
 const GOOGLE_TRANSLATE_API_KEY = "AIzaSyD7ceHPryMzs45hWJOyFNBxtOzQOEmJcSA";
 
-
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // ============================================================
@@ -107,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul23-tap73";
+const BUILD_TAG = "jul23-tap74";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -4031,14 +4030,17 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       auto_clocked_out: true
     }).eq('id', shift.id);
     setShift(null); setWorkBlocks([]); setActiveBlock(null); setTasks([]); setActiveTask(null);
-    alert("You were clocked out automatically after 5 hours of inactivity. Your time was adjusted to your last activity. Talk to your manager if this is a mistake.");
+    alert("You were clocked out automatically after 1 hour of inactivity. Your time was adjusted to your last activity. Talk to your manager if this is a mistake.");
   };
 
   // Idle detector — only active while there's an open shift
   const { showWarning: showIdleWarning, dismissWarning: dismissIdleWarning } = useIdleDetector({
     shift,
     onAutoClockOut: autoClockOut,
-    enabled: !!shift && !shift.end_time
+    // Not in preview: an owner poking around the cleaner UI isn't really on
+    // the clock, and a retroactive idle clock-out would close their open
+    // block the next time the page regains focus or reloads.
+    enabled: !previewMode && !!shift && !shift.end_time
   });
 
   // Switch straight to a specific pending job at ANOTHER property. The
@@ -8932,7 +8934,11 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
   const handleReopenDone = (b) => {
     if (!onReopen) return;
     if (!b.mine && !confirm(`Reopen ${b.ownerName}'s workblock and continue it?\n\nIt becomes your active workblock at this bedroom.`)) return;
-    setBlockTab('active');
+    // If the reopened block has a task still running, show Active. Otherwise
+    // land on New so the cleaner immediately sees the remaining checklist for
+    // the bedroom instead of an empty Active tab.
+    const hasRunning = (b.tasks || []).some(t => !t.end_time);
+    setBlockTab(hasRunning ? 'active' : 'new');
     onReopen(b);
   };
 

@@ -12,7 +12,6 @@ import {
 
 // =================================================================
 // 🔧 PASTE YOUR SUPABASE KEYS HERE
-// =================================================================
 const SUPABASE_URL = "https://bbaynvqnbkjyqhzhhypr.supabase.co/";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJiYXludnFuYmtqeXFoemhoeXByIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc0NzQ2MTMsImV4cCI6MjA5MzA1MDYxM30.ZXUoHFj_IwMe6rX8RxK8Dj4kAB9AS7X9xZAhQ84wDEk";
 
@@ -24,7 +23,6 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 // If empty, the Translate button is hidden.
 // =================================================================
 const GOOGLE_TRANSLATE_API_KEY = "AIzaSyD7ceHPryMzs45hWJOyFNBxtOzQOEmJcSA";
-
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
@@ -107,7 +105,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul22-tap67";
+const BUILD_TAG = "jul23-tap70";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -12193,20 +12191,28 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
                   const key = payKey(empId, d.key, null);
                   const stale = isUnpaidStale(d.key, paid);
                   return (
-                    <div className={`px-4 py-2.5 border-t flex items-center justify-between gap-2 flex-wrap ${stale ? 'bg-amber-50 border-amber-200' : 'border-stone-100'}`}>
-                      <div className="text-xs font-mono flex items-center gap-1.5 flex-wrap">
-                        {!paid && owed > 0 && (
-                          <span className="text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-800 border border-amber-200 font-bold">Owed</span>
-                        )}
-                        <span>
-                          <span className="text-stone-500">{paid ? 'Paid ' : 'You owe '}</span>
-                          <span className="text-stone-900 font-bold">{owed > 0 ? fmtMoney(owed) : '—'}</span>
-                          {hasFlat && <span className="text-amber-700"> · flat</span>}
-                          {stale && <span className="text-amber-700"> · unpaid 7+ days</span>}
-                        </span>
-                        <span className="text-[10px] text-stone-400">· whole day (recorded before per-property pay)</span>
+                    <div className={`px-4 py-2.5 border-t ${stale ? 'bg-amber-50 border-amber-200' : 'border-stone-100'}`}>
+                      {/* Same top-row shape as the per-property strips: label on
+                         the left, amount on the right, actions underneath. Keeps
+                         "You owe" in one place down the whole cleaner card. */}
+                      <div className="flex items-start justify-between gap-2 mb-1.5 flex-wrap">
+                        <div className="min-w-0">
+                          <div className="text-xs font-mono text-stone-600">Whole day</div>
+                          <div className="text-[10px] font-mono text-stone-400 mt-0.5">recorded before per-property pay</div>
+                        </div>
+                        <div className="text-xs font-mono flex items-center gap-1.5 flex-shrink-0">
+                          {!paid && owed > 0 && (
+                            <span className="text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-800 border border-amber-200 font-bold">Owed</span>
+                          )}
+                          <span>
+                            <span className="text-stone-500">{paid ? 'Paid ' : 'You owe '}</span>
+                            <span className="text-stone-900 font-bold">{owed > 0 ? fmtMoney(owed) : '—'}</span>
+                            {hasFlat && <span className="text-amber-700"> · flat</span>}
+                            {stale && <span className="text-amber-700"> · unpaid 7+ days</span>}
+                          </span>
+                        </div>
                       </div>
-                      <div className="flex items-center gap-1.5 flex-wrap">
+                      <div className="flex items-center gap-1.5 flex-wrap justify-end">
                         {settingPay === key ? (
                           <span className="flex items-center gap-1">
                             <span className="text-[11px] text-stone-500 font-mono">$</span>
@@ -35776,12 +35782,28 @@ function PortalScheduleTab({ property, onOpenUnitDay, recentOpen, setRecentOpen 
   const todayKey = localTodayKey();
 
   const load = async () => {
-    const { data, error } = await supabase.from('assignments')
-      .select('id, title, assignment_type, scheduled_date, file_url, file_kind, targets:assignment_targets(id, status, completed_at, template_section, unit_id, unit:units(label, bedrooms, bathrooms), party:parties(label))')
-      .eq('customer_id', property.id)
-      .is('deleted_at', null);
-    if (error) { console.error('[schedule] load failed', error); }
-    setRows(data || []);
+    // This query used to have no ORDER BY, no .range() and no .limit(),
+    // which meant PostgREST silently capped it at its max-rows setting and
+    // returned an ARBITRARY slice of this property's assignments. Without a
+    // sort key Postgres makes no promise about which rows come back, so the
+    // same job could be present on one load and missing on the next with
+    // nobody touching it — and re-creating it made it reappear. Ordered and
+    // paginated now, so every assignment for the property is always loaded.
+    const PAGE = 1000;
+    let all = [];
+    for (let from = 0; ; from += PAGE) {
+      const { data, error } = await supabase.from('assignments')
+        .select('id, title, assignment_type, scheduled_date, file_url, file_kind, targets:assignment_targets(id, status, completed_at, template_section, unit_id, unit:units(label, bedrooms, bathrooms), party:parties(label))')
+        .eq('customer_id', property.id)
+        .is('deleted_at', null)
+        .order('scheduled_date', { ascending: false, nullsFirst: false })
+        .order('id', { ascending: true })   // tiebreak so paging can't skip or repeat
+        .range(from, from + PAGE - 1);
+      if (error) { console.error('[schedule] load failed', error); break; }
+      all = all.concat(data || []);
+      if (!data || data.length < PAGE) break;
+    }
+    setRows(all);
   };
   useEffect(() => { load(); /* eslint-disable-next-line */ }, [property.id]);
 
@@ -35794,16 +35816,34 @@ function PortalScheduleTab({ property, onOpenUnitDay, recentOpen, setRecentOpen 
 
   const label = (unit, party) => unitPartyLabel(unit?.label, party?.label) || 'Job';
 
+  // An assignment counts as still open if anything on it isn't done. A job
+  // with no targets at all is treated as open too — it used to fall through
+  // `.some()` returning false on an empty array and vanish from every list.
+  const stillOpen = (a) => {
+    const ts = a.targets || [];
+    return ts.length === 0 || ts.some(t => t.status !== 'done');
+  };
+
+  // Overdue: open work whose date has already passed. Without this, a job
+  // scheduled for today silently disappeared the moment the date rolled
+  // over — too old for Upcoming, not finished so not in Recently done.
+  const overdue = [];
   // Upcoming: assignments with a due date today-or-later, still open.
   const upcomingByDate = {};
   (rows || []).forEach(a => {
-    if (!a.scheduled_date || String(a.scheduled_date).slice(0, 10) < todayKey) return;
-    const anyOpen = (a.targets || []).some(t => t.status !== 'done');
-    if (!anyOpen) return;
+    if (!a.scheduled_date) return;
     const k = String(a.scheduled_date).slice(0, 10);
+    if (!stillOpen(a)) return;
+    if (k < todayKey) { overdue.push(a); return; }
     (upcomingByDate[k] = upcomingByDate[k] || []).push(a);
   });
   const upcomingDates = Object.keys(upcomingByDate).sort();
+  overdue.sort((a, b) => String(a.scheduled_date).localeCompare(String(b.scheduled_date)));
+  const daysLate = (key) => {
+    const [y, m, d] = String(key).slice(0, 10).split('-').map(Number);
+    const [ty, tm, td] = todayKey.split('-').map(Number);
+    return Math.round((new Date(ty, tm - 1, td) - new Date(y, m - 1, d)) / 86400000);
+  };
 
   // Recently done: bedrooms fully finished in the last 3 days (one per job).
   const cutoff = new Date(); cutoff.setDate(cutoff.getDate() - 3);
@@ -35828,6 +35868,63 @@ function PortalScheduleTab({ property, onOpenUnitDay, recentOpen, setRecentOpen 
   });
   recent.sort((x, y) => y.when - x.when);
 
+  // One upcoming/overdue job card. Shared by both lists so the overdue
+  // section can't drift from Upcoming.
+  const renderJobCard = (a, late = 0) => {
+    const ts = a.targets || [];
+    const title = label(ts[0]?.unit, ts[0]?.party) || a.title || 'Job';
+    const size = unitSizeLabel(ts[0]?.unit);
+    const byCat = {};
+    const secLabel = { bedroom: 'Bedroom', vanity: 'Vanity', bathroom: 'Bathroom', general: 'General' };
+    ts.forEach(t => { const l = secLabel[t.template_section] || (t.template_section ? t.template_section.charAt(0).toUpperCase() + t.template_section.slice(1) : 'Other'); byCat[l] = (byCat[l] || 0) + 1; });
+    const cats = Object.entries(byCat);
+    return (
+      <div key={a.id} className={`rounded-2xl p-4 border ${late > 0 ? 'bg-amber-50 border-amber-300' : 'bg-white border-stone-200'}`}>
+        <div className="flex items-start justify-between gap-2">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="font-serif text-lg text-stone-900">{title}</span>
+              {size && (
+                <span className="text-[10px] font-mono px-1.5 py-0.5 rounded-md bg-stone-100 text-stone-700 border border-stone-200 flex-shrink-0">
+                  {size}
+                </span>
+              )}
+            </div>
+            <div className="text-[11px] text-stone-500 font-mono mt-0.5">
+              {a.assignment_type ? assignmentTypeLabel(a.assignment_type) : 'Clean'} · {ts.length} item{ts.length === 1 ? '' : 's'}
+            </div>
+          </div>
+          <span className="flex flex-col items-end gap-1 flex-shrink-0">
+          {late > 0 && (
+            <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-amber-200 text-amber-900 font-bold">
+              {late} day{late === 1 ? '' : 's'} late
+            </span>
+          )}
+          {a.assignment_type && <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-orange-100 text-orange-800">{assignmentTypeLabel(a.assignment_type)}</span>}
+        </span>
+        </div>
+        {cats.length > 0 && (
+          <div className="mt-2.5 grid grid-cols-2 gap-x-8 gap-y-1 text-[11px] font-mono max-w-[16rem]">
+            {cats.map(([l, n]) => (
+              <div key={l} className="flex items-center justify-between border-b border-stone-100 pb-0.5">
+                <span className="text-stone-500">{l}</span>
+                <span className="text-stone-800 font-semibold">{n}</span>
+              </div>
+            ))}
+          </div>
+        )}
+        {a.file_url && (
+          <div className="mt-3 flex justify-end">
+            <button onClick={() => setAttach({ url: a.file_url, kind: a.file_kind, title })}
+              className="px-3 py-1.5 rounded-lg bg-stone-100 hover:bg-stone-200 text-stone-700 text-xs font-medium flex items-center gap-1.5">
+              {a.file_kind === 'pdf' ? <FileText size={12} /> : <ImageIcon size={12} />} View attachment
+            </button>
+          </div>
+        )}
+      </div>
+    );
+  };
+
   if (rows === null) return <div className="px-5 py-10 text-center text-stone-400 text-sm">Loading…</div>;
 
   return (
@@ -35838,6 +35935,23 @@ function PortalScheduleTab({ property, onOpenUnitDay, recentOpen, setRecentOpen 
         <p className="text-sm text-stone-600">Scheduled work for {property.name}.</p>
       </div>
 
+      {overdue.length > 0 && (
+        <div>
+          <div className="flex items-center gap-2 mb-2.5">
+            <AlertCircle size={16} className="text-amber-700 flex-shrink-0" />
+            <span className="text-base font-bold text-amber-900">
+              Overdue · {overdue.length}
+            </span>
+          </div>
+          <p className="text-xs text-stone-600 mb-2.5">
+            Past its date and not finished yet.
+          </p>
+          <div className="space-y-2">
+            {overdue.map(a => renderJobCard(a, daysLate(a.scheduled_date)))}
+          </div>
+        </div>
+      )}
+
       {upcomingDates.length === 0 ? (
         <div className="text-center py-10 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
           Nothing scheduled ahead right now.
@@ -35846,57 +35960,14 @@ function PortalScheduleTab({ property, onOpenUnitDay, recentOpen, setRecentOpen 
         <div className="space-y-4">
           {upcomingDates.map(dk => (
             <div key={dk}>
-              <div className={`text-xs uppercase tracking-wider font-mono mb-2 ${dk === todayKey ? 'text-emerald-700' : 'text-stone-500'}`}>
-                {dk === todayKey ? 'Today · ' : ''}{fmtDay(dk)}
+              <div className="flex items-center gap-2 mb-2.5">
+                <span className={`w-1 h-5 rounded-full flex-shrink-0 ${dk === todayKey ? 'bg-emerald-600' : 'bg-stone-300'}`} />
+                <span className={`text-base font-bold uppercase tracking-wide font-mono ${dk === todayKey ? 'text-emerald-700' : 'text-stone-800'}`}>
+                  {dk === todayKey ? 'Today · ' : ''}{fmtDay(dk)}
+                </span>
               </div>
               <div className="space-y-2">
-                {upcomingByDate[dk].map(a => {
-                  const ts = a.targets || [];
-                  const title = label(ts[0]?.unit, ts[0]?.party) || a.title || 'Job';
-                  const size = unitSizeLabel(ts[0]?.unit);
-                  const byCat = {};
-                  const secLabel = { bedroom: 'Bedroom', vanity: 'Vanity', bathroom: 'Bathroom', general: 'General' };
-                  ts.forEach(t => { const l = secLabel[t.template_section] || (t.template_section ? t.template_section.charAt(0).toUpperCase() + t.template_section.slice(1) : 'Other'); byCat[l] = (byCat[l] || 0) + 1; });
-                  const cats = Object.entries(byCat);
-                  return (
-                    <div key={a.id} className="rounded-2xl bg-white border border-stone-200 p-4">
-                      <div className="flex items-start justify-between gap-2">
-                        <div className="min-w-0">
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <span className="font-serif text-lg text-stone-900">{title}</span>
-                            {size && (
-                              <span className="text-[10px] font-mono px-1.5 py-0.5 rounded-md bg-stone-100 text-stone-700 border border-stone-200 flex-shrink-0">
-                                {size}
-                              </span>
-                            )}
-                          </div>
-                          <div className="text-[11px] text-stone-500 font-mono mt-0.5">
-                            {a.assignment_type ? assignmentTypeLabel(a.assignment_type) : 'Clean'} · {ts.length} item{ts.length === 1 ? '' : 's'}
-                          </div>
-                        </div>
-                        {a.assignment_type && <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-orange-100 text-orange-800 flex-shrink-0">{assignmentTypeLabel(a.assignment_type)}</span>}
-                      </div>
-                      {cats.length > 0 && (
-                        <div className="mt-2.5 grid grid-cols-2 gap-x-8 gap-y-1 text-[11px] font-mono max-w-[16rem]">
-                          {cats.map(([l, n]) => (
-                            <div key={l} className="flex items-center justify-between border-b border-stone-100 pb-0.5">
-                              <span className="text-stone-500">{l}</span>
-                              <span className="text-stone-800 font-semibold">{n}</span>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                      {a.file_url && (
-                        <div className="mt-3 flex justify-end">
-                          <button onClick={() => setAttach({ url: a.file_url, kind: a.file_kind, title })}
-                            className="px-3 py-1.5 rounded-lg bg-stone-100 hover:bg-stone-200 text-stone-700 text-xs font-medium flex items-center gap-1.5">
-                            {a.file_kind === 'pdf' ? <FileText size={12} /> : <ImageIcon size={12} />} View attachment
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
+                {upcomingByDate[dk].map(a => renderJobCard(a))}
               </div>
             </div>
           ))}

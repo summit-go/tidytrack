@@ -7,11 +7,12 @@ import {
   Trash2, Eye, EyeOff, LayoutDashboard, FileText, DollarSign,
   Home, Layers, User, Edit2, Copy, Printer, Calendar, HelpCircle,
   MessageCircle, MessageSquare, Settings, Languages, Menu, Square, Share2,
-  ClipboardList, Lock, Circle, MoreVertical, RotateCcw
+  ClipboardList, Lock, Circle, MoreVertical, RotateCcw, Undo2
 } from 'lucide-react';
 
 // =================================================================
 // 🔧 PASTE YOUR SUPABASE KEYS HERE
+// =================================================================
 const SUPABASE_URL = "https://bbaynvqnbkjyqhzhhypr.supabase.co/";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJiYXludnFuYmtqeXFoemhoeXByIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc0NzQ2MTMsImV4cCI6MjA5MzA1MDYxM30.ZXUoHFj_IwMe6rX8RxK8Dj4kAB9AS7X9xZAhQ84wDEk";
 
@@ -105,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul23-tap70";
+const BUILD_TAG = "jul23-tap72";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -3666,8 +3667,58 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   const [employee, setEmployee] = useState(employeeInit);
   // Supply-checklist gate. Lives here (not in App) so it also fires for Beta
   // accounts and any path that renders the cleaner shell. Skipped only in
-  // owner-preview mode. Defaults false → shows on entry, before any work UI.
+  // owner-preview mode.
+  //
+  // The checklist is meant once per day, not once per page load. supplyOk is
+  // React state that resets to false on every mount, so a refresh (or the app
+  // being reopened) used to force the cleaner back through the whole list even
+  // though they'd already confirmed that morning. supplyChecked gates the work
+  // UI while we look for today's confirmation: null = still checking (show a
+  // splash, not the gate), false = no confirmation today (show the gate), true
+  // = already confirmed today (skip straight through).
   const [supplyOk, setSupplyOk] = useState(false);
+  const [supplyChecked, setSupplyChecked] = useState(false);
+
+  useEffect(() => {
+    if (previewMode) { setSupplyChecked(true); return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        // Local midnight → the cleaner's "today". A confirmation from
+        // yesterday shouldn't carry over, and one from 6am should still
+        // count at 9am.
+        const now = new Date();
+        const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
+        // We don't hard-code the timestamp column name (it's a DB default),
+        // so try the common ones in order and fall back to "no confirmation"
+        // rather than ever wrongly skipping the checklist.
+        let found = false;
+        for (const col of ['confirmed_at', 'created_at', 'inserted_at']) {
+          const { data, error } = await supabase
+            .from('supply_checklist_confirmations')
+            .select('id')
+            .eq('employee_id', employee?.id)
+            .gte(col, startOfDay)
+            .limit(1);
+          if (error) {
+            // Unknown column → try the next candidate. Any other error →
+            // stop and leave the gate up (safe default).
+            if (/column|does not exist|42703/i.test(error.message || '')) continue;
+            break;
+          }
+          if (data && data.length > 0) found = true;
+          break; // column exists; trust its answer
+        }
+        if (!cancelled && found) setSupplyOk(true);
+      } catch (e) {
+        console.warn('[supply] today-confirmation check failed', e);
+      } finally {
+        if (!cancelled) setSupplyChecked(true);
+      }
+    })();
+    return () => { cancelled = true; };
+    /* eslint-disable-next-line */
+  }, [employee?.id, previewMode]);
   const [shift, setShift] = useState(null);
   const [workBlocks, setWorkBlocks] = useState([]);
   const [activeBlock, setActiveBlock] = useState(null);
@@ -5252,6 +5303,10 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   // Skipped in owner-preview. Fires for Beta accounts too (they render this
   // shell). Skips itself if the list is empty / on error, so never traps.
   if (!previewMode && !supplyOk) {
+    // Wait for the same-day confirmation lookup before deciding — otherwise a
+    // cleaner who already confirmed this morning sees the gate flash up for a
+    // moment on every refresh.
+    if (!supplyChecked) return <Splash text="Loading…" />;
     return <SupplyChecklistGate employee={employee} onDone={() => setSupplyOk(true)} onSignOut={onSignOut} />;
   }
 
@@ -8698,7 +8753,7 @@ function UndoMoveMenu({ disabled, canUndo, canMove, onUndo, onMoveBedroom, onMov
         aria-label="Something's wrong — undo this workblock or move it"
         title="Started by mistake, or in the wrong bedroom? Fix it here"
         className="w-9 h-9 rounded-full bg-amber-500 hover:bg-amber-400 text-stone-900 inline-flex items-center justify-center border border-amber-300 disabled:opacity-50 active:scale-95 transition shadow-sm">
-        <RotateCcw size={16} strokeWidth={2.5} />
+        <Undo2 size={16} strokeWidth={2.5} />
       </button>
       {open && (
         <div className="absolute z-40 top-full right-0 mt-1 w-72 bg-stone-50 rounded-2xl shadow-xl border border-stone-200 overflow-hidden">

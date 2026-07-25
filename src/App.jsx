@@ -25,6 +25,7 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 // =================================================================
 const GOOGLE_TRANSLATE_API_KEY = "AIzaSyD7ceHPryMzs45hWJOyFNBxtOzQOEmJcSA";
 
+
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // ============================================================
@@ -106,7 +107,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul23-tap72";
+const BUILD_TAG = "jul23-tap73";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -1078,7 +1079,20 @@ function StaffApp() {
       setSession({ employee });
     }} />;
   }
-  const signOut = async () => { await sessionStore.clear(); setSession(null); };
+  const signOut = async () => {
+    // Clear any persisted "preview as cleaner/PM" flags so a deliberate
+    // sign-out doesn't drop the owner back into a preview session on their
+    // next login. (These are keyed per-employee, so they never leak between
+    // users — this is just for the same owner signing back in.)
+    try {
+      for (let i = localStorage.length - 1; i >= 0; i--) {
+        const k = localStorage.key(i);
+        if (k && k.startsWith('tidytrack_page_manager_preview_')) localStorage.removeItem(k);
+      }
+    } catch {}
+    await sessionStore.clear();
+    setSession(null);
+  };
   // Beta testers (is_beta_tester=true) get a sticky top toggle bar
   // letting them swap between BETA / EMPLOYEE / PM views. The flag is
   // set via SQL on a dedicated test-harness employee row — your real
@@ -11407,14 +11421,24 @@ function ManagerShell({ employee, onSignOut }) {
   // their actions in this mode go to the database under their own
   // employee record, just like a normal cleaner shift. They can
   // exit any time via the banner.
-  const [previewMode, setPreviewMode] = useState(false);
+  // Persisted to localStorage (keyed per employee) so a browser refresh
+  // while the owner is previewing the cleaner/PM side keeps them there,
+  // rather than snapping back to the manager view every reload.
+  const [previewMode, setPreviewMode] = usePagePersistence(`manager_preview_cleaner_${employee.id}`, false);
   const showMoneyTabs = canSeeMoney(employee); // owner only
   const isOwner = employee?.role === 'owner';
   // Owner "hats": Operations (cleaning side) vs Business (management).
   // Reshapes the bottom nav so each mode only shows its own tabs.
   // Managers keep the flat nav.
   const [mode, setMode] = usePagePersistence(`manager_mode_${employee.id}`, 'ops'); // 'ops' | 'business'
-  const [pmPreview, setPmPreview] = useState(false);
+  const [pmPreview, setPmPreview] = usePagePersistence(`manager_preview_pm_${employee.id}`, false);
+  // Cleaner-preview and PM-preview are mutually exclusive. If a stale
+  // localStorage from an interrupted session ever had both set, let
+  // cleaner-preview win (it renders first below) and clear the other.
+  useEffect(() => {
+    if (previewMode && pmPreview) setPmPreview(false);
+    /* eslint-disable-next-line */
+  }, []);
   const switchMode = (m) => {
     setMode(m);
     if (m === 'ops' && !['daily', 'dashboard', 'assignments'].includes(tab)) setTab('daily');

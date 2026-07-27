@@ -25,7 +25,6 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 // =================================================================
 const GOOGLE_TRANSLATE_API_KEY = "AIzaSyD7ceHPryMzs45hWJOyFNBxtOzQOEmJcSA";
 
-
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // ============================================================
@@ -107,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul24-tap84";
+const BUILD_TAG = "jul24-tap85";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -18262,6 +18261,16 @@ function extraAmount(l) {
     : (parseFloat(l.extraAmount) || 0);
 }
 function lineAmount(l) {
+  // Non-billable = the owner is eating this one (comp, redo, courtesy). It
+  // still shows in the editor and still gets stamped invoiced so reporting
+  // knows the work was accounted for, but it adds nothing to what the
+  // property is charged and it's hidden from the printed invoice.
+  if (l.nonBillable) return 0;
+  return baseAmount(l) + extraAmount(l);
+}
+// What the line WOULD have billed, ignoring the non-billable flag — used
+// by reporting so a comped clean still shows its real value.
+function lineFullAmount(l) {
   return baseAmount(l) + extraAmount(l);
 }
 
@@ -18560,6 +18569,7 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
           extraMinutes: sl.extra_minutes != null ? String(sl.extra_minutes) : '',
           extraRate: sl.extra_rate != null ? String(sl.extra_rate) : '',
           extraNote: sl.extra_note || '',
+          nonBillable: !!sl.non_billable,
         };
       });
     }
@@ -18592,6 +18602,7 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
             extraMinutes: sl.extra_minutes != null ? String(sl.extra_minutes) : '',
             extraRate: sl.extra_rate != null ? String(sl.extra_rate) : '',
             extraNote: sl.extra_note || '',
+            nonBillable: !!sl.non_billable,
             // No source targets to re-stamp — this line was already billed
             // and its targets freed; saving re-stamps whatever regenerated.
             sourceTargetIds: [],
@@ -18701,6 +18712,10 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
       extra_mode: l.extraOn ? (l.extraMode || 'fixed') : null,
       extra_minutes: (l.extraOn && l.extraMode === 'time') ? (parseFloat(l.extraMinutes) || 0) : null,
       extra_rate: (l.extraOn && l.extraMode === 'time') ? (parseFloat(l.extraRate) || 0) : null,
+      // Non-billable lines: amount above is 0 (they don't add to the bill),
+      // but we keep what they WOULD have been so reporting shows the comp.
+      non_billable: !!l.nonBillable,
+      full_amount: lineFullAmount(l),
       qty: 1, sort_order: i, source_unit_id: l.unitId || null, source_party_id: l.partyId || null,
     }));
     if (lineRows.length) {
@@ -18760,6 +18775,8 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
       description: l.description, qty: 1, amount: lineAmount(l),
       base_amount: baseAmount(l),
       extra_amount: extraAmount(l),
+      non_billable: !!l.nonBillable,
+      full_amount: lineFullAmount(l),
       extra_note: (l.extraOn && l.extraNote) ? l.extraNote : null,
       extra_mode: l.extraOn ? (l.extraMode || 'fixed') : null,
       extra_minutes: (l.extraOn && l.extraMode === 'time') ? (parseFloat(l.extraMinutes) || 0) : null,
@@ -18978,9 +18995,18 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
                       </span>
                     )}
                     <span className="text-right flex-shrink-0">
-                      <span className={`font-mono text-sm block ${overridden ? 'text-amber-700' : 'text-stone-900'}`}>${amt.toFixed(2)}</span>
-                      {xtra > 0 && (
-                        <span className="text-[10px] font-mono text-amber-700 block">${base.toFixed(2)} + ${xtra.toFixed(2)} extra</span>
+                      {l.nonBillable ? (
+                        <>
+                          <span className="font-mono text-sm block text-stone-400 line-through">${lineFullAmount(l).toFixed(2)}</span>
+                          <span className="text-[9px] uppercase tracking-wider font-mono px-1.5 py-0.5 rounded-full bg-stone-200 text-stone-600 font-bold">Not billed</span>
+                        </>
+                      ) : (
+                        <>
+                          <span className={`font-mono text-sm block ${overridden ? 'text-amber-700' : 'text-stone-900'}`}>${amt.toFixed(2)}</span>
+                          {xtra > 0 && (
+                            <span className="text-[10px] font-mono text-amber-700 block">${base.toFixed(2)} + ${xtra.toFixed(2)} extra</span>
+                          )}
+                        </>
                       )}
                     </span>
                     <button onClick={() => removeLine(l.key)} className="p-1.5 rounded-lg text-stone-300 hover:text-red-600 hover:bg-red-50">
@@ -18989,6 +19015,19 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
                   </div>
                   {open && (
                     <div className="border-t border-stone-100 p-4 space-y-3">
+                      {/* Non-billable: owner eats this line. Excluded from the
+                         property's total and hidden on the printed invoice,
+                         but still recorded so it shows in reporting. */}
+                      <label className={`flex items-center gap-3 p-3 rounded-xl border ${l.nonBillable ? 'bg-stone-100 border-stone-300' : 'bg-white border-stone-200'}`}>
+                        <input type="checkbox" checked={!!l.nonBillable}
+                          onChange={(e) => updateLine(l.key, { nonBillable: e.target.checked })} />
+                        <div className="flex-1 min-w-0">
+                          <div className="text-sm font-medium text-stone-900">Don't bill the property for this</div>
+                          <div className="text-xs text-stone-500">
+                            Keeps it off the invoice you send and out of the total, but still records it (at {`$${lineFullAmount(l).toFixed(2)}`}) so it shows in your reports as a comp / redo you covered.
+                          </div>
+                        </div>
+                      </label>
                       {/* Three stages, in the order they apply:
                          1. STANDARD — the priced items
                          2. EXTRA    — added on top
@@ -19262,9 +19301,13 @@ function InvoiceDocument({ invoiceId, data, preview, onBack, onChanged, onEditDr
     <div className="p-6"><button onClick={onBack} className="text-sm text-stone-600 flex items-center gap-2"><ArrowLeft size={16} /> Back</button><div className="mt-4 text-stone-500">Invoice not found.</div></div>
   );
 
-  const total = lines.reduce((s, l) => s + (parseFloat(l.amount) || 0), 0);
-  const extraTotal = lines.reduce((s, l) => s + (parseFloat(l.extra_amount) || 0), 0);
-  const baseTotal = lines.reduce((s, l) => {
+  // The printed/PM-facing invoice only shows lines the property is billed
+  // for. Non-billable lines (comps/redos the owner ate) are tracked in the
+  // data but never appear on the document or in its totals.
+  const billableLines = lines.filter(l => !l.non_billable);
+  const total = billableLines.reduce((s, l) => s + (parseFloat(l.amount) || 0), 0);
+  const extraTotal = billableLines.reduce((s, l) => s + (parseFloat(l.extra_amount) || 0), 0);
+  const baseTotal = billableLines.reduce((s, l) => {
     const amt = parseFloat(l.amount) || 0;
     const x = parseFloat(l.extra_amount) || 0;
     return s + (l.base_amount != null ? (parseFloat(l.base_amount) || 0) : (amt - x));
@@ -19359,7 +19402,7 @@ function InvoiceDocument({ invoiceId, data, preview, onBack, onChanged, onEditDr
             <div className="flex-1">Items</div>
             <div className="text-right" style={{ width: 110 }}>Amount</div>
           </div>
-          {lines.map((l, i) => {
+          {billableLines.map((l, i) => {
             const amount = parseFloat(l.amount) || 0;
             const xtra = parseFloat(l.extra_amount) || 0;
             // base_amount is backfilled by v58; fall back for any line

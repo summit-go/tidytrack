@@ -106,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul24-tap77";
+const BUILD_TAG = "jul24-tap79";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -3174,27 +3174,28 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
         <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Pick what you'll clean</label>
         <div className="grid grid-cols-4 gap-2">
           {(() => {
-            // Per-section counts. total = pending+in_progress (work
-            // that exists at this bedroom for this section), busy =
-            // in_progress (currently being worked). hasRequested = at
-            // least one requested-by target exists in this section, so
-            // the section card can show a "Requested" badge.
+            // Per-section counts. open = pending+in_progress+paused (work
+            // still to finish), busy = in_progress (being worked right now),
+            // done = completed, total = everything assigned here. We keep
+            // done so the card can say "Done" once the section is finished
+            // instead of forever reading "Started".
             const stats = {
-              bedroom:  { busy: 0, total: 0, hasRequested: false },
-              vanity:   { busy: 0, total: 0, hasRequested: false },
-              bathroom: { busy: 0, total: 0, hasRequested: false },
-              general:  { busy: 0, total: 0, hasRequested: false },
+              bedroom:  { busy: 0, open: 0, done: 0, total: 0, hasRequested: false },
+              vanity:   { busy: 0, open: 0, done: 0, total: 0, hasRequested: false },
+              bathroom: { busy: 0, open: 0, done: 0, total: 0, hasRequested: false },
+              general:  { busy: 0, open: 0, done: 0, total: 0, hasRequested: false },
             };
             checklistTargets.forEach(t => {
               const sec = (t.template_section || '').toLowerCase();
               if (!(sec in stats)) return;
               if (t.requested_by) stats[sec].hasRequested = true;
-              if (t.status === 'done') return;
               stats[sec].total += 1;
+              if (t.status === 'done') { stats[sec].done += 1; return; }
+              stats[sec].open += 1;
               if (t.status === 'in_progress') stats[sec].busy += 1;
             });
             return TASK_CATEGORIES.map(c => {
-              const s = stats[c.id] || { busy: 0, total: 0, hasRequested: false };
+              const s = stats[c.id] || { busy: 0, open: 0, done: 0, total: 0, hasRequested: false };
               const inChecklist = checklistMode && checklistTargets.length > 0;
               const isOpen = category === c.id;
               const isEmpty = inChecklist && s.total === 0;
@@ -3253,8 +3254,16 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
                     if (s.total === 0) {
                       chipText = 'Not assigned';
                       chipColor = isOpen ? 'bg-stone-700 text-stone-300' : 'bg-stone-100 text-stone-500 border border-stone-200';
+                    } else if (s.open === 0) {
+                      // Nothing left open and the section has items → all done.
+                      chipText = 'Done';
+                      chipColor = isOpen ? 'bg-emerald-200 text-emerald-900' : 'bg-emerald-100 text-emerald-800 border border-emerald-300';
                     } else if (s.busy > 0) {
                       chipText = 'Started';
+                      chipColor = isOpen ? 'bg-amber-200 text-amber-900' : 'bg-amber-100 text-amber-800 border border-amber-300';
+                    } else if (s.done > 0) {
+                      // Some finished, some still to do.
+                      chipText = 'In progress';
                       chipColor = isOpen ? 'bg-amber-200 text-amber-900' : 'bg-amber-100 text-amber-800 border border-amber-300';
                     } else {
                       chipText = 'Not started';
@@ -3263,7 +3272,7 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
                     return (
                       <span className={`text-[8px] uppercase tracking-wide font-mono font-bold px-1.5 py-0.5 rounded-full max-w-full inline-flex items-center ${chipColor}`}>
                         <span className="truncate">{chipText}</span>
-                        {s.total > 0 && <span className="ml-1 opacity-75 flex-shrink-0">{s.busy}/{s.total}</span>}
+                        {s.total > 0 && <span className="ml-1 opacity-75 flex-shrink-0">{s.done}/{s.total}</span>}
                       </span>
                     );
                   })()}
@@ -3374,9 +3383,14 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
         // and paused ones are read-only and visually grayed out. This
         // gives the cleaner a holistic view of the section at a glance
         // rather than hiding what they've already started.
+        // Show pending / in_progress / paused (still-to-finish work) AND
+        // done, so the cleaner sees the whole section. Pending is interactive
+        // (checkboxes); in_progress/paused/done are read-only chrome. Done
+        // renders as a green completed row instead of vanishing, so "Started"
+        // never lingers on something that's actually finished.
         const items = checklistTargets.filter(t =>
           (t.template_section || '').toLowerCase() === category &&
-          (t.status === 'pending' || t.status === 'in_progress' || t.status === 'paused')
+          (t.status === 'pending' || t.status === 'in_progress' || t.status === 'paused' || t.status === 'done')
         );
         const pendingCount = items.filter(t => t.status === 'pending').length;
         if (items.length === 0) {
@@ -3442,41 +3456,50 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
                     {group.items.map(t => {
                       const checked = selectedTargetIds.has(t.id);
                       const itemKey = t.template_item_key || '';
-                      // Started/paused items are read-only chrome —
-                      // visible so the cleaner sees the full picture
-                      // of the section, but not interactive (they're
-                      // already underway).
+                      // Three read-only states now, not one:
+                      //   done         → finished, green, checked
+                      //   in_progress  → "Started", amber
+                      //   paused       → "Paused", amber
+                      // Only pending items stay interactive (a checkbox the
+                      // cleaner can tick to start). isLocked = any non-pending.
+                      const isDone = t.status === 'done';
                       const isStarted = t.status === 'in_progress' || t.status === 'paused';
-                      // Only show edit pencil for translated items in
-                      // checklist mode — cleaners can fix bad Spanish
-                      // labels. Requests (custom items) skipped since
-                      // their label is already the cleaner's own text.
+                      const isLocked = isDone || isStarted;
                       const canEditLabel = locale === 'es' && itemKey && !itemKey.startsWith('requested:');
                       return (
                         <div key={t.id} className={`flex items-start gap-1 rounded-xl border-2 transition-all ${
-                          isStarted
-                            ? 'border-stone-200 bg-stone-100 opacity-60'
-                            : checked
-                              ? 'border-amber-600 bg-amber-50'
-                              : 'border-stone-200 bg-white hover:border-stone-400'
+                          isDone
+                            ? 'border-emerald-200 bg-emerald-50 opacity-90'
+                            : isStarted
+                              ? 'border-stone-200 bg-stone-100 opacity-60'
+                              : checked
+                                ? 'border-amber-600 bg-amber-50'
+                                : 'border-stone-200 bg-white hover:border-stone-400'
                         }`}>
                           <button type="button"
-                            onClick={() => !isStarted && toggleTarget(t.id)}
-                            disabled={isStarted}
+                            onClick={() => !isLocked && toggleTarget(t.id)}
+                            disabled={isLocked}
                             className="flex items-start gap-2 px-3 py-2.5 text-left flex-1 min-w-0 disabled:cursor-not-allowed">
                             <div className={`mt-0.5 w-4 h-4 rounded border-2 flex-shrink-0 flex items-center justify-center ${
-                              isStarted
-                                ? 'border-stone-400 bg-stone-300'
-                                : checked
-                                  ? 'border-amber-600 bg-amber-600'
-                                  : 'border-stone-300'
+                              isDone
+                                ? 'border-emerald-600 bg-emerald-600'
+                                : isStarted
+                                  ? 'border-stone-400 bg-stone-300'
+                                  : checked
+                                    ? 'border-amber-600 bg-amber-600'
+                                    : 'border-stone-300'
                             }`}>
-                              {(checked || isStarted) && <Check size={11} className="text-white" />}
+                              {(checked || isLocked) && <Check size={11} className="text-white" />}
                             </div>
                             <div className="flex-1 min-w-0">
-                              <div className={`text-sm ${isStarted ? 'text-stone-500 line-through decoration-stone-400' : 'text-stone-900'}`}>
+                              <div className={`text-sm ${isLocked ? 'text-stone-500 line-through decoration-stone-400' : 'text-stone-900'}`}>
                                 {labelForTarget(t)}
                               </div>
+                              {isDone && (
+                                <span className="inline-block mt-0.5 text-[9px] uppercase tracking-wider font-mono px-1.5 py-0.5 rounded-full bg-emerald-100 border border-emerald-300 text-emerald-800 font-bold">
+                                  Done
+                                </span>
+                              )}
                               {isStarted && (
                                 <span className="inline-block mt-0.5 text-[9px] uppercase tracking-wider font-mono px-1.5 py-0.5 rounded-full bg-amber-100 border border-amber-300 text-amber-800 font-bold">
                                   {t.status === 'paused' ? 'Paused' : 'Started'}
@@ -9214,7 +9237,7 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
             <div className="space-y-4">
               {finishedHere.length > 0 && (
                 <div>
-                  <div className="text-[10px] uppercase tracking-wider text-stone-400 font-mono mb-2">This session · tap Start to pick it back up</div>
+                  <div className="text-[10px] uppercase tracking-wider text-stone-400 font-mono mb-2">This session · tap Reopen task to pick it back up</div>
                   <div className="space-y-3">
                     {finishedHere.map(t => (
                       <TaskCard key={t.id} task={t} isActive={false}
@@ -10828,9 +10851,9 @@ function TaskCard({ task, isActive, onStop, onResume, onAddPhoto }) {
         {isDone ? (
           <button onClick={onResume}
             style={{ touchAction: 'manipulation' }}
-            aria-label="Start this task again"
-            className="ml-2 h-9 px-4 rounded-full bg-stone-100 text-stone-700 text-sm font-medium flex items-center gap-1.5 active:scale-95 transition-transform">
-            <Play size={14} /> Start
+            aria-label="Reopen this task"
+            className="ml-2 h-9 px-4 rounded-full bg-stone-100 text-stone-700 text-sm font-medium active:scale-95 transition-transform">
+            Reopen task
           </button>
         ) : (
           <button onClick={onStop}

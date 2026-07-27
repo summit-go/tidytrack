@@ -106,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul23-tap74";
+const BUILD_TAG = "jul24-tap77";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -1222,10 +1222,31 @@ function Splash({ text }) {
 // it stays out of PM printouts.
 function ScreenId({ id }) {
   return (
-    <div className="fixed bottom-16 right-2 z-[45] pointer-events-none select-none print:hidden flex items-center gap-1.5 px-2 py-1 rounded-lg bg-stone-900/90 border border-amber-400/50 shadow-lg">
+    <div className="fixed top-1 right-2 z-[60] pointer-events-none select-none print:hidden flex items-center gap-1.5 px-2 py-0.5 rounded-lg bg-stone-900/90 border border-amber-400/50 shadow-lg">
       <span className="text-[10px] font-mono font-bold uppercase tracking-widest text-amber-300 leading-none">{id}</span>
       <span className="text-[9px] font-mono text-stone-400 leading-none">{BUILD_TAG}</span>
     </div>
+  );
+}
+
+// Wrap any control that only owners should see. Cleaners and managers get
+// nothing (the control is fully removed for them, not just disabled — a
+// disabled Block button would still read as "a thing I might be able to
+// do"). For owners it renders the control plus an "owners only" marker:
+// a native hover tooltip AND a small lock badge, so when Allan is testing
+// he can tell at a glance which buttons his cleaners can't see. Toggle the
+// badge off with badge={false} where space is tight.
+function OwnerOnly({ employee, children, label = 'Owners only', badge = true }) {
+  if (!isOwner(employee)) return null;
+  return (
+    <span className="relative inline-flex items-center" title={label}>
+      {children}
+      {badge && (
+        <span className="ml-1 inline-flex items-center gap-0.5 text-[8px] font-mono uppercase tracking-wider px-1 py-0.5 rounded bg-amber-100 text-amber-800 border border-amber-200 select-none">
+          <Lock size={7} /> owner
+        </span>
+      )}
+    </span>
   );
 }
 
@@ -7882,7 +7903,7 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
           </div>
         )}
         <div className="mt-2 flex items-center gap-2 text-xs text-stone-400 font-mono flex-wrap">
-          <span className="inline-flex items-center gap-1 text-stone-200"><Clock size={11} /> {fmtTime(elapsed)}</span>
+          <span className="inline-flex items-center gap-1 text-stone-200"><Clock size={11} /> {fmtTime(elapsed)} <span className="text-stone-400 normal-case">clocked in</span></span>
           <span className="text-stone-600">·</span>
           <span>Started {fmtClock(shift.start_time)}</span>
           <span className="text-stone-600">·</span>
@@ -8896,8 +8917,18 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
   // 'done'   = finished workblocks at this bedroom today (yours + others)
   // Opens on Active when a task is already running, else New.
   const [blockTab, setBlockTab] = useState(() => activeTask ? 'active' : 'new');
-  // Auto-jump to Active the moment a task starts (activeTask becomes set).
-  useEffect(() => { if (activeTask) setBlockTab('active'); }, [activeTask]);
+  // Auto-jump to Active the moment a task starts, and back to New the moment
+  // the running task is marked Done (activeTask clears). Landing on New drops
+  // the cleaner straight onto the checklist to pick their next item, instead
+  // of an empty Active tab. Tracks the previous value so switching between
+  // tabs by hand while idle doesn't yank them around.
+  const prevActiveTaskRef = useRef(activeTask);
+  useEffect(() => {
+    const had = prevActiveTaskRef.current;
+    if (activeTask) setBlockTab('active');
+    else if (had) setBlockTab('new'); // a task just finished
+    prevActiveTaskRef.current = activeTask;
+  }, [activeTask]);
 
   // Finished workblocks at THIS bedroom today — closed blocks only, mine +
   // others, grouped by workblock. Powers the Done tab and replaces the old
@@ -9183,7 +9214,7 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
             <div className="space-y-4">
               {finishedHere.length > 0 && (
                 <div>
-                  <div className="text-[10px] uppercase tracking-wider text-stone-400 font-mono mb-2">This session · tap ▶ to resume</div>
+                  <div className="text-[10px] uppercase tracking-wider text-stone-400 font-mono mb-2">This session · tap Start to pick it back up</div>
                   <div className="space-y-3">
                     {finishedHere.map(t => (
                       <TaskCard key={t.id} task={t} isActive={false}
@@ -9207,9 +9238,9 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
                               <User size={11} /> {b.mine ? 'You' : b.ownerName}
                             </span>
                             <button onClick={() => handleReopenDone(b)} disabled={busy}
-                              aria-label="Reopen workblock"
-                              className="w-9 h-9 rounded-full bg-stone-900 text-stone-50 flex items-center justify-center active:scale-95 transition-transform disabled:opacity-40">
-                              <Play size={15} />
+                              aria-label="Start this workblock again"
+                              className="h-9 px-4 rounded-full bg-stone-900 text-stone-50 text-sm font-medium flex items-center gap-1.5 active:scale-95 transition-transform disabled:opacity-40">
+                              <Play size={14} /> Start
                             </button>
                           </div>
                           <div className="mt-2.5 flex flex-wrap gap-x-3 gap-y-1">
@@ -9221,7 +9252,7 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
                             {fmtClock(b.start_time)} – {fmtClock(b.end_time)}{dur ? ` · ${fmtTimeShort(dur)}` : ''} · {bTasks.length} task{bTasks.length === 1 ? '' : 's'}
                           </div>
                           <div className="mt-2 text-[10px] text-stone-500 font-mono flex items-center gap-1.5">
-                            <Play size={11} /> {b.mine ? 'Tap play to reopen and keep working' : `Tap play to reopen ${b.ownerName}'s block`}
+                            <Play size={11} /> {b.mine ? 'Tap Start to reopen and keep working' : `Tap Start to reopen ${b.ownerName}'s block`}
                           </div>
                         </div>
                       );
@@ -10704,8 +10735,8 @@ function ActiveWorkblockCard({ task, onStop, onAddPhoto }) {
         </div>
         <button onClick={onStop}
           style={{ touchAction: 'manipulation' }}
-          className="px-4 py-2.5 rounded-full bg-stone-900 text-stone-50 text-sm font-medium flex items-center gap-1 active:scale-95 transition-transform">
-          <Pause size={14} /> Done
+          className="px-5 py-2.5 rounded-full bg-stone-900 text-stone-50 text-sm font-medium active:scale-95 transition-transform">
+          Done
         </button>
       </div>
       {/* Four buckets, 2x2 rather than four cramped across — these are
@@ -10797,8 +10828,9 @@ function TaskCard({ task, isActive, onStop, onResume, onAddPhoto }) {
         {isDone ? (
           <button onClick={onResume}
             style={{ touchAction: 'manipulation' }}
-            className="ml-2 p-3 rounded-full bg-stone-100 text-stone-600 active:scale-95 transition-transform">
-            <Play size={14} />
+            aria-label="Start this task again"
+            className="ml-2 h-9 px-4 rounded-full bg-stone-100 text-stone-700 text-sm font-medium flex items-center gap-1.5 active:scale-95 transition-transform">
+            <Play size={14} /> Start
           </button>
         ) : (
           <button onClick={onStop}
@@ -11501,13 +11533,15 @@ function ManagerShell({ employee, onSignOut }) {
   if (previewMode) {
     return (
       <div className="min-h-screen bg-stone-50">
-        <div className="bg-amber-600 text-white px-4 py-2 text-xs font-mono flex items-center justify-between sticky top-0 z-50">
-          <div className="flex items-center gap-2">
-            <Eye size={12} /> Preview as cleaner — actions don't affect reports or payroll
+        <div className="bg-amber-600 text-white px-3 py-1 text-[10px] font-mono flex items-center justify-between gap-2 sticky top-0 z-50">
+          <div className="flex items-center gap-1.5 min-w-0">
+            <Eye size={11} className="flex-shrink-0" />
+            <span className="font-bold">Preview · cleaner</span>
+            <span className="text-white/70 truncate hidden sm:inline">— doesn't affect reports</span>
           </div>
           <button onClick={exitPreviewMode}
-            className="px-2 py-0.5 rounded bg-white/20 hover:bg-white/30">
-            Exit preview
+            className="px-2 py-0.5 rounded bg-white/20 hover:bg-white/30 flex-shrink-0">
+            Exit
           </button>
         </div>
         <EmployeeApp employee={employee} previewMode={true}
@@ -21926,9 +21960,13 @@ function PortalApp({ previewMode = false, previewEmployee = null, onExitPreview 
 
   const withPreviewBanner = (node) => previewMode ? (
     <div className="min-h-screen bg-stone-50">
-      <div className="bg-indigo-600 text-white px-4 py-2 text-xs font-mono flex items-center justify-between sticky top-0 z-50">
-        <div className="flex items-center gap-2"><Eye size={12} /> Preview as PM — this is what your property managers see</div>
-        <button onClick={() => onExitPreview && onExitPreview()} className="px-2 py-0.5 rounded bg-white/20 hover:bg-white/30">Exit preview</button>
+      <div className="bg-indigo-600 text-white px-3 py-1 text-[10px] font-mono flex items-center justify-between gap-2 sticky top-0 z-50">
+        <div className="flex items-center gap-1.5 min-w-0">
+          <Eye size={11} className="flex-shrink-0" />
+          <span className="font-bold">Preview · PM</span>
+          <span className="text-white/70 truncate hidden sm:inline">— what your PMs see</span>
+        </div>
+        <button onClick={() => onExitPreview && onExitPreview()} className="px-2 py-0.5 rounded bg-white/20 hover:bg-white/30 flex-shrink-0">Exit</button>
       </div>
       {node}
     </div>
@@ -30554,7 +30592,13 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
               {propertyName && <div className="font-serif text-2xl text-stone-50 leading-tight truncate">{propertyName}</div>}
             </div>
             {elapsedMs != null && (
-              <div className="font-mono text-2xl text-stone-50 tracking-tight tabular-nums flex-shrink-0">{fmtTime(elapsedMs)}</div>
+              /* This is the block clock — time cleaning THIS bedroom, not the
+                 shift clock. Labelled so it can't be mistaken for clocked-in
+                 time (which lives on the Home screen as "On the clock"). */
+              <div className="text-right flex-shrink-0">
+                <div className="text-[9px] uppercase tracking-widest text-stone-400 font-mono leading-none mb-0.5">Cleaning time</div>
+                <div className="font-mono text-2xl text-stone-50 tracking-tight tabular-nums leading-none">{fmtTime(elapsedMs)}</div>
+              </div>
             )}
           </div>
         </div>
@@ -30614,6 +30658,7 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
             onTogglePriority={togglePriority}
               canMarkDone={can(employee, 'mark_assignments_done') || t.started_by === employee?.id}
               canMarkDoneAlways={can(employee, 'mark_assignments_done')}
+              ownerView={isOwner(employee)}
               currentEmployeeId={employee?.id}
               canEditDates={can(employee, 'edit_due_dates')}
               onSetDueDate={async (aid, date) => { if (aid) { await supabase.from('assignments').update({ scheduled_date: date }).eq('id', aid); load(); } }}
@@ -30878,13 +30923,15 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
                 {/* The owner/manager "mark complete" + "delete" actions moved
                    to compact icons at the right end of this row (below). */}
                 {!isAllDone && (
+                  <OwnerOnly employee={employee}>
                   <button onClick={() => setStatusModal({ target: rep, bulkRows: openItems })} disabled={busy || bundleGated}
-                    title={bundleGated ? 'Start cleaning before marking blocked' : ''}
+                    title={bundleGated ? 'Start cleaning before marking blocked' : 'Owners only'}
                     className={`h-9 px-3 rounded-lg text-xs font-medium flex items-center gap-1 border ${bundleGated
                       ? 'bg-stone-100 border-stone-200 text-stone-400 cursor-not-allowed'
                       : 'border-red-200 hover:bg-red-50 text-red-700 disabled:opacity-50'}`}>
                     <AlertCircle size={12} /> Block
                   </button>
+                  </OwnerOnly>
                 )}
                 {!isAllDone && (
                   <button onClick={() => setReassignTarget(rep)} disabled={busy}
@@ -31009,7 +31056,7 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
 }
 
 // Reusable card for one assignment target, used in banner + panel
-function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPending, onDone, onReopen, onBlocked, onReassign, onDelete, onGoToBedroom, onOpenBedroomHistory, onTogglePriority, canMarkDone = true, canMarkDoneAlways = false, currentEmployeeId, propertyId, canEditDates = false, onSetDueDate, dark = false, workScreen = false, onStartCleaning = null, onExit = null }) {
+function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPending, onDone, onReopen, onBlocked, onReassign, onDelete, onGoToBedroom, onOpenBedroomHistory, onTogglePriority, canMarkDone = true, canMarkDoneAlways = false, currentEmployeeId, propertyId, canEditDates = false, onSetDueDate, dark = false, workScreen = false, onStartCleaning = null, onExit = null, ownerView = false }) {
   const t = target;
   // Dark variant — used when this card is folded into the cleaner's black
   // "Working on" header. Only the neutral surfaces flip; colored status /
@@ -31276,20 +31323,17 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
             <Play size={12} /> Reopen
           </button>
         )}
-        {(t.status === 'pending' || t.status === 'in_progress' || t.status === 'paused') && (() => {
-          // Same rule as Mark complete: you can't block work you haven't
-          // started. Keep the button visible but greyed on pending so the
-          // cleaner sees it exists — owners/managers (mark_assignments_done)
-          // can block without starting, so never disabled for them.
-          const blockDisabled = t.status === 'pending' && !canMarkDoneAlways;
+        {ownerView && (t.status === 'pending' || t.status === 'in_progress' || t.status === 'paused') && (() => {
+          // Block is owner-only now. Owners can block without starting, so
+          // it's never disabled for them here.
           return (
-            <button onClick={onBlocked} disabled={busy || blockDisabled}
-              title={blockDisabled ? 'Start this assignment before marking it blocked' : ''}
-              className={`h-9 px-3 rounded-lg text-xs font-medium flex items-center gap-1 border ${blockDisabled
-                ? 'bg-stone-100 border-stone-200 text-stone-400 cursor-not-allowed'
-                : 'border-red-200 hover:bg-red-50 text-red-700 disabled:opacity-50'}`}>
+            <OwnerOnly employee={{ role: 'owner' }}>
+            <button onClick={onBlocked} disabled={busy}
+              title="Owners only"
+              className="h-9 px-3 rounded-lg text-xs font-medium flex items-center gap-1 border border-red-200 hover:bg-red-50 text-red-700 disabled:opacity-50">
               <AlertCircle size={12} /> Block
             </button>
+            </OwnerOnly>
           );
         })()}
         {onReassign && (t.unit_id || t.party_id) && (
@@ -31895,10 +31939,13 @@ function SuggestedTabContent({ propertyId, employee, onGoToBedroom, onOpenBedroo
                   <Check size={12} /> Mark complete
                 </button>
               )}
+              <OwnerOnly employee={employee}>
               <button onClick={() => setStatusModal({ target: rep, bulkRows: items })} disabled={busy}
+                title="Owners only"
                 className="h-9 px-3 rounded-lg border border-red-200 hover:bg-red-50 text-red-700 text-xs font-medium flex items-center gap-1 disabled:opacity-50">
                 <AlertCircle size={12} /> Block
               </button>
+              </OwnerOnly>
               <button onClick={() => setReassignTarget(rep)} disabled={busy}
                 className="h-9 px-3 rounded-lg border border-stone-300 hover:bg-stone-50 text-stone-700 text-xs font-medium flex items-center gap-1 disabled:opacity-50">
                 <User size={12} /> Reassign
@@ -32696,6 +32743,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                 onTogglePriority={togglePriority}
               canMarkDone={can(employee, 'mark_assignments_done') || t.started_by === employee?.id}
               canMarkDoneAlways={can(employee, 'mark_assignments_done')}
+              ownerView={isOwner(employee)}
               currentEmployeeId={employee?.id}
                 onGoToBedroom={onGoToBedroom ? () => startAndGo(t) : null}
                 canEditDates={can(employee, 'edit_due_dates')}
@@ -33183,10 +33231,13 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                               </button>
                             )}
                             {!allDone && (
+                              <OwnerOnly employee={employee}>
                               <button onClick={() => setStatusModal({ target: firstTarget, bulkRows: newItems })} disabled={busy}
+                                title="Owners only"
                                 className="h-9 px-3 rounded-lg border border-red-200 hover:bg-red-50 text-red-700 text-xs font-medium flex items-center gap-1 disabled:opacity-50">
                                 <AlertCircle size={12} /> Block
                               </button>
+                              </OwnerOnly>
                             )}
                             {!allDone && (
                               <button onClick={() => setReassignTarget(firstTarget)} disabled={busy}
@@ -33232,6 +33283,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                             onTogglePriority={togglePriority}
                             canMarkDone={can(employee, 'mark_assignments_done') || t.started_by === employee?.id}
               canMarkDoneAlways={can(employee, 'mark_assignments_done')}
+              ownerView={isOwner(employee)}
                             currentEmployeeId={employee?.id}
                             onGoToBedroom={onGoToBedroom ? () => startAndGo(t) : null}
                             canEditDates={can(employee, 'edit_due_dates')}

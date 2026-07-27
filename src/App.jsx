@@ -25,6 +25,7 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 // =================================================================
 const GOOGLE_TRANSLATE_API_KEY = "AIzaSyD7ceHPryMzs45hWJOyFNBxtOzQOEmJcSA";
 
+
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // ============================================================
@@ -106,7 +107,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul24-tap82";
+const BUILD_TAG = "jul24-tap84";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -1222,7 +1223,7 @@ function Splash({ text }) {
 // it stays out of PM printouts.
 function ScreenId({ id }) {
   return (
-    <div className="fixed top-1 right-2 z-[60] pointer-events-none select-none print:hidden flex items-center gap-1.5 px-2 py-0.5 rounded-lg bg-stone-900/90 border border-amber-400/50 shadow-lg">
+    <div className="fixed top-1 left-1/2 -translate-x-1/2 z-[60] pointer-events-none select-none print:hidden flex items-center gap-1.5 px-2 py-0.5 rounded-lg bg-stone-900/90 border border-amber-400/50 shadow-lg">
       <span className="text-[10px] font-mono font-bold uppercase tracking-widest text-amber-300 leading-none">{id}</span>
       <span className="text-[9px] font-mono text-stone-400 leading-none">{BUILD_TAG}</span>
     </div>
@@ -14696,6 +14697,10 @@ function PortalUserForm({ employee, user, allProperties, onCancel, onSaved }) {
   // assignment flow. Default OFF — we steer PMs toward the new
   // structured checklist wizard.
   const [allowLegacyUploads, setAllowLegacyUploads] = useState(!!user?.allow_legacy_uploads);
+  // Per-PM permission: when ON, this user sees the Invoices tab in the
+  // portal and can view/download the invoices the owner has marked sent.
+  // Default OFF — invoices are money info, so it's opt-in per person.
+  const [canViewInvoices, setCanViewInvoices] = useState(!!user?.can_view_invoices);
   const [assignedPropIds, setAssignedPropIds] = useState(
     new Set((user?.properties || []).map(p => p.id))
   );
@@ -14747,6 +14752,7 @@ function PortalUserForm({ employee, user, allProperties, onCancel, onSaved }) {
         notes: notes.trim() || null,
         active,
         allow_legacy_uploads: allowLegacyUploads,
+        can_view_invoices: canViewInvoices,
         created_by: employee.id,
       }).select().single();
       if (e) {
@@ -14764,6 +14770,7 @@ function PortalUserForm({ employee, user, allProperties, onCancel, onSaved }) {
         notes: notes.trim() || null,
         active,
         allow_legacy_uploads: allowLegacyUploads,
+        can_view_invoices: canViewInvoices,
       }).eq('id', user.id);
       if (e) {
         setBusy(false);
@@ -14908,6 +14915,22 @@ function PortalUserForm({ employee, user, allProperties, onCancel, onSaved }) {
               <div className="text-sm font-medium text-stone-900">Allow legacy file uploads</div>
               <div className="text-xs text-stone-500">
                 When off (default), this user only sees the new checklist wizard and the legacy file-upload button is greyed out. Turn this on only if this PM specifically needs the old file/photo workflow.
+              </div>
+            </div>
+          </label>
+        )}
+
+        {/* Invoice access — owner toggles per person. Off by default since
+           invoices are financial. When on, this PM gets the Invoices tab and
+           can view/download every invoice marked sent for their properties. */}
+        {kind !== 'tenant' && (
+          <label className="flex items-center gap-3 p-3 rounded-xl bg-stone-50">
+            <input type="checkbox" checked={canViewInvoices}
+              onChange={(e) => setCanViewInvoices(e.target.checked)} />
+            <div>
+              <div className="text-sm font-medium text-stone-900">View invoices</div>
+              <div className="text-xs text-stone-500">
+                When on, this user sees an Invoices tab in their portal with every invoice you've marked sent for their properties — view and download only, they can't change anything. Off by default.
               </div>
             </div>
           </label>
@@ -22236,6 +22259,15 @@ function PortalHome({ property, portalKind, portalUser, properties, onSwitchProp
   const setTab = setTabProp || setOwnTab;
   const asgSub = asgSubProp !== undefined ? asgSubProp : ownAsgSub;
   const setAsgSub = setAsgSubProp || setOwnAsgSub;
+  // Per-PM invoice access. Owners/managers viewing the portal (preview) and
+  // anyone with the can_view_invoices flag get the Invoices tab. A previewing
+  // owner (__preview) always sees it so they can check what a PM would.
+  const canViewInvoices = !!portalUser?.can_view_invoices || !!portalUser?.__preview;
+  // If invoices was the persisted tab but this user can't see it, fall back.
+  useEffect(() => {
+    if (tab === 'invoices' && !canViewInvoices) setTab('history');
+    /* eslint-disable-next-line */
+  }, [tab, canViewInvoices]);
   const [groups, setGroups] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [ownFilter, setOwnFilter] = useState('7d');
@@ -22500,10 +22532,12 @@ function PortalHome({ property, portalKind, portalUser, properties, onSwitchProp
             className={`flex-1 py-2 px-2 rounded-lg text-xs font-medium ${tab === 'assignments' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
             Assignments
           </button>
-          <button onClick={() => setTab('invoices')}
-            className={`flex-1 py-2 px-2 rounded-lg text-xs font-medium ${tab === 'invoices' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
-            Invoices
-          </button>
+          {canViewInvoices && (
+            <button onClick={() => setTab('invoices')}
+              className={`flex-1 py-2 px-2 rounded-lg text-xs font-medium ${tab === 'invoices' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+              Invoices
+            </button>
+          )}
         </div>
       </div>
 
@@ -22545,7 +22579,7 @@ function PortalHome({ property, portalKind, portalUser, properties, onSwitchProp
         </div>
       )}
 
-      {tab === 'invoices' && (
+      {tab === 'invoices' && canViewInvoices && (
         <PortalInvoicesTab property={property} />
       )}
 

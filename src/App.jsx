@@ -106,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul24-tap81";
+const BUILD_TAG = "jul24-tap82";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -19194,7 +19194,7 @@ function fmtInvoiceDate(d) {
 // invoice + its lines and renders the polished layout matching the
 // company's PDF, with print / status / delete actions.
 // =================================================================
-function InvoiceDocument({ invoiceId, data, preview, onBack, onChanged, onEditDraft, saving = false, onSaveDraft, onSaveSent, onSavePaid }) {
+function InvoiceDocument({ invoiceId, data, preview, onBack, onChanged, onEditDraft, saving = false, onSaveDraft, onSaveSent, onSavePaid, readOnly = false }) {
   const [inv, setInv] = useState(null);
   const [lines, setLines] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -19255,7 +19255,7 @@ function InvoiceDocument({ invoiceId, data, preview, onBack, onChanged, onEditDr
           <ArrowLeft size={16} /> {preview ? 'Back to draft' : 'Back'}
         </button>
         <div className="flex items-center gap-2 flex-wrap">
-          {preview && (
+          {!readOnly && preview && (
             <>
               <span className="text-xs font-mono text-amber-700 px-2 py-1 rounded bg-amber-50">Preview</span>
               {onSaveDraft && (
@@ -19278,15 +19278,15 @@ function InvoiceDocument({ invoiceId, data, preview, onBack, onChanged, onEditDr
               )}
             </>
           )}
-          {!preview && inv.status === 'draft' && onEditDraft && (
+          {!readOnly && !preview && inv.status === 'draft' && onEditDraft && (
             <button onClick={() => { if (confirm('Reopen this invoice to edit? Your prices, overrides and notes are kept, and any newer cleanings in the period merge in.')) onEditDraft(inv); }}
               disabled={working} className="px-3 py-1.5 rounded-lg bg-amber-600 text-white text-xs font-medium disabled:opacity-50">Edit / add cleanings</button>
           )}
-          {!preview && inv.status !== 'sent' && <button onClick={() => setStatus('sent')} disabled={working} className="px-3 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-medium disabled:opacity-50">Mark sent</button>}
-          {!preview && inv.status !== 'paid' && <button onClick={() => setStatus('paid')} disabled={working} className="px-3 py-1.5 rounded-lg bg-emerald-600 text-white text-xs font-medium disabled:opacity-50">Mark paid</button>}
-          {!preview && inv.status !== 'draft' && <button onClick={() => setStatus('draft')} disabled={working} className="px-3 py-1.5 rounded-lg bg-white border border-stone-300 text-stone-600 text-xs">Back to draft</button>}
-          <button onClick={() => window.print()} className="px-3 py-1.5 rounded-lg bg-stone-900 text-white text-xs font-medium flex items-center gap-1.5"><FileText size={13} /> Print / PDF</button>
-          {!preview && <button onClick={del} disabled={working} className="p-1.5 rounded-lg text-stone-400 hover:text-red-600 hover:bg-red-50"><Trash2 size={15} /></button>}
+          {!readOnly && !preview && inv.status !== 'sent' && <button onClick={() => setStatus('sent')} disabled={working} className="px-3 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-medium disabled:opacity-50">Mark sent</button>}
+          {!readOnly && !preview && inv.status !== 'paid' && <button onClick={() => setStatus('paid')} disabled={working} className="px-3 py-1.5 rounded-lg bg-emerald-600 text-white text-xs font-medium disabled:opacity-50">Mark paid</button>}
+          {!readOnly && !preview && inv.status !== 'draft' && <button onClick={() => setStatus('draft')} disabled={working} className="px-3 py-1.5 rounded-lg bg-white border border-stone-300 text-stone-600 text-xs">Back to draft</button>}
+          <button onClick={() => window.print()} className="px-3 py-1.5 rounded-lg bg-stone-900 text-white text-xs font-medium flex items-center gap-1.5"><FileText size={13} /> {readOnly ? 'Download / print' : 'Print / PDF'}</button>
+          {!readOnly && !preview && <button onClick={del} disabled={working} className="p-1.5 rounded-lg text-stone-400 hover:text-red-600 hover:bg-red-50"><Trash2 size={15} /></button>}
         </div>
       </div>
 
@@ -22500,6 +22500,10 @@ function PortalHome({ property, portalKind, portalUser, properties, onSwitchProp
             className={`flex-1 py-2 px-2 rounded-lg text-xs font-medium ${tab === 'assignments' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
             Assignments
           </button>
+          <button onClick={() => setTab('invoices')}
+            className={`flex-1 py-2 px-2 rounded-lg text-xs font-medium ${tab === 'invoices' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+            Invoices
+          </button>
         </div>
       </div>
 
@@ -22541,6 +22545,10 @@ function PortalHome({ property, portalKind, portalUser, properties, onSwitchProp
         </div>
       )}
 
+      {tab === 'invoices' && (
+        <PortalInvoicesTab property={property} />
+      )}
+
       {showWelcome && (
         <WelcomeModal propertyName={property.name} onClose={dismissWelcome} />
       )}
@@ -22573,6 +22581,86 @@ function PortalHome({ property, portalKind, portalUser, properties, onSwitchProp
 }
 
 // History tab — the original PortalHome content extracted
+// PM-side invoices. Shows every invoice the owner has marked sent (or paid)
+// for this property, so PMs can view and download the same document the owner
+// emailed them, and keep their own running record. Read-only — PMs can't
+// change status, edit, or delete. Drafts never appear here; an invoice only
+// surfaces once the owner marks it sent.
+function PortalInvoicesTab({ property }) {
+  const [invoices, setInvoices] = useState(null);
+  const [viewId, setViewId] = useState(null);
+
+  const load = async () => {
+    const { data, error } = await supabase.from('invoices')
+      .select('id, invoice_number, title, created_at, invoice_date, due_date, sent_at, total, status')
+      .eq('customer_id', property.id)
+      .in('status', ['sent', 'paid'])
+      .order('sent_at', { ascending: false, nullsFirst: false })
+      .order('created_at', { ascending: false });
+    if (error) { console.warn('[portal invoices] load failed', error); setInvoices([]); return; }
+    setInvoices(data || []);
+  };
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, [property.id]);
+
+  const fmtDay = (iso) => iso ? new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '—';
+
+  if (viewId) {
+    return <InvoiceDocument invoiceId={viewId} readOnly onBack={() => setViewId(null)} />;
+  }
+
+  if (invoices === null) {
+    return <div className="px-5 py-10 text-center text-stone-400 text-sm">Loading…</div>;
+  }
+
+  return (
+    <div className="px-5 pt-4 pb-28">
+      <div className="mb-4">
+        <h2 className="font-serif text-2xl text-stone-900 mb-1">Invoices</h2>
+        <p className="text-sm text-stone-600">Invoices from Summit Clean for {property.name}. Tap one to view or download.</p>
+      </div>
+
+      {invoices.length === 0 ? (
+        <div className="rounded-2xl bg-stone-50 border border-stone-200 p-8 text-center">
+          <FileText size={22} className="inline text-stone-300 mb-2" />
+          <div className="text-sm text-stone-500">No invoices yet.</div>
+          <div className="text-[11px] text-stone-400 font-mono mt-1">They'll show up here once they're sent to you.</div>
+        </div>
+      ) : (
+        <div className="space-y-2.5">
+          {invoices.map(inv => {
+            const paid = inv.status === 'paid';
+            return (
+              <button key={inv.id} onClick={() => setViewId(inv.id)}
+                className="w-full text-left rounded-2xl bg-white border border-stone-200 p-4 hover:border-stone-400 active:scale-[0.99] transition-all flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="font-serif text-lg text-stone-900">
+                      {inv.invoice_number ? `#${inv.invoice_number}` : (inv.title || 'Invoice')}
+                    </span>
+                    <span className={`text-[9px] uppercase tracking-wider font-mono px-1.5 py-0.5 rounded-full font-bold ${
+                      paid ? 'bg-emerald-100 text-emerald-800 border border-emerald-200'
+                           : 'bg-blue-100 text-blue-800 border border-blue-200'}`}>
+                      {paid ? 'Paid' : 'Received'}
+                    </span>
+                  </div>
+                  <div className="text-[11px] text-stone-500 font-mono mt-1">
+                    Sent {fmtDay(inv.sent_at || inv.created_at)}
+                    {inv.due_date && ` · due ${fmtDay(inv.due_date)}`}
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 flex-shrink-0">
+                  <span className="font-mono text-lg text-stone-900 tabular-nums">{inv.total != null ? fmtMoney(Number(inv.total)) : '—'}</span>
+                  <ChevronRight size={16} className="text-stone-400" />
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function PortalHistoryTab({ property, groups, loaded, filter, setFilter, onOpenUnitDay }) {
   // Filters — PM-appropriate. Date, building, and apartment. We
   // intentionally don't expose category/cleaner filters here because PMs

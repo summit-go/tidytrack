@@ -106,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul24-tap80";
+const BUILD_TAG = "jul24-tap81";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -2770,15 +2770,10 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
   const checklistMode = !!(customerId && unitId && partyId);
   const loadChecklistTargets = async () => {
     if (!checklistMode) { setChecklistTargets([]); return; }
-    // Include done items (exclude only blocked) so the picker can show
-    // finished work as a green "Done" row instead of it vanishing — which
-    // was leaving completed items looking like they were never touched, or
-    // stuck on "Started". The section stats and item rows decide how each
-    // status renders.
     const { data } = await supabase.from('assignment_targets')
       .select('*, assignment:assignments!inner(id, customer_id, active, source, pm_status, deleted_at, sheet_type, template_set_id, bathroom_variant, general_variant)')
       .eq('unit_id', unitId).eq('party_id', partyId)
-      .neq('status', 'blocked');
+      .not('status', 'in', '(done,blocked)');
     const open = (data || []).filter(t =>
       t.assignment?.customer_id === customerId &&
       t.assignment?.active &&
@@ -3179,28 +3174,27 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
         <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Pick what you'll clean</label>
         <div className="grid grid-cols-4 gap-2">
           {(() => {
-            // Per-section counts. open = pending+in_progress+paused (work
-            // still to finish), busy = in_progress (being worked right now),
-            // done = completed, total = everything assigned here. We keep
-            // done so the card can say "Done" once the section is finished
-            // instead of forever reading "Started".
+            // Per-section counts. total = pending+in_progress (work
+            // that exists at this bedroom for this section), busy =
+            // in_progress (currently being worked). hasRequested = at
+            // least one requested-by target exists in this section, so
+            // the section card can show a "Requested" badge.
             const stats = {
-              bedroom:  { busy: 0, open: 0, done: 0, total: 0, hasRequested: false },
-              vanity:   { busy: 0, open: 0, done: 0, total: 0, hasRequested: false },
-              bathroom: { busy: 0, open: 0, done: 0, total: 0, hasRequested: false },
-              general:  { busy: 0, open: 0, done: 0, total: 0, hasRequested: false },
+              bedroom:  { busy: 0, total: 0, hasRequested: false },
+              vanity:   { busy: 0, total: 0, hasRequested: false },
+              bathroom: { busy: 0, total: 0, hasRequested: false },
+              general:  { busy: 0, total: 0, hasRequested: false },
             };
             checklistTargets.forEach(t => {
               const sec = (t.template_section || '').toLowerCase();
               if (!(sec in stats)) return;
               if (t.requested_by) stats[sec].hasRequested = true;
+              if (t.status === 'done') return;
               stats[sec].total += 1;
-              if (t.status === 'done') { stats[sec].done += 1; return; }
-              stats[sec].open += 1;
               if (t.status === 'in_progress') stats[sec].busy += 1;
             });
             return TASK_CATEGORIES.map(c => {
-              const s = stats[c.id] || { busy: 0, open: 0, done: 0, total: 0, hasRequested: false };
+              const s = stats[c.id] || { busy: 0, total: 0, hasRequested: false };
               const inChecklist = checklistMode && checklistTargets.length > 0;
               const isOpen = category === c.id;
               const isEmpty = inChecklist && s.total === 0;
@@ -3259,16 +3253,8 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
                     if (s.total === 0) {
                       chipText = 'Not assigned';
                       chipColor = isOpen ? 'bg-stone-700 text-stone-300' : 'bg-stone-100 text-stone-500 border border-stone-200';
-                    } else if (s.open === 0) {
-                      // Nothing left open and the section has items → all done.
-                      chipText = 'Done';
-                      chipColor = isOpen ? 'bg-emerald-200 text-emerald-900' : 'bg-emerald-100 text-emerald-800 border border-emerald-300';
                     } else if (s.busy > 0) {
                       chipText = 'Started';
-                      chipColor = isOpen ? 'bg-amber-200 text-amber-900' : 'bg-amber-100 text-amber-800 border border-amber-300';
-                    } else if (s.done > 0) {
-                      // Some finished, some still to do.
-                      chipText = 'In progress';
                       chipColor = isOpen ? 'bg-amber-200 text-amber-900' : 'bg-amber-100 text-amber-800 border border-amber-300';
                     } else {
                       chipText = 'Not started';
@@ -3277,7 +3263,7 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
                     return (
                       <span className={`text-[8px] uppercase tracking-wide font-mono font-bold px-1.5 py-0.5 rounded-full max-w-full inline-flex items-center ${chipColor}`}>
                         <span className="truncate">{chipText}</span>
-                        {s.total > 0 && <span className="ml-1 opacity-75 flex-shrink-0">{s.done}/{s.total}</span>}
+                        {s.total > 0 && <span className="ml-1 opacity-75 flex-shrink-0">{s.busy}/{s.total}</span>}
                       </span>
                     );
                   })()}
@@ -3388,14 +3374,9 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
         // and paused ones are read-only and visually grayed out. This
         // gives the cleaner a holistic view of the section at a glance
         // rather than hiding what they've already started.
-        // Show pending / in_progress / paused (still-to-finish work) AND
-        // done, so the cleaner sees the whole section. Pending is interactive
-        // (checkboxes); in_progress/paused/done are read-only chrome. Done
-        // renders as a green completed row instead of vanishing, so "Started"
-        // never lingers on something that's actually finished.
         const items = checklistTargets.filter(t =>
           (t.template_section || '').toLowerCase() === category &&
-          (t.status === 'pending' || t.status === 'in_progress' || t.status === 'paused' || t.status === 'done')
+          (t.status === 'pending' || t.status === 'in_progress' || t.status === 'paused')
         );
         const pendingCount = items.filter(t => t.status === 'pending').length;
         if (items.length === 0) {
@@ -3461,50 +3442,41 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
                     {group.items.map(t => {
                       const checked = selectedTargetIds.has(t.id);
                       const itemKey = t.template_item_key || '';
-                      // Three read-only states now, not one:
-                      //   done         → finished, green, checked
-                      //   in_progress  → "Started", amber
-                      //   paused       → "Paused", amber
-                      // Only pending items stay interactive (a checkbox the
-                      // cleaner can tick to start). isLocked = any non-pending.
-                      const isDone = t.status === 'done';
+                      // Started/paused items are read-only chrome —
+                      // visible so the cleaner sees the full picture
+                      // of the section, but not interactive (they're
+                      // already underway).
                       const isStarted = t.status === 'in_progress' || t.status === 'paused';
-                      const isLocked = isDone || isStarted;
+                      // Only show edit pencil for translated items in
+                      // checklist mode — cleaners can fix bad Spanish
+                      // labels. Requests (custom items) skipped since
+                      // their label is already the cleaner's own text.
                       const canEditLabel = locale === 'es' && itemKey && !itemKey.startsWith('requested:');
                       return (
                         <div key={t.id} className={`flex items-start gap-1 rounded-xl border-2 transition-all ${
-                          isDone
-                            ? 'border-emerald-200 bg-emerald-50 opacity-90'
-                            : isStarted
-                              ? 'border-stone-200 bg-stone-100 opacity-60'
-                              : checked
-                                ? 'border-amber-600 bg-amber-50'
-                                : 'border-stone-200 bg-white hover:border-stone-400'
+                          isStarted
+                            ? 'border-stone-200 bg-stone-100 opacity-60'
+                            : checked
+                              ? 'border-amber-600 bg-amber-50'
+                              : 'border-stone-200 bg-white hover:border-stone-400'
                         }`}>
                           <button type="button"
-                            onClick={() => !isLocked && toggleTarget(t.id)}
-                            disabled={isLocked}
+                            onClick={() => !isStarted && toggleTarget(t.id)}
+                            disabled={isStarted}
                             className="flex items-start gap-2 px-3 py-2.5 text-left flex-1 min-w-0 disabled:cursor-not-allowed">
                             <div className={`mt-0.5 w-4 h-4 rounded border-2 flex-shrink-0 flex items-center justify-center ${
-                              isDone
-                                ? 'border-emerald-600 bg-emerald-600'
-                                : isStarted
-                                  ? 'border-stone-400 bg-stone-300'
-                                  : checked
-                                    ? 'border-amber-600 bg-amber-600'
-                                    : 'border-stone-300'
+                              isStarted
+                                ? 'border-stone-400 bg-stone-300'
+                                : checked
+                                  ? 'border-amber-600 bg-amber-600'
+                                  : 'border-stone-300'
                             }`}>
-                              {(checked || isLocked) && <Check size={11} className="text-white" />}
+                              {(checked || isStarted) && <Check size={11} className="text-white" />}
                             </div>
                             <div className="flex-1 min-w-0">
-                              <div className={`text-sm ${isLocked ? 'text-stone-500 line-through decoration-stone-400' : 'text-stone-900'}`}>
+                              <div className={`text-sm ${isStarted ? 'text-stone-500 line-through decoration-stone-400' : 'text-stone-900'}`}>
                                 {labelForTarget(t)}
                               </div>
-                              {isDone && (
-                                <span className="inline-block mt-0.5 text-[9px] uppercase tracking-wider font-mono px-1.5 py-0.5 rounded-full bg-emerald-100 border border-emerald-300 text-emerald-800 font-bold">
-                                  Done
-                                </span>
-                              )}
                               {isStarted && (
                                 <span className="inline-block mt-0.5 text-[9px] uppercase tracking-wider font-mono px-1.5 py-0.5 rounded-full bg-amber-100 border border-amber-300 text-amber-800 font-bold">
                                   {t.status === 'paused' ? 'Paused' : 'Started'}
@@ -3786,13 +3758,6 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   const [activeBlock, setActiveBlock] = useState(null);
   const [tasks, setTasks] = useState([]);
   const [activeTask, setActiveTask] = useState(null);
-  // Maps a task id → the assignment_target ids it was started from, so that
-  // finishing that one task (the per-task "Done" button) can flip exactly
-  // those checklist items to done. The task row itself doesn't store this
-  // link, and one task can cover several items, so we remember it here for
-  // the session. (finishBlock still sweeps everything at the bedroom, so
-  // this is only needed for the finer-grained per-task Done.)
-  const taskTargetsRef = useRef({});
   const [photoModal, setPhotoModal] = useState(null);
   const [clockInFlow, setClockInFlow] = useState(null);
   // Bottom-nav tab — Home / Assignments / More. Lifted to AuthedShift
@@ -4019,7 +3984,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     const msg = hasOpen ? 'You have an active work block. End shift anyway?' : 'End your shift?';
     if (!confirm(msg)) return;
     setBusy(true);
-    if (activeTask) await stopTask(activeTask, false, false);
+    if (activeTask) await stopTask(activeTask, false);
     if (activeBlock && !activeBlock.end_time) {
       await supabase.from('work_blocks').update({ end_time: new Date().toISOString() }).eq('id', activeBlock.id);
     }
@@ -4036,7 +4001,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   const signOutWithCleanup = async () => {
     try {
       if (activeTask) {
-        try { await stopTask(activeTask, false, false); } catch (e) { console.warn('[signOut] stopTask failed', e); }
+        try { await stopTask(activeTask, false); } catch (e) { console.warn('[signOut] stopTask failed', e); }
       }
       // Before closing the block, park any in-progress items at this
       // shift as 'paused' rather than leaving them 'in_progress' with no
@@ -4077,7 +4042,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   // we use that as the shift's end_time so billable time excludes the idle gap.
   const autoClockOut = async (endTs) => {
     if (!shift) return;
-    if (activeTask) await stopTask(activeTask, false, false);
+    if (activeTask) await stopTask(activeTask, false);
     if (activeBlock && !activeBlock.end_time) {
       await supabase.from('work_blocks').update({ end_time: new Date(endTs).toISOString() }).eq('id', activeBlock.id);
     }
@@ -4108,7 +4073,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   const switchToJob = async (job) => {
     if (!job?.customerId) { switchProperty(); return; }
     setBusy(true);
-    if (activeTask) await stopTask(activeTask, false, false);
+    if (activeTask) await stopTask(activeTask, false);
     if (activeBlock && !activeBlock.end_time) {
       await supabase.from('work_blocks').update({ end_time: new Date().toISOString() }).eq('id', activeBlock.id);
     }
@@ -4145,7 +4110,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   const switchProperty = async () => {
     if (!confirm('Clock out here and pick a new property?')) return;
     setBusy(true);
-    if (activeTask) await stopTask(activeTask, false, false);
+    if (activeTask) await stopTask(activeTask, false);
     if (activeBlock && !activeBlock.end_time) {
       await supabase.from('work_blocks').update({ end_time: new Date().toISOString() }).eq('id', activeBlock.id);
     }
@@ -4459,7 +4424,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     // onPickBlockParty. The block's items stay in whatever status they
     // were in (paused / in_progress) — nothing is lost.
     try {
-      if (activeTask) await stopTask(activeTask, false, false);
+      if (activeTask) await stopTask(activeTask, false);
       const { data: myOpenBlocks } = await supabase.from('work_blocks')
         .select('id').eq('shift_id', shift.id).is('end_time', null)
         .neq('id', targetBlock.id);
@@ -4555,7 +4520,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       try {
         await supabase.from('work_block_participants').update({ left_at: nowISO })
           .eq('work_block_id', activeBlock.id).eq('employee_id', employee.id).is('left_at', null);
-        if (activeTask) await stopTask(activeTask, false, false);
+        if (activeTask) await stopTask(activeTask, false);
         await supabase.from('work_blocks').update({ end_time: nowISO }).eq('id', activeBlock.id);
         setWorkBlocks(prev => prev.map(b => b.id === activeBlock.id ? { ...b, end_time: nowISO } : b));
       } catch (e) { setBusy(false); alert('Could not finish: ' + (e.message || e)); return; }
@@ -4610,7 +4575,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   const finishBlock = async () => {
     if (!confirm(`Done in ${activeBlock.party?.label} at ${activeBlock.unit?.label}? You'll go back to the assignments.`)) return;
     setBusy(true);
-    if (activeTask) await stopTask(activeTask, false, false);
+    if (activeTask) await stopTask(activeTask, false);
     const ts = new Date().toISOString();
     await supabase.from('work_blocks').update({ end_time: ts }).eq('id', activeBlock.id);
     // Auto-complete on close-out: EVERY still-open target at this (unit,
@@ -4675,7 +4640,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     // If they're ending the block that happens to be active right now,
     // stop any running task too so we don't leave orphaned timing.
     if (activeBlock?.id === block.id && activeTask) {
-      await stopTask(activeTask, false, false);
+      await stopTask(activeTask, false);
     }
     const ts = new Date().toISOString();
     await supabase.from('work_blocks').update({ end_time: ts }).eq('id', block.id);
@@ -4883,7 +4848,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     if (!pickedTargets || pickedTargets.length === 0) return;
     // Stop the current active task before starting a new one (matches
     // legacy onStartTask behavior — only ONE task active at a time).
-    if (activeTask) await stopTask(activeTask, false, false);
+    if (activeTask) await stopTask(activeTask, false);
     // 1) Advance picked targets to in_progress in a single update
     const ids = pickedTargets.map(t => t.id);
     const toAdvance = pickedTargets.filter(t => t.status === 'pending' || t.status === 'paused');
@@ -4918,9 +4883,6 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     }
     setTasks(prev => [...prev, row]);
     setActiveTask(row.id);
-    // Remember which checklist items this task represents, so marking the
-    // task Done can complete exactly these targets (see stopTask).
-    taskTargetsRef.current[row.id] = ids;
     setNewTaskName('');
   };
 
@@ -4996,7 +4958,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     const myOpen = workBlocks.find(b => !b.end_time && b.unit_id === target.unit_id && b.party_id === target.party_id);
     if (myOpen) {
       setBusy(true);
-      if (activeTask) await stopTask(activeTask, false, false);
+      if (activeTask) await stopTask(activeTask, false);
       const ts = new Date().toISOString();
       await supabase.from('work_blocks').update({ end_time: ts }).eq('id', myOpen.id);
       setWorkBlocks(prev => prev.map(b => b.id === myOpen.id ? { ...b, end_time: ts } : b));
@@ -5033,7 +4995,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       return;
     }
     setBusy(true);
-    if (activeTask) await stopTask(activeTask, false, false);
+    if (activeTask) await stopTask(activeTask, false);
     // Update the cleaner's open items at the current bedroom to the
     // chosen status (paused for resume, done for finish).
     if (employee?.id && activeBlock.unit_id && activeBlock.party_id) {
@@ -5222,7 +5184,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   const startTask = async (overrideName = null, category = null, subcategory = null) => {
     const nameToUse = (overrideName || newTaskName || '').trim();
     if (!nameToUse) return;
-    if (activeTask) await stopTask(activeTask, false, false);
+    if (activeTask) await stopTask(activeTask, false);
     const insert = { shift_id: shift.id, name: nameToUse, is_preview: previewMode };
     if (activeBlock) insert.work_block_id = activeBlock.id;
     if (category) insert.category = category;
@@ -5245,7 +5207,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   // as not-yet-started tasks so the cleaner can resume them in order.
   const startTasksFromPicker = async (taskInputs) => {
     if (!taskInputs || taskInputs.length === 0) return;
-    if (activeTask) await stopTask(activeTask, false, false);
+    if (activeTask) await stopTask(activeTask, false);
     // Insert the first task as started (with current timestamp via default)
     const first = taskInputs[0];
     const firstInsert = {
@@ -5299,77 +5261,18 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     stampMainSectionFromCategories(taskInputs.map(t => t.category));
   };
 
-  const stopTask = async (taskId, refetch = true, markDone = true) => {
+  const stopTask = async (taskId, refetch = true) => {
     const ts = new Date().toISOString();
     await supabase.from('tasks').update({ end_time: ts }).eq('id', taskId);
     if (refetch) setTasks(prev => prev.map(t => t.id === taskId ? { ...t, end_time: ts } : t));
     if (activeTask === taskId) setActiveTask(null);
-    // Marking a task Done should complete the checklist items it covers, so
-    // they read "Done" in the picker instead of lingering as "Started". Only
-    // on a real finish (markDone) — not when we stop a task just to switch to
-    // another one. Guarded to active/approved assignments, same rule as the
-    // block-level sweep in finishBlock.
-    if (!markDone) return;
-    const linked = taskTargetsRef.current[taskId];
-    const stopped = tasks.find(t => t.id === taskId);
-    try {
-      let query = supabase
-        .from('assignment_targets')
-        .select('id, status, template_section, assignment:assignments!inner(customer_id, active, source, pm_status, deleted_at)');
-      if (linked && linked.length > 0) {
-        // Exact link from this session.
-        query = query.in('id', linked);
-      } else if (activeBlock?.unit_id && activeBlock?.party_id) {
-        // Session link is gone (e.g. after a page refresh). Fall back to the
-        // in-progress items at this bedroom — narrowed to the task's section
-        // when it has one — so "Done" still completes the right checklist.
-        query = query
-          .eq('unit_id', activeBlock.unit_id)
-          .eq('party_id', activeBlock.party_id)
-          .in('status', ['in_progress', 'paused']);
-        if (stopped?.category) query = query.eq('template_section', stopped.category);
-      } else {
-        return;
-      }
-      const { data: rows } = await query;
-      const ids = (rows || [])
-        .filter(t =>
-          t.status !== 'done' &&
-          t.assignment?.customer_id === shift?.customer_id &&
-          t.assignment?.active &&
-          !t.assignment?.deleted_at &&
-          (t.assignment?.source !== 'pm' || t.assignment?.pm_status === 'approved')
-        )
-        .map(t => t.id);
-      if (ids.length > 0) {
-        await supabase.from('assignment_targets').update({
-          status: 'done', completed_at: ts, completed_by: employee?.id || null,
-        }).in('id', ids);
-      }
-      delete taskTargetsRef.current[taskId];
-    } catch (e) {
-      console.warn('[stopTask] could not complete linked targets', e);
-    }
   };
 
   const resumeTask = async (taskId) => {
-    if (activeTask) await stopTask(activeTask, false, false);
+    if (activeTask) await stopTask(activeTask, false);
     await supabase.from('tasks').update({ end_time: null }).eq('id', taskId);
     setTasks(prev => prev.map(t => t.id === taskId ? { ...t, end_time: null } : t));
     setActiveTask(taskId);
-    // If this task had completed some checklist items, reopening it should
-    // put those items back to in_progress so the picker stops showing them
-    // as Done while the work is running again.
-    const linked = taskTargetsRef.current[taskId];
-    if (linked && linked.length > 0) {
-      try {
-        await supabase.from('assignment_targets')
-          .update({ status: 'in_progress', completed_at: null, completed_by: null })
-          .in('id', linked).eq('status', 'done');
-      } catch (e) {
-        console.warn('[resumeTask] could not reopen linked targets', e);
-      }
-    }
   };
 
   const uploadPhoto = async (taskId, kind, file) => {
@@ -5725,7 +5628,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
         if (activeBlock) {
           const nowISO = new Date().toISOString();
           try {
-            if (activeTask) await stopTask(activeTask, false, false);
+            if (activeTask) await stopTask(activeTask, false);
             await supabase.from('work_blocks').update({ end_time: nowISO }).eq('id', activeBlock.id);
             setWorkBlocks(prev => prev.map(b => b.id === activeBlock.id ? { ...b, end_time: nowISO } : b));
           } catch (e) { console.warn('[onExit] could not close block', e); }

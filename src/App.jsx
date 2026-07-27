@@ -106,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul24-tap85";
+const BUILD_TAG = "jul27-tap86";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -18292,6 +18292,7 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
   const [diag, setDiag] = useState(null);
   // Done work in this window that an earlier invoice already claimed.
   const [billedElsewhere, setBilledElsewhere] = useState({ bedrooms: 0, invoices: [] });
+  const [rebillWarning, setRebillWarning] = useState(false);
   const [defaultRate, setDefaultRate] = useState(0);
   const [previewing, setPreviewing] = useState(false);
 
@@ -18333,7 +18334,14 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
     if (unitIds.length) {
       let res = await fetchTargets(true);
       if (res.err && /invoiced_on|column|does not exist/i.test(res.err.message || '')) {
-        res = await fetchTargets(false);  // v41 not run — fall back
+        // The invoiced_on column is what stops already-billed work from
+        // reappearing on a new invoice. If it's missing we must NOT silently
+        // fall back to showing everything — that's how a bedroom gets billed
+        // twice. Surface it loudly and keep the fallback only so the screen
+        // isn't blank, with a banner the owner can't miss.
+        console.error('[invoice] invoiced_on column missing — re-bill protection OFF until v41 is run');
+        setRebillWarning(true);
+        res = await fetchTargets(false);
       }
       targets = res.rows; fetchErr = res.err;
     }
@@ -18867,6 +18875,17 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
            finished bedroom in this window; this draft drops the ones an
            earlier invoice already claimed. Without this line the two
            screens disagree for no visible reason. */}
+        {rebillWarning && (
+          <div className="mb-3 p-3 rounded-2xl bg-red-50 border-2 border-red-300">
+            <div className="text-xs text-red-900 font-bold flex items-center gap-1.5">
+              <AlertCircle size={14} className="flex-shrink-0" /> Re-bill protection is OFF
+            </div>
+            <div className="text-[11px] text-red-800 mt-1">
+              This database is missing the column that tracks which cleanings have already been invoiced, so this draft may show work you've <span className="font-bold">already billed</span> (e.g. a bedroom that's on another invoice). Don't send this until it's fixed — run the <span className="font-mono">v41</span> migration in Supabase, then reopen this draft.
+            </div>
+          </div>
+        )}
+
         {billedElsewhere.bedrooms > 0 && (
           <div className="mb-3 p-3 rounded-2xl bg-amber-50 border border-amber-200">
             <div className="text-xs text-amber-900 font-medium">

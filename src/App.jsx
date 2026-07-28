@@ -25,7 +25,6 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 // =================================================================
 const GOOGLE_TRANSLATE_API_KEY = "AIzaSyD7ceHPryMzs45hWJOyFNBxtOzQOEmJcSA";
 
-
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // ============================================================
@@ -107,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul27-tap87";
+const BUILD_TAG = "jul27-tap89";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -13915,12 +13914,79 @@ async function downloadPhoto(photo, context) {
 }
 
 // Download multiple photos sequentially (each with its own filename).
+// This is the fallback path: on mobile every <a download> is its own
+// system prompt, so we only use it if the one-file ZIP below can't load.
 async function downloadPhotos(photos, contextFn) {
   for (let i = 0; i < photos.length; i++) {
     const ctx = typeof contextFn === 'function' ? contextFn(photos[i]) : contextFn;
     await downloadPhoto(photos[i], ctx);
     // Small delay between downloads so browsers don't drop them
     if (i < photos.length - 1) await new Promise(r => setTimeout(r, 300));
+  }
+}
+
+// Lazy-load JSZip from the CDN the first time it's needed. Kept out of the
+// bundle so there's no package.json/build change — it just fetches on demand
+// and caches on window. Returns the JSZip constructor, or null if it can't
+// load (offline, CDN blocked) so callers can fall back.
+let _jszipPromise = null;
+function loadJSZip() {
+  if (typeof window !== 'undefined' && window.JSZip) return Promise.resolve(window.JSZip);
+  if (_jszipPromise) return _jszipPromise;
+  _jszipPromise = new Promise((resolve) => {
+    try {
+      const s = document.createElement('script');
+      s.src = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
+      s.async = true;
+      s.onload = () => resolve(window.JSZip || null);
+      s.onerror = () => resolve(null);
+      document.head.appendChild(s);
+    } catch { resolve(null); }
+  });
+  return _jszipPromise;
+}
+
+// Bundle every selected photo into ONE .zip and download it in a single
+// action — one prompt on mobile instead of one per file. Falls back to the
+// sequential downloader if JSZip can't load or zipping fails. onProgress
+// (optional) gets (done, total) as blobs are fetched.
+async function downloadPhotosZip(photos, contextFn, zipName, onProgress) {
+  const JSZip = await loadJSZip();
+  if (!JSZip) { await downloadPhotos(photos, contextFn); return false; }
+  try {
+    const zip = new JSZip();
+    const usedNames = new Set();
+    for (let i = 0; i < photos.length; i++) {
+      const p = photos[i];
+      const ctx = typeof contextFn === 'function' ? contextFn(p) : contextFn;
+      let name = photoFilename(p, ctx);
+      // Guard against two photos resolving to the same filename in one zip.
+      if (usedNames.has(name)) {
+        const dot = name.lastIndexOf('.');
+        name = dot > 0 ? `${name.slice(0, dot)}_${i + 1}${name.slice(dot)}` : `${name}_${i + 1}`;
+      }
+      usedNames.add(name);
+      try {
+        const resp = await fetch(p.public_url);
+        if (!resp.ok) continue;
+        zip.file(name, await resp.blob());
+      } catch { /* skip a single bad photo, keep the rest */ }
+      if (onProgress) onProgress(i + 1, photos.length);
+    }
+    const blob = await zip.generateAsync({ type: 'blob' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = zipName || 'cleaning_photos.zip';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+    return true;
+  } catch (e) {
+    console.error('[downloadPhotosZip] failed, falling back', e);
+    await downloadPhotos(photos, contextFn);
+    return false;
   }
 }
 
@@ -19041,6 +19107,7 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
                       <div key={u.id} className="flex items-center justify-between gap-2 text-xs">
                         <span className="font-mono text-stone-800 truncate">
                           {u.label}{u.type ? ` · ${assignmentTypeLabel ? assignmentTypeLabel(u.type) : u.type}` : ''}
+                          {u.scheduled && <span className="text-stone-400"> · {fmtDueDate(String(u.scheduled).slice(0, 10))}</span>}
                         </span>
                         <span className="font-mono text-stone-400 flex-shrink-0">{u.started}/{u.total} started</span>
                       </div>
@@ -23291,6 +23358,7 @@ function PortalUnitDay({ property, unitId, date, portalUser, onBack }) {
   const [selectMode, setSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState(new Set());
   const [bulkBusy, setBulkBusy] = useState(false);
+  const [zipProgress, setZipProgress] = useState(null); // {done,total} while zipping
   // Bedroom tab — when a unit has multiple bedrooms cleaned on the same
   // day, the PM needs to see photos isolated by bedroom. Without this,
   // pictures from 3 different bedrooms all merge into one stream which
@@ -23425,7 +23493,19 @@ function PortalUnitDay({ property, unitId, date, portalUser, onBack }) {
     const sel = getSelectedPhotos();
     if (sel.length === 0) return;
     setBulkBusy(true);
-    await downloadPhotos(sel, (p) => photoContext(p));
+    if (sel.length === 1) {
+      // One photo = one prompt anyway; keep the plain named download.
+      await downloadPhoto(sel[0], photoContext(sel[0]));
+    } else {
+      // Multiple = one .zip = a single prompt on mobile instead of one per
+      // file. Name it after the property/unit/date so it's easy to find.
+      const parts = [property.name, unit?.label, date].filter(Boolean)
+        .map(s => String(s).replace(/[^\w\-]+/g, '_'));
+      const zipName = `${parts.join('_') || 'cleaning'}_photos.zip`;
+      await downloadPhotosZip(sel, (p) => photoContext(p), zipName,
+        (done, total) => setZipProgress({ done, total }));
+      setZipProgress(null);
+    }
     setBulkBusy(false);
   };
 
@@ -23770,7 +23850,9 @@ function PortalUnitDay({ property, unitId, date, portalUser, onBack }) {
             <button onClick={handleBulkDownload} disabled={selectedIds.size === 0 || bulkBusy}
               className="px-3 py-2 rounded-full bg-amber-600 hover:bg-amber-700 text-white text-xs font-medium flex items-center gap-1.5 disabled:opacity-40">
               {bulkBusy ? <div className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" /> : <Download size={14} />}
-              Download
+              {bulkBusy && zipProgress
+                ? `Zipping ${zipProgress.done}/${zipProgress.total}`
+                : selectedIds.size > 1 ? 'Download zip' : 'Download'}
             </button>
             {canShareFiles() && (
               <button onClick={handleBulkShare} disabled={selectedIds.size === 0 || bulkBusy}

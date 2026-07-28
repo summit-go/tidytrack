@@ -106,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul27-tap89";
+const BUILD_TAG = "jul27-tap91";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -632,13 +632,21 @@ function useAssignmentSync(load, channelKey = 'asgn-sync') {
 }
 
 // =================================================================
-// IDLE DETECTOR — auto clock-out after 5 hours of inactivity.
-// Shows a warning at the 2-hour mark giving them 3 hours to dismiss.
+// IDLE DETECTOR — auto clock-out after 1 hour of inactivity.
+// Shows a warning at the 45-minute mark giving them 15 minutes to
+// dismiss before the clock-out lands.
 //
 // Detects activity via pointer/keyboard/touch events. Debounces saves
 // of `last_activity_at` to the database to once per minute max.
 // When the app regains focus, checks if too much time has passed and
 // triggers auto-clock-out retroactively using the saved last_activity_at.
+//
+// NOTE: this only clocks a shift OUT — it never signs the cleaner out of
+// the app or closes anything. If a cleaner reports the app "closing" after
+// a while, that's the phone OS discarding the backgrounded tab to save
+// memory (screen lock, switching to the camera, etc.), not this. The
+// session persists; the app just reloads and reload() re-attaches their
+// open shift, work block and active task.
 //
 // Returns: { showWarning, dismissWarning } — caller renders the warning UI.
 // =================================================================
@@ -3765,7 +3773,13 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   // workblock starts we auto-snap back to Home so the cleaner sees the
   // workblock card (and doesn't get stuck on the Assignments list with
   // the workblock running silently in the background).
-  const [cleanerTab, setCleanerTab] = useState('home');
+  // Persisted per-employee so an OS tab reload (phone backgrounded the app
+  // to save memory, screen locked, switched to the camera) drops the cleaner
+  // back on the tab they were on rather than always Home. Their shift, work
+  // block and active task are already restored from the database in reload();
+  // this just keeps the tab consistent too. The effect below still forces
+  // Home whenever they're not clocked in.
+  const [cleanerTab, setCleanerTab] = usePagePersistence(`cleaner_tab_${employee.id}`, 'home');
   const [blockStartFlow, setBlockStartFlow] = useState(null);
   // Set when an assignment "Start" or "Go to this bedroom" is tapped from
   // somewhere outside the bedroom — we navigate the cleaner to that
@@ -3833,8 +3847,36 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
           .select('*, unit:units(*), party:parties(*), tasks(*, photos(*, taken_by_employee:employees!taken_by(name)))')
           .eq('shift_id', activeShift.id)
           .order('start_time', { ascending: true });
-        setWorkBlocks(blocks || []);
-        const live = (blocks || []).find(b => !b.end_time);
+        let allBlocks = blocks || [];
+        // The query above only sees blocks from THIS shift. If the cleaner
+        // clocked out and back in (or the phone reloaded the app into a new
+        // shift), their earlier blocks — and the photos in them — live under
+        // the previous shift and would vanish for them, even though other
+        // cleaners still see them. Pull this cleaner's OWN closed blocks from
+        // today at this property and merge any that aren't already loaded, so
+        // their photos always come back with them.
+        try {
+          const dayStart = new Date(); dayStart.setHours(0, 0, 0, 0);
+          const { data: mine } = await supabase
+            .from('work_blocks')
+            .select('*, unit:units(*), party:parties(*), shift:shifts!inner(id, employee_id, customer_id), tasks(*, photos(*, taken_by_employee:employees!taken_by(name)))')
+            .eq('shift.employee_id', employee.id)
+            .eq('shift.customer_id', activeShift.customer_id)
+            .gte('start_time', dayStart.toISOString())
+            .order('start_time', { ascending: true });
+          if (mine && mine.length) {
+            const have = new Set(allBlocks.map(b => b.id));
+            const extra = mine.filter(b => !have.has(b.id));
+            if (extra.length) {
+              allBlocks = [...allBlocks, ...extra]
+                .sort((a, b) => new Date(a.start_time) - new Date(b.start_time));
+            }
+          }
+        } catch (e) {
+          console.warn('[reload] could not merge own earlier blocks', e);
+        }
+        setWorkBlocks(allBlocks);
+        const live = allBlocks.find(b => !b.end_time);
         if (live) {
           setActiveBlock(live);
           setTasks(live.tasks || []);
@@ -8940,7 +8982,7 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
       if (!block?.unit_id || !block?.party_id) { if (!cancelled) setDoneBlocks({ list: [], loading: false }); return; }
       const start = new Date(); start.setHours(0, 0, 0, 0);
       const { data } = await supabase.from('work_blocks')
-        .select('*, unit:units(*), party:parties(*), shift:shifts!inner(id, employee:employees!inner(id, name)), tasks(id, name, category, subcategory, start_time, end_time)')
+        .select('*, unit:units(*), party:parties(*), shift:shifts!inner(id, employee:employees!inner(id, name)), tasks(id, name, category, subcategory, start_time, end_time, photos(*, taken_by_employee:employees!taken_by(name)))')
         .eq('unit_id', block.unit_id).eq('party_id', block.party_id)
         .gte('start_time', start.toISOString())
         .not('end_time', 'is', null)
@@ -9251,6 +9293,35 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
                           <div className="mt-2 text-[10px] text-stone-500 font-mono">
                             {fmtClock(b.start_time)} – {fmtClock(b.end_time)}{dur ? ` · ${fmtTimeShort(dur)}` : ''} · {bTasks.length} task{bTasks.length === 1 ? '' : 's'}
                           </div>
+                          {(() => {
+                            // Photos live under the block's tasks. Surface them
+                            // right on the closed card so a cleaner can see their
+                            // pictures are safe without reopening anything — this
+                            // is the "my photos disappeared" reassurance.
+                            const blockPhotos = bTasks.flatMap(t => (t.photos || []).filter(p => !p.deleted_at));
+                            if (blockPhotos.length === 0) return null;
+                            return (
+                              <div className="mt-2.5">
+                                <div className="text-[10px] uppercase tracking-wider text-stone-400 font-mono mb-1.5">
+                                  {blockPhotos.length} photo{blockPhotos.length === 1 ? '' : 's'}
+                                </div>
+                                <div className="flex gap-1.5 flex-wrap">
+                                  {blockPhotos.slice(0, 8).map(p => (
+                                    <a key={p.id} href={p.public_url} target="_blank" rel="noopener noreferrer"
+                                      onClick={(e) => e.stopPropagation()}
+                                      className="block w-14 h-14 rounded-lg overflow-hidden border border-stone-200 bg-stone-100 flex-shrink-0">
+                                      <img src={p.public_url} alt="" loading="lazy" className="w-full h-full object-cover" />
+                                    </a>
+                                  ))}
+                                  {blockPhotos.length > 8 && (
+                                    <span className="w-14 h-14 rounded-lg border border-stone-200 bg-stone-50 flex items-center justify-center text-[11px] font-mono text-stone-500 flex-shrink-0">
+                                      +{blockPhotos.length - 8}
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          })()}
                           <div className="mt-2 text-[10px] text-stone-500 font-mono flex items-center gap-1.5">
                             <Play size={11} /> {b.mine ? 'Tap Start to reopen and keep working' : `Tap Start to reopen ${b.ownerName}'s block`}
                           </div>

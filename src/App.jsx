@@ -106,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul27-tap91";
+const BUILD_TAG = "jul28-tap92";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -3856,7 +3856,11 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
         // today at this property and merge any that aren't already loaded, so
         // their photos always come back with them.
         try {
+          // Same rolling window as the Done tab (see doneBlocks) — a block
+          // the cleaner started on a previous day and is continuing today
+          // should come back with its photos, not just today's blocks.
           const dayStart = new Date(); dayStart.setHours(0, 0, 0, 0);
+          dayStart.setDate(dayStart.getDate() - 6);
           const { data: mine } = await supabase
             .from('work_blocks')
             .select('*, unit:units(*), party:parties(*), shift:shifts!inner(id, employee_id, customer_id), tasks(*, photos(*, taken_by_employee:employees!taken_by(name)))')
@@ -8980,7 +8984,14 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
     let cancelled = false;
     const load = async () => {
       if (!block?.unit_id || !block?.party_id) { if (!cancelled) setDoneBlocks({ list: [], loading: false }); return; }
+      // Not "today only" — a bedroom can be started one day and finished the
+      // next (a cleaner runs out of time, someone else picks it up tomorrow).
+      // If we only showed today's closed blocks, yesterday's block — the one
+      // that owns the "STARTED" checklist items — would be invisible, so the
+      // items looked started with nowhere to reopen them. Look back a few
+      // days so continued work is always reachable in Done.
       const start = new Date(); start.setHours(0, 0, 0, 0);
+      start.setDate(start.getDate() - 6);
       const { data } = await supabase.from('work_blocks')
         .select('*, unit:units(*), party:parties(*), shift:shifts!inner(id, employee:employees!inner(id, name)), tasks(id, name, category, subcategory, start_time, end_time, photos(*, taken_by_employee:employees!taken_by(name)))')
         .eq('unit_id', block.unit_id).eq('party_id', block.party_id)
@@ -9239,7 +9250,7 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
         return (
         <div className="mx-4 mt-4">
           <div className="flex items-center justify-between mb-3">
-            <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">Finished here today</div>
+            <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">Finished here recently</div>
             {(block?.unit?.label || block?.party?.label) && (
               <div className="text-[11px] text-stone-400 font-mono">
                 {block?.unit?.label}{block?.unit?.label && block?.party?.label ? ' · ' : ''}{block?.party?.label}
@@ -9291,7 +9302,17 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
                             ))}
                           </div>
                           <div className="mt-2 text-[10px] text-stone-500 font-mono">
-                            {fmtClock(b.start_time)} – {fmtClock(b.end_time)}{dur ? ` · ${fmtTimeShort(dur)}` : ''} · {bTasks.length} task{bTasks.length === 1 ? '' : 's'}
+                            {(() => {
+                              // Prefix the day when this block isn't from today,
+                              // so a bedroom started yesterday reads clearly as
+                              // earlier work being continued.
+                              const bStart = new Date(b.start_time);
+                              const today = new Date(); today.setHours(0, 0, 0, 0);
+                              const isToday = bStart >= today;
+                              const dayLabel = isToday ? '' :
+                                bStart.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }) + ' · ';
+                              return `${dayLabel}${fmtClock(b.start_time)} – ${fmtClock(b.end_time)}`;
+                            })()}{dur ? ` · ${fmtTimeShort(dur)}` : ''} · {bTasks.length} task{bTasks.length === 1 ? '' : 's'}
                           </div>
                           {(() => {
                             // Photos live under the block's tasks. Surface them

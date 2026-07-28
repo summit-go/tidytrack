@@ -25,6 +25,7 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 // =================================================================
 const GOOGLE_TRANSLATE_API_KEY = "AIzaSyD7ceHPryMzs45hWJOyFNBxtOzQOEmJcSA";
 
+
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // ============================================================
@@ -106,7 +107,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul27-tap86";
+const BUILD_TAG = "jul27-tap87";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -18293,6 +18294,7 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
   // Done work in this window that an earlier invoice already claimed.
   const [billedElsewhere, setBilledElsewhere] = useState({ bedrooms: 0, invoices: [] });
   const [rebillWarning, setRebillWarning] = useState(false);
+  const [verifyOpen, setVerifyOpen] = useState(false);
   const [defaultRate, setDefaultRate] = useState(0);
   const [previewing, setPreviewing] = useState(false);
 
@@ -18390,12 +18392,12 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
     //     stamped is done, in range, and still absent here with no
     //     explanation. That silence is what makes the two screens look
     //     like they disagree. Count it and say so.
-    let alreadyBilled = { bedrooms: 0, invoices: [] };
+    let alreadyBilled = { bedrooms: 0, invoices: [], items: [] };
     if (unitIds.length) {
       let billed = []; const PAGE = 1000;
       for (let from = 0; ; from += PAGE) {
         const { data, error } = await supabase.from('assignment_targets')
-          .select('unit_id, party_id, invoiced_on')
+          .select('unit_id, party_id, invoiced_on, completed_at, assignment:assignments(assignment_type)')
           .eq('status', 'done')
           .in('unit_id', unitIds)
           .gte('completed_at', start + 'T00:00:00').lte('completed_at', end + 'T23:59:59')
@@ -18414,7 +18416,29 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
           .select('id, invoice_number, invoice_date, status').in('id', invIds);
         invMeta = im || [];
       }
-      alreadyBilled = { bedrooms: beds.size, invoices: invMeta };
+      const invById = Object.fromEntries(invMeta.map(i => [i.id, i]));
+      // One row per unit:party:invoice so the verify panel can show exactly
+      // which already-sent invoice each cleaning is sitting on.
+      const seenBilled = new Map();
+      billed.forEach(b => {
+        const k = `${b.unit_id}:${b.party_id}:${b.invoiced_on}`;
+        if (seenBilled.has(k)) {
+          const ex = seenBilled.get(k);
+          if (b.completed_at && (!ex.date || b.completed_at < ex.date)) ex.date = b.completed_at;
+          return;
+        }
+        const inv = invById[b.invoiced_on];
+        seenBilled.set(k, {
+          unitLabel: unitLabelById[b.unit_id] || '—',
+          type: b.assignment?.assignment_type || '',
+          date: b.completed_at || null,
+          invoiceNumber: inv?.invoice_number || null,
+          invoiceStatus: inv?.status || null,
+        });
+      });
+      const billedItems = Array.from(seenBilled.values())
+        .sort((a, b) => String(a.unitLabel).localeCompare(String(b.unitLabel), undefined, { numeric: true }));
+      alreadyBilled = { bedrooms: beds.size, invoices: invMeta, items: billedItems };
     }
     setBilledElsewhere(alreadyBilled);
     // 4) Group by assignment (= one bedroom clean).
@@ -18936,6 +18960,98 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
             ))}
           </div>
         )}
+
+        {/* CROSS-CHECK — see the same three things you'd check by hand:
+            what this draft bills, what's already on past invoices, and what
+            was done in this range but isn't being billed. All for the same
+            date window, so you can confirm nothing's double-billed or
+            missed before sending. */}
+        <div className="mb-4 rounded-2xl border border-stone-200 overflow-hidden">
+          <button onClick={() => setVerifyOpen(v => !v)}
+            className="w-full flex items-center justify-between px-4 py-3 bg-stone-50 hover:bg-stone-100 transition-colors">
+            <span className="text-xs uppercase tracking-wider font-mono text-stone-700 flex items-center gap-2">
+              <ClipboardList size={13} /> Cross-check this range
+            </span>
+            <span className="flex items-center gap-2">
+              <span className="text-[10px] font-mono text-stone-400">
+                {lines.length} to bill · {billedElsewhere.bedrooms} already billed
+              </span>
+              <ChevronRight size={15} className={`text-stone-400 transition-transform ${verifyOpen ? 'rotate-90' : ''}`} />
+            </span>
+          </button>
+          {verifyOpen && (
+            <div className="p-4 space-y-4 bg-white">
+              {/* 1 — On this draft */}
+              <div>
+                <div className="text-[10px] uppercase tracking-wider font-mono text-emerald-700 mb-1.5 flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-emerald-500" /> On this new invoice ({lines.length})
+                </div>
+                {lines.length === 0 ? (
+                  <div className="text-xs text-stone-400 pl-3.5">Nothing on the draft yet.</div>
+                ) : (
+                  <div className="space-y-1 pl-3.5">
+                    {lines.map(l => (
+                      <div key={l.key} className="flex items-center justify-between gap-2 text-xs">
+                        <span className="font-mono text-stone-800 truncate">
+                          {l.label}{l.serviceType ? ` · ${assignmentTypeLabel ? assignmentTypeLabel(l.serviceType) : l.serviceType}` : ''}
+                          {l.cleanedDays?.length > 0 && <span className="text-stone-400"> · {fmtDueDate(l.cleanedDays[0])}</span>}
+                        </span>
+                        <span className="font-mono text-stone-600 flex-shrink-0">
+                          {l.nonBillable ? <span className="text-stone-400">not billed</span> : `$${lineAmount(l).toFixed(2)}`}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* 2 — Already on past invoices */}
+              <div>
+                <div className="text-[10px] uppercase tracking-wider font-mono text-blue-700 mb-1.5 flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-blue-500" /> Already billed on a past invoice ({billedElsewhere.items?.length || 0})
+                </div>
+                {(billedElsewhere.items?.length || 0) === 0 ? (
+                  <div className="text-xs text-stone-400 pl-3.5">None of this range's cleanings are on an earlier invoice.</div>
+                ) : (
+                  <div className="space-y-1 pl-3.5">
+                    {billedElsewhere.items.map((b, i) => (
+                      <div key={i} className="flex items-center justify-between gap-2 text-xs">
+                        <span className="font-mono text-stone-800 truncate">
+                          {b.unitLabel}{b.type ? ` · ${assignmentTypeLabel ? assignmentTypeLabel(b.type) : b.type}` : ''}
+                          {b.date && <span className="text-stone-400"> · {fmtDueDate(String(b.date).slice(0, 10))}</span>}
+                        </span>
+                        <span className="font-mono text-blue-700 flex-shrink-0 whitespace-nowrap">
+                          #{b.invoiceNumber || '—'}{b.invoiceStatus ? ` (${b.invoiceStatus})` : ''}
+                        </span>
+                      </div>
+                    ))}
+                    <div className="text-[11px] text-stone-400 pt-1">These are hidden from the draft above so they can't be billed twice.</div>
+                  </div>
+                )}
+              </div>
+
+              {/* 3 — Done in range but not on this bill (unfinished / scheduled) */}
+              {unfinished.filter(u => !dismissed.has(u.id)).length > 0 && (
+                <div>
+                  <div className="text-[10px] uppercase tracking-wider font-mono text-amber-700 mb-1.5 flex items-center gap-1.5">
+                    <span className="w-2 h-2 rounded-full bg-amber-500" /> Scheduled in range, not finished ({unfinished.filter(u => !dismissed.has(u.id)).length})
+                  </div>
+                  <div className="space-y-1 pl-3.5">
+                    {unfinished.filter(u => !dismissed.has(u.id)).map(u => (
+                      <div key={u.id} className="flex items-center justify-between gap-2 text-xs">
+                        <span className="font-mono text-stone-800 truncate">
+                          {u.label}{u.type ? ` · ${assignmentTypeLabel ? assignmentTypeLabel(u.type) : u.type}` : ''}
+                        </span>
+                        <span className="font-mono text-stone-400 flex-shrink-0">{u.started}/{u.total} started</span>
+                      </div>
+                    ))}
+                    <div className="text-[11px] text-stone-400 pt-1">Not billed — the work isn't finished.</div>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
 
         {/* Lines */}
         <div className="flex items-center justify-between mb-2">

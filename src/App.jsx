@@ -106,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul28-tap97";
+const BUILD_TAG = "jul29-tap98";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -11860,7 +11860,7 @@ function ManagerDashboard({ employee, onSignOut, onOpenMessages, onLogoClick }) 
     for (let from = 0; ; from += PAGE) {
       let q = supabase
         .from('shifts')
-        .select('*, employee:employees(id,name,pay_rate_hourly), customer:customers(id,name,property_type,bill_rate_hourly), work_blocks(id, end_time, start_time, bill_rate_at_work, assignment_id, assignment:assignments(assignment_type), unit:units(label, bedrooms, bathrooms), party:parties(label))')
+        .select('*, employee:employees(id,name,pay_rate_hourly), customer:customers(id,name,property_type,bill_rate_hourly,bill_mode), work_blocks(id, end_time, start_time, bill_rate_at_work, assignment_id, assignment:assignments(assignment_type), unit:units(label, bedrooms, bathrooms), party:parties(label))')
         .eq('is_preview', false)
         .order('start_time', { ascending: false })
         .range(from, from + PAGE - 1);
@@ -12212,7 +12212,7 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
   const [settingPay, setSettingPay] = useState(null); // day key having a flat $ set
   const [payAmt, setPayAmt] = useState('');
   const monthStart = (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-01`; })();
-  const payKey = (empId, dateKey, custId) => `${empId}:${dateKey}:${custId}`;
+  const payKey = (empId, dateKey, custId, asgId = null) => `${empId}:${dateKey}:${custId}:${asgId || ''}`;
   // Split one day's shifts by property. Every shift carries exactly one
   // customer_id, so these groups never overlap.
   const groupByProperty = (dayShifts) => {
@@ -12226,10 +12226,12 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
     return Array.from(m.values()).sort((a, b) => naturalCompare(a.name, b.name));
   };
 
-  // Flat pay for a whole day/job — overrides hours x rate. Empty clears it.
-  const saveFlatPay = async (empId, dateKey, custId, amount) => {
+  // Flat pay for a whole day / a property / a single assignment — overrides
+  // hours x rate. Empty clears it. assignmentId set = a per-assignment line
+  // (flat-rate properties); null = the old whole-day or per-property row.
+  const saveFlatPay = async (empId, dateKey, custId, amount, assignmentId = null) => {
     if (!empId) { alert('No cleaner id — could not save pay.'); return; }
-    const key = payKey(empId, dateKey, custId);
+    const key = payKey(empId, dateKey, custId, assignmentId);
     const existing = payDays[key];
     // Pre-split day rows (custId null) are still fully editable — they're
     // updated by row id, so they never need a property. Only creating a
@@ -12242,17 +12244,27 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
     if (existing?.id) {
       ({ error } = await supabase.from('employee_pay_days').update({ flat_amount: val }).eq('id', existing.id));
     } else {
-      // A row for this (employee, day) may already exist (e.g. from Mark paid)
-      // even if it's not in local state — upsert avoids the duplicate-key error.
-      ({ error } = await supabase.from('employee_pay_days')
-        .upsert({ employee_id: empId, work_date: dateKey, customer_id: custId, flat_amount: val, created_by: currentEmployee?.id || null },
-          { onConflict: 'employee_id,work_date,customer_id' }));
+      // No local row. A matching row could still exist server-side (e.g.
+      // from Mark paid) — look it up by the full key rather than relying on
+      // onConflict, since our uniqueness is an expression index that
+      // PostgREST upsert can't target. Update if found, else insert.
+      let q = supabase.from('employee_pay_days').select('id')
+        .eq('employee_id', empId).eq('work_date', dateKey);
+      q = custId ? q.eq('customer_id', custId) : q.is('customer_id', null);
+      q = assignmentId ? q.eq('assignment_id', assignmentId) : q.is('assignment_id', null);
+      const { data: found } = await q.maybeSingle();
+      if (found?.id) {
+        ({ error } = await supabase.from('employee_pay_days').update({ flat_amount: val }).eq('id', found.id));
+      } else {
+        ({ error } = await supabase.from('employee_pay_days')
+          .insert({ employee_id: empId, work_date: dateKey, customer_id: custId, assignment_id: assignmentId, flat_amount: val, created_by: currentEmployee?.id || null }));
+      }
     }
     setPayBusy(null); setSettingPay(null);
     if (error) {
-      const missingCol = /flat_amount|customer_id/.test(error.message || '') || error.code === '42703' || error.code === 'PGRST204' || error.code === '42P10';
+      const missingCol = /flat_amount|customer_id|assignment_id/.test(error.message || '') || error.code === '42703' || error.code === 'PGRST204' || error.code === '42P10';
       alert('Could not save pay: ' + (error.message || 'unknown error')
-        + (missingCol ? '\n\nPer-property pay isn\'t in your database yet. Run v60_pay_per_property.sql in Supabase, then try again.' : ''));
+        + (missingCol ? '\n\nPer-assignment pay isn\'t in your database yet. Run v65_pay_per_assignment.sql (and v60) in Supabase, then try again.' : ''));
       return;
     }
     await loadPay();
@@ -12263,7 +12275,7 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
       .select('*').gte('work_date', monthStart);
     if (error) return; // table not created yet
     const m = {};
-    (data || []).forEach(r => { m[payKey(r.employee_id, r.work_date, r.customer_id)] = r; });
+    (data || []).forEach(r => { m[payKey(r.employee_id, r.work_date, r.customer_id, r.assignment_id)] = r; });
     setPayDays(m);
   };
   useEffect(() => { loadPay(); /* eslint-disable-next-line */ }, []);
@@ -12274,21 +12286,32 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
     const ms = dayShifts.filter(s => s.end_time).reduce((sum, s) => sum + shiftBillableMs(s), 0);
     return (ms / 3600000) * rate;
   };
-  const togglePaid = async (empId, dateKey, custId, amount) => {
-    const key = payKey(empId, dateKey, custId);
+  const togglePaid = async (empId, dateKey, custId, amount, assignmentId = null) => {
+    const key = payKey(empId, dateKey, custId, assignmentId);
     const existing = payDays[key];
     if (!custId && !existing?.id) { alert('No property on these shifts — could not save pay.'); return; }
     setPayBusy(key);
     if (existing?.paid_at) {
       await supabase.from('employee_pay_days').update({ paid_at: null }).eq('id', existing.id);
-    } else if (existing) {
+    } else if (existing?.id) {
       await supabase.from('employee_pay_days').update({ paid_at: new Date().toISOString(), amount }).eq('id', existing.id);
     } else {
-      await supabase.from('employee_pay_days').insert({
-        employee_id: empId, work_date: dateKey, customer_id: custId,
-        paid_at: new Date().toISOString(),
-        amount, created_by: currentEmployee?.id || null,
-      });
+      // Look up server-side by full key before inserting (same reason as
+      // saveFlatPay — expression unique index, no upsert target).
+      let q = supabase.from('employee_pay_days').select('id')
+        .eq('employee_id', empId).eq('work_date', dateKey);
+      q = custId ? q.eq('customer_id', custId) : q.is('customer_id', null);
+      q = assignmentId ? q.eq('assignment_id', assignmentId) : q.is('assignment_id', null);
+      const { data: found } = await q.maybeSingle();
+      if (found?.id) {
+        await supabase.from('employee_pay_days').update({ paid_at: new Date().toISOString(), amount }).eq('id', found.id);
+      } else {
+        await supabase.from('employee_pay_days').insert({
+          employee_id: empId, work_date: dateKey, customer_id: custId, assignment_id: assignmentId,
+          paid_at: new Date().toISOString(),
+          amount, created_by: currentEmployee?.id || null,
+        });
+      }
     }
     setPayBusy(null);
     await loadPay();
@@ -12598,24 +12621,71 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
                   );
                 }
                 let dayOwed = 0, dayPaid = 0;
-                const strips = propGroups.map(pg => {
-                  const key = payKey(empId, d.key, pg.id);
-                  const row = payDays[key];
-                  const hasFlat = row?.flat_amount != null;
-                  const owed = hasFlat ? Number(row.flat_amount) : payOwed(pg.shifts);
-                  const paid = !!row?.paid_at;
-                  if (paid) dayPaid += owed; else dayOwed += owed;
-                  const pMs = pg.shifts.filter(s => s.end_time)
-                    .reduce((sum, s) => sum + shiftBillableMs(s), 0);
-                  const pBlocks = pg.shifts.reduce((n, s) => n + (s.work_blocks?.length || 0), 0);
-                  // Distinct apartments touched here — the number you'd
-                  // multiply by when you pay a flat rate per cleaning.
-                  const apts = new Set();
+                const strips = [];
+                propGroups.forEach(pg => {
+                  const sample = pg.shifts[0];
+                  const isHourly = (sample?.customer?.bill_mode === 'hourly');
+                  // Hourly property (Carriage Cove): keep ONE grouped strip for
+                  // the whole property, priced by hours — unchanged behavior.
+                  if (isHourly) {
+                    const key = payKey(empId, d.key, pg.id, null);
+                    const row = payDays[key];
+                    const hasFlat = row?.flat_amount != null;
+                    const owed = hasFlat ? Number(row.flat_amount) : payOwed(pg.shifts);
+                    const paid = !!row?.paid_at;
+                    if (paid) dayPaid += owed; else dayOwed += owed;
+                    const pMs = pg.shifts.filter(s => s.end_time).reduce((sum, s) => sum + shiftBillableMs(s), 0);
+                    const pBlocks = pg.shifts.reduce((n, s) => n + (s.work_blocks?.length || 0), 0);
+                    const apts = new Set();
+                    pg.shifts.forEach(s => (s.work_blocks || []).forEach(b => { if (b.unit?.label) apts.add(b.unit.label); }));
+                    strips.push({ pg, assignmentId: null, title: pg.name, sub: null, key, row, hasFlat, owed, paid, pMs, pBlocks,
+                                  aptCount: apts.size, hourly: true, stale: isUnpaidStale(d.key, paid) });
+                    return;
+                  }
+                  // Flat-rate property (Bridges, Citifront): ONE strip per
+                  // ASSIGNMENT. Group this property's blocks by assignment_id
+                  // (legacy null blocks fall back to a per-unit:party key so
+                  // they still show, just not merged across jobs).
+                  const byAsg = new Map();
                   pg.shifts.forEach(s => (s.work_blocks || []).forEach(b => {
-                    if (b.unit?.label) apts.add(b.unit.label);
-                  }));
-                  return { pg, key, row, hasFlat, owed, paid, pMs, pBlocks,
-                           aptCount: apts.size, stale: isUnpaidStale(d.key, paid) };
+                    const aId = b.assignment_id || null;
+                    const gkey = aId || `legacy:${b.unit?.label || ''}:${b.party?.label || ''}`;
+                    if (!byAsg.has(gkey)) {
+                      byAsg.set(gkey, {
+                        assignmentId: aId,
+                        unitLabel: b.unit?.label || '',
+                        size: unitSizeLabel(b.unit),
+                        type: b.assignment?.assignment_type || '',
+                        ms: 0, blocks: 0,
+                      });
+                    }
+                    const g = byAsg.get(gkey);
+                    g.blocks += 1;
+                    if (b.end_time) g.ms += (new Date(b.end_time) - new Date(b.start_time));
+                  });
+                  const asgList = Array.from(byAsg.values())
+                    .sort((a, b) => naturalCompare(a.unitLabel, b.unitLabel) || naturalCompare(a.type, b.type));
+                  asgList.forEach(g => {
+                    // Only assignment-tagged lines get their own pay row. Legacy
+                    // null-assignment blocks share the property-level row (null
+                    // assignment) so we never create an unkeyable pay row.
+                    const asgId = g.assignmentId;
+                    const key = payKey(empId, d.key, pg.id, asgId);
+                    const row = payDays[key];
+                    const hasFlat = row?.flat_amount != null;
+                    const owed = hasFlat ? Number(row.flat_amount) : 0; // flat: no auto amount, you enter it
+                    const paid = !!row?.paid_at;
+                    if (paid) dayPaid += owed; else dayOwed += owed;
+                    const title = g.unitLabel || pg.name;
+                    const subParts = [g.size, g.type ? assignmentTypeLabel(g.type) : null].filter(Boolean);
+                    strips.push({
+                      pg, assignmentId: asgId, title,
+                      sub: subParts.join(' · ') + (g.blocks > 1 ? ` · ${g.blocks} visits` : ''),
+                      key, row, hasFlat, owed, paid,
+                      pMs: g.ms, pBlocks: g.blocks, aptCount: 1, hourly: false,
+                      legacy: !asgId, stale: isUnpaidStale(d.key, paid),
+                    });
+                  });
                 });
                 return (
                   <div className="border-t border-stone-100">
@@ -12626,11 +12696,12 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
                           <div className="min-w-0">
                             <div className="text-xs font-mono text-amber-800 flex items-center gap-1.5">
                               <Building2 size={11} className="flex-shrink-0" />
-                              <span className="truncate">{st.pg.name}</span>
+                              <span className="truncate">{st.title}</span>
                             </div>
                             <div className="text-[10px] font-mono text-stone-400 mt-0.5">
+                              {st.sub ? <span>{st.sub} · </span> : null}
                               {fmtTimeShort(st.pMs)}
-                              {st.aptCount > 0 && ` · ${st.aptCount} ${st.aptCount === 1 ? 'apartment' : 'apartments'}`}
+                              {st.hourly && st.aptCount > 0 && ` · ${st.aptCount} ${st.aptCount === 1 ? 'apartment' : 'apartments'}`}
                               {` · ${st.pBlocks} ${st.pBlocks === 1 ? 'block' : 'blocks'}`}
                             </div>
                           </div>
@@ -12643,8 +12714,8 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
                               <span className="text-stone-900 font-bold">{st.owed > 0 ? fmtMoney(st.owed) : '—'}</span>
                               {st.hasFlat
                                 ? <span className="text-amber-700"> · flat</span>
-                                : st.owed > 0 ? <span className="text-stone-400"> · hourly</span> : null}
-                              {st.owed === 0 && !st.hasFlat && <span className="text-stone-400"> (set a rate or flat pay)</span>}
+                                : st.hourly && st.owed > 0 ? <span className="text-stone-400"> · hourly</span> : null}
+                              {st.owed === 0 && !st.hasFlat && <span className="text-stone-400"> {st.hourly ? '(set a rate or flat pay)' : '(enter what you owe)'}</span>}
                               {st.stale && <span className="text-amber-700"> · unpaid 7+ days</span>}
                             </span>
                           </div>
@@ -12656,10 +12727,10 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
                               <input type="number" min="0" step="0.01" autoFocus value={payAmt} onChange={e => setPayAmt(e.target.value)}
                                 placeholder="0.00"
                                 className="w-20 px-1.5 py-0.5 rounded border border-stone-300 text-xs font-mono" />
-                              <button onClick={() => saveFlatPay(empId, d.key, st.pg.id, payAmt)} disabled={payBusy === st.key}
+                              <button onClick={() => saveFlatPay(empId, d.key, st.pg.id, payAmt, st.assignmentId)} disabled={payBusy === st.key}
                                 className="text-[11px] px-2 py-0.5 rounded bg-stone-900 text-white">Save</button>
                               {st.hasFlat && (
-                                <button onClick={() => saveFlatPay(empId, d.key, st.pg.id, '')} disabled={payBusy === st.key}
+                                <button onClick={() => saveFlatPay(empId, d.key, st.pg.id, '', st.assignmentId)} disabled={payBusy === st.key}
                                   className="text-[11px] px-1.5 text-red-600">Clear</button>
                               )}
                               <button onClick={() => setSettingPay(null)} className="text-[11px] px-1 text-stone-500">Cancel</button>
@@ -12694,7 +12765,7 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
                               </button>
                             </>
                           )}
-                          <button onClick={() => togglePaid(empId, d.key, st.pg.id, st.owed)} disabled={payBusy === st.key}
+                          <button onClick={() => togglePaid(empId, d.key, st.pg.id, st.owed, st.assignmentId)} disabled={payBusy === st.key}
                             className={`text-[11px] font-mono px-2.5 py-0.5 rounded-full flex items-center gap-1 disabled:opacity-50 ${st.paid ? 'bg-emerald-600 text-white' : 'bg-white border border-stone-300 text-stone-600'}`}>
                             {st.paid ? <><Check size={10} /> Paid</> : 'Mark paid'}
                           </button>

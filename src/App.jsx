@@ -106,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul29-tap98";
+const BUILD_TAG = "jul29-tap99";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -11860,7 +11860,7 @@ function ManagerDashboard({ employee, onSignOut, onOpenMessages, onLogoClick }) 
     for (let from = 0; ; from += PAGE) {
       let q = supabase
         .from('shifts')
-        .select('*, employee:employees(id,name,pay_rate_hourly), customer:customers(id,name,property_type,bill_rate_hourly,bill_mode), work_blocks(id, end_time, start_time, bill_rate_at_work, assignment_id, assignment:assignments(assignment_type), unit:units(label, bedrooms, bathrooms), party:parties(label))')
+        .select('*, employee:employees(id,name,pay_rate_hourly), customer:customers(id,name,property_type,bill_rate_hourly,bill_mode), work_blocks(id, end_time, start_time, bill_rate_at_work, assignment_id, unit_id, assignment:assignments(assignment_type), unit:units(label, bedrooms, bathrooms), party:parties(label))')
         .eq('is_preview', false)
         .order('start_time', { ascending: false })
         .range(from, from + PAGE - 1);
@@ -12212,7 +12212,7 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
   const [settingPay, setSettingPay] = useState(null); // day key having a flat $ set
   const [payAmt, setPayAmt] = useState('');
   const monthStart = (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-01`; })();
-  const payKey = (empId, dateKey, custId, asgId = null) => `${empId}:${dateKey}:${custId}:${asgId || ''}`;
+  const payKey = (empId, dateKey, custId, asgId = null, unitId = null) => `${empId}:${dateKey}:${custId}:${asgId || ''}:${unitId || ''}`;
   // Split one day's shifts by property. Every shift carries exactly one
   // customer_id, so these groups never overlap.
   const groupByProperty = (dayShifts) => {
@@ -12229,9 +12229,9 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
   // Flat pay for a whole day / a property / a single assignment — overrides
   // hours x rate. Empty clears it. assignmentId set = a per-assignment line
   // (flat-rate properties); null = the old whole-day or per-property row.
-  const saveFlatPay = async (empId, dateKey, custId, amount, assignmentId = null) => {
+  const saveFlatPay = async (empId, dateKey, custId, amount, assignmentId = null, unitId = null) => {
     if (!empId) { alert('No cleaner id — could not save pay.'); return; }
-    const key = payKey(empId, dateKey, custId, assignmentId);
+    const key = payKey(empId, dateKey, custId, assignmentId, unitId);
     const existing = payDays[key];
     // Pre-split day rows (custId null) are still fully editable — they're
     // updated by row id, so they never need a property. Only creating a
@@ -12252,19 +12252,20 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
         .eq('employee_id', empId).eq('work_date', dateKey);
       q = custId ? q.eq('customer_id', custId) : q.is('customer_id', null);
       q = assignmentId ? q.eq('assignment_id', assignmentId) : q.is('assignment_id', null);
+      q = unitId ? q.eq('unit_id', unitId) : q.is('unit_id', null);
       const { data: found } = await q.maybeSingle();
       if (found?.id) {
         ({ error } = await supabase.from('employee_pay_days').update({ flat_amount: val }).eq('id', found.id));
       } else {
         ({ error } = await supabase.from('employee_pay_days')
-          .insert({ employee_id: empId, work_date: dateKey, customer_id: custId, assignment_id: assignmentId, flat_amount: val, created_by: currentEmployee?.id || null }));
+          .insert({ employee_id: empId, work_date: dateKey, customer_id: custId, assignment_id: assignmentId, unit_id: unitId, flat_amount: val, created_by: currentEmployee?.id || null }));
       }
     }
     setPayBusy(null); setSettingPay(null);
     if (error) {
-      const missingCol = /flat_amount|customer_id|assignment_id/.test(error.message || '') || error.code === '42703' || error.code === 'PGRST204' || error.code === '42P10';
+      const missingCol = /flat_amount|customer_id|assignment_id|unit_id/.test(error.message || '') || error.code === '42703' || error.code === 'PGRST204' || error.code === '42P10';
       alert('Could not save pay: ' + (error.message || 'unknown error')
-        + (missingCol ? '\n\nPer-assignment pay isn\'t in your database yet. Run v65_pay_per_assignment.sql (and v60) in Supabase, then try again.' : ''));
+        + (missingCol ? '\n\nPer-assignment pay isn\'t fully set up in your database yet. Run v65 and v66 in Supabase, then try again.' : ''));
       return;
     }
     await loadPay();
@@ -12275,7 +12276,7 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
       .select('*').gte('work_date', monthStart);
     if (error) return; // table not created yet
     const m = {};
-    (data || []).forEach(r => { m[payKey(r.employee_id, r.work_date, r.customer_id, r.assignment_id)] = r; });
+    (data || []).forEach(r => { m[payKey(r.employee_id, r.work_date, r.customer_id, r.assignment_id, r.unit_id)] = r; });
     setPayDays(m);
   };
   useEffect(() => { loadPay(); /* eslint-disable-next-line */ }, []);
@@ -12286,8 +12287,8 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
     const ms = dayShifts.filter(s => s.end_time).reduce((sum, s) => sum + shiftBillableMs(s), 0);
     return (ms / 3600000) * rate;
   };
-  const togglePaid = async (empId, dateKey, custId, amount, assignmentId = null) => {
-    const key = payKey(empId, dateKey, custId, assignmentId);
+  const togglePaid = async (empId, dateKey, custId, amount, assignmentId = null, unitId = null) => {
+    const key = payKey(empId, dateKey, custId, assignmentId, unitId);
     const existing = payDays[key];
     if (!custId && !existing?.id) { alert('No property on these shifts — could not save pay.'); return; }
     setPayBusy(key);
@@ -12296,18 +12297,17 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
     } else if (existing?.id) {
       await supabase.from('employee_pay_days').update({ paid_at: new Date().toISOString(), amount }).eq('id', existing.id);
     } else {
-      // Look up server-side by full key before inserting (same reason as
-      // saveFlatPay — expression unique index, no upsert target).
       let q = supabase.from('employee_pay_days').select('id')
         .eq('employee_id', empId).eq('work_date', dateKey);
       q = custId ? q.eq('customer_id', custId) : q.is('customer_id', null);
       q = assignmentId ? q.eq('assignment_id', assignmentId) : q.is('assignment_id', null);
+      q = unitId ? q.eq('unit_id', unitId) : q.is('unit_id', null);
       const { data: found } = await q.maybeSingle();
       if (found?.id) {
         await supabase.from('employee_pay_days').update({ paid_at: new Date().toISOString(), amount }).eq('id', found.id);
       } else {
         await supabase.from('employee_pay_days').insert({
-          employee_id: empId, work_date: dateKey, customer_id: custId, assignment_id: assignmentId,
+          employee_id: empId, work_date: dateKey, customer_id: custId, assignment_id: assignmentId, unit_id: unitId,
           paid_at: new Date().toISOString(),
           amount, created_by: currentEmployee?.id || null,
         });
@@ -12653,6 +12653,7 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
                     if (!byAsg.has(gkey)) {
                       byAsg.set(gkey, {
                         assignmentId: aId,
+                        unitId: b.unit_id || null,
                         unitLabel: b.unit?.label || '',
                         size: unitSizeLabel(b.unit),
                         type: b.assignment?.assignment_type || '',
@@ -12666,11 +12667,13 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
                   const asgList = Array.from(byAsg.values())
                     .sort((a, b) => naturalCompare(a.unitLabel, b.unitLabel) || naturalCompare(a.type, b.type));
                   asgList.forEach(g => {
-                    // Only assignment-tagged lines get their own pay row. Legacy
-                    // null-assignment blocks share the property-level row (null
-                    // assignment) so we never create an unkeyable pay row.
+                    // Assignment-tagged lines key by assignment_id. Legacy
+                    // blocks with no assignment_id key by UNIT instead, so two
+                    // untagged apartments (D108, F404) are separate pay rows
+                    // and separate edit states — not one shared row.
                     const asgId = g.assignmentId;
-                    const key = payKey(empId, d.key, pg.id, asgId);
+                    const unitKeyId = asgId ? null : (g.unitId || null);
+                    const key = payKey(empId, d.key, pg.id, asgId, unitKeyId);
                     const row = payDays[key];
                     const hasFlat = row?.flat_amount != null;
                     const owed = hasFlat ? Number(row.flat_amount) : 0; // flat: no auto amount, you enter it
@@ -12679,7 +12682,7 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
                     const title = g.unitLabel || pg.name;
                     const subParts = [g.size, g.type ? assignmentTypeLabel(g.type) : null].filter(Boolean);
                     strips.push({
-                      pg, assignmentId: asgId, title,
+                      pg, assignmentId: asgId, unitId: unitKeyId, title,
                       sub: subParts.join(' · ') + (g.blocks > 1 ? ` · ${g.blocks} visits` : ''),
                       key, row, hasFlat, owed, paid,
                       pMs: g.ms, pBlocks: g.blocks, aptCount: 1, hourly: false,
@@ -12727,10 +12730,10 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
                               <input type="number" min="0" step="0.01" autoFocus value={payAmt} onChange={e => setPayAmt(e.target.value)}
                                 placeholder="0.00"
                                 className="w-20 px-1.5 py-0.5 rounded border border-stone-300 text-xs font-mono" />
-                              <button onClick={() => saveFlatPay(empId, d.key, st.pg.id, payAmt, st.assignmentId)} disabled={payBusy === st.key}
+                              <button onClick={() => saveFlatPay(empId, d.key, st.pg.id, payAmt, st.assignmentId, st.unitId)} disabled={payBusy === st.key}
                                 className="text-[11px] px-2 py-0.5 rounded bg-stone-900 text-white">Save</button>
                               {st.hasFlat && (
-                                <button onClick={() => saveFlatPay(empId, d.key, st.pg.id, '', st.assignmentId)} disabled={payBusy === st.key}
+                                <button onClick={() => saveFlatPay(empId, d.key, st.pg.id, '', st.assignmentId, st.unitId)} disabled={payBusy === st.key}
                                   className="text-[11px] px-1.5 text-red-600">Clear</button>
                               )}
                               <button onClick={() => setSettingPay(null)} className="text-[11px] px-1 text-stone-500">Cancel</button>
@@ -12765,7 +12768,7 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
                               </button>
                             </>
                           )}
-                          <button onClick={() => togglePaid(empId, d.key, st.pg.id, st.owed, st.assignmentId)} disabled={payBusy === st.key}
+                          <button onClick={() => togglePaid(empId, d.key, st.pg.id, st.owed, st.assignmentId, st.unitId)} disabled={payBusy === st.key}
                             className={`text-[11px] font-mono px-2.5 py-0.5 rounded-full flex items-center gap-1 disabled:opacity-50 ${st.paid ? 'bg-emerald-600 text-white' : 'bg-white border border-stone-300 text-stone-600'}`}>
                             {st.paid ? <><Check size={10} /> Paid</> : 'Mark paid'}
                           </button>

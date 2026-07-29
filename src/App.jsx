@@ -106,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul28-tap95";
+const BUILD_TAG = "jul28-tap97";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -4153,8 +4153,15 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
 
   // Switch property = clock out current shift, then drop straight on the property picker.
   // Cleaner break than clock-out → home → clock-in.
-  const switchProperty = async () => {
-    if (!confirm('Clock out here and pick a new property?')) return;
+  const switchProperty = async (targetProperty = null) => {
+    // Direct switch: a property was tapped (e.g. from the More-tab browser),
+    // so clock out here and clock straight into that one — no second picker.
+    // Without a target, fall back to the old behavior (clock out → picker).
+    const direct = targetProperty && targetProperty.id;
+    const msg = direct
+      ? `Clock out of ${shift.customer?.name || 'here'} and clock in at ${targetProperty.name}?`
+      : 'Clock out here and pick a new property?';
+    if (!confirm(msg)) return;
     setBusy(true);
     if (activeTask) await stopTask(activeTask, false);
     if (activeBlock && !activeBlock.end_time) {
@@ -4162,7 +4169,23 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     }
     await supabase.from('shifts').update({ end_time: new Date().toISOString() }).eq('id', shift.id);
     setShift(null); setWorkBlocks([]); setActiveBlock(null); setTasks([]); setActiveTask(null);
-    setClockInFlow({ step: 'property' });  // Jump straight to the picker
+    if (direct) {
+      // Reuse the exact same clock-in path the picker uses, so there's one
+      // code path for "start a shift at a property" and no risk of a second
+      // open shift. doClockIn inserts the new shift and clears the flow.
+      if (targetProperty.property_type === 'multi_unit') {
+        await doClockIn({ customerId: targetProperty.id, propertyType: 'multi_unit' });
+      } else {
+        await doClockIn({
+          customerId: targetProperty.id,
+          billRate: targetProperty.bill_mode === 'hourly' ? targetProperty.bill_rate_hourly : targetProperty.flat_rate_amount,
+          propertyType: 'simple',
+        });
+      }
+      setCleanerTab && setCleanerTab('home');
+    } else {
+      setClockInFlow({ step: 'property' });  // no target → jump to the picker
+    }
     setBusy(false);
   };
 
@@ -8154,7 +8177,7 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
             <div className="-mx-4">
               <CleanerPropertiesList currentPropertyId={shift.customer_id} employee={employee}
                 onOpenCurrent={() => setCleanerTab('home')}
-                onSwitch={() => onSwitchProperty && onSwitchProperty()} />
+                onSwitch={(p) => onSwitchProperty && onSwitchProperty(p)} />
             </div>
           )}
 
@@ -8163,7 +8186,7 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
             onOpenMessages={onOpenMessages}
             onOpenWhosHere={() => setWhosHereOpen(true)} />
           {onSwitchProperty && (
-            <button onClick={onSwitchProperty}
+            <button onClick={() => onSwitchProperty()}
               className="w-full px-4 py-3.5 rounded-2xl bg-white border border-stone-200 hover:border-stone-400 text-left flex items-center gap-3 active:scale-98">
               <Building2 size={18} className="text-stone-700" />
               <div className="flex-1">
@@ -11817,9 +11840,12 @@ function ManagerDashboard({ employee, onSignOut, onOpenMessages, onLogoClick }) 
 
   // Date filter = a custom range OR all time. Empty range = all time,
   // and all time really means all (the query below paginates so nothing
-  // gets cut off by the 1000-row cap). Defaults to today.
+  // gets cut off by the 1000-row cap). Defaults to the last 7 days so a
+  // cleaner's recent shifts are all visible — "today only" was hiding
+  // yesterday's and cross-day work behind a filter nobody realized was set.
   const todayKey = new Date().toISOString().slice(0, 10);
-  const [dateFrom, setDateFrom] = useState(todayKey); // default: today
+  const weekAgoKey = (() => { const d = new Date(); d.setDate(d.getDate() - 6); return d.toISOString().slice(0, 10); })();
+  const [dateFrom, setDateFrom] = useState(weekAgoKey); // default: last 7 days
   const [dateTo, setDateTo] = useState(todayKey);
   const [filterCleaners, setFilterCleaners] = useState(new Set());
   const [filterProperties, setFilterProperties] = useState(new Set());
@@ -11834,7 +11860,7 @@ function ManagerDashboard({ employee, onSignOut, onOpenMessages, onLogoClick }) 
     for (let from = 0; ; from += PAGE) {
       let q = supabase
         .from('shifts')
-        .select('*, employee:employees(id,name,pay_rate_hourly), customer:customers(id,name,property_type,bill_rate_hourly), work_blocks(id, end_time, start_time, bill_rate_at_work, unit:units(label), party:parties(label))')
+        .select('*, employee:employees(id,name,pay_rate_hourly), customer:customers(id,name,property_type,bill_rate_hourly), work_blocks(id, end_time, start_time, bill_rate_at_work, assignment_id, assignment:assignments(assignment_type), unit:units(label, bedrooms, bathrooms), party:parties(label))')
         .eq('is_preview', false)
         .order('start_time', { ascending: false })
         .range(from, from + PAGE - 1);
@@ -12406,29 +12432,62 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
                    already loaded with their unit/party labels — the card
                    just never showed them, so "3 blocks" was all you got. */}
                 {(() => {
-                  const blocksList = d.shifts.flatMap(s => (s.work_blocks || []).map(b => ({ ...b, propName: s.customer?.name || '' })))
-                    .filter(b => b.start_time)
-                    .sort((a, b) => new Date(a.start_time) - new Date(b.start_time));
-                  if (blocksList.length === 0) return null;
-                  const show = blocksList.slice(0, 5);
+                  // One line per ASSIGNMENT, not per work block. A cleaner who
+                  // clocks into the same job several times (start, step away,
+                  // come back) made multiple blocks for ONE assignment — those
+                  // collapse to a single line so E109 doesn't read as two jobs.
+                  // Two genuinely different jobs at the same unit (a move-out
+                  // AND a trash-out) have different assignment_ids, so they
+                  // correctly stay as two lines, each labelled with its type.
+                  // Legacy blocks with no assignment_id fall back to grouping
+                  // by unit:party so nothing old collapses wrongly.
+                  const allBlocks = d.shifts.flatMap(s => (s.work_blocks || []).map(b => ({ ...b, propName: s.customer?.name || '' })))
+                    .filter(b => b.start_time);
+                  if (allBlocks.length === 0) return null;
+                  const groups = new Map();
+                  allBlocks.forEach(b => {
+                    const key = b.assignment_id || `${b.unit?.label || ''}:${b.party?.label || ''}`;
+                    if (!groups.has(key)) {
+                      groups.set(key, {
+                        key,
+                        label: unitPartyLabel(b.unit?.label, b.party?.label) || 'No bedroom set',
+                        type: b.assignment?.assignment_type || '',
+                        size: unitSizeLabel(b.unit),
+                        firstStart: b.start_time,
+                        lastEnd: b.end_time,
+                        running: !b.end_time,
+                        ms: 0,
+                        visits: 0,
+                      });
+                    }
+                    const g = groups.get(key);
+                    g.visits += 1;
+                    if (b.start_time < g.firstStart) g.firstStart = b.start_time;
+                    if (!b.end_time) g.running = true;
+                    else if (!g.lastEnd || b.end_time > g.lastEnd) g.lastEnd = b.end_time;
+                    if (b.end_time) g.ms += (new Date(b.end_time) - new Date(b.start_time));
+                  });
+                  const lines = Array.from(groups.values()).sort((a, b) => new Date(a.firstStart) - new Date(b.firstStart));
+                  const show = lines.slice(0, 6);
                   return (
                     <div className="mb-1.5 space-y-0.5">
-                      {show.map(b => {
-                        const label = unitPartyLabel(b.unit?.label, b.party?.label) || 'No bedroom set';
-                        const ms = b.end_time ? (new Date(b.end_time) - new Date(b.start_time)) : 0;
-                        return (
-                          <div key={b.id} className="flex items-center justify-between gap-2 text-[11px] font-mono">
-                            <span className="text-stone-700 truncate">{label}</span>
-                            <span className="text-stone-400 flex-shrink-0">
-                              {fmtClock(b.start_time)}{b.end_time ? `–${fmtClock(b.end_time)}` : ' · running'}
-                              {b.end_time && ms > 0 ? ` · ${fmtTimeShort(ms)}` : ''}
-                            </span>
-                          </div>
-                        );
-                      })}
-                      {blocksList.length > show.length && (
+                      {show.map(g => (
+                        <div key={g.key} className="flex items-center justify-between gap-2 text-[11px] font-mono">
+                          <span className="text-stone-700 truncate">
+                            {g.label}
+                            {g.size ? <span className="text-stone-400"> · {g.size}</span> : ''}
+                            {g.type ? <span className="text-stone-400"> · {assignmentTypeLabel(g.type)}</span> : ''}
+                            {g.visits > 1 ? <span className="text-stone-400"> · {g.visits} visits</span> : ''}
+                          </span>
+                          <span className="text-stone-400 flex-shrink-0">
+                            {fmtClock(g.firstStart)}{g.running ? ' · running' : (g.lastEnd ? `–${fmtClock(g.lastEnd)}` : '')}
+                            {!g.running && g.ms > 0 ? ` · ${fmtTimeShort(g.ms)}` : ''}
+                          </span>
+                        </div>
+                      ))}
+                      {lines.length > show.length && (
                         <div className="text-[10px] font-mono text-stone-400">
-                          +{blocksList.length - show.length} more — open the day to see them
+                          +{lines.length - show.length} more — open the day to see them
                         </div>
                       )}
                     </div>

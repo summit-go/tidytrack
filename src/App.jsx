@@ -12662,7 +12662,7 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
                     const g = byAsg.get(gkey);
                     g.blocks += 1;
                     if (b.end_time) g.ms += (new Date(b.end_time) - new Date(b.start_time));
-                  });
+                  }));
                   const asgList = Array.from(byAsg.values())
                     .sort((a, b) => naturalCompare(a.unitLabel, b.unitLabel) || naturalCompare(a.type, b.type));
                   asgList.forEach(g => {

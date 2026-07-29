@@ -106,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul28-tap94";
+const BUILD_TAG = "jul28-tap95";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -32398,7 +32398,7 @@ function SuggestedTabContent({ propertyId, employee, onGoToBedroom, onOpenBedroo
             {c.whosHere.map((w, i) => (
               <span key={i} className="inline-flex items-center gap-1">
                 <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-amber-100 text-amber-900 border border-amber-300 font-bold">
-                  {w.name}{w.mainSection ? ` · ${w.mainSection}` : ''} is here
+                  {w.name} here{w.mainSection ? ` · ${w.mainSection}` : ''}
                 </span>
                 {onJoinBlock && w.workBlockId && (
                   <button onClick={(e) => { e.stopPropagation(); onJoinBlock({ id: w.workBlockId }); }}
@@ -32678,7 +32678,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
     let rows = []; const PAGE = 1000;
     for (let from = 0; ; from += PAGE) {
       const { data, error } = await supabase.from('work_blocks')
-        .select('id, party_id, main_section, shift:shifts!inner(customer_id, employee:employees(id, name))')
+        .select('id, party_id, assignment_id, main_section, shift:shifts!inner(customer_id, employee:employees(id, name))')
         .is('end_time', null)
         .eq('shift.customer_id', propertyId)
         .range(from, from + PAGE - 1);
@@ -32687,20 +32687,29 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
       if (data.length < PAGE) break;
       if (from > 100000) break;
     }
+    // Key by assignment_id when the block has one (so "who's here" belongs to
+    // the specific job — trash-out vs move-out — not the whole bedroom), and
+    // ALSO by party_id as a fallback for legacy blocks with no assignment_id.
+    // Cards look themselves up by assignment first, then party.
     const m = new Map();
+    const push = (key, entry) => {
+      if (!key) return;
+      if (!m.has(key)) m.set(key, []);
+      m.get(key).push(entry);
+    };
     rows.forEach(b => {
       if (b.shift?.customer_id !== propertyId) return;
-      if (!b.party_id) return;
       // Exclude the viewing cleaner's own workblock — they don't need
       // to "join" themselves; the active workblock pill at the top of
       // the cleaner shell already surfaces it.
       if (b.shift?.employee?.id === employee?.id) return;
-      if (!m.has(b.party_id)) m.set(b.party_id, []);
-      m.get(b.party_id).push({
+      const entry = {
         name: b.shift?.employee?.name || '?',
         workBlockId: b.id,
         mainSection: b.main_section,
-      });
+      };
+      if (b.assignment_id) push(`a:${b.assignment_id}`, entry);
+      push(`p:${b.party_id}`, entry); // legacy fallback key
     });
     setWhosHereByParty(m);
   };
@@ -33487,15 +33496,26 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                              can hop in without going through the picker
                              flow. Self-chip is filtered out in loadWhosHere
                              since "Join yourself" makes no sense. */}
-                          {(whosHereByParty.get(pid) || []).length > 0 && (
+                          {(() => {
+                            // Never show "someone is here" on a DONE card — the
+                            // job's finished, nobody's actively in it. And look
+                            // up by THIS card's assignment (falling back to the
+                            // bedroom for legacy blocks) so a different job at
+                            // the same bedroom doesn't bleed its chip onto this
+                            // card.
+                            if (allDone) return null;
+                            const asgKey = firstTarget?.assignment_id ? `a:${firstTarget.assignment_id}` : null;
+                            const here = (asgKey && whosHereByParty.get(asgKey)) || whosHereByParty.get(`p:${pid}`) || [];
+                            if (here.length === 0) return null;
+                            return (
                             <div className="mb-2 flex items-center gap-1.5 flex-wrap">
                               <span className="text-[10px] uppercase tracking-wider font-mono text-amber-900 font-bold">
                                 ●
                               </span>
-                              {(whosHereByParty.get(pid) || []).map((w, i) => (
+                              {here.map((w, i) => (
                                 <span key={i} className="inline-flex items-center gap-1">
                                   <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-amber-100 text-amber-900 border border-amber-300 font-bold">
-                                    {w.name}{w.mainSection ? ` · ${w.mainSection}` : ''} is here
+                                    {w.name} here{w.mainSection ? ` · ${w.mainSection}` : ''}
                                   </span>
                                   {onJoinBlock && w.workBlockId && (
                                     <button onClick={(e) => { e.stopPropagation(); onJoinBlock({ id: w.workBlockId }); }}
@@ -33506,7 +33526,8 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                                 </span>
                               ))}
                             </div>
-                          )}
+                            );
+                          })()}
                           {/* === HEADER: title + chips === */}
                           <div className="flex items-start justify-between gap-2 mb-2">
                             <div className="flex-1 min-w-0">

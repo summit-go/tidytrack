@@ -106,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "jul28-tap92";
+const BUILD_TAG = "jul28-tap94";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -5014,12 +5014,17 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       setBusy(false);
     }
 
-    // Show the pending start screen — cleaner confirms by tapping Start
+    // Show the pending start screen — cleaner confirms by tapping Start.
+    // Carry the assignment_id through so the work block created on confirm
+    // is tagged with the exact job the cleaner came from (the card they
+    // tapped), keeping two jobs at one bedroom — e.g. trash-out vs move-out
+    // — from merging into one session.
     setPendingStart({
       unitId: target.unit_id,
       partyId: target.party_id,
       unitLabel: target.unit?.label || '',
       partyLabel: target.party?.label || '',
+      assignmentId: target.assignment_id || target.assignment?.id || null,
     });
   };
 
@@ -5098,6 +5103,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
         shift_id: shift.id,
         unit_id: pendingStart.unitId,
         party_id: pendingStart.partyId,
+        assignment_id: pendingStart.assignmentId || null,
         bill_rate_at_work: shift.customer?.bill_rate_hourly || null,
         is_preview: previewMode,
       })
@@ -7057,11 +7063,9 @@ const unitPartyLabel = (unitLabel, partyLabel) =>
 // like when they finished?" — the thing you need before re-opening a
 // clean someone else already did.
 //
-// Work blocks carry unit_id/party_id but NOT assignment_id, so a
-// session is matched to an assignment by time: any block that started
-// between the assignment being created and it being completed (or now,
-// if it's still open) belongs to it. Anything that matches nothing is
-// listed separately rather than silently dropped.
+// As of v64, work blocks carry assignment_id, so a session links to its
+// assignment directly. For blocks created before that (assignment_id null)
+// we still fall back to matching by unit_id/party_id + time window.
 // =================================================================
 function AssignmentWorkHistory({ propertyId, unitId, partyId, employee, defaultOpen = false, onReopen = null }) {
   const [rows, setRows] = useState([]);
@@ -7080,7 +7084,7 @@ function AssignmentWorkHistory({ propertyId, unitId, partyId, employee, defaultO
           .select('id, status, completed_at, assignment_id, assignment:assignments(id, assignment_type, title, created_at, deleted_at)')
           .eq('unit_id', unitId).eq('party_id', partyId),
         supabase.from('work_blocks')
-          .select('id, start_time, end_time, unit_id, party_id, shift:shifts!inner(customer_id, employee:employees(id, name)), tasks(*, photos(*))')
+          .select('id, start_time, end_time, unit_id, party_id, assignment_id, shift:shifts!inner(customer_id, employee:employees(id, name)), tasks(*, photos(*))')
           .eq('unit_id', unitId).eq('party_id', partyId)
           .order('start_time', { ascending: false }),
       ]);
@@ -7107,14 +7111,28 @@ function AssignmentWorkHistory({ propertyId, unitId, partyId, employee, defaultO
       });
       const list = Array.from(byAsg.values());
 
-      // Match sessions to assignments by time window.
+      // Attach each session to its assignment. Prefer the REAL link: a block
+      // tagged with assignment_id goes straight to that assignment — no
+      // guessing, so a trash-out and a move-out at the same bedroom never
+      // merge. Only blocks with no tag (legacy, pre-v64) fall back to the old
+      // time-window match.
+      const byId = new Map(list.map(r => [r.id, r]));
       const unmatched = [];
       blocks.forEach(b => {
+        if (b.assignment_id && byId.has(b.assignment_id)) {
+          byId.get(b.assignment_id).blocks.push(b);
+          return;
+        }
+        if (b.assignment_id && !byId.has(b.assignment_id)) {
+          // Tagged, but that assignment has no targets at this bedroom in the
+          // current set (deleted or filtered) — don't cross-attribute it.
+          unmatched.push(b);
+          return;
+        }
+        // Legacy untagged block: fall back to the time window.
         const t = new Date(b.start_time).getTime();
         const hit = list.find(r => {
           const from = new Date(r.createdAt).getTime();
-          // +1 day of slack: work often finishes just after the last item
-          // is ticked, and we'd rather over-attribute than lose a session.
           const to = r.lastDone ? new Date(r.lastDone).getTime() + 86400000 : Date.now();
           return t >= from && t <= to;
         });
@@ -8976,6 +8994,19 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
     prevActiveTaskRef.current = activeTask;
   }, [activeTask]);
 
+  // When the active block itself changes — a join, a reopen, or moving to a
+  // different bedroom — land on Active with that block open. The cleaner
+  // asked to be IN this workblock; drop them there, not on the pick-a-task
+  // (New) screen. (A fresh start still snaps to Active via the running-task
+  // effect above.) Guarded so it only fires on an actual block change.
+  const prevBlockIdRef = useRef(block?.id);
+  useEffect(() => {
+    if (block?.id && block.id !== prevBlockIdRef.current) {
+      setBlockTab('active');
+      prevBlockIdRef.current = block.id;
+    }
+  }, [block?.id]);
+
   // Finished workblocks at THIS bedroom today — closed blocks only, mine +
   // others, grouped by workblock. Powers the Done tab and replaces the old
   // standalone "Tasks others did today" panel.
@@ -8992,13 +9023,21 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
       // days so continued work is always reachable in Done.
       const start = new Date(); start.setHours(0, 0, 0, 0);
       start.setDate(start.getDate() - 6);
-      const { data } = await supabase.from('work_blocks')
+      let q = supabase.from('work_blocks')
         .select('*, unit:units(*), party:parties(*), shift:shifts!inner(id, employee:employees!inner(id, name)), tasks(id, name, category, subcategory, start_time, end_time, photos(*, taken_by_employee:employees!taken_by(name)))')
         .eq('unit_id', block.unit_id).eq('party_id', block.party_id)
         .gte('start_time', start.toISOString())
         .not('end_time', 'is', null)
         .neq('id', block.id)
         .order('start_time', { ascending: false });
+      // Scope to the SAME assignment when the current block is tagged with
+      // one. This is the core of the fix: two separate jobs at the same
+      // bedroom (e.g. trash-out and move-out) each show only THEIR OWN closed
+      // workblocks and photos, instead of merging. Legacy blocks that predate
+      // assignment tagging (assignment_id null) fall back to bedroom-only so
+      // nothing old disappears.
+      if (block.assignment_id) q = q.eq('assignment_id', block.assignment_id);
+      const { data } = await q;
       if (cancelled) return;
       const list = (data || []).map(b => ({
         ...b,
@@ -9011,18 +9050,17 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
     load();
     return () => { cancelled = true; };
     // eslint-disable-next-line
-  }, [block?.id, block?.unit_id, block?.party_id, employee?.id, blockTab]);
+  }, [block?.id, block?.unit_id, block?.party_id, block?.assignment_id, employee?.id, blockTab]);
 
   // Reopen a finished workblock → it becomes the active block. Confirm first
   // when it belongs to someone else (you're picking up their session).
   const handleReopenDone = (b) => {
     if (!onReopen) return;
-    if (!b.mine && !confirm(`Reopen ${b.ownerName}'s workblock and continue it?\n\nIt becomes your active workblock at this bedroom.`)) return;
-    // If the reopened block has a task still running, show Active. Otherwise
-    // land on New so the cleaner immediately sees the remaining checklist for
-    // the bedroom instead of an empty Active tab.
-    const hasRunning = (b.tasks || []).some(t => !t.end_time);
-    setBlockTab(hasRunning ? 'active' : 'new');
+    if (!b.mine && !confirm(`Reopen ${b.ownerName}'s workblock and continue it?\n\nIt becomes your active workblock at this bedroom, and moves to the Active tab.`)) return;
+    // Reopen always lands on Active with the block open — the cleaner asked
+    // to work THIS block, so put them in it. From there they tap New to add
+    // the next task, exactly like a fresh block.
+    setBlockTab('active');
     onReopen(b);
   };
 
@@ -9106,18 +9144,10 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
         </div>
       )}
 
-      {/* Other cleaners' workblocks at THIS bedroom. Shows when another
-         cleaner is working a different section here — Cleaner B sees
-         a card with Cleaner A's name, section, elapsed time, task /
-         photo count, and a Join button so they can drop in to help.
-         Hidden when no one else is here. */}
-      {block.unit?.id && block.party?.id && (
-        <div className="mx-4 mt-3">
-          <OtherWorkblocksHere unitId={block.unit.id} partyId={block.party.id}
-            currentBlockId={block.id} currentEmployeeId={employee?.id}
-            onJoin={onJoinBlock} />
-        </div>
-      )}
+      {/* Other cleaners' open workblocks at this bedroom now live inside the
+         Active tab (below), not above the tabs — a "someone else is here,
+         Join them" card only makes sense alongside your own active work, and
+         it was confusingly showing on the New tab. */}
 
       {/* New / Active / Done toggle — splits the old single-scroll view so
          the cleaner sees one thing at a time. Badges flag where the work is
@@ -9165,6 +9195,16 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
               </span>
             ))}
           </div>
+          {/* Other cleaners working a different section at THIS bedroom, with
+             a Join button. Lives here in Active so it sits alongside your own
+             running work, not on the New/pick-a-task screen. */}
+          {block.unit?.id && block.party?.id && (
+            <div className="mx-4 mt-4">
+              <OtherWorkblocksHere unitId={block.unit.id} partyId={block.party.id}
+                currentBlockId={block.id} currentEmployeeId={employee?.id}
+                onJoin={onJoinBlock} />
+            </div>
+          )}
         </>
       )}
 
@@ -9315,21 +9355,35 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
                             })()}{dur ? ` · ${fmtTimeShort(dur)}` : ''} · {bTasks.length} task{bTasks.length === 1 ? '' : 's'}
                           </div>
                           {(() => {
-                            // Photos live under the block's tasks. Surface them
-                            // right on the closed card so a cleaner can see their
-                            // pictures are safe without reopening anything — this
-                            // is the "my photos disappeared" reassurance.
+                            // Photos live under the block's tasks — from ANY
+                            // cleaner who worked this block, so a reopener sees
+                            // the whole picture. Grouped by kind with counts
+                            // (Before / After / Damage / Couldn't clean) and
+                            // tappable to view full-size.
                             const blockPhotos = bTasks.flatMap(t => (t.photos || []).filter(p => !p.deleted_at));
                             if (blockPhotos.length === 0) return null;
+                            const KIND_META = {
+                              before: { label: 'Before', color: 'text-blue-700' },
+                              after: { label: 'After', color: 'text-emerald-700' },
+                              damage: { label: 'Damage', color: 'text-red-700' },
+                              cannot_clean: { label: "Couldn't clean", color: 'text-yellow-700' },
+                            };
+                            const counts = {};
+                            blockPhotos.forEach(p => { counts[p.kind] = (counts[p.kind] || 0) + 1; });
                             return (
                               <div className="mt-2.5">
-                                <div className="text-[10px] uppercase tracking-wider text-stone-400 font-mono mb-1.5">
-                                  {blockPhotos.length} photo{blockPhotos.length === 1 ? '' : 's'}
+                                <div className="flex items-center gap-2 flex-wrap mb-1.5">
+                                  {['before', 'after', 'damage', 'cannot_clean'].filter(k => counts[k]).map(k => (
+                                    <span key={k} className={`text-[10px] uppercase tracking-wider font-mono ${KIND_META[k].color}`}>
+                                      {counts[k]} {KIND_META[k].label}
+                                    </span>
+                                  ))}
                                 </div>
                                 <div className="flex gap-1.5 flex-wrap">
                                   {blockPhotos.slice(0, 8).map(p => (
                                     <a key={p.id} href={p.public_url} target="_blank" rel="noopener noreferrer"
                                       onClick={(e) => e.stopPropagation()}
+                                      title={KIND_META[p.kind]?.label || p.kind}
                                       className="block w-14 h-14 rounded-lg overflow-hidden border border-stone-200 bg-stone-100 flex-shrink-0">
                                       <img src={p.public_url} alt="" loading="lazy" className="w-full h-full object-cover" />
                                     </a>
@@ -32245,9 +32299,15 @@ function SuggestedTabContent({ propertyId, employee, onGoToBedroom, onOpenBedroo
     const allDone = items.length > 0 && items.every(i => i.status === 'done');
     const goTo = () => {
       if (!onGoToBedroom) return;
+      // Carry this card's assignment so the block is tagged with the exact
+      // job. A grouped card can hold items from one assignment; if it somehow
+      // spans more than one, we don't guess — leave it null so it behaves as
+      // legacy rather than mis-tagging.
+      const asgIds = [...new Set(items.map(i => i.assignment_id).filter(Boolean))];
       onGoToBedroom({
         unit_id: c.unitId,
         party_id: c.partyId,
+        assignment_id: asgIds.length === 1 ? asgIds[0] : null,
         unit: { id: c.unitId, label: c.unitLabel },
         party: { id: c.partyId, label: c.partyLabel },
       });

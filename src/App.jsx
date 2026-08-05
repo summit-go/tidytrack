@@ -106,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug4-tap103";
+const BUILD_TAG = "aug4-tap104";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -1279,12 +1279,13 @@ function DueDateEditor({ value, onSave, onCancel, compact = false }) {
   return (
     <span className="inline-flex items-center gap-1 flex-wrap align-middle"
       onClick={(e) => e.stopPropagation()}>
+      {/* Picking a date saves it right away — the phone's own calendar
+         checkmark is the only confirm needed, so there's no separate Save
+         button to tap afterward. */}
       <input type="date" autoFocus value={draft}
-        onChange={(e) => setDraft(e.target.value)}
+        onChange={(e) => { setDraft(e.target.value); if (e.target.value) onSave(e.target.value); }}
         onClick={(e) => e.stopPropagation()}
         className={`${txt} font-mono px-1.5 py-0.5 rounded border border-stone-400 bg-white`} />
-      <button onClick={(e) => { stop(e); onSave(draft || ''); }}
-        className={`${txt} font-mono px-2 py-0.5 rounded bg-stone-900 text-white`}>Save</button>
       {value ? (
         <button onClick={(e) => { stop(e); onSave(''); }}
           className={`${txt} font-mono px-2 py-0.5 rounded bg-white border border-stone-300 text-stone-600`}>Clear</button>
@@ -7430,7 +7431,7 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
       supabase.from('employees').select('id, name, role').eq('active', true).order('name'),
     ]);
     const allowed = new Set(visibleProps(propRows || [], employee).map(p => p.id));
-    setTeam((emps || []).filter(e => e.role !== 'owner'));
+    setTeam((emps || []).filter(e => e.role !== 'owner' && !/\b(test|beta|demo)\b/i.test(e.name || '')));
     // Paginated — this query is unscoped (every property, every open target),
     // so a plain call stops at PostgREST's 1000-row cap and silently drops
     // jobs. That made freshly-assigned work never show up under "Mine".
@@ -7484,6 +7485,9 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
     const here = await fetchLivePresence();
     Object.values(byJob).forEach(j => {
       j.hereNow = (here[`${j.unitId}:${j.partyId || ''}`] || []).filter(h => h.id !== employee?.id);
+      // Names read cleaner alphabetically on the card, not in load order.
+      j.assignees.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+      j.requested.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
     });
     setJobs(Object.values(byJob));
     setLoaded(true);
@@ -7520,6 +7524,16 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
     await supabase.from('assignment_targets')
       .update({ status: 'done', completed_at: new Date().toISOString(), completed_by: employee.id })
       .eq('assignment_id', j.id).neq('status', 'done');
+    setBusyId(null); load();
+  };
+
+  // Owners/managers can flag a job priority right from this list — flips all
+  // of the assignment's targets, which is what the priority pill + top-sort
+  // read from.
+  const toggleJobPriority = async (j) => {
+    setBusyId(j.id);
+    await supabase.from('assignment_targets')
+      .update({ priority: !j.priority }).eq('assignment_id', j.id);
     setBusyId(null); load();
   };
 
@@ -7712,6 +7726,13 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
                         className="text-[11px] font-medium px-2.5 py-1 rounded-full bg-stone-100 text-stone-700 disabled:opacity-50">Request</button>
                     )}
                     {iRequested(j) && <span className="text-[11px] font-mono text-amber-700">Requested</span>}
+                    {canAssign && (
+                      <button onClick={() => toggleJobPriority(j)} disabled={busyId === j.id}
+                        title={j.priority ? 'Remove priority' : 'Mark priority'}
+                        className={`text-[10px] font-mono px-2 py-0.5 rounded-full inline-flex items-center gap-1 disabled:opacity-50 ${j.priority ? 'bg-red-600 text-white' : 'bg-white border border-dashed border-stone-300 text-stone-500'}`}>
+                        <AlertCircle size={10} /> {j.priority ? 'Priority' : 'Mark priority'}
+                      </button>
+                    )}
                     {canDone && (
                       <button onClick={() => markDone(j)} disabled={busyId === j.id}
                         title="Mark completed" className="p-1 rounded-lg text-emerald-600 hover:bg-emerald-50 disabled:opacity-40">
@@ -12316,10 +12337,11 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
     const existing = payDays[key];
     if (!custId && !existing?.id) { alert('No property on these shifts — could not save pay.'); return; }
     setPayBusy(key);
+    let error;
     if (existing?.paid_at) {
-      await supabase.from('employee_pay_days').update({ paid_at: null }).eq('id', existing.id);
+      ({ error } = await supabase.from('employee_pay_days').update({ paid_at: null }).eq('id', existing.id));
     } else if (existing?.id) {
-      await supabase.from('employee_pay_days').update({ paid_at: new Date().toISOString(), amount }).eq('id', existing.id);
+      ({ error } = await supabase.from('employee_pay_days').update({ paid_at: new Date().toISOString(), amount }).eq('id', existing.id));
     } else {
       let q = supabase.from('employee_pay_days').select('id')
         .eq('employee_id', empId).eq('work_date', dateKey);
@@ -12328,16 +12350,22 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
       q = unitId ? q.eq('unit_id', unitId) : q.is('unit_id', null);
       const { data: found } = await q.maybeSingle();
       if (found?.id) {
-        await supabase.from('employee_pay_days').update({ paid_at: new Date().toISOString(), amount }).eq('id', found.id);
+        ({ error } = await supabase.from('employee_pay_days').update({ paid_at: new Date().toISOString(), amount }).eq('id', found.id));
       } else {
-        await supabase.from('employee_pay_days').insert({
+        ({ error } = await supabase.from('employee_pay_days').insert({
           employee_id: empId, work_date: dateKey, customer_id: custId, assignment_id: assignmentId, unit_id: unitId,
           paid_at: new Date().toISOString(),
           amount, created_by: currentEmployee?.id || null,
-        });
+        }));
       }
     }
     setPayBusy(null);
+    if (error) {
+      const missingCol = /assignment_id|unit_id|customer_id|paid_at/.test(error.message || '') || error.code === '42703' || error.code === 'PGRST204';
+      alert('Could not mark paid: ' + (error.message || 'unknown error')
+        + (missingCol ? '\n\nYour database may be missing a pay column. Run v65 and v66 in Supabase, then try again.' : ''));
+      return;
+    }
     await loadPay();
   };
   // Set the TOTAL worked time for a whole day. manual_adjustment_seconds
@@ -17410,7 +17438,7 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
         j.assignees.push({ id: r.employee_id, name: nameById[r.employee_id] || '', requested: r.status === 'requested' });
       });
     }
-    setTeam((emps || []).filter(e => e.role !== 'owner'));
+    setTeam((emps || []).filter(e => e.role !== 'owner' && !/\b(test|beta|demo)\b/i.test(e.name || '')));
     // Who's physically in each bedroom right now. Matched on unit:party
     // because that's all a work block records.
     const here = await fetchLivePresence();
@@ -23951,12 +23979,30 @@ function PortalUnitDay({ property, unitId, date, portalUser, onBack }) {
     const sel = getSelectedPhotos();
     if (sel.length === 0) return;
     setBulkBusy(true);
+    // On phones, the same native picker that "Save X images" uses (Web Share
+    // with files) is the nicest way to get photos into the camera roll — one
+    // action, one confirm. So if this device can share files, Download uses
+    // that exact path. Desktop (no file-share) falls back to a single .zip.
+    if (canShareFiles()) {
+      const ok = await sharePhotos(sel, (p) => photoContext(p));
+      setBulkBusy(false);
+      if (!ok) {
+        // Share was dismissed or failed — fall back to the zip so Download
+        // always does something.
+        setBulkBusy(true);
+        const parts = [property.name, unit?.label, date].filter(Boolean)
+          .map(s => String(s).replace(/[^\w\-]+/g, '_'));
+        const zipName = `${parts.join('_') || 'cleaning'}_photos.zip`;
+        await downloadPhotosZip(sel, (p) => photoContext(p), zipName,
+          (done, total) => setZipProgress({ done, total }));
+        setZipProgress(null);
+        setBulkBusy(false);
+      }
+      return;
+    }
     if (sel.length === 1) {
-      // One photo = one prompt anyway; keep the plain named download.
       await downloadPhoto(sel[0], photoContext(sel[0]));
     } else {
-      // Multiple = one .zip = a single prompt on mobile instead of one per
-      // file. Name it after the property/unit/date so it's easy to find.
       const parts = [property.name, unit?.label, date].filter(Boolean)
         .map(s => String(s).replace(/[^\w\-]+/g, '_'));
       const zipName = `${parts.join('_') || 'cleaning'}_photos.zip`;

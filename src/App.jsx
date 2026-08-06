@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { createClient } from '@supabase/supabase-js';
 import {
-  Clock, Camera, LogOut, ChevronRight, ChevronLeft, Plus, Pause, Play, Check,
+  Clock, Camera, LogOut, ChevronRight, ChevronLeft, ChevronDown, Plus, Pause, Play, Check,
   ArrowLeft, Users, Image as ImageIcon, Download, X, MapPin,
   Briefcase, Delete, AlertCircle, UserPlus, Building2,
   Trash2, Eye, EyeOff, LayoutDashboard, FileText, DollarSign,
@@ -106,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug5-tap110";
+const BUILD_TAG = "aug5-tap111";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -1941,6 +1941,39 @@ const splitTaskName = (name) => {
   }
   return [name];
 };
+
+// A compact, scrollable dropdown for a multi-item workblock's item list.
+// Instead of the full list expanding the card, this shows a single bar with
+// the count; tapping opens a fixed-height panel the cleaner scrolls inside,
+// so a 5-item and a 40-item workblock take the same space on the card.
+// Collapsed by default. Used on both the active and the done task cards.
+function ItemsDropdown({ items }) {
+  const [open, setOpen] = useState(false);
+  const list = (items || []).filter(Boolean);
+  if (list.length === 0) return null;
+  return (
+    <div className="mt-2">
+      <button type="button" onClick={(e) => { e.stopPropagation(); setOpen(o => !o); }}
+        style={{ touchAction: 'manipulation' }}
+        className="w-full flex items-center justify-between gap-2 px-3 py-2 rounded-lg bg-white border border-stone-300 text-[11px] uppercase tracking-wider font-mono text-stone-600 active:scale-[0.99] transition">
+        <span>{open ? 'Hide items' : `${list.length} item${list.length === 1 ? '' : 's'}`}</span>
+        <ChevronDown size={15} className={`flex-shrink-0 transition-transform ${open ? 'rotate-180' : ''}`} />
+      </button>
+      {open && (
+        <div className="mt-1.5 rounded-lg border border-stone-300 bg-white overflow-y-auto"
+          style={{ maxHeight: '160px' }}>
+          {list.map((it, i) => (
+            <div key={i}
+              className={`flex items-center gap-2 px-3 py-2 text-sm text-stone-800 ${i < list.length - 1 ? 'border-b border-stone-100' : ''}`}>
+              <span className="w-1.5 h-1.5 rounded-full bg-amber-500 flex-shrink-0" />
+              <span className="break-words">{it}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 // =================================================================
 // ADDRESS LINK — tappable address chip. Opens the address in the
@@ -11026,20 +11059,9 @@ function ActiveWorkblockCard({ task, onStop, onAddPhoto }) {
             {damage.length > 0 && <span className="ml-2 text-red-700 font-bold">⚠ {damage.length} damage</span>}
             {cannot.length > 0 && <span className="ml-2 text-yellow-700 font-bold">⚠ {cannot.length} couldn't clean</span>}
           </div>
-          {/* Subsection chips — what's actually being worked in this
-             block. Previously the count said "4 items" but you had
-             to expand a task card below to see WHICH 4. Now the
-             items render right under the timer line as a flex-wrap
-             of small chips. */}
-          {parts.length > 1 && (
-            <div className="flex flex-wrap gap-1 mt-2">
-              {parts.map((p, i) => (
-                <span key={i} className="text-[10px] uppercase tracking-wider font-mono px-1.5 py-0.5 rounded-full bg-white border border-amber-300 text-stone-700">
-                  {p}
-                </span>
-              ))}
-            </div>
-          )}
+          {/* Subsection items — shown as a compact scrollable dropdown so a
+             long list doesn't fill the card. Collapsed by default. */}
+          {parts.length > 1 && <ItemsDropdown items={parts} />}
         </div>
         <button onClick={onStop}
           style={{ touchAction: 'manipulation' }}
@@ -11095,21 +11117,15 @@ function TaskCard({ task, isActive, onStop, onResume, onAddPhoto }) {
             {isDone && <Check size={14} className="text-emerald-600 flex-shrink-0 mt-1.5" />}
             {isActive && <span className="w-2 h-2 rounded-full bg-amber-600 animate-pulse flex-shrink-0 mt-2.5" />}
             {(() => {
-              // Multi-item task → bullet list, one item per line so
-              // the cleaner can read each picked subsection clearly.
-              // Single-item tasks render the original single line.
+              // Multi-item task → compact headline; the full list lives in a
+              // scrollable dropdown below (see ItemsDropdown) so it doesn't
+              // fill the card. Single-item tasks render the plain name.
               const parts = splitTaskName(task.name);
               if (parts.length > 1) {
-                return (
-                  <ul className="font-serif text-base text-stone-900 flex-1 min-w-0 space-y-0.5">
-                    {parts.map((p, i) => (
-                      <li key={i} className="flex items-start gap-1.5">
-                        <span className="text-amber-600 flex-shrink-0">•</span>
-                        <span className="break-words">{p}</span>
-                      </li>
-                    ))}
-                  </ul>
-                );
+                const head = task.category
+                  ? taskCategoryShortLabel(task.category, task.subcategory)
+                  : `${parts.length} items`;
+                return <span className="font-serif text-lg text-stone-900 truncate">{head}</span>;
               }
               return <span className="font-serif text-lg text-stone-900 truncate">{task.name}</span>;
             })()}
@@ -11132,6 +11148,8 @@ function TaskCard({ task, isActive, onStop, onResume, onAddPhoto }) {
           <div className="text-xs text-stone-500 font-mono">
             {fmtClock(task.start_time)}{task.end_time && ` — ${fmtClock(task.end_time)}`} · {fmtTimeShort(elapsed)}
           </div>
+          {/* Multi-item list as a compact scrollable dropdown (active + done). */}
+          {(() => { const parts = splitTaskName(task.name); return parts.length > 1 ? <ItemsDropdown items={parts} /> : null; })()}
         </div>
         {isDone ? (
           <button onClick={onResume}

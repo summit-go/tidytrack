@@ -106,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug5-tap111";
+const BUILD_TAG = "aug6-tap112";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -33075,26 +33075,30 @@ function SuggestedTabContent({ propertyId, employee, onGoToBedroom, onOpenBedroo
            at this bedroom. Compact pill row above the title/breakdown.
            Each name gets a Join button so the helper can jump straight
            into that workblock as a participant. */}
-        {c.whosHere && c.whosHere.length > 0 && (
-          <div className="mb-2 flex items-center gap-1.5 flex-wrap">
-            <span className="text-[10px] uppercase tracking-wider font-mono text-amber-900 font-bold">
-              ●
-            </span>
-            {c.whosHere.map((w, i) => (
-              <span key={i} className="inline-flex items-center gap-1">
-                <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-amber-100 text-amber-900 border border-amber-300 font-bold">
-                  {w.name} here{w.mainSection ? ` · ${w.mainSection}` : ''}
-                </span>
-                {onJoinBlock && w.workBlockId && (
-                  <button onClick={(e) => { e.stopPropagation(); onJoinBlock({ id: w.workBlockId }); }}
-                    className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-900 hover:bg-stone-800 text-stone-50 font-bold inline-flex items-center gap-1 active:scale-95">
-                    <Plus size={9} /> Join
-                  </button>
-                )}
+        {c.whosHere && c.whosHere.length > 0 && (() => {
+          // One consolidated chip + ONE Join button, not a chip+button per
+          // name. Everyone here is at the same bedroom, so joining any of
+          // their open blocks lands the helper in this bedroom — we use the
+          // first block that has an id.
+          const names = c.whosHere.map(w => w.name).filter(Boolean);
+          const sections = Array.from(new Set(c.whosHere.map(w => w.mainSection).filter(Boolean)));
+          const joinTarget = c.whosHere.find(w => w.workBlockId);
+          const label = names.join(', ') + ' here' + (sections.length ? ` · ${sections.join(', ')}` : '');
+          return (
+            <div className="mb-2 flex items-center gap-1.5 flex-wrap">
+              <span className="text-[10px] uppercase tracking-wider font-mono text-amber-900 font-bold">●</span>
+              <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-amber-100 text-amber-900 border border-amber-300 font-bold">
+                {label}
               </span>
-            ))}
-          </div>
-        )}
+              {onJoinBlock && joinTarget && (
+                <button onClick={(e) => { e.stopPropagation(); onJoinBlock({ id: joinTarget.workBlockId }); }}
+                  className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-900 hover:bg-stone-800 text-stone-50 font-bold inline-flex items-center gap-1 active:scale-95">
+                  <Plus size={9} /> Join
+                </button>
+              )}
+            </div>
+          );
+        })()}
 
         {/* === TITLE + TYPE + SECTION BREAKDOWN === */}
         <div className="mb-2">
@@ -34071,7 +34075,22 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                   <Building2 size={16} className="text-amber-700 flex-shrink-0" />
                   <span className="font-serif text-base text-stone-900 truncate">{unitLabel}</span>
                   <span className="text-xs font-mono px-2 py-0.5 rounded-full bg-amber-600 text-white font-bold flex-shrink-0">
-                    {bedroomCount} job{bedroomCount === 1 ? '' : 's'}
+                    {(() => {
+                      // Show WHICH bedrooms have work (e.g. "1, 3") instead of a
+                      // bare job count — more useful at a glance. Pull the number
+                      // out of each bedroom label ("Bedroom 3" / "BR 3" → 3),
+                      // dedupe, sort numerically. Falls back to the count if a
+                      // label has no number.
+                      const nums = bedroomEntries
+                        .map(([, b]) => {
+                          const m = String(b.party?.label || '').match(/(\d+)/);
+                          return m ? Number(m[1]) : null;
+                        })
+                        .filter(n => n != null);
+                      const uniq = Array.from(new Set(nums)).sort((a, b) => a - b);
+                      if (uniq.length === 0) return `${bedroomCount} job${bedroomCount === 1 ? '' : 's'}`;
+                      return uniq.join(', ');
+                    })()}
                   </span>
                   {unitDue === 'overdue' && <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-red-100 text-red-700 flex-shrink-0">Overdue</span>}
                   {unitDue === 'today' && <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 flex-shrink-0">Today</span>}
@@ -34220,24 +34239,22 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                             const asgKey = firstTarget?.assignment_id ? `a:${firstTarget.assignment_id}` : null;
                             const here = (asgKey && whosHereByParty.get(asgKey)) || whosHereByParty.get(`p:${pid}`) || [];
                             if (here.length === 0) return null;
+                            const hNames = here.map(w => w.name).filter(Boolean);
+                            const hSections = Array.from(new Set(here.map(w => w.mainSection).filter(Boolean)));
+                            const hJoin = here.find(w => w.workBlockId);
+                            const hLabel = hNames.join(', ') + ' here' + (hSections.length ? ` · ${hSections.join(', ')}` : '');
                             return (
                             <div className="mb-2 flex items-center gap-1.5 flex-wrap">
-                              <span className="text-[10px] uppercase tracking-wider font-mono text-amber-900 font-bold">
-                                ●
+                              <span className="text-[10px] uppercase tracking-wider font-mono text-amber-900 font-bold">●</span>
+                              <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-amber-100 text-amber-900 border border-amber-300 font-bold">
+                                {hLabel}
                               </span>
-                              {here.map((w, i) => (
-                                <span key={i} className="inline-flex items-center gap-1">
-                                  <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-amber-100 text-amber-900 border border-amber-300 font-bold">
-                                    {w.name} here{w.mainSection ? ` · ${w.mainSection}` : ''}
-                                  </span>
-                                  {onJoinBlock && w.workBlockId && (
-                                    <button onClick={(e) => { e.stopPropagation(); onJoinBlock({ id: w.workBlockId }); }}
-                                      className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-900 hover:bg-stone-800 text-stone-50 font-bold inline-flex items-center gap-1 active:scale-95">
-                                      <Plus size={9} /> Join
-                                    </button>
-                                  )}
-                                </span>
-                              ))}
+                              {onJoinBlock && hJoin && (
+                                <button onClick={(e) => { e.stopPropagation(); onJoinBlock({ id: hJoin.workBlockId }); }}
+                                  className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-900 hover:bg-stone-800 text-stone-50 font-bold inline-flex items-center gap-1 active:scale-95">
+                                  <Plus size={9} /> Join
+                                </button>
+                              )}
                             </div>
                             );
                           })()}
@@ -34388,9 +34405,6 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                           </div>
                           {/* === ASSIGNMENT TITLE + TYPE + SECTION BREAKDOWN === */}
                           <div className="mb-2">
-                            <div className="font-serif text-sm text-stone-700">
-                              {shortenBedroom(firstTarget?.assignment?.title) || 'Cleaning assignment'}
-                            </div>
                             {firstTarget?.assignment?.assignment_type && (
                               <div className="mt-1">
                                 <AssignmentTypeChip type={firstTarget.assignment.assignment_type} />

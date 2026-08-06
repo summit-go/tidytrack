@@ -106,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug5-tap108";
+const BUILD_TAG = "aug5-tap110";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -2024,11 +2024,19 @@ function SupplyChecklistGate({ employee, onDone, onSignOut }) {
   const confirm = async () => {
     if (!canConfirm) return;
     setBusy(true);
+    // Local same-day flag first — even if the DB write fails (RLS, offline,
+    // missing column), a refresh today won't re-prompt. Keyed per employee.
     try {
-      await supabase.from('supply_checklist_confirmations').insert({
+      const todayKey = new Date().toISOString().slice(0, 10);
+      localStorage.setItem(`supply_ok_${employee?.id}_${todayKey}`, '1');
+    } catch {}
+    try {
+      const { error } = await supabase.from('supply_checklist_confirmations').insert({
         employee_id: employee?.id || null,
         confirmed_name: name.trim(),
+        confirmed_at: new Date().toISOString(),
       });
+      if (error) console.warn('[supply] confirm save failed', error);
     } catch (e) { console.warn('[supply] confirm save failed', e); }
     setBusy(false);
     onDone();
@@ -3777,6 +3785,15 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
 
   useEffect(() => {
     if (previewMode) { setSupplyChecked(true); return; }
+    // Fast local path: if this employee already confirmed today on this device,
+    // skip the gate instantly (and skip the DB round-trip). This is what stops
+    // a browser refresh from re-prompting even if the DB write is flaky.
+    try {
+      const todayKey = new Date().toISOString().slice(0, 10);
+      if (localStorage.getItem(`supply_ok_${employee?.id}_${todayKey}`) === '1') {
+        setSupplyOk(true); setSupplyChecked(true); return;
+      }
+    } catch {}
     let cancelled = false;
     (async () => {
       try {
@@ -4532,6 +4549,38 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   //
   // Cap: 4 participants per block. Includes the original starter.
   const PARTICIPANT_CAP = 4;
+  // Close EVERY open work block this cleaner owns, across ALL their shifts —
+  // not just the current one. A cleaner should only ever have one block open
+  // at a time; scoping the pre-close to the current shift let a stale block
+  // from an earlier still-open shift stay running, which is how someone ended
+  // up "active" in two different bedrooms (101 and 312) at once. Returns the
+  // ids it closed so callers can update local state.
+  const closeAllMyOpenBlocks = async (exceptId = null) => {
+    if (!employee?.id) return [];
+    try {
+      // Find this cleaner's open blocks via their shifts (any shift, open or
+      // not) — the block is "mine" if its shift belongs to me.
+      const { data: myShifts } = await supabase.from('shifts')
+        .select('id').eq('employee_id', employee.id);
+      const shiftIds = (myShifts || []).map(s => s.id);
+      if (shiftIds.length === 0) return [];
+      let q = supabase.from('work_blocks').select('id')
+        .in('shift_id', shiftIds).is('end_time', null);
+      if (exceptId) q = q.neq('id', exceptId);
+      const { data: openBlocks } = await q;
+      const ids = (openBlocks || []).map(b => b.id);
+      if (ids.length > 0) {
+        const ts = new Date().toISOString();
+        await supabase.from('work_blocks').update({ end_time: ts }).in('id', ids);
+        setWorkBlocks(prev => prev.map(b => ids.includes(b.id) ? { ...b, end_time: ts } : b));
+      }
+      return ids;
+    } catch (e) {
+      console.warn('[closeAllMyOpenBlocks] failed', e);
+      return [];
+    }
+  };
+
   const joinBlock = async (targetBlock) => {
     if (!targetBlock?.id) return;
     if (!shift?.id) { alert('Clock in first to join a workblock.'); return; }
@@ -4548,18 +4597,9 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     // were in (paused / in_progress) — nothing is lost.
     try {
       if (activeTask) await stopTask(activeTask, false);
-      const { data: myOpenBlocks } = await supabase.from('work_blocks')
-        .select('id').eq('shift_id', shift.id).is('end_time', null)
-        .neq('id', targetBlock.id);
-      if (myOpenBlocks && myOpenBlocks.length > 0) {
-        const ts = new Date().toISOString();
-        await supabase.from('work_blocks')
-          .update({ end_time: ts })
-          .in('id', myOpenBlocks.map(b => b.id));
-        setWorkBlocks(prev => prev.map(b =>
-          myOpenBlocks.some(o => o.id === b.id) ? { ...b, end_time: ts } : b
-        ));
-      }
+      // Close every open block I own (across all my shifts), except the one
+      // I'm joining — prevents being active in two bedrooms via a stale shift.
+      await closeAllMyOpenBlocks(targetBlock.id);
     } catch (e) {
       console.warn('[joinBlock] could not pre-close own open blocks', e);
     }
@@ -4783,16 +4823,9 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     // reopen it below regardless of whose shift it's under, so anyone
     // can recover a block that was closed by accident.
     try {
-      if (shift?.id) {
-        const { data: openBlocks } = await supabase.from('work_blocks')
-          .select('id').eq('shift_id', shift.id).is('end_time', null).neq('id', block.id);
-        if (openBlocks && openBlocks.length > 0) {
-          const ts = new Date().toISOString();
-          await supabase.from('work_blocks')
-            .update({ end_time: ts })
-            .in('id', openBlocks.map(b => b.id));
-        }
-      }
+      // Close every open block I own across all my shifts (not just the
+      // current one), except the one being reopened.
+      await closeAllMyOpenBlocks(block.id);
     } catch (e) {
       console.warn('[reopenBlock] could not pre-close open blocks', e);
     }
@@ -5161,17 +5194,11 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   const confirmPendingStart = async () => {
     if (!pendingStart) return;
     setBusy(true);
-    // Safety: close any other open block under this shift before opening
-    // a new one (mirrors onPickBlockParty's defensive pre-close)
+    // Safety: close every open block I own across ALL my shifts before opening
+    // a new one — a stale block from an earlier open shift must not stay
+    // running in another bedroom.
     try {
-      const { data: openBlocks } = await supabase.from('work_blocks')
-        .select('id').eq('shift_id', shift.id).is('end_time', null);
-      if (openBlocks && openBlocks.length > 0) {
-        const ts = new Date().toISOString();
-        await supabase.from('work_blocks')
-          .update({ end_time: ts })
-          .in('id', openBlocks.map(b => b.id));
-      }
+      await closeAllMyOpenBlocks(null);
     } catch (e) {
       console.warn('[confirmPendingStart] could not pre-close open blocks', e);
     }
@@ -9401,7 +9428,7 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
             disabled={busy}
             className="w-full py-4 rounded-2xl bg-amber-700 hover:bg-amber-800 text-stone-50 text-base font-bold flex items-center justify-center gap-2 active:scale-98 transition-transform disabled:opacity-50">
             <Check size={18} />
-            I'm done here
+            We are done here
           </button>
           {totalActive > 1 && onLeaveBlock && (
             <div className="text-[11px] text-stone-500 text-center mt-1.5 font-mono">
@@ -31642,8 +31669,28 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
     if (onUpdate) onUpdate();
   };
 
-  // Flip the priority flag on a single target. Per-target (not per-
-  // assignment) since AssignmentCard shows one card per target. Owners
+  // Smart reopen — restore a done item to what it actually was, rather than
+  // forcing "new". Worked items (a real start) return to in_progress (Active);
+  // never-started items return to pending (New). See the fuller note on the
+  // other reopenTarget.
+  const reopenTarget = async (target) => {
+    const wasWorked = !!target.started_at || !!target.started_by;
+    const newStatus = wasWorked ? 'in_progress' : 'pending';
+    setTargets(prev => prev.map(t => t.id === target.id ? { ...t, status: newStatus, completed_at: null, completed_by: null } : t));
+    setBusy(true);
+    const patch = { status: newStatus, completed_at: null, completed_by: null };
+    if (newStatus === 'in_progress') {
+      if (!target.started_at) patch.started_at = new Date().toISOString();
+      patch.started_by = target.started_by || employee?.id || null;
+    } else {
+      patch.started_at = null; patch.started_by = null;
+    }
+    const { error } = await supabase.from('assignment_targets').update(patch).eq('id', target.id);
+    setBusy(false);
+    if (error) { load(); alert('Could not reopen: ' + error.message); return; }
+    load();
+    if (onUpdate) onUpdate();
+  };
   // can toggle right from the capsule without opening the detail.
   const togglePriority = async (target) => {
     const next = !target.priority;
@@ -31791,7 +31838,7 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
             onPause={() => updateStatus(t, 'paused')}
             onMoveToPending={() => updateStatus(t, 'pending')}
             onDone={() => updateStatus(t, 'done')}
-            onReopen={() => updateStatus(t, 'pending')}
+            onReopen={() => reopenTarget(t)}
             onBlocked={() => setStatusModal({ target: t })}
             onReassign={() => setReassignTarget(t)}
             onDelete={can(employee, 'upload_assignments') ? async () => {
@@ -33617,9 +33664,37 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
     if (onUpdate) onUpdate();
   };
 
-  // Flip the priority flag on a single target. Same per-target model
-  // as elsewhere — one card = one target, one toggle. Optimistic
-  // update so the chip flips instantly; rolls back on DB error.
+  // Reopen a DONE item back to the state it was actually in — not a blanket
+  // reset to "new". "We are done here" sweeps every item at a bedroom to done,
+  // including ones never touched, so on reopen we use the work evidence to
+  // restore each item honestly:
+  //   • worked (has a real start / started_by) → in_progress (Active), so the
+  //     cleaner picks it back up where they left off
+  //   • never started (no started_at) → pending (New)
+  // Completion stamps are cleared since it's no longer done.
+  const reopenTarget = async (target) => {
+    const wasWorked = !!target.started_at || !!target.started_by;
+    const newStatus = wasWorked ? 'in_progress' : 'pending';
+    const movedOffTab = newStatus !== statusFilter;
+    if (movedOffTab) setTargets(prev => prev.filter(t => t.id !== target.id));
+    else setTargets(prev => prev.map(t => t.id === target.id ? { ...t, status: newStatus } : t));
+
+    setBusy(true);
+    const patch = { status: newStatus, completed_at: null, completed_by: null };
+    if (newStatus === 'in_progress') {
+      if (!target.started_at) patch.started_at = new Date().toISOString();
+      patch.started_by = target.started_by || employee?.id || null;
+    } else {
+      patch.started_at = null; patch.started_by = null;
+    }
+    const { error } = await supabase.from('assignment_targets').update(patch).eq('id', target.id);
+    setBusy(false);
+    if (error) { load(); alert('Could not reopen: ' + error.message); return; }
+    load();
+    if (onUpdate) onUpdate();
+  };
+
+  // Flip the priority flag on a single target.
   const togglePriority = async (target) => {
     const next = !target.priority;
     setTargets(prev => prev.map(t => t.id === target.id ? { ...t, priority: next } : t));
@@ -33900,7 +33975,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                 onPause={() => updateStatus(t, 'paused')}
               onMoveToPending={() => updateStatus(t, 'pending')}
                 onDone={() => updateStatus(t, 'done')}
-                onReopen={() => updateStatus(t, 'pending')}
+                onReopen={() => reopenTarget(t)}
                 onBlocked={() => setStatusModal({ target: t })}
                 onReassign={() => setReassignTarget(t)}
                 onTogglePriority={togglePriority}
@@ -34452,7 +34527,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                             onPause={() => updateStatus(t, 'paused')}
                             onMoveToPending={() => updateStatus(t, 'pending')}
                             onDone={() => updateStatus(t, 'done')}
-                            onReopen={() => updateStatus(t, 'pending')}
+                            onReopen={() => reopenTarget(t)}
                             onBlocked={() => setStatusModal({ target: t })}
                             onReassign={() => setReassignTarget(t)}
                             onTogglePriority={togglePriority}

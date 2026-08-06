@@ -106,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap112";
+const BUILD_TAG = "aug6-tap115";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -897,8 +897,16 @@ function useTick(active) {
   const [, setT] = useState(0);
   useEffect(() => {
     if (!active) return;
-    const id = setInterval(() => setT(t => t + 1), 1000);
-    return () => clearInterval(id);
+    // Only tick while the app is actually on screen — a backgrounded live
+    // timer doesn't need to re-render every second (and the elapsed time is
+    // recomputed from timestamps on return anyway, so nothing drifts).
+    let id = null;
+    const start = () => { if (id == null) id = setInterval(() => setT(t => t + 1), 1000); };
+    const stop = () => { if (id != null) { clearInterval(id); id = null; } };
+    const onVis = () => { if (document.hidden) stop(); else { setT(t => t + 1); start(); } };
+    if (!document.hidden) start();
+    document.addEventListener('visibilitychange', onVis);
+    return () => { stop(); document.removeEventListener('visibilitychange', onVis); };
   }, [active]);
 }
 
@@ -3987,8 +3995,21 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
         const live = allBlocks.find(b => !b.end_time);
         if (live) {
           setActiveBlock(live);
-          setTasks(live.tasks || []);
-          const liveTask = (live.tasks || []).find(t => !t.end_time);
+          // A cleaner can end up with more than one open block at the SAME
+          // bedroom (e.g. a stale earlier shift never closed). Each block's
+          // tasks — and the before/after photos on them — would otherwise be
+          // split, and the ones on the non-active block would look "missing".
+          // So gather tasks from EVERY open block at this same unit+party, not
+          // just the one we picked as active. Dedupe by task id.
+          const sameSpotOpen = allBlocks.filter(b =>
+            !b.end_time && b.unit_id === live.unit_id && b.party_id === live.party_id);
+          const seen = new Set();
+          const mergedTasks = [];
+          sameSpotOpen.forEach(b => (b.tasks || []).forEach(t => {
+            if (!seen.has(t.id)) { seen.add(t.id); mergedTasks.push(t); }
+          }));
+          setTasks(mergedTasks.length ? mergedTasks : (live.tasks || []));
+          const liveTask = mergedTasks.find(t => !t.end_time) || (live.tasks || []).find(t => !t.end_time);
           if (liveTask) setActiveTask(liveTask.id);
         }
       } else {
@@ -4545,6 +4566,12 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       `${heavy ? '\u26A0 ' : ''}Undo this work block? ${detail}Any items you marked in-progress will go back to pending. This cannot be reversed.`
     );
     if (!confirm(msg)) return;
+    // Photos are often the whole point of a job (before/after proof). Deleting
+    // them is permanent, so when any exist require a SECOND explicit yes — a
+    // single mis-tap should never wipe evidence photos.
+    if (photoCount > 0) {
+      if (!confirm(tt(`This will permanently delete ${photoCount} photo${photoCount === 1 ? '' : 's'} that can't be recovered. Are you absolutely sure?`))) return;
+    }
     setBusy(true);
     try {
       // 1. Revert assignment_targets the cleaner advanced during this
@@ -5921,8 +5948,10 @@ function WhosHerePopup({ propertyId, myEmployeeId, propertyName, onClose, onJoin
 
   useEffect(() => {
     load();
-    const iv = setInterval(load, 30000);
-    return () => clearInterval(iv);
+    const iv = setInterval(() => { if (!document.hidden) load(); }, 30000);
+    const onVis = () => { if (!document.hidden) load(); };
+    document.addEventListener('visibilitychange', onVis);
+    return () => { clearInterval(iv); document.removeEventListener('visibilitychange', onVis); };
   }, [propertyId]);
 
   // Exclude self — the cleaner already knows where THEY are
@@ -6921,8 +6950,10 @@ function WhosWorkingNowModal({ employee, onClose }) {
       if (!cancelled) { setRows(out); setLoaded(true); }
     };
     load();
-    const iv = setInterval(load, 30000);
-    return () => { cancelled = true; clearInterval(iv); };
+    const iv = setInterval(() => { if (!document.hidden) load(); }, 30000);
+    const onVis = () => { if (!document.hidden) load(); };
+    document.addEventListener('visibilitychange', onVis);
+    return () => { cancelled = true; clearInterval(iv); document.removeEventListener('visibilitychange', onVis); };
   }, [employee?.id]);
 
   const working = rows.filter(r => r.kind === 'block');
@@ -9111,8 +9142,10 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
       if (!cancelled) setParticipants(data || []);
     };
     load();
-    const iv = setInterval(load, 30000);
-    return () => { cancelled = true; clearInterval(iv); };
+    const iv = setInterval(() => { if (!document.hidden) load(); }, 30000);
+    const onVis = () => { if (!document.hidden) load(); };
+    document.addEventListener('visibilitychange', onVis);
+    return () => { cancelled = true; clearInterval(iv); document.removeEventListener('visibilitychange', onVis); };
   }, [block?.id]);
   // Other cleaners currently in this block (not me)
   const others = participants.filter(p => p.employee_id !== employee?.id);
@@ -11640,7 +11673,7 @@ async function clearAssignmentBroadcast(assignmentId) {
 
 // Bell icon + dropdown feed for the header. Shows unread count, lists recent
 // notifications (read + unread) as 7-day history, marks them read on open.
-function NotificationBell({ employee, isOwner }) {
+function NotificationBell({ employee, isOwner, onNavigate }) {
   const [open, setOpen] = useState(false);
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -11655,6 +11688,31 @@ function NotificationBell({ employee, isOwner }) {
     if (isOwner) {
       supabase.from('notifications').delete().lt('created_at', weekAgoISO)
         .then(({ error }) => { if (error) console.warn('[notify] prune failed', error); });
+      // Backfill: PM assignments that are pending approval but have no bell
+      // notification yet (e.g. submitted before the bell existed). Create one
+      // per assignment so the owner sees them in the bell, not just a screen.
+      try {
+        const { data: pendingAsg } = await supabase.from('assignments')
+          .select('id, title, customer_id, customer:customers(name)')
+          .eq('source', 'pm').eq('pm_status', 'pending')
+          .is('deleted_at', null);
+        if (pendingAsg && pendingAsg.length) {
+          const { data: existing } = await supabase.from('notifications')
+            .select('link_id')
+            .eq('kind', 'pm_assignment')
+            .in('link_id', pendingAsg.map(a => a.id));
+          const have = new Set((existing || []).map(r => r.link_id));
+          const toInsert = pendingAsg.filter(a => !have.has(a.id)).map(a => ({
+            recipient_scope: 'owner', kind: 'pm_assignment',
+            title: 'New assignment to approve',
+            body: `${a.customer?.name || 'A property'} · ${a.title || 'Assignment'}`,
+            link_kind: 'assignment', link_id: a.id,
+          }));
+          if (toInsert.length) {
+            await supabase.from('notifications').insert(toInsert);
+          }
+        }
+      } catch (e) { console.warn('[notify] pm backfill skipped', e); }
     }
     // A person sees notifications addressed to them, plus (if owner/manager)
     // the 'owner' broadcast feed.
@@ -11679,9 +11737,12 @@ function NotificationBell({ employee, isOwner }) {
 
   useEffect(() => {
     load();
-    // Light polling so new items surface without a full refresh.
-    const t = setInterval(load, 60000);
-    return () => clearInterval(t);
+    // Light polling so new items surface without a full refresh — paused
+    // while the app is backgrounded, refreshes on return.
+    const t = setInterval(() => { if (!document.hidden) load(); }, 60000);
+    const onVis = () => { if (!document.hidden) load(); };
+    document.addEventListener('visibilitychange', onVis);
+    return () => { clearInterval(t); document.removeEventListener('visibilitychange', onVis); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [employee?.id, isOwner]);
 
@@ -11745,16 +11806,22 @@ function NotificationBell({ employee, isOwner }) {
               ) : items.length === 0 ? (
                 <div className="px-4 py-8 text-center text-sm text-stone-400">Nothing yet.</div>
               ) : (
-                items.map(n => (
-                  <div key={n.id} className={`px-4 py-3 border-b border-stone-50 flex gap-3 ${n.read_at ? '' : 'bg-amber-50/40'}`}>
+                items.map(n => {
+                  const clickable = !!onNavigate && (n.link_kind || n.kind);
+                  return (
+                  <div key={n.id} role={clickable ? 'button' : undefined}
+                    onClick={clickable ? () => { setOpen(false); onNavigate(n); } : undefined}
+                    className={`px-4 py-3 border-b border-stone-50 flex gap-3 ${n.read_at ? '' : 'bg-amber-50/40'} ${clickable ? 'hover:bg-stone-50 cursor-pointer active:scale-[0.99]' : ''}`}>
                     <span className={`w-2 h-2 rounded-full mt-1.5 flex-shrink-0 ${KIND_DOT[n.kind] || KIND_DOT.other}`} />
                     <div className="min-w-0 flex-1">
                       <div className="text-sm text-stone-900 font-medium">{n.title}</div>
                       {n.body && <div className="text-xs text-stone-600 mt-0.5 whitespace-pre-wrap">{n.body}</div>}
                       <div className="text-[10px] font-mono text-stone-400 mt-1">{fmtWhen(n.created_at)}</div>
                     </div>
+                    {clickable && <ChevronRight size={14} className="text-stone-300 flex-shrink-0 self-center" />}
                   </div>
-                ))
+                  );
+                })
               )}
             </div>
           </div>
@@ -11764,7 +11831,7 @@ function NotificationBell({ employee, isOwner }) {
   );
 }
 
-function Header({ name, onSignOut, role, employee, onOpenMessages, onLogoClick, onBack, onOpenWhosHere, menuItems, cleanerView = false }) {
+function Header({ name, onSignOut, role, employee, onOpenMessages, onLogoClick, onBack, onOpenWhosHere, menuItems, onNotificationNavigate, cleanerView = false }) {
   // Messages icon in header for all signed-in roles (cleaner/manager/owner)
   const showMessagesIcon = !!(onOpenMessages && employee);
   // Cleaners get a bare header (just the logo) — their language / messages /
@@ -11845,7 +11912,7 @@ function Header({ name, onSignOut, role, employee, onOpenMessages, onLogoClick, 
       </div>
       {!isCleaner && (
       <div className="flex items-center gap-2" data-no-translate>
-        <NotificationBell employee={employee} isOwner={role === 'owner' || role === 'manager'} />
+        <NotificationBell employee={employee} isOwner={role === 'owner' || role === 'manager'} onNavigate={onNotificationNavigate} />
         {/* Everything that used to sit as separate icons (language, messages,
            who's-here) now lives inside this one ⋯ menu, together with any
            tools the parent passes and Sign out. That keeps the header to just
@@ -11924,7 +11991,7 @@ function Header({ name, onSignOut, role, employee, onOpenMessages, onLogoClick, 
       )}
       {isCleaner && employee && (
         <div className="flex items-center" data-no-translate>
-          <NotificationBell employee={employee} isOwner={false} />
+          <NotificationBell employee={employee} isOwner={false} onNavigate={onNotificationNavigate} />
         </div>
       )}
     </div>
@@ -25025,8 +25092,10 @@ function WhosWherePanel({ employee }) {
   };
   useEffect(() => {
     load();
-    const iv = setInterval(load, 30000); // refresh every 30s
-    return () => clearInterval(iv);
+    const iv = setInterval(() => { if (!document.hidden) load(); }, 30000);
+    const onVis = () => { if (!document.hidden) load(); };
+    document.addEventListener('visibilitychange', onVis);
+    return () => { clearInterval(iv); document.removeEventListener('visibilitychange', onVis); };
   }, []);
 
   if (!loaded) return null;
@@ -26216,6 +26285,13 @@ function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenAssi
       <ScreenId id="OW-DAILY" />
       <Header name={employee.name} onSignOut={onSignOut} role={employee.role} employee={employee} onOpenMessages={onOpenMessages} onLogoClick={onLogoClick}
         onOpenWhosHere={() => setWhosWhereOpen(true)}
+        onNotificationNavigate={(n) => {
+          // PM assignment / recheck notifications open the review screen where
+          // the owner approves or denies. Other kinds just dismiss.
+          if (n?.kind === 'pm_assignment' || n?.kind === 'recheck' || n?.link_kind === 'assignment') {
+            onOpenInbox && onOpenInbox();
+          }
+        }}
         menuItems={[
           ...(onOpenAssignedVsCleaned ? [{ icon: <Eye size={18} />, label: 'Assigned vs cleaned', onClick: onOpenAssignedVsCleaned }] : []),
           ...(betaEnabled ? [{ icon: <Clock size={18} />, label: 'Activity timeline', onClick: () => setShowActivityTimeline(true) }] : []),
@@ -26223,30 +26299,9 @@ function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenAssi
           { icon: <ClipboardList size={18} />, label: 'Supply checklist', onClick: () => setShowSupplyChecklist(true) },
         ]} />
       <div className="px-5 pt-6">
-        {inboxTotal > 0 && (
-          <button onClick={onOpenInbox}
-            className="w-full mb-5 p-4 rounded-2xl bg-amber-50 border-2 border-amber-300 hover:border-amber-500 active:scale-98 transition-all flex items-center justify-between gap-3">
-            <div className="flex items-center gap-3">
-              <div className="w-9 h-9 rounded-full bg-amber-600 text-white flex items-center justify-center font-mono text-sm font-bold">
-                {inboxTotal}
-              </div>
-              <div className="text-left">
-                <div className="font-serif text-base text-stone-900">
-                  Inbox — needs review
-                </div>
-                <div className="text-xs text-stone-600 font-mono">
-                  {[
-                    inboxCounts.pendingAssignments > 0 && `${inboxCounts.pendingAssignments} ${inboxCounts.pendingAssignments === 1 ? 'assignment' : 'assignments'}`,
-                    inboxCounts.pendingRechecks > 0 && `${inboxCounts.pendingRechecks} ${inboxCounts.pendingRechecks === 1 ? 'recheck' : 'rechecks'}`,
-                    inboxCounts.newPhotos > 0 && `${inboxCounts.newPhotos} ${inboxCounts.newPhotos === 1 ? 'photo' : 'photos'}`,
-                  ].filter(Boolean).join(' · ')}
-                  {' from property managers'}
-                </div>
-              </div>
-            </div>
-            <ChevronRight size={18} className="text-stone-400 flex-shrink-0" />
-          </button>
-        )}
+        {/* The inbox banner was removed — PM assignments now surface in the
+           header notification bell. Tapping a bell item opens the same
+           review screen (InboxView) to approve/deny. */}
         {/* "Who's working now" moved to the person icon in the header.
            The three occasional tools (Assigned vs cleaned, Activity
            timeline, Label overrides) moved into the header ⋯ menu — see
@@ -36596,9 +36651,11 @@ function LiveCleanersSheet({ viewer, onClose, onOpenShift }) {
       await loadFn();
     };
     load();
-    // Refresh every 15 seconds to keep the durations live
-    const id = setInterval(load, 15000);
-    return () => { cancelled = true; clearInterval(id); };
+    // Refresh every 30s while visible (was 15s, always-on). Pauses when hidden.
+    const id = setInterval(() => { if (!document.hidden) load(); }, 30000);
+    const onVis = () => { if (!document.hidden) load(); };
+    document.addEventListener('visibilitychange', onVis);
+    return () => { cancelled = true; clearInterval(id); document.removeEventListener('visibilitychange', onVis); };
   }, []);
 
   useTick(true);
@@ -39570,8 +39627,12 @@ function useUnreadCount({ employee = null, customer = null, refreshKey = 0 }) {
       } catch (e) { console.error('[unread]', e); }
     };
     load();
-    const interval = setInterval(load, 20000); // poll every 20s as a backup to realtime
-    return () => { cancelled = true; clearInterval(interval); };
+    // 30s backup poll (was 20s, always-on). Realtime is the fast path; this
+    // only catches missed events, and now pauses when the app is hidden.
+    const interval = setInterval(() => { if (!document.hidden) load(); }, 30000);
+    const onVis = () => { if (!document.hidden) load(); };
+    document.addEventListener('visibilitychange', onVis);
+    return () => { cancelled = true; clearInterval(interval); document.removeEventListener('visibilitychange', onVis); };
   }, [employee?.id, customer?.id, refreshKey]);
   return count;
 }

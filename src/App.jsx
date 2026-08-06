@@ -7,7 +7,7 @@ import {
   Trash2, Eye, EyeOff, LayoutDashboard, FileText, DollarSign,
   Home, Layers, User, Edit2, Copy, Printer, Calendar, HelpCircle,
   MessageCircle, MessageSquare, Settings, Languages, Menu, Square, Share2,
-  ClipboardList, Lock, Circle, MoreVertical, RotateCcw, Undo2
+  ClipboardList, Lock, Circle, MoreVertical, RotateCcw, Undo2, Bell
 } from 'lucide-react';
 
 // =================================================================
@@ -106,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug4-tap104";
+const BUILD_TAG = "aug5-tap108";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -7503,6 +7503,15 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
       .upsert({ assignment_id: j.id, employee_id: employee.id, status: 'requested', created_by: employee.id }, { onConflict: 'assignment_id,employee_id' });
     setBusyId(null);
     if (error) { alert('Could not ask for this job: ' + error.message); return; }
+    createNotification({
+      to: { scope: 'owner' }, kind: 'cleaner_request',
+      title: `${employee.name} asked for a job`,
+      body: `${unitPartyLabel(j.unitLabel, j.partyLabel) || 'A job'} at ${j.propName || 'a property'}`,
+      linkKind: 'assignment', linkId: j.id, createdBy: employee.id,
+    });
+    // A request counts as claiming a broadcast priority job — clear it so it
+    // stops showing for the other cleaners.
+    clearAssignmentBroadcast(j.id);
     load();
   };
   const commitAssignees = async (j, ids) => {    setBusyId(j.id);
@@ -7510,12 +7519,29 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
     const error = await saveAssignees(j.id, current, ids, employee.id);
     setBusyId(null);
     if (error) { alert('Could not update who\u2019s assigned: ' + error.message); return; }
+    if (ids.length > 0) clearAssignmentBroadcast(j.id); // now claimed
     setAssignOpen(null);
     load();
   };
   const approveRequest = async (j, empId) => {
     setBusyId(j.id);
     await supabase.from('assignment_assignees').update({ status: 'assigned' }).eq('assignment_id', j.id).eq('employee_id', empId);
+    clearAssignmentBroadcast(j.id);
+    setBusyId(null); load();
+  };
+  // Owner/manager denies a cleaner's request — removes the request row so it
+  // doesn't linger. The cleaner can request again if it was a mistake.
+  const denyRequest = async (j, empId) => {
+    setBusyId(j.id);
+    await supabase.from('assignment_assignees').delete()
+      .eq('assignment_id', j.id).eq('employee_id', empId).eq('status', 'requested');
+    setBusyId(null); load();
+  };
+  // A cleaner cancels their OWN pending request.
+  const cancelRequest = async (j) => {
+    setBusyId(j.id);
+    await supabase.from('assignment_assignees').delete()
+      .eq('assignment_id', j.id).eq('employee_id', employee.id).eq('status', 'requested');
     setBusyId(null); load();
   };
   const markDone = async (j) => {
@@ -7532,8 +7558,33 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
   // read from.
   const toggleJobPriority = async (j) => {
     setBusyId(j.id);
+    const turningOn = !j.priority;
     await supabase.from('assignment_targets')
-      .update({ priority: !j.priority }).eq('assignment_id', j.id);
+      .update({ priority: turningOn }).eq('assignment_id', j.id);
+    if (turningOn) {
+      const body = `${unitPartyLabel(j.unitLabel, j.partyLabel) || 'A job'} at ${j.propName || 'a property'}`;
+      if ((j.assignees || []).length > 0) {
+        // Already has cleaners on it — tell just them.
+        j.assignees.forEach(a => {
+          if (a.id && a.id !== employee?.id) createNotification({
+            to: { employeeId: a.id }, kind: 'priority_assignment',
+            title: 'A job was marked priority', body,
+            linkKind: 'assignment', linkId: j.id, createdBy: employee?.id,
+          });
+        });
+      } else {
+        // Unassigned priority job — broadcast to ALL cleaners. This single
+        // row shows for everyone and is deleted the moment someone claims it.
+        createNotification({
+          to: { scope: 'all_cleaners' }, kind: 'priority_assignment',
+          title: 'Priority job available', body,
+          linkKind: 'assignment', linkId: j.id, createdBy: employee?.id,
+        });
+      }
+    } else {
+      // Priority turned off — clear any open broadcast for this job.
+      clearAssignmentBroadcast(j.id);
+    }
     setBusyId(null); load();
   };
 
@@ -7546,7 +7597,7 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
     const t = new Date(); t.setDate(t.getDate() + 1);
     return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`;
   })();
-  const list = (sub === 'mine' ? jobs.filter(j => isMine(j) || iRequested(j)) : jobs)
+  const list = (sub === 'mine' ? jobs.filter(j => isMine(j)) : jobs)
     .slice()
     .sort((a, b) =>
       dueRank(a.scheduledDate) - dueRank(b.scheduledDate)
@@ -7627,8 +7678,16 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
                     <span key={a.id} className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 flex items-center gap-1">
                       <Clock size={9} /> {a.name} asked
                       {canAssign && (
-                        <button onClick={() => approveRequest(j, a.id)} disabled={busyId === j.id}
-                          className="ml-1 px-1.5 py-0.5 rounded-full bg-amber-600 hover:bg-amber-700 text-white text-[9px] font-bold active:scale-95 transition disabled:opacity-50">approve</button>
+                        <>
+                          <button onClick={() => approveRequest(j, a.id)} disabled={busyId === j.id}
+                            className="ml-1 px-1.5 py-0.5 rounded-full bg-emerald-600 hover:bg-emerald-700 text-white text-[9px] font-bold active:scale-95 transition disabled:opacity-50">approve</button>
+                          <button onClick={() => denyRequest(j, a.id)} disabled={busyId === j.id}
+                            className="px-1.5 py-0.5 rounded-full bg-white border border-red-300 text-red-700 hover:bg-red-50 text-[9px] font-bold active:scale-95 transition disabled:opacity-50">deny</button>
+                        </>
+                      )}
+                      {!canAssign && a.id === employee?.id && (
+                        <button onClick={() => cancelRequest(j)} disabled={busyId === j.id}
+                          className="ml-1 px-1.5 py-0.5 rounded-full bg-white border border-stone-300 text-stone-600 hover:bg-stone-50 text-[9px] font-bold active:scale-95 transition disabled:opacity-50">cancel</button>
                       )}
                     </span>
                   ))}
@@ -7725,7 +7784,15 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
                       <button onClick={() => requestJob(j)} disabled={busyId === j.id}
                         className="text-[11px] font-medium px-2.5 py-1 rounded-full bg-stone-100 text-stone-700 disabled:opacity-50">Request</button>
                     )}
-                    {iRequested(j) && <span className="text-[11px] font-mono text-amber-700">Requested</span>}
+                    {iRequested(j) && (
+                      <span className="flex items-center gap-1.5">
+                        <span className="text-[11px] font-mono text-amber-700">Requested</span>
+                        {!canAssign && (
+                          <button onClick={() => cancelRequest(j)} disabled={busyId === j.id}
+                            className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-white border border-stone-300 text-stone-600 hover:bg-stone-50 disabled:opacity-50">Cancel</button>
+                        )}
+                      </span>
+                    )}
                     {canAssign && (
                       <button onClick={() => toggleJobPriority(j)} disabled={busyId === j.id}
                         title={j.priority ? 'Remove priority' : 'Mark priority'}
@@ -11497,6 +11564,161 @@ async function deleteMessagePhoto(path) {
   try { await supabase.storage.from(MESSAGE_BUCKET).remove([path]); } catch {}
 }
 
+// Write a notification row. Fire-and-forget — never blocks the action that
+// triggered it. `to` is either { employeeId } for a specific person or
+// { scope: 'owner' } to broadcast to the owner/manager team.
+async function createNotification({ to, kind, title, body = null, linkKind = null, linkId = null, createdBy = null }) {
+  try {
+    await supabase.from('notifications').insert({
+      recipient_employee_id: to?.employeeId || null,
+      recipient_scope: to?.scope || null,
+      kind: kind || 'other',
+      title, body,
+      link_kind: linkKind, link_id: linkId,
+      created_by: createdBy,
+    });
+  } catch (e) { console.warn('[notify] insert failed', e); }
+}
+
+// Remove any "priority job available" broadcast for an assignment — called
+// when someone claims it (requests/gets assigned/starts) or it's no longer
+// priority, so the notification stops showing for every cleaner at once.
+async function clearAssignmentBroadcast(assignmentId) {
+  if (!assignmentId) return;
+  try {
+    await supabase.from('notifications').delete()
+      .eq('recipient_scope', 'all_cleaners')
+      .eq('link_kind', 'assignment')
+      .eq('link_id', assignmentId);
+  } catch (e) { console.warn('[notify] clear broadcast failed', e); }
+}
+
+// Bell icon + dropdown feed for the header. Shows unread count, lists recent
+// notifications (read + unread) as 7-day history, marks them read on open.
+function NotificationBell({ employee, isOwner }) {
+  const [open, setOpen] = useState(false);
+  const [items, setItems] = useState([]);
+  const [loading, setLoading] = useState(false);
+
+  const load = async () => {
+    if (!employee?.id) return;
+    setLoading(true);
+    const weekAgoISO = new Date(Date.now() - 7 * 86400000).toISOString();
+    // Auto-prune: delete anything past the 7-day window so history stays
+    // tidy without anyone running SQL. Fire-and-forget; owners/managers do
+    // the delete (cleaners just read). Safe if it no-ops.
+    if (isOwner) {
+      supabase.from('notifications').delete().lt('created_at', weekAgoISO)
+        .then(({ error }) => { if (error) console.warn('[notify] prune failed', error); });
+    }
+    // A person sees notifications addressed to them, plus (if owner/manager)
+    // the 'owner' broadcast feed.
+    let q = supabase.from('notifications')
+      .select('*')
+      .gte('created_at', weekAgoISO)
+      .order('created_at', { ascending: false })
+      .limit(50);
+    if (isOwner) {
+      q = q.or(`recipient_employee_id.eq.${employee.id},recipient_scope.eq.owner`);
+    } else {
+      // Cleaners see notifications addressed to them personally, plus any
+      // broadcast to all cleaners (e.g. a priority job open to whoever grabs
+      // it). The broadcast row is deleted when someone claims the job, so it
+      // stops showing for everyone at once.
+      q = q.or(`recipient_employee_id.eq.${employee.id},recipient_scope.eq.all_cleaners`);
+    }
+    const { data } = await q;
+    setItems(data || []);
+    setLoading(false);
+  };
+
+  useEffect(() => {
+    load();
+    // Light polling so new items surface without a full refresh.
+    const t = setInterval(load, 60000);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [employee?.id, isOwner]);
+
+  const unread = items.filter(n => !n.read_at).length;
+
+  const openBell = async () => {
+    setOpen(o => !o);
+    if (!open && unread > 0) {
+      const unreadItems = items.filter(n => !n.read_at);
+      // Broadcast rows (recipient_scope set) are SHARED across cleaners —
+      // writing read_at would mark them read for everyone. So we only persist
+      // read on personal rows; broadcast rows are just dimmed locally and go
+      // away for real when the job is claimed (row deleted).
+      const personalIds = unreadItems.filter(n => !n.recipient_scope).map(n => n.id);
+      setItems(prev => prev.map(n => (!n.read_at ? { ...n, read_at: new Date().toISOString() } : n)));
+      if (personalIds.length) {
+        try { await supabase.from('notifications').update({ read_at: new Date().toISOString() }).in('id', personalIds); }
+        catch (e) { console.warn('[notify] mark read failed', e); }
+      }
+    }
+  };
+
+  const fmtWhen = (iso) => {
+    const d = new Date(iso); const now = new Date();
+    const diff = (now - d) / 60000;
+    if (diff < 1) return 'just now';
+    if (diff < 60) return `${Math.floor(diff)}m ago`;
+    if (diff < 1440) return `${Math.floor(diff / 60)}h ago`;
+    return d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+  };
+  const KIND_DOT = {
+    pm_assignment: 'bg-amber-500', cleaner_request: 'bg-amber-500',
+    message: 'bg-blue-500', priority_assignment: 'bg-red-500', other: 'bg-stone-400',
+  };
+
+  if (!employee?.id) return null;
+  return (
+    <div className="relative">
+      <button onClick={openBell}
+        className="relative p-2 rounded-full text-stone-50 active:scale-95 transition"
+        style={{ backgroundColor: 'rgba(255,255,255,0.12)' }}
+        title="Notifications">
+        <Bell size={18} />
+        {unread > 0 && (
+          <span className="absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1 rounded-full bg-red-500 text-white text-[10px] font-mono font-bold flex items-center justify-center border-2" style={{ borderColor: '#3E5C76' }}>
+            {unread > 99 ? '99+' : unread}
+          </span>
+        )}
+      </button>
+      {open && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
+          <div className="absolute right-0 mt-2 w-80 max-w-[92vw] z-50 rounded-2xl bg-white border border-stone-200 shadow-xl overflow-hidden">
+            <div className="px-4 py-3 border-b border-stone-100 flex items-center justify-between">
+              <span className="text-xs uppercase tracking-wider font-mono text-stone-500">Notifications</span>
+              <span className="text-[10px] font-mono text-stone-400">last 7 days</span>
+            </div>
+            <div className="max-h-[60vh] overflow-y-auto">
+              {loading && items.length === 0 ? (
+                <div className="px-4 py-8 text-center text-sm text-stone-400">Loading…</div>
+              ) : items.length === 0 ? (
+                <div className="px-4 py-8 text-center text-sm text-stone-400">Nothing yet.</div>
+              ) : (
+                items.map(n => (
+                  <div key={n.id} className={`px-4 py-3 border-b border-stone-50 flex gap-3 ${n.read_at ? '' : 'bg-amber-50/40'}`}>
+                    <span className={`w-2 h-2 rounded-full mt-1.5 flex-shrink-0 ${KIND_DOT[n.kind] || KIND_DOT.other}`} />
+                    <div className="min-w-0 flex-1">
+                      <div className="text-sm text-stone-900 font-medium">{n.title}</div>
+                      {n.body && <div className="text-xs text-stone-600 mt-0.5 whitespace-pre-wrap">{n.body}</div>}
+                      <div className="text-[10px] font-mono text-stone-400 mt-1">{fmtWhen(n.created_at)}</div>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function Header({ name, onSignOut, role, employee, onOpenMessages, onLogoClick, onBack, onOpenWhosHere, menuItems, cleanerView = false }) {
   // Messages icon in header for all signed-in roles (cleaner/manager/owner)
   const showMessagesIcon = !!(onOpenMessages && employee);
@@ -11578,6 +11800,7 @@ function Header({ name, onSignOut, role, employee, onOpenMessages, onLogoClick, 
       </div>
       {!isCleaner && (
       <div className="flex items-center gap-2" data-no-translate>
+        <NotificationBell employee={employee} isOwner={role === 'owner' || role === 'manager'} />
         {/* Everything that used to sit as separate icons (language, messages,
            who's-here) now lives inside this one ⋯ menu, together with any
            tools the parent passes and Sign out. That keeps the header to just
@@ -11654,12 +11877,14 @@ function Header({ name, onSignOut, role, employee, onOpenMessages, onLogoClick, 
         </div>
       </div>
       )}
+      {isCleaner && employee && (
+        <div className="flex items-center" data-no-translate>
+          <NotificationBell employee={employee} isOwner={false} />
+        </div>
+      )}
     </div>
   );
 }
-
-// =================================================================
-// MANAGER SHELL
 // =================================================================
 
 function ManagerShell({ employee, onSignOut }) {
@@ -17569,7 +17794,22 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
     const ids = job.targetIds || [];
     if (ids.length === 0) return;
     setActioning(job.id);
-    await supabase.from('assignment_targets').update({ priority: !job.priority }).in('id', ids);
+    const turningOn = !job.priority;
+    await supabase.from('assignment_targets').update({ priority: turningOn }).in('id', ids);
+    if (turningOn) {
+      // Announce the priority job to all cleaners; the row clears when someone
+      // claims it. (assignees aren't tracked in this owner view, so we always
+      // broadcast — if it's already assigned, the assigned cleaner still sees
+      // the alert, which is fine.)
+      createNotification({
+        to: { scope: 'all_cleaners' }, kind: 'priority_assignment',
+        title: 'Priority job available',
+        body: `${job.unitLabel || 'A job'}${job.partyLabel ? ' · ' + job.partyLabel : ''} at ${propById[job.customerId]?.name || 'a property'}`,
+        linkKind: 'assignment', linkId: job.id, createdBy: employee?.id,
+      });
+    } else {
+      clearAssignmentBroadcast(job.id);
+    }
     setActioning(null); load();
   };
 
@@ -27497,6 +27737,20 @@ function AssignmentList({ property, employee, onBack, onNew, onNewChecklist, onN
   const [teamList, setTeamList] = useState([]);
   const [assignFor, setAssignFor] = useState(null);
   const [assigneeMap, setAssigneeMap] = useState({}); // assignment_id -> [{id,name,requested}]
+  // Owner resolves a cleaner's request right from the board.
+  const [reqBusy, setReqBusy] = useState(null);
+  const approveAsgRequest = async (asgId, empId) => {
+    setReqBusy(`${asgId}:${empId}`);
+    await supabase.from('assignment_assignees').update({ status: 'assigned' })
+      .eq('assignment_id', asgId).eq('employee_id', empId);
+    setReqBusy(null); loadAssignees(Object.keys(assigneeMap));
+  };
+  const denyAsgRequest = async (asgId, empId) => {
+    setReqBusy(`${asgId}:${empId}`);
+    await supabase.from('assignment_assignees').delete()
+      .eq('assignment_id', asgId).eq('employee_id', empId).eq('status', 'requested');
+    setReqBusy(null); loadAssignees(Object.keys(assigneeMap));
+  };
   const loadAssignees = async (asgIds) => {
     if (!asgIds.length) { setAssigneeMap({}); return; }
     // No employees embed — see the note in the assignment schedule load().
@@ -27755,6 +28009,14 @@ function AssignmentList({ property, employee, onBack, onNew, onNewChecklist, onN
               {(assigneeMap[a.id] || []).map(p => (
                 <span key={p.id} className={`px-2 py-0.5 rounded-full inline-flex items-center gap-1 ${p.requested ? 'bg-amber-100 text-amber-800' : 'bg-indigo-100 text-indigo-700'}`}>
                   <User size={9} /> {p.name}{p.requested ? ' asked' : ''}
+                  {p.requested && canAssignHere && (
+                    <>
+                      <button onClick={(e) => { e.stopPropagation(); approveAsgRequest(a.id, p.id); }} disabled={reqBusy === `${a.id}:${p.id}`}
+                        className="ml-1 px-1.5 py-0.5 rounded-full bg-emerald-600 hover:bg-emerald-700 text-white text-[9px] font-bold disabled:opacity-50">approve</button>
+                      <button onClick={(e) => { e.stopPropagation(); denyAsgRequest(a.id, p.id); }} disabled={reqBusy === `${a.id}:${p.id}`}
+                        className="px-1.5 py-0.5 rounded-full bg-white border border-red-300 text-red-700 hover:bg-red-50 text-[9px] font-bold disabled:opacity-50">deny</button>
+                    </>
+                  )}
                 </span>
               ))}
               {canAssignHere && (
@@ -37559,6 +37821,14 @@ function PortalAssignmentForm({ property, assignment, portalKind, onCancel, onSa
           if (e2) throw e2;
         }
       }
+      if (submitForApproval) {
+        createNotification({
+          to: { scope: 'owner' }, kind: 'pm_assignment',
+          title: `New assignment to approve`,
+          body: `${property.name} · ${title.trim() || assignmentTypeLabel(assignmentType)}${isEdit ? ' (resubmitted)' : ''}`,
+          linkKind: 'assignment', linkId: (isEdit ? assignment.id : null),
+        });
+      }
       onSaved();
     } catch (err) {
       setError(err.message || String(err));
@@ -38052,6 +38322,12 @@ function PortalAssignmentDetail({ property, assignment, portalUser, onBack, onEd
       .eq('id', assignment.id);
     setBusy(false);
     if (error) { alert('Could not submit: ' + error.message); return; }
+    createNotification({
+      to: { scope: 'owner' }, kind: 'pm_assignment',
+      title: 'Assignment resubmitted for approval',
+      body: `${property.name} · ${assignment.title || assignmentTypeLabel(assignment.assignment_type)}`,
+      linkKind: 'assignment', linkId: assignment.id,
+    });
     onBack();
   };
 
@@ -39760,6 +40036,28 @@ function MessageThread({ conversationId, otherName, asEmployee = null, asPmCusto
       }
       const { error: e } = await supabase.from('messages').insert(insert);
       if (e) throw e;
+      // Bell notification for a 1-on-1 staff DM — tell the OTHER participant
+      // there's a new message. (Property threads are a broadcast with a
+      // lazily-built participant list, so those aren't notified here; the
+      // existing unread badge still covers them.)
+      if (asEmployee) {
+        try {
+          const { data: conv } = await supabase.from('conversations')
+            .select('kind').eq('id', conversationId).maybeSingle();
+          if (conv?.kind === 'staff_dm') {
+            const { data: parts } = await supabase.from('conversation_participants')
+              .select('employee_id').eq('conversation_id', conversationId);
+            (parts || []).forEach(p => {
+              if (p.employee_id && p.employee_id !== asEmployee.id) createNotification({
+                to: { employeeId: p.employee_id }, kind: 'message',
+                title: `New message from ${asEmployee.name}`,
+                body: (text.trim() || (photoUrl ? '📷 Photo' : '')).slice(0, 120),
+                linkKind: 'conversation', linkId: conversationId, createdBy: asEmployee.id,
+              });
+            });
+          }
+        } catch (notifyErr) { console.warn('[notify] dm notify skipped', notifyErr); }
+      }
       setText(''); setPhotoFile(null); setUrgent(false);
       // load() will be triggered by realtime, but call it anyway for instant response
       load();

@@ -25,6 +25,7 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 // =================================================================
 const GOOGLE_TRANSLATE_API_KEY = "AIzaSyD7ceHPryMzs45hWJOyFNBxtOzQOEmJcSA";
 
+
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // ============================================================
@@ -106,7 +107,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap118";
+const BUILD_TAG = "aug6-tap119";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -17787,6 +17788,152 @@ function PartyForm({ property, unit, party, onCancel, onSaved }) {
 // property and either view its OPEN assignments or upload new ones.
 // Composes the existing AssignmentList + AssignmentForm components.
 // =================================================================
+// =================================================================
+// COMPLETED ASSIGNMENTS — owner-facing "done" browser, the counterpart
+// to the cleaner's Done tab. Lists finished assignments (newest first,
+// grouped by day), each drilling into the full bedroom history with
+// photos, times, and notes. Loads its own data (done targets) so it
+// doesn't touch the open-assignments loader.
+// =================================================================
+function CompletedAssignmentsView({ employee, propById }) {
+  const [rows, setRows] = useState([]);
+  const [loaded, setLoaded] = useState(false);
+  const [days, setDays] = useState(14); // how far back
+  const [drill, setDrill] = useState(null); // { propertyId, propertyName, unitId, unitLabel, partyId, partyLabel }
+
+  const load = async () => {
+    setLoaded(false);
+    const sinceISO = new Date(Date.now() - days * 86400000).toISOString();
+    // Paginate to avoid PostgREST's 1000-row cap silently truncating.
+    let all = [];
+    let from = 0;
+    const page = 1000;
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      const { data, error } = await supabase.from('assignment_targets')
+        .select('id, status, completed_at, unit_id, party_id, unit:units(label), party:parties(label), assignment:assignments!inner(id, title, customer_id, assignment_type, source, deleted_at)')
+        .eq('status', 'done')
+        .not('completed_at', 'is', null)
+        .gte('completed_at', sinceISO)
+        .order('completed_at', { ascending: false })
+        .range(from, from + page - 1);
+      if (error) { console.warn('[completed] load error', error); break; }
+      all = all.concat(data || []);
+      if (!data || data.length < page) break;
+      from += page;
+    }
+    // Drop soft-deleted assignments and any preview/test properties.
+    const clean = all.filter(t => !t.assignment?.deleted_at && propById[t.assignment?.customer_id]);
+    // Collapse to one row per (assignment + unit + party) — a cleaning check
+    // has many item-targets that all completed together; we don't want 25
+    // rows for one bedroom. Key by assignment+unit+party, keep the latest
+    // completed_at and the count of items.
+    const byKey = {};
+    clean.forEach(t => {
+      const key = `${t.assignment.id}:${t.unit_id}:${t.party_id}`;
+      if (!byKey[key]) {
+        byKey[key] = {
+          key,
+          assignmentId: t.assignment.id,
+          customerId: t.assignment.customer_id,
+          unitId: t.unit_id, partyId: t.party_id,
+          unitLabel: t.unit?.label || '', partyLabel: t.party?.label || '',
+          type: t.assignment.assignment_type || '',
+          title: t.assignment.title || '',
+          completedAt: t.completed_at,
+          items: 0,
+        };
+      }
+      byKey[key].items += 1;
+      if (t.completed_at > byKey[key].completedAt) byKey[key].completedAt = t.completed_at;
+    });
+    const list = Object.values(byKey).sort((a, b) => (b.completedAt || '').localeCompare(a.completedAt || ''));
+    setRows(list);
+    setLoaded(true);
+  };
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, [days]);
+
+  if (drill) {
+    return <BedroomHistoryView
+      propertyId={drill.customerId}
+      propertyName={propById[drill.customerId]?.name || 'Property'}
+      unitId={drill.unitId} unitLabel={drill.unitLabel}
+      partyId={drill.partyId} partyLabel={drill.partyLabel}
+      employee={employee}
+      onBack={() => setDrill(null)} />;
+  }
+
+  // Group rows by day (local date) for headers like the cleaner's done view.
+  const byDay = {};
+  rows.forEach(r => {
+    const d = new Date(r.completedAt);
+    const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    (byDay[key] = byDay[key] || []).push(r);
+  });
+  const dayKeys = Object.keys(byDay).sort((a, b) => b.localeCompare(a));
+  const fmtDay = (key) => {
+    const [y, m, d] = key.split('-').map(Number);
+    const dt = new Date(y, m - 1, d);
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const diff = Math.round((today - dt) / 86400000);
+    if (diff === 0) return 'Today';
+    if (diff === 1) return 'Yesterday';
+    return dt.toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' });
+  };
+  const fmtTime = (iso) => new Date(iso).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+  const typeLabel = (t) => (QUICK_TYPES.find(q => q.key === t) || {}).label || t || 'Clean';
+
+  return (
+    <div>
+      <div className="flex gap-1 bg-stone-100 p-1 rounded-xl mb-5">
+        {[{ v: 7, l: '7 days' }, { v: 14, l: '14 days' }, { v: 30, l: '30 days' }].map(o => (
+          <button key={o.v} onClick={() => setDays(o.v)}
+            className={`flex-1 py-1.5 rounded-lg text-xs font-medium ${days === o.v ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>{o.l}</button>
+        ))}
+      </div>
+      {!loaded ? <Splash text="Loading…" /> : rows.length === 0 ? (
+        <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
+          Nothing completed in the last {days} days.
+        </div>
+      ) : (
+        <div className="space-y-6">
+          {dayKeys.map(dk => (
+            <div key={dk}>
+              <div className="text-xs uppercase tracking-wider text-emerald-700 font-mono mb-2 flex items-center gap-1.5">
+                <Check size={11} /> {fmtDay(dk)} <span className="text-stone-400">· {byDay[dk].length}</span>
+              </div>
+              <div className="space-y-2">
+                {byDay[dk].map(r => (
+                  <button key={r.key}
+                    onClick={() => setDrill(r)}
+                    className="w-full text-left p-4 rounded-2xl bg-white border border-stone-200 hover:border-stone-400 active:scale-[0.99] transition flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="font-serif text-base text-stone-900 truncate">
+                        <span className="font-bold">{r.unitLabel}</span>
+                        {r.partyLabel ? <span className="text-stone-500"> · {r.partyLabel}</span> : null}
+                      </div>
+                      <div className="text-xs text-stone-500 font-mono mt-0.5 flex items-center gap-1.5 flex-wrap">
+                        <span>{propById[r.customerId]?.name || 'Property'}</span>
+                        <span>·</span>
+                        <span>{typeLabel(r.type)}</span>
+                        <span>·</span>
+                        <span>{r.items} item{r.items === 1 ? '' : 's'}</span>
+                        <span>·</span>
+                        <span>done {fmtTime(r.completedAt)}</span>
+                      </div>
+                    </div>
+                    <ChevronRight size={16} className="text-stone-400 flex-shrink-0" />
+                  </button>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
   const [properties, setProperties] = useState([]);
   const [assignmentCounts, setAssignmentCounts] = useState({}); // { customer_id: open_count }
@@ -18260,9 +18407,13 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
                 className={`flex-1 py-2 rounded-lg text-sm font-medium ${scheduleMode === 'schedule' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>Schedule</button>
               <button onClick={() => setScheduleMode('property')}
                 className={`flex-1 py-2 rounded-lg text-sm font-medium ${scheduleMode === 'property' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>By property</button>
+              <button onClick={() => setScheduleMode('completed')}
+                className={`flex-1 py-2 rounded-lg text-sm font-medium ${scheduleMode === 'completed' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>Completed</button>
             </div>
 
-            {!loaded ? <Splash text="Loading…" /> : jobs.length === 0 ? (
+            {scheduleMode === 'completed' ? (
+              <CompletedAssignmentsView employee={employee} propById={propById} />
+            ) : !loaded ? <Splash text="Loading…" /> : jobs.length === 0 ? (
               <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
                 No open assignments. Tap “Add assignment” to create one.
               </div>

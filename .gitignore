@@ -1,0 +1,25 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# Vercel
+.vercel/
+
+# Logs
+*.log
+
+# Local / OS
+.DS_Store
+*.local
+desktop.ini
+thumbs.db
+
+# local agent docs
+ai/

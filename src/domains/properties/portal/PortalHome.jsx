@@ -101,7 +101,6 @@ import {
   can,
   isOwner,
   isManager,
-  canSeeMoney,
   canSeePortalInvoices,
   visibleProps,
 } from "../../../lib/permissions.js";

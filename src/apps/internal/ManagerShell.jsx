@@ -221,7 +221,7 @@ export function ManagerShell({ employee, onSignOut }) {
     `manager_preview_cleaner_${employee.id}`,
     false,
   );
-  const showMoneyTabs = canSeeMoney(employee); // owner only
+  const showMoneyTabs = canSeeMoney(employee); // owner or view_pay_info
   const isOwner = employee?.role === "owner";
   // Owner "hats": Operations (cleaning side) vs Business (management).
   // Reshapes the bottom nav so each mode only shows its own tabs.

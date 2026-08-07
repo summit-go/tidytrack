@@ -1,14 +1,26 @@
 # Changelog
 
-Concise history of changes for each commit, reverse chronological order
+Concise history of changes made for each commit, in reverse chronological order.
 
-## 2026-08-07 - Phase C1 complete: Shared work-loop read models
+## 2026-08-07 - Phase C Track 2 scope: code-as-source-of-truth for billing visibility
+
+- Decision: Track 2 is structural only — consolidate portal/staff money gates; do not implement `mvp.md` kind-based PM Staff rules unless explicitly scoped later
+- Added Track 2 roadmap at `ai/roadmaps/2026-08-07_phase-c-billing-gate_roadmap.md`; updated main roadmap + plan Phase C sections; clarified `mvp.md` money section
+
+## 2026-08-07 - Phase C Track 1 complete: Work loop decomposition
+
+- **C2** — Split `AssignmentTabContent` (~2,557 → ~1,158 lines): `useAssignmentTabLoad`, `AssignmentTargetCard`, `AssignmentDoneGroups`; orchestration shell still holds bulk actions + filter UI (optional further thinning deferred)
+- **C3** — Split `EmployeeApp` (~3,154 → ~479 lines): `useActiveWorkBlock`, `useCleanerNavigation`, `CleanerClockedOut`, `CleanerPropertyFlow`, `CleanerBlockFlow`
+- **C4** — Split `ChecklistAssignmentWizard` (~2,814 → ~293 lines): `useChecklistWizardState`, one file per wizard step under `cross-cutting/wizard/` (shared staff + portal entry)
+- Track 1 exit criteria met: shared read-model hooks wired across cleaner/manager/portal; three megacomponents decomposed into reviewable sub-modules; behavior-preserving refactors only
+
+## 2026-08-07 - Track 1 C1 complete: Shared work-loop read models
 
 - Finished C1: `fetchOpenAssignmentTargets`, `fetchOpenTargetsAtProperty`, filter/sort helpers in `lib/assignments.js`; `buildWhosHereByParty` in `lib/workBlocks.js`
 - Added `usePropertyAssignmentTargets` hook; wired `AssignmentTabContent`, `SuggestedTabContent`, `AssignmentsTab`
 - All four assignment/work-block consumers now share paginated queries; `npm run build` passes
 
-## 2026-08-07 - Phase C1: Shared work-loop read models (partial)
+## 2026-08-07 - Track 1 C1: Shared work-loop read models (partial)
 
 - Added Track 1 roadmap at `ai/roadmaps/2026-08-07_phase-c-work-loop_roadmap.md`
 - Added `src/lib/workBlocks.js` — `fetchOpenWorkBlocksAtProperty`, `buildWhosHereLookup`

@@ -57,7 +57,7 @@ Everything below needs to work together as one complete workflow, not as separat
 - Invoicing and billing (draft, price book, send to clients).
 - Payroll export for staff.
 - Profit/loss reporting for the Owner.
-- Invoice visibility is opt-in per client user; PM Staff never get it regardless.
+- **Portal invoice visibility (implementation):** opt-in per portal user via `can_view_invoices` (owner toggles in admin; default off for all kinds). Previewing owner always sees invoices. This is what the code does today — not kind-based defaults. Aspirational kind rules in the Users section above may differ; treat code behavior as authoritative until explicitly changed.
 
 ## Flexible / can change
 

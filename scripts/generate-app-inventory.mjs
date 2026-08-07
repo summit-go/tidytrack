@@ -37,6 +37,7 @@ const PLANNED_TARGETS = {
   saveAssignees: "src/lib/supabase.js",
   fetchLivePresence: "src/lib/supabase.js",
   createNotification: "src/lib/supabase.js",
+  clearPmAssignmentNotification: "src/lib/supabase.js",
   clearAssignmentBroadcast: "src/lib/supabase.js",
   // A1 lib/constants.js
   ASSIGNMENT_TYPES: "src/lib/constants.js",
@@ -127,6 +128,7 @@ const PLANNED_TARGETS = {
   NotificationBell: "src/components/NotificationBell.jsx",
   OwnerOnly: "src/components/OwnerOnly.jsx",
   DueDateEditor: "src/components/DueDateEditor.jsx",
+  ConfirmModal: "src/components/ConfirmModal.jsx",
   // A5a early shells
   RootRouter: "src/apps/RootRouter.jsx",
   LandingPage: "src/apps/LandingPage.jsx",
@@ -191,6 +193,7 @@ const PLANNED_TARGETS = {
   AssignmentBanner: "src/apps/staff/manager/assignments/",
   AssignmentCard: "src/apps/staff/manager/assignments/",
   AllOpenAssignments: "src/apps/staff/manager/assignments/",
+  CompletedAssignmentsView: "src/apps/staff/manager/assignments/",
   MoneyView: "src/apps/staff/manager/money/",
   PriceBookEditor: "src/apps/staff/manager/money/",
   InvoiceDraftEditor: "src/apps/staff/manager/money/",
@@ -210,6 +213,7 @@ const PLANNED_TARGETS = {
   PropertyPicker: "src/apps/staff/cleaner/",
   PropertyHub: "src/apps/staff/cleaner/",
   AssignmentsPanel: "src/apps/staff/cleaner/",
+  InlineBedroomTasks: "src/apps/staff/cleaner/",
   UnitPicker: "src/apps/staff/cleaner/",
   PartyPicker: "src/apps/staff/cleaner/",
   SectionPicker: "src/apps/staff/cleaner/",
@@ -288,6 +292,7 @@ const PLANNED_TARGETS = {
   IdleWarningModal: "cross-cutting A9",
   ChangePinModal: "cross-cutting A9",
   WorkBlockAssignmentLink: "cross-cutting A9",
+  AttachmentModal: "cross-cutting A9",
   // A10 messaging
   StaffMessagesTab: "src/features/messaging/",
   ConversationList: "src/features/messaging/",
@@ -373,7 +378,7 @@ function renderMarkdown(symbols, coupling, generatedAt) {
 **Source:** \`src/App.jsx\` (${symbols.length} top-level symbols)
 **Regenerate:** \`node scripts/generate-app-inventory.mjs\`
 
-Companion to [\`ai/roadmaps/2026-08-06-app-jsx-split_plan.md\`](../roadmaps/2026-08-06-app-jsx-split_plan.md).
+Companion to [\`ai/roadmaps/2026-08-06_app-jsx-split_plan.md\`](../roadmaps/2026-08-06_app-jsx-split_plan.md).
 
 > Name a symbol in the phase checklist only if it defines a folder/domain boundary or has documented hidden coupling; everything else lives in this inventory.
 

@@ -10,7 +10,7 @@
 
 - [ ] Staff PIN sign-in succeeds with a known employee PIN
 - [ ] Cleaner clock-in at a property/unit
-- [ ] Cleaner completes a task with photo verification
+- [ ] Cleaner completes a task with photo verification (includes `InlineBedroomTasks` in work-block flow when applicable)
 - [ ] Cleaner clock-out
 
 ## 2. Staff — manager/owner flow
@@ -47,7 +47,8 @@
 
 ## 7. Known non-regressions (do not treat as bugs)
 
-- [ ] `BetaShell` PM stub ("Coming soon", lines ~1497–1511 in original `App.jsx`) — intentionally non-functional; stays that way post-split
+- [ ] `BetaShell` PM stub (`BetaShell` → PM view: "Coming soon" / PortalShell adapter message) — intentionally non-functional; stays that way post-split
+- [ ] SMS alerts stub ("Coming soon: text-message alerts…") — intentionally non-functional; stays that way post-split
 
 ---
 

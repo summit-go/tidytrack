@@ -1,5 +1,5 @@
 import React from "react";
-import { BUILD_TAG } from "../lib/constants.js";
+import { APP_VERSION } from "../lib/constants.js";
 
 export function ScreenId({ id }) {
   return (
@@ -8,7 +8,7 @@ export function ScreenId({ id }) {
         {id}
       </span>
       <span className="text-[9px] font-mono text-stone-400 leading-none">
-        {BUILD_TAG}
+        v{APP_VERSION}
       </span>
     </div>
   );

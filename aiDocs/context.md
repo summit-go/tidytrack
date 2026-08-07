@@ -23,4 +23,5 @@ There is no styleguide yet. If one is added later, link it here.
 ## Rules for agents
 
 - Update `aiDocs/changelog.md` with every commit.
+- Update `APP_VERSION` in `src/lib/constants.js` and `version` in `package.json` to match what you completed, using the increment rules in `ai/notes/2026-08-07_semantic-versioning.md`. Keep both values in sync.
 - Git operations are read-only for agents. Humans make stages, commits, and pushes — do not `git commit`, `git push`, or otherwise write to git history yourself.

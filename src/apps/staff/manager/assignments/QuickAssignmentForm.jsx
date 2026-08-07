@@ -76,7 +76,6 @@ import {
 import {ASSIGNMENT_TYPES,
   assignmentTypeLabel,
   assignmentTypeMeta,
-  BUILD_TAG,
   KIND_CANNOT,
   PHOTO_KIND_LABELS,
   photoKindLabel,

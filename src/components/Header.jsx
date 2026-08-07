@@ -9,7 +9,7 @@ import {
   LogOut,
 } from "lucide-react";
 import { supabase } from "../lib/supabase.js";
-import { BUILD_TAG } from "../lib/constants.js";
+import { APP_VERSION } from "../lib/constants.js";
 import { isTextTranslateConfigured } from "../lib/translation.js";
 import { useUnreadCount } from "../hooks/useUnreadCount.js";
 import { useLocale } from "../contexts/LocaleContext.jsx";
@@ -85,7 +85,7 @@ export function Header({
           className="text-[10px] font-mono opacity-70"
           style={{ color: "#FAF8F4" }}
         >
-          TidyTrack · {BUILD_TAG}
+          TidyTrack v{APP_VERSION}
         </div>
       </div>
     </div>

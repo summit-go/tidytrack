@@ -39,7 +39,6 @@ import { AlertCircle } from "lucide-react";
   ScreenId: {
     path: "src/components/ScreenId.jsx",
     header: `import React from "react";
-import { BUILD_TAG } from "../lib/constants.js";
 
 `,
   },
@@ -161,7 +160,6 @@ import {
   LogOut,
 } from "lucide-react";
 import { supabase } from "../lib/supabase.js";
-import { BUILD_TAG } from "../lib/constants.js";
 import { isTextTranslateConfigured } from "../lib/translation.js";
 import { useUnreadCount } from "../hooks/useUnreadCount.js";
 import { useLocale } from "../contexts/LocaleContext.jsx";

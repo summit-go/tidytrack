@@ -49,7 +49,6 @@ const PLANNED_TARGETS = {
   INVOICE_TYPE_LABEL: "src/lib/constants.js",
   INVOICE_STATUS_STYLE: "src/lib/constants.js",
   SUMMIT_COMPANY: "src/lib/constants.js",
-  BUILD_TAG: "src/lib/constants.js",
   // A1 lib/permissions.js
   can: "src/lib/permissions.js",
   isOwner: "src/lib/permissions.js",

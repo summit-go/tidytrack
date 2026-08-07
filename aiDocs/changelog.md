@@ -2,6 +2,14 @@
 
 Concise history of changes for each commit, reverse chronological order
 
+## 2026-08-07 - Phase A2 + A3: Hooks and contexts
+
+- Extracted 7 hooks to `src/hooks/`: `useAssignmentSync`, `useIdleDetector`, `usePagePersistence`, `useItemLabelOverrides`, `useTick`, `useUnreadCount`, `useAssignmentsForBedroomOnDate`
+- Extracted contexts to `src/contexts/`: `LocaleContext.jsx` (`LocaleContext`, `useLocale`, `TranslationProvider` as a unit), `PreviewContext.jsx` (definition only; provider remains inline in `ManagerShell`)
+- Restored `TranslationProvider` and `useTick` from pre-A1 baseline — both were accidentally removed during A1 lib extraction
+- `App.jsx` imports hooks and contexts; ~700 lines removed from monolith
+- `npm run build` passes
+
 ## 2026-08-07 - Phase A1: Foundations (`src/lib/`)
 
 - Extracted 8 lib modules from `App.jsx`: `supabase.js`, `constants.js`, `permissions.js`, `format.js`, `compare.js`, `photos.js`, `sessionStore.js`, `translation.js`

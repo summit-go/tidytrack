@@ -9,7 +9,7 @@ Concise history of changes made for each commit, in reverse chronological order.
 - Staff UI labels/badges say "Lead"; `EmployeeForm` writes `lead`; legacy `manager` DB rows still readable
 - localStorage keys migrated (`manager_*` → `lead_*`) via `migrateLeadPersistenceKeys` on LeadShell mount
 - Optional SQL: `sql/2026-08-07_manager-to-lead-role.sql`; Property Manager portal strings untouched
-- Track 4 roadmap at `ai/roadmaps/2026-08-07_phase-c-naming_roadmap.md`; `npm run build` passes
+- Track 4 roadmap at `ai/roadmaps/2026-08-07_app-split-phase-c-naming_roadmap.md`; `npm run build` passes
 
 ## 2026-08-07 - Track 3 follow-up: trim billing import bloat
 
@@ -23,7 +23,7 @@ Concise history of changes made for each commit, in reverse chronological order.
 - Fixed portal→manager leak: `PortalInvoicesTab` now imports `InvoiceDocument` from `billing/shared/`
 - Moved `DateRangePicker` to `src/components/` (shared by billing + work dashboard); trimmed App.jsx-era unused imports
 - Trimmed `MoneyView` to tab-shell imports only (~260 → ~75 lines of imports/logic)
-- Track 3 roadmap at `ai/roadmaps/2026-08-07_phase-c-money-boundaries_roadmap.md`; behavior unchanged; `npm run build` passes
+- Track 3 roadmap at `ai/roadmaps/2026-08-07_app-split-phase-c-money-boundaries_roadmap.md`; behavior unchanged; `npm run build` passes
 
 ## 2026-08-07 - Phase C Track 2 complete: Billing visibility gate
 
@@ -35,7 +35,7 @@ Concise history of changes made for each commit, in reverse chronological order.
 ## 2026-08-07 - Phase C Track 2 scope: code-as-source-of-truth for billing visibility
 
 - Decision: Track 2 is structural only — consolidate portal/staff money gates; do not implement `mvp.md` kind-based PM Staff rules unless explicitly scoped later
-- Added Track 2 roadmap at `ai/roadmaps/2026-08-07_phase-c-billing-gate_roadmap.md`; updated main roadmap + plan Phase C sections; clarified `mvp.md` money section
+- Added Track 2 roadmap at `ai/roadmaps/2026-08-07_app-split-phase-c-billing-gate_roadmap.md`; updated main roadmap + plan Phase C sections; clarified `mvp.md` money section
 
 ## 2026-08-07 - Phase C Track 1 complete: Work loop decomposition
 
@@ -52,7 +52,7 @@ Concise history of changes made for each commit, in reverse chronological order.
 
 ## 2026-08-07 - Track 1 C1: Shared work-loop read models (partial)
 
-- Added Track 1 roadmap at `ai/roadmaps/2026-08-07_phase-c-work-loop_roadmap.md`
+- Added Track 1 roadmap at `ai/roadmaps/2026-08-07_app-split-phase-c-work-loop_roadmap.md`
 - Added `src/lib/workBlocks.js` — `fetchOpenWorkBlocksAtProperty`, `buildWhosHereLookup`
 - Extended `src/lib/assignments.js` — `fetchPropertyAssignmentTargets`, `computeAssignmentStatusCounts`, shared select strings
 - Added `src/domains/work/hooks/useAssignmentStatusCounts.js`, `useOpenWorkBlocksAtProperty.js`

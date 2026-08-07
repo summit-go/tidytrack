@@ -148,6 +148,7 @@ import {
   autoTranslateAssignment,
 } from "../../../lib/translation.js";
 import { buildTargetTitle, unitSizeLabel, shortenBedroom, partyDisplay, unitPartyLabel } from "../../../lib/labels.js";
+import { fetchOpenAssignmentTargets } from "../../../lib/assignments.js";
 import { splitTaskName } from "../../../lib/tasks.js";
 import { useAssignmentSync } from "../../../hooks/useAssignmentSync.js";
 import { useIdleDetector } from "../../../hooks/useIdleDetector.js";
@@ -207,29 +208,9 @@ export function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClic
   const [propSearch, setPropSearch] = useState("");
 
   const load = async () => {
-    // Paginated — a plain query hits PostgREST's 1000-row cap and silently
-    // drops jobs (cards then show missing/blank options).
-    const fetchOpenTargets = async () => {
-      let rows = [];
-      const PAGE = 1000;
-      for (let from = 0; ; from += PAGE) {
-        const { data, error } = await supabase
-          .from("assignment_targets")
-          .select(
-            "id, status, priority, unit_id, party_id, template_section, unit:units(label, bedrooms, bathrooms), party:parties(label), assignment:assignments!inner(id, title, customer_id, active, deleted_at, scheduled_date, assignment_type, took_longer)",
-          )
-          .not("status", "in", "(done,blocked)")
-          .range(from, from + PAGE - 1);
-        if (error || !data) break;
-        rows = rows.concat(data);
-        if (data.length < PAGE) break;
-        if (from > 100000) break;
-      }
-      return { data: rows };
-    };
     const [propsRes, targetsRes] = await Promise.all([
       supabase.from("customers").select("*").eq("active", true).order("name"),
-      fetchOpenTargets(),
+      fetchOpenAssignmentTargets(),
     ]);
     const counts = {};
     const seenBedrooms = new Set();

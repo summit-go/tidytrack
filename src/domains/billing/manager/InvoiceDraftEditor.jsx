@@ -1,4 +1,10 @@
-import React, { useState, useEffect, useCallback, useRef, useContext } from "react";
+import React, {
+  useState,
+  useEffect,
+  useCallback,
+  useRef,
+  useContext,
+} from "react";
 import {
   Search,
   Clock,
@@ -169,7 +175,10 @@ import { useItemLabelOverrides } from "../../../hooks/useItemLabelOverrides.js";
 import { useTick } from "../../../hooks/useTick.js";
 import { useUnreadCount } from "../../../hooks/useUnreadCount.js";
 import { useAssignmentsForBedroomOnDate } from "../../../hooks/useAssignmentsForBedroomOnDate.js";
-import { useLocale, TranslationProvider } from "../../../contexts/LocaleContext.jsx";
+import {
+  useLocale,
+  TranslationProvider,
+} from "../../../contexts/LocaleContext.jsx";
 import { PreviewContext } from "../../../contexts/PreviewContext.jsx";
 import { AssignmentTypeChip } from "../../../components/chips/AssignmentTypeChip.jsx";
 import { PriorityChip } from "../../../components/chips/PriorityChip.jsx";
@@ -190,9 +199,14 @@ import { TabButton } from "../../../components/TabButton.jsx";
 import { PhotoZoomViewer } from "../../../components/PhotoZoomViewer.jsx";
 import { TranslateButton } from "../../../components/TranslateButton.jsx";
 import { ZoomableImage } from "../../../components/ZoomableImage.jsx";
-import { subAmount, baseAmount, extraAmount, lineAmount, lineFullAmount } from "./invoiceAmounts.js";
+import {
+  subAmount,
+  baseAmount,
+  extraAmount,
+  lineAmount,
+  lineFullAmount,
+} from "./invoiceAmounts.js";
 import { InvoiceDocument } from "./InvoiceDocument.jsx";
-import { subAmount } from "./invoiceAmounts.js";
 
 export function InvoiceDraftEditor({
   property,

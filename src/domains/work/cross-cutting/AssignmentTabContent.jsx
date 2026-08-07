@@ -73,7 +73,6 @@ import {
   uploadMessagePhoto,
   deleteMessagePhoto,
   updateAssignmentScheduledDate,
-  fetchAllPages,
 } from "../../../lib/supabase.js";
 import {
   ASSIGNMENT_TYPES,
@@ -134,7 +133,13 @@ import {
   buildingKey,
   BUILDING_BLOCK_SIZE,
 } from "../../../lib/compare.js";
-import { isPmApprovedAssignment, assignmentKeyFromTarget, dominantAssignmentStatus } from "../../../lib/assignments.js";
+import {
+  isPmApprovedAssignment,
+  assignmentKeyFromTarget,
+  dominantAssignmentStatus,
+} from "../../../lib/assignments.js";
+import { useOpenWorkBlocksAtProperty } from "../hooks/useOpenWorkBlocksAtProperty.js";
+import { usePropertyAssignmentTargets } from "../hooks/usePropertyAssignmentTargets.js";
 import {
   compressImage,
   photoFilename,
@@ -202,8 +207,6 @@ export function AssignmentTabContent({
   onOpenBedroomHistory,
   onJoinBlock,
 }) {
-  const [targets, setTargets] = useState([]);
-  const [loaded, setLoaded] = useState(false);
   const [opened, setOpened] = useState(null);
   const [statusModal, setStatusModal] = useState(null);
   const [reassignTarget, setReassignTarget] = useState(null);
@@ -253,242 +256,24 @@ export function AssignmentTabContent({
     setEditDueId(null);
     if (id) {
       await updateAssignmentScheduledDate(id, date);
-      load();
+      rereload();
     }
   };
 
   // Track which unit-bundles are expanded on the Pending view
   const [bundleOpen, setBundleOpen] = useState({}); // { unitId: boolean }
 
-  const [loadError, setLoadError] = useState(null);
+  const whosHereByParty = useOpenWorkBlocksAtProperty({
+    propertyId,
+    excludeEmployeeId: employee?.id,
+  });
 
-  // Open workblocks across this property — keyed by party_id so the
-  // bedroom card can show a "[Name] · section is here" chip with a
-  // Join button. Without this, a cleaner browsing Pending / In progress
-  // had no Join affordance from the bedroom card itself; they had to
-  // dive into the section picker (or use the Suggested tab). The
-  // realtime sync (useAssignmentSync) reloads this when work_blocks
-  // changes — so when another cleaner opens or closes a workblock,
-  // every viewer's bedroom cards reflect it within a second or two.
-  const [whosHereByParty, setWhosHereByParty] = useState(new Map());
-  const loadWhosHere = async () => {
-    // Scoped server-side to THIS property and paginated. This used to
-    // pull EVERY open work block app-wide and filter in JS, so once open
-    // blocks passed PostgREST's 1000-row cap an arbitrary subset came
-    // back — which is why the "X is here" chip appeared on some bedroom
-    // cards and not others.
-    let rows = [];
-    const PAGE = 1000;
-    for (let from = 0; ; from += PAGE) {
-      const { data, error } = await supabase
-        .from("work_blocks")
-        .select(
-          "id, party_id, assignment_id, main_section, shift:shifts!inner(customer_id, employee:employees(id, name))",
-        )
-        .is("end_time", null)
-        .eq("shift.customer_id", propertyId)
-        .range(from, from + PAGE - 1);
-      if (error || !data) break;
-      rows = rows.concat(data);
-      if (data.length < PAGE) break;
-      if (from > 100000) break;
-    }
-    // Key by assignment_id when the block has one (so "who's here" belongs to
-    // the specific job — trash-out vs move-out — not the whole bedroom), and
-    // ALSO by party_id as a fallback for legacy blocks with no assignment_id.
-    // Cards look themselves up by assignment first, then party.
-    const m = new Map();
-    const push = (key, entry) => {
-      if (!key) return;
-      if (!m.has(key)) m.set(key, []);
-      m.get(key).push(entry);
-    };
-    rows.forEach((b) => {
-      if (b.shift?.customer_id !== propertyId) return;
-      // Exclude the viewing cleaner's own workblock — they don't need
-      // to "join" themselves; the active workblock pill at the top of
-      // the cleaner shell already surfaces it.
-      if (b.shift?.employee?.id === employee?.id) return;
-      const entry = {
-        name: b.shift?.employee?.name || "?",
-        workBlockId: b.id,
-        mainSection: b.main_section,
-      };
-      if (b.assignment_id) push(`a:${b.assignment_id}`, entry);
-      push(`p:${b.party_id}`, entry); // legacy fallback key
+  const { targets, setTargets, loaded, loadError, reload } =
+    usePropertyAssignmentTargets({
+      propertyId,
+      statusFilter,
+      employeeId: employee?.id,
     });
-    setWhosHereByParty(m);
-  };
-  useEffect(() => {
-    loadWhosHere(); /* eslint-disable-next-line */
-  }, [propertyId]);
-  useAssignmentSync(loadWhosHere, "asgn-tab-whoshere");
-
-  const load = async () => {
-    setLoadError(null);
-    // "Mine" and "recheck_passed" are derived from status='done' with
-    // extra clientside filtering. We treat them as Done-tab variants
-    // for the dominant-status logic below.
-    const isMineOrRecheck =
-      statusFilter === "mine" || statusFilter === "recheck_passed";
-    const isDoneTab = statusFilter === "done" || isMineOrRecheck;
-    // Load EVERY relevant target at this property in one query — not
-    // just items whose status matches the current tab. We need the
-    // full per-bedroom status mix to compute the dominant status and
-    // place each bedroom card in exactly ONE tab. This is the fix for
-    // "card shows up in both Pending and In progress" — that bug was
-    // a direct symptom of the previous per-item-status query.
-    // Page through ALL matching targets in 1000-row chunks. Supabase
-    // enforces a hard server-side max-rows ceiling (~1000) that
-    // .limit() can't exceed, so a single query silently truncates once
-    // a property has 1000+ target rows (a move-out check alone is 6-10
-    // rows; a busy property blows past 1000 fast). That truncation was
-    // the "184 jobs but only 48 visible / 998 rows" bug. We loop with
-    // .range() until a page comes back short, guaranteeing we collect
-    // every row. The !inner join + customer_id eq narrows server-side
-    // where supported; we still re-filter client-side as a safety net.
-    const { data, error } = await fetchAllPages((from, to) =>
-      supabase
-        .from("assignment_targets")
-        .select(
-          "*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, approved_at, deleted_at, extracted_text, spanish_translation, translation_status, assignment_type, scheduled_date, sheet_type, template_set_id, bathroom_variant, general_variant, created_at), unit:units(id, label), party:parties(id, label), starter:employees!started_by(id, name), completer:employees!completed_by(id, name), assignedTo:employees!assigned_to(id, name)",
-        )
-        .eq("assignment.customer_id", propertyId)
-        .eq("assignment.active", true)
-        .is("assignment.deleted_at", null)
-        .order("id", { ascending: true })
-        .range(from, to),
-    );
-    if (error) {
-      console.error("[Assignments] load error:", error);
-      setLoadError(error.message);
-      setTargets([]);
-      setLoaded(true);
-      return;
-    }
-    // Customer / active / PM-approval filter — same as before. Items
-    // not visible to cleaners get dropped here.
-    let allRelevant = (data || []).filter(
-      (t) =>
-        t.assignment?.customer_id === propertyId &&
-        t.assignment?.active !== false &&
-        !t.assignment?.deleted_at &&
-        isPmApprovedAssignment(t.assignment),
-    );
-
-    // Compute dominant status per ASSIGNMENT (not per bedroom). Each
-    // assignment is an independent job with its own lifecycle — a
-    // cleaning-check done last week and a move-out check pending this
-    // week at the SAME bedroom are two separate assignments and one
-    // must never override the other. Keying by assignment_id (instead
-    // of unit_id::party_id) keeps them distinct. Priority order:
-    // in_progress > paused > blocked > pending > done determines which
-    // tab the assignment lands in.
-    const statusesByAsgn = new Map();
-    allRelevant.forEach((t) => {
-      const k = assignmentKeyFromTarget(t);
-      if (!statusesByAsgn.has(k)) statusesByAsgn.set(k, new Set());
-      statusesByAsgn.get(k).add(t.status);
-    });
-    const dominantByAsgn = new Map();
-    statusesByAsgn.forEach((statusSet, k) => {
-      const winner = dominantAssignmentStatus(statusSet);
-      dominantByAsgn.set(k, winner);
-    });
-
-    // Filter to assignments whose dominant status matches the current
-    // tab. For "mine" / "recheck_passed" / Done we still keep everything
-    // status=done since those are derived views — extra clientside
-    // narrowing happens below.
-    let filtered;
-    if (isDoneTab) {
-      filtered = allRelevant.filter(
-        (t) => t.status === "done" || t.status === "blocked",
-      );
-    } else {
-      filtered = allRelevant.filter(
-        (t) => dominantByAsgn.get(assignmentKeyFromTarget(t)) === statusFilter,
-      );
-    }
-    // "Mine" view: only items I personally completed today
-    if (statusFilter === "mine") {
-      const todayStart = localTodayStart();
-      filtered = filtered.filter(
-        (t) =>
-          t.completed_by &&
-          employee?.id &&
-          t.completed_by === employee.id &&
-          t.completed_at &&
-          new Date(t.completed_at) >= todayStart,
-      );
-    }
-    if (statusFilter === "recheck_passed") {
-      filtered = filtered.filter((t) => t.recheck_passed_at);
-    }
-    if (statusFilter === "done") {
-      // Sort Done by building → unit → bedroom (natural compare on the
-      // unit label so "B1-101" comes before "B1-102" before "B2-101").
-      // Owner uses Done to verify specific apartments, so spatial order
-      // beats temporal order for findability. Time-bucketing (Day of /
-      // Last 3d / Older) still groups by date — within each bucket the
-      // items are now ordered by apartment.
-      filtered.sort(
-        (a, b) =>
-          naturalCompare(a.unit?.label || "", b.unit?.label || "") ||
-          naturalCompare(a.party?.label || "", b.party?.label || ""),
-      );
-    } else if (statusFilter === "paused") {
-      // Paused tab: assignments paused BY the current user sort to the
-      // top (most useful — they can resume their own work first), then
-      // everyone else's paused work alphabetically by unit/party.
-      // "Paused by" is inferred from started_by since the cleaner who
-      // started is the one who paused. Priority still wins overall.
-      const myId = employee?.id;
-      filtered.sort((a, b) => {
-        const ap = a.priority ? 1 : 0;
-        const bp = b.priority ? 1 : 0;
-        if (ap !== bp) return bp - ap;
-        const aMine = myId && a.started_by === myId ? 0 : 1;
-        const bMine = myId && b.started_by === myId ? 0 : 1;
-        if (aMine !== bMine) return aMine - bMine;
-        return (
-          naturalCompare(a.unit?.label || "", b.unit?.label || "") ||
-          naturalCompare(a.party?.label || "", b.party?.label || "")
-        );
-      });
-    } else {
-      // Overdue → today → undated → upcoming, then priority, then
-      // natural unit/party order, so cleaners see today's work first.
-      // Due date first, THEN building order. Anything with a date sits
-      // above anything without; undated work keeps its old natural order
-      // at the bottom.
-      filtered.sort((a, b) => {
-        const da = a.assignment?.scheduled_date || "";
-        const db = b.assignment?.scheduled_date || "";
-        const ra = assignmentDueRank(da || null);
-        const rb = assignmentDueRank(db || null);
-        if (ra !== rb) return ra - rb;
-        // Real chronological order inside a bucket. scheduled_date is
-        // 'YYYY-MM-DD', so a string compare is already date order.
-        // Without this every future date ties and the sort collapses
-        // straight to building order.
-        if (da !== db) return da.localeCompare(db);
-        const ap = a.priority ? 1 : 0;
-        const bp = b.priority ? 1 : 0;
-        if (ap !== bp) return bp - ap;
-        return (
-          naturalCompare(a.unit?.label || "", b.unit?.label || "") ||
-          naturalCompare(a.party?.label || "", b.party?.label || "")
-        );
-      });
-    }
-    setTargets(filtered);
-    setLoaded(true);
-  };
-  useEffect(() => {
-    load(); /* eslint-disable-next-line */
-  }, [propertyId, statusFilter]);
-  useAssignmentSync(load, "asgn-tab");
 
   // Map of "<unit_id>:<party_id>" → Set of task categories ever worked
   // at that bedroom for this property. Used by the category filter so
@@ -564,11 +349,11 @@ export function AssignmentTabContent({
       .in("id", ids);
     setBusy(false);
     if (error) {
-      load();
+      reload();
       alert("Could not update: " + error.message);
       return;
     }
-    load();
+    reload();
     if (onUpdate) onUpdate();
   };
 
@@ -586,7 +371,7 @@ export function AssignmentTabContent({
       .in("id", ids);
     if (error) {
       alert("Could not update priority: " + error.message);
-      load();
+      reload();
     }
   };
 
@@ -637,12 +422,12 @@ export function AssignmentTabContent({
     setBusy(false);
     if (error) {
       // Roll back optimistic on failure so the user sees the truth
-      load();
+      reload();
       alert("Could not update: " + error.message);
       return;
     }
     setStatusModal(null);
-    load();
+    reload();
     if (onUpdate) onUpdate();
   };
 
@@ -680,11 +465,11 @@ export function AssignmentTabContent({
       .eq("id", target.id);
     setBusy(false);
     if (error) {
-      load();
+      reload();
       alert("Could not reopen: " + error.message);
       return;
     }
-    load();
+    reload();
     if (onUpdate) onUpdate();
   };
 
@@ -871,7 +656,7 @@ export function AssignmentTabContent({
       alert("Could not update request: " + error.message);
       return;
     }
-    load();
+    reload();
     if (onUpdate) onUpdate();
   };
 
@@ -1050,7 +835,7 @@ export function AssignmentTabContent({
                 onSetDueDate={async (aid, date) => {
                   if (aid) {
                     await updateAssignmentScheduledDate(aid, date);
-                    load();
+                    reload();
                   }
                 }}
                 onOpenBedroomHistory={onOpenBedroomHistory}
@@ -1381,7 +1166,7 @@ export function AssignmentTabContent({
                              Each chip carries the cleaner's name + section
                              they're working + a Join button so the viewer
                              can hop in without going through the picker
-                             flow. Self-chip is filtered out in loadWhosHere
+                             flow. Self-chip is filtered out in useOpenWorkBlocksAtProperty
                              since "Join yourself" makes no sense. */}
                           {(() => {
                             // Never show "someone is here" on a DONE card — the
@@ -1996,7 +1781,7 @@ export function AssignmentTabContent({
                                       );
                                       return;
                                     }
-                                    load();
+                                    reload();
                                     if (onUpdate) onUpdate();
                                   }}
                                   disabled={busy}
@@ -2054,7 +1839,7 @@ export function AssignmentTabContent({
                             onSetDueDate={async (aid, date) => {
                               if (aid) {
                                 await updateAssignmentScheduledDate(aid, date);
-                                load();
+                                reload();
                               }
                             }}
                             onOpenBedroomHistory={onOpenBedroomHistory}
@@ -2546,7 +2331,7 @@ export function AssignmentTabContent({
           propertyId={propertyId}
           onSaved={() => {
             setReassignTarget(null);
-            load();
+            reload();
             if (onUpdate) onUpdate();
           }}
           onClose={() => setReassignTarget(null)}

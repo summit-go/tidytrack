@@ -157,6 +157,14 @@ import {
   bathroomNumberForBedroom,
 } from "../../../lib/labels.js";
 import { splitTaskName } from "../../../lib/tasks.js";
+import {
+  fetchOpenTargetsAtProperty,
+  filterVisiblePropertyTargets,
+} from "../../../lib/assignments.js";
+import {
+  fetchOpenWorkBlocksAtProperty,
+  buildWhosHereByParty,
+} from "../../../lib/workBlocks.js";
 import { useAssignmentSync } from "../../../hooks/useAssignmentSync.js";
 import { useIdleDetector } from "../../../hooks/useIdleDetector.js";
 import { usePagePersistence } from "../../../hooks/usePagePersistence.js";
@@ -278,7 +286,7 @@ export function SuggestedTabContent({
           }
         : null;
 
-      // 2. Units + parties + full target detail + open work blocks
+      // 2. Units + parties + open targets + open work blocks (paginated)
       const [unitsRes, partiesRes, targetsRes, blocksRes] = await Promise.all([
         supabase
           .from("units")
@@ -288,62 +296,25 @@ export function SuggestedTabContent({
         supabase
           .from("parties")
           .select("id, label, unit_id, sort_order, active"),
-        supabase
-          .from("assignment_targets")
-          .select(
-            "*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, deleted_at, assignment_type, template_set_id, sheet_type, general_variant, bathroom_variant, scheduled_date, created_at), unit:units(id, label), party:parties(id, label), starter:employees!started_by(name), completer:employees!completed_by(name), assignedTo:employees!assigned_to(id, name)",
-          )
-          .not("status", "in", "(done,blocked)"),
-        // Open work blocks property-wide for the "who's here" chips.
-        // main_section is pulled so each chip can label which section
-        // the cleaner is working — relevant once cleaners split a
-        // bedroom across sections.
-        // Scoped to this property server-side — an app-wide open-block
-        // query silently truncates at the 1000-row cap and the "is here"
-        // chips go missing on arbitrary cards.
-        supabase
-          .from("work_blocks")
-          .select(
-            "id, unit_id, party_id, main_section, shift:shifts!inner(customer_id, employee:employees(id, name))",
-          )
-          .is("end_time", null)
-          .eq("shift.customer_id", propertyId),
+        fetchOpenTargetsAtProperty(propertyId),
+        fetchOpenWorkBlocksAtProperty(propertyId),
       ]);
       const units = unitsRes.data || [];
       const parties = (partiesRes.data || []).filter((p) => p.active !== false);
-      const openTargets = (targetsRes.data || []).filter((t) => {
-        const a = t.assignment;
-        if (!a || a.customer_id !== propertyId) return false;
-        if (a.active === false) return false;
-        if (a.source === "pm" && a.pm_status !== "approved") return false;
-        return true;
-      });
-      const openBlocks = (blocksRes.data || []).filter(
-        (b) =>
-          b.shift?.customer_id === propertyId &&
-          b.shift?.employee?.id &&
-          b.shift.employee.id !== employee.id,
+      const openTargets = filterVisiblePropertyTargets(
+        targetsRes.data,
+        propertyId,
       );
+      const whosHereByParty = buildWhosHereByParty(blocksRes.data, {
+        propertyId,
+        excludeEmployeeId: employee.id,
+      });
 
-      // Group open targets by bedroom (party_id)
       const targetsByParty = new Map();
       openTargets.forEach((t) => {
         if (!t.party_id) return;
         if (!targetsByParty.has(t.party_id)) targetsByParty.set(t.party_id, []);
         targetsByParty.get(t.party_id).push(t);
-      });
-      // Build "who's here" map — keyed by party_id, contains [{ name, partyLabel(if relevant) }]
-      // For the chip we just need the cleaner's name; the bedroom IS the card.
-      const whosHereByParty = new Map();
-      openBlocks.forEach((b) => {
-        if (!b.party_id) return;
-        if (!whosHereByParty.has(b.party_id))
-          whosHereByParty.set(b.party_id, []);
-        whosHereByParty.get(b.party_id).push({
-          name: b.shift.employee.name,
-          workBlockId: b.id,
-          mainSection: b.main_section, // null for legacy blocks; UI hides badge in that case
-        });
       });
 
       const unitMap = new Map(units.map((u) => [u.id, u]));

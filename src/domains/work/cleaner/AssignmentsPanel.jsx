@@ -134,6 +134,7 @@ import {
   BUILDING_BLOCK_SIZE,
 } from "../../../lib/compare.js";
 import { isVisibleAssignmentTarget, assignmentKeyFromTarget, dominantAssignmentStatus } from "../../../lib/assignments.js";
+import { useAssignmentStatusCounts } from "../hooks/useAssignmentStatusCounts.js";
 import {
   compressImage,
   photoFilename,
@@ -200,90 +201,11 @@ export function AssignmentsPanel({
   onJoinBlock,
 }) {
   const [tab, setTab] = useState("pending");
-  const [counts, setCounts] = useState({
-    pending: 0,
-    paused: 0,
-    in_progress: 0,
-    done: 0,
-    blocked: 0,
-    mine: 0,
+  const { counts, reload: reloadCounts } = useAssignmentStatusCounts({
+    propertyId,
+    employeeId: employee?.id,
+    refreshKey,
   });
-
-  const loadCounts = async () => {
-    const { data, error: pErr } = await fetchAllPages((from, to) =>
-      supabase
-        .from("assignment_targets")
-        .select(
-          "status, completed_by, completed_at, unit_id, party_id, assignment_id, recheck_passed_at, assignment:assignments!inner(customer_id, active, source, pm_status, deleted_at)",
-        )
-        .eq("assignment.customer_id", propertyId)
-        .eq("assignment.active", true)
-        .is("assignment.deleted_at", null)
-        .order("id", { ascending: true })
-        .range(from, to),
-    );
-    if (pErr) return;
-    const filtered = (data || []).filter(isVisibleAssignmentTarget);
-    // Count UNIQUE assignments per status. Each assignment gets bucketed
-    // ONCE based on its DOMINANT status (in_progress > paused > blocked
-    // > pending > done). This is the counterpart to the dominant-status
-    // logic in load() — both key by assignment_id so a cleaning-check
-    // and a move-out check at the same bedroom count as two separate
-    // jobs. They must agree or the badge says "1 pending" while the
-    // tab shows something else.
-    const statusesByAsgn = new Map();
-    filtered.forEach((t) => {
-      const k = assignmentKeyFromTarget(t);
-      if (!statusesByAsgn.has(k)) statusesByAsgn.set(k, new Set());
-      statusesByAsgn.get(k).add(t.status);
-    });
-    const sets = {
-      pending: new Set(),
-      paused: new Set(),
-      in_progress: new Set(),
-      done: new Set(),
-      blocked: new Set(),
-      mine: new Set(),
-      recheck_passed: new Set(),
-    };
-    statusesByAsgn.forEach((statusSet, k) => {
-      const dom = dominantAssignmentStatus(statusSet);
-      if (sets[dom]) sets[dom].add(k);
-    });
-    // "Mine" still depends on which items the viewing cleaner finished
-    // today — it's a derived view, so we walk the items separately.
-    const todayStart = localTodayStart();
-    filtered.forEach((t) => {
-      if (t.recheck_passed_at) sets.recheck_passed.add(assignmentKeyFromTarget(t));
-      if (
-        t.completed_by &&
-        employee?.id &&
-        t.completed_by === employee.id &&
-        t.completed_at
-      ) {
-        const ca = new Date(t.completed_at);
-        if (ca >= todayStart) sets.mine.add(assignmentKeyFromTarget(t));
-      }
-    });
-    setCounts({
-      pending: sets.pending.size,
-      paused: sets.paused.size,
-      in_progress: sets.in_progress.size,
-      done: sets.done.size,
-      blocked: sets.blocked.size,
-      mine: sets.mine.size,
-      recheck_passed: sets.recheck_passed.size,
-    });
-  };
-  useEffect(() => {
-    loadCounts();
-  }, [propertyId, refreshKey]);
-  // Tab badges need to refresh on every DB change too, not just on
-  // propertyId / refreshKey. Without this hook the counts went stale
-  // the moment a cleaner started a workblock — the card itself moved
-  // to In progress (because load() re-ran on the same sync) but the
-  // badges still read the old numbers until you tabbed away and back.
-  useAssignmentSync(loadCounts, "asgn-panel-counts");
 
   return (
     <div className="px-2 sm:px-4 mt-4">
@@ -351,7 +273,7 @@ export function AssignmentsPanel({
         propertyId={propertyId}
         employee={employee}
         statusFilter={tab}
-        onUpdate={loadCounts}
+        onUpdate={reloadCounts}
         onGoToBedroom={onGoToBedroom}
         onOpenBedroomHistory={onOpenBedroomHistory}
         onJoinBlock={onJoinBlock}

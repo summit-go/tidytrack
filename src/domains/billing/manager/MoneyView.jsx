@@ -190,6 +190,11 @@ import { TabButton } from "../../../components/TabButton.jsx";
 import { PhotoZoomViewer } from "../../../components/PhotoZoomViewer.jsx";
 import { TranslateButton } from "../../../components/TranslateButton.jsx";
 import { ZoomableImage } from "../../../components/ZoomableImage.jsx";
+import { InvoiceView } from "./InvoiceView.jsx";
+import { InvoicePaymentsReport } from "./InvoicePaymentsReport.jsx";
+import { ExportView } from "./ExportView.jsx";
+import { ProfitReportView } from "./ProfitReportView.jsx";
+import { CleaningsReportView } from "../../work/assignments/CleaningsReportView.jsx";
 
 export function MoneyView({ employee, onSignOut, onOpenMessages, onLogoClick }) {
   const [subTab, setSubTab] = useState("invoices"); // 'invoices' | 'payroll' | 'reports' | 'profit'

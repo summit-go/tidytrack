@@ -2,6 +2,21 @@
 
 Concise history of changes for each commit, reverse chronological order
 
+## 2026-08-07 - Phase C1 complete: Shared work-loop read models
+
+- Finished C1: `fetchOpenAssignmentTargets`, `fetchOpenTargetsAtProperty`, filter/sort helpers in `lib/assignments.js`; `buildWhosHereByParty` in `lib/workBlocks.js`
+- Added `usePropertyAssignmentTargets` hook; wired `AssignmentTabContent`, `SuggestedTabContent`, `AssignmentsTab`
+- All four assignment/work-block consumers now share paginated queries; `npm run build` passes
+
+## 2026-08-07 - Phase C1: Shared work-loop read models (partial)
+
+- Added Track 1 roadmap at `ai/roadmaps/2026-08-07_phase-c-work-loop_roadmap.md`
+- Added `src/lib/workBlocks.js` — `fetchOpenWorkBlocksAtProperty`, `buildWhosHereLookup`
+- Extended `src/lib/assignments.js` — `fetchPropertyAssignmentTargets`, `computeAssignmentStatusCounts`, shared select strings
+- Added `src/domains/work/hooks/useAssignmentStatusCounts.js`, `useOpenWorkBlocksAtProperty.js`
+- Wired `AssignmentsPanel` and `AssignmentTabContent` to shared hooks/helpers
+- Remaining C1 deferred to next commit
+
 ## 2026-08-07 - Phase B2: Trivial read-model consolidation
 
 - Added `src/lib/assignments.js` — `isPmApprovedAssignment`, `isVisibleAssignmentTarget`, `assignmentKeyFromTarget`, `dominantAssignmentStatus`

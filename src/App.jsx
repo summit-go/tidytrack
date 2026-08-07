@@ -106,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap127";
+const BUILD_TAG = "aug6-tap130";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -9021,6 +9021,7 @@ function InlineBedroomTasks({ propertyId, unitId, partyId, employee }) {
   const [items, setItems] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [open, setOpen] = useState(true);
+  const [secFilter, setSecFilter] = useState('all'); // 'all' | section key
 
   useEffect(() => {
     let cancelled = false;
@@ -9066,24 +9067,43 @@ function InlineBedroomTasks({ propertyId, unitId, partyId, employee }) {
           {!loaded ? (
             <div className="text-center py-4 text-stone-400 text-sm">Loading…</div>
           ) : (
-            <div className="space-y-3">
-              {order.map(sec => (
-                <div key={sec}>
-                  <div className="text-[10px] uppercase tracking-wider font-mono text-stone-400 mb-1.5">
+            <>
+              {/* Pill tabs — All shows every section (same as before);
+                 tapping a section filters to just that section, like the
+                 quick-glance pop-up. */}
+              <div className="flex items-center gap-1.5 flex-wrap mb-3">
+                <button onClick={() => setSecFilter('all')}
+                  className={`text-[11px] font-mono px-2.5 py-1 rounded-full ${secFilter === 'all' ? 'bg-stone-900 text-white' : 'bg-stone-100 text-stone-600'}`}>
+                  All ({items.length})
+                </button>
+                {order.map(sec => (
+                  <button key={sec} onClick={() => setSecFilter(sec)}
+                    className={`text-[11px] font-mono px-2.5 py-1 rounded-full capitalize ${secFilter === sec ? 'bg-stone-900 text-white' : 'bg-stone-100 text-stone-600'}`}>
                     {sec} ({bySection[sec].length})
-                  </div>
-                  <div className="grid grid-cols-2 gap-1">
-                    {bySection[sec].map(t => (
-                      <div key={t.id} className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-stone-50 border border-stone-200">
-                        <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
-                          t.status === 'in_progress' ? 'bg-amber-500' : t.status === 'paused' ? 'bg-amber-400' : 'bg-stone-300'}`} />
-                        <span className="text-xs text-stone-700 min-w-0 break-words">{labelFor(t)}</span>
+                  </button>
+                ))}
+              </div>
+              <div className="space-y-3">
+                {(secFilter === 'all' ? order : order.filter(s => s === secFilter)).map(sec => (
+                  <div key={sec}>
+                    {secFilter === 'all' && (
+                      <div className="text-[10px] uppercase tracking-wider font-mono text-stone-400 mb-1.5">
+                        {sec} ({bySection[sec].length})
                       </div>
-                    ))}
+                    )}
+                    <div className="grid grid-cols-2 gap-1">
+                      {bySection[sec].map(t => (
+                        <div key={t.id} className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-stone-50 border border-stone-200">
+                          <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
+                            t.status === 'in_progress' ? 'bg-amber-500' : t.status === 'paused' ? 'bg-amber-400' : 'bg-stone-300'}`} />
+                          <span className="text-xs text-stone-700 min-w-0 break-words">{labelFor(t)}</span>
+                        </div>
+                      ))}
+                    </div>
                   </div>
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            </>
           )}
         </div>
       )}
@@ -11246,42 +11266,39 @@ function ActiveWorkblockCard({ task, onStop, onAddPhoto }) {
   // sees "Bathroom" instead of a 200-character " + " joined string.
   // Falls back to the task name when there's no category.
   const headline = categoryLabel || (parts.length > 0 ? parts[0] : task.name);
-  const itemCount = parts.length;
   return (
     <div className="mx-4 mt-4 p-4 rounded-2xl bg-amber-50 border-2 border-amber-300"
       style={{ touchAction: 'manipulation' }}>
       <div className="flex items-center gap-2 mb-2">
         <span className="w-2 h-2 rounded-full bg-amber-700 animate-pulse" />
-        <span className="text-xs uppercase tracking-wider text-amber-800 font-mono">Active workblock</span>
+        <span className="text-xs uppercase tracking-wider text-amber-800 font-mono">Active job</span>
       </div>
       <div className="flex items-start justify-between gap-3 mb-3">
         <div className="flex-1 min-w-0">
           <div className="font-serif text-2xl text-stone-900 leading-tight">{headline}</div>
           <div className="text-xs text-stone-600 font-mono mt-1">
             {fmtTime(elapsed)}
-            {itemCount > 1 && <> · {itemCount} items</>}
             {damage.length > 0 && <span className="ml-2 text-red-700 font-bold">⚠ {damage.length} damage</span>}
             {cannot.length > 0 && <span className="ml-2 text-yellow-700 font-bold">⚠ {cannot.length} couldn't clean</span>}
           </div>
-          {/* Subsection items — shown as a compact scrollable dropdown so a
-             long list doesn't fill the card. Collapsed by default. */}
-          {parts.length > 1 && <ItemsDropdown items={parts} />}
+          {/* Task list — shown as a compact scrollable dropdown. Shows even
+             for a single item so the cleaner always sees what's in this job.
+             The dropdown's own header carries the count (no redundant text). */}
+          {parts.length >= 1 && <ItemsDropdown items={parts} />}
         </div>
         <button onClick={onStop}
           style={{ touchAction: 'manipulation' }}
-          className="px-5 py-2.5 rounded-full bg-stone-900 text-stone-50 text-sm font-medium active:scale-95 transition-transform">
+          className="px-3.5 py-1.5 rounded-full bg-stone-900 text-stone-50 text-xs font-medium active:scale-95 transition-transform flex-shrink-0">
           Done
         </button>
       </div>
-      {/* One camera button — the cleaner takes/uploads a photo, then picks
-         which bucket it belongs to (before / after / damage / couldn't
-         clean) and can reassign it later if needed. */}
+      {/* One camera button — icon only, sits on the left. */}
       <button onClick={() => onAddPhoto(null)}
         style={{ touchAction: 'manipulation' }}
-        className="w-full px-3 py-3.5 rounded-xl bg-stone-900 hover:bg-stone-800 text-stone-50 text-sm font-medium flex items-center justify-center gap-2 active:scale-95 transition-transform">
-        <Camera size={16} /> Add photo
+        className="px-4 py-2.5 rounded-xl bg-stone-900 hover:bg-stone-800 text-stone-50 text-sm font-medium inline-flex items-center gap-2 active:scale-95 transition-transform">
+        <Camera size={18} />
         {(before.length + after.length + damage.length + cannot.length) > 0 && (
-          <span className="text-stone-300 font-mono">({before.length + after.length + damage.length + cannot.length})</span>
+          <span className="text-stone-300 font-mono text-xs">{before.length + after.length + damage.length + cannot.length}</span>
         )}
       </button>
     </div>
@@ -32020,7 +32037,7 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
   const [statusModal, setStatusModal] = useState(null);
   const [reassignTarget, setReassignTarget] = useState(null);
   const [busy, setBusy] = useState(false);
-  const [collapsed, setCollapsed] = useState(false);
+  const [attachmentView, setAttachmentView] = useState(null); // { url, kind } | null
   const [editDueId, setEditDueId] = useState(null);
   const [liveHere, setLiveHere] = useState(false); // an open work block exists at this bedroom
   const canEditDatesB = can(employee, 'edit_due_dates');
@@ -32324,23 +32341,25 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
           </div>
         </div>
       )}
-      <div className={`flex items-center gap-2 ${collapsed ? '' : 'mb-3'}`}>
-        <button onClick={() => setCollapsed(c => !c)}
-          className="flex-1 min-w-0 flex items-center gap-2 active:opacity-80">
-          <FileText size={16} className={`flex-shrink-0 ${dark ? 'text-amber-400' : 'text-blue-700'}`} />
-          <span className={`text-xs uppercase tracking-wider font-mono flex-1 text-left ${dark ? 'text-stone-300' : 'text-blue-800'}`}>
-            {(() => {
-              const groups = buildGroups(targets);
-              const assignmentCount = groups.length;
-              const doneCount = targets.filter(t => t.status === 'done').length;
-              return `${assignmentCount} assignment${assignmentCount === 1 ? '' : 's'} · ${doneCount}/${targets.length} done`;
-            })()}
-          </span>
-          <ChevronRight size={14} className={`transition-transform ${collapsed ? '' : 'rotate-90'} ${dark ? 'text-stone-400' : 'text-blue-700'}`} />
-        </button>
-        {dark && undoSlot}
-      </div>
-      {!collapsed && (() => {
+      {(dark && workScreen && (targets.some(t => t.assignment?.file_url) || undoSlot)) && (
+        <div className="flex items-center justify-end gap-2 mb-3">
+          {/* Attachment button — view the uploaded sheet/photo for this
+             bedroom's assignment, next to the undo control. */}
+          {(() => {
+            const withFile = targets.find(t => t.assignment?.file_url);
+            if (!withFile) return null;
+            return (
+              <button onClick={() => setAttachmentView({ url: withFile.assignment.file_url, kind: withFile.assignment.file_kind })}
+                title="View attachment"
+                className="w-9 h-9 rounded-full bg-slate-700 hover:bg-slate-600 text-stone-100 flex items-center justify-center flex-shrink-0 active:scale-95 transition">
+                <FileText size={16} />
+              </button>
+            );
+          })()}
+          {undoSlot}
+        </div>
+      )}
+      {(() => {
         const groups = buildGroups(targets);
         // Split priority and non-priority so the visual divider matches
         // the rest of the app — priority items live at the top, then a
@@ -32738,10 +32757,15 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
       {/* "Start cleaning" is now a small button in the card's own action row
          (passed down to AssignmentCard), not a big bar here. */}
 
+      {attachmentView && (
+        <AttachmentModal url={attachmentView.url} kind={attachmentView.kind}
+          onClose={() => setAttachmentView(null)} />
+      )}
       {opened && (
         opened.assignment?.template_set_id
           ? <ChecklistAssignmentView assignment={opened.assignment} onOpenSibling={(a) => setOpened(o => ({ ...o, assignment: a }))}
               employee={employee}
+              quickGlance={true}
               onClose={() => setOpened(null)}
               onOpenSheet={opened.assignment?.file_url
                 ? () => window.open(opened.assignment.file_url, '_blank', 'noopener')
@@ -33767,6 +33791,7 @@ function SuggestedTabContent({ propertyId, employee, onGoToBedroom, onOpenBedroo
         opened.assignment?.template_set_id
           ? <ChecklistAssignmentView assignment={opened.assignment} onOpenSibling={(a) => setOpened(o => ({ ...o, assignment: a }))}
               employee={employee}
+              quickGlance={true}
               onClose={() => setOpened(null)}
               onOpenSheet={opened.assignment?.file_url
                 ? () => window.open(opened.assignment.file_url, '_blank', 'noopener')
@@ -35453,6 +35478,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
         opened.assignment?.template_set_id
           ? <ChecklistAssignmentView assignment={opened.assignment} onOpenSibling={(a) => setOpened(o => ({ ...o, assignment: a }))}
               employee={employee}
+              quickGlance={true}
               onClose={() => setOpened(null)}
               onOpenSheet={opened.assignment?.file_url
                 ? () => window.open(opened.assignment.file_url, '_blank', 'noopener')

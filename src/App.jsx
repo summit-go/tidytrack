@@ -106,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap122";
+const BUILD_TAG = "aug6-tap124";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -3139,6 +3139,149 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
     reset();
   };
 
+  const renderSectionItemBox = () => {
+        const sectionLabels = { bedroom: 'Bedroom', vanity: 'Vanity', bathroom: 'Bathroom', general: 'General' };
+        // Show ALL non-done/non-blocked items so the cleaner sees both
+        // what they've already picked AND what's still available. The
+        // pending ones are interactive (checkboxes); the in_progress
+        // and paused ones are read-only and visually grayed out. This
+        // gives the cleaner a holistic view of the section at a glance
+        // rather than hiding what they've already started.
+        const items = checklistTargets.filter(t =>
+          (t.template_section || '').toLowerCase() === category &&
+          (t.status === 'pending' || t.status === 'in_progress' || t.status === 'paused')
+        );
+        const pendingCount = items.filter(t => t.status === 'pending').length;
+        if (items.length === 0) {
+          // Only show "all done/started" copy when there's at least
+          // one done item — otherwise legacy bedrooms with 0 in this
+          // section would see a misleading note.
+          const allItems = checklistTargets.filter(t =>
+            (t.template_section || '').toLowerCase() === category
+          );
+          if (allItems.length === 0) return null;
+          return (
+            <div className="rounded-2xl bg-emerald-50 border-2 border-emerald-200 p-3 text-center">
+              <Check size={18} className="inline text-emerald-700 mb-1" />
+              <div className="text-xs text-emerald-800 font-medium">
+                Every {sectionLabels[category]} item is done.
+              </div>
+            </div>
+          );
+        }
+        // Group by parent assignment so General with two variants
+        // shows the variant labels. Other sections flatten.
+        const showSubheaders = category === 'general';
+        const byAssignment = new Map();
+        items.forEach(t => {
+          const aid = t.assignment?.id;
+          if (!byAssignment.has(aid)) byAssignment.set(aid, { assignment: t.assignment, items: [] });
+          byAssignment.get(aid).items.push(t);
+        });
+        return (
+          <div className="rounded-2xl bg-emerald-50 border-2 border-emerald-200 p-3">
+            <div className="flex items-center gap-2 mb-2">
+              <FileText size={14} className="text-emerald-700 flex-shrink-0" />
+              <span className="text-[11px] uppercase tracking-wider font-mono text-emerald-800 font-bold flex-1">
+                {sectionLabels[category]} — pick what you'll start
+              </span>
+              <span className="text-[10px] font-mono text-emerald-700">
+                {pendingCount} left
+              </span>
+            </div>
+            <div className="space-y-2">
+              {Array.from(byAssignment.values()).map(group => {
+                // Human-readable label for the general variant — so
+                // the cleaner sees "Kitchen" or "LR / Patio / Water
+                // Heater" instead of just "variant D". Previously
+                // they'd see "Sink" with no idea WHICH sink (kitchen,
+                // vanity, etc.). The subheader now resolves this.
+                const generalVariantLabel = {
+                  a: 'LR / Patio / Water Heater',
+                  b: 'Fridge / Microwave / Breezeway',
+                  c: 'Vents / Stove / Oven / Dishwasher',
+                  d: 'Kitchen',
+                };
+                const variantKey = (group.assignment.general_variant || '').toLowerCase();
+                const variantHumanLabel = generalVariantLabel[variantKey] || null;
+                return (
+                <div key={group.assignment.id}>
+                  {showSubheaders && variantHumanLabel && (
+                    <div className="text-[11px] uppercase tracking-wider font-mono text-emerald-800 font-bold mb-1.5 px-1">
+                      {variantHumanLabel}
+                    </div>
+                  )}
+                  <div className="grid grid-cols-2 gap-1.5">
+                    {group.items.map(t => {
+                      const checked = selectedTargetIds.has(t.id);
+                      const itemKey = t.template_item_key || '';
+                      // Started/paused items are read-only chrome —
+                      // visible so the cleaner sees the full picture
+                      // of the section, but not interactive (they're
+                      // already underway).
+                      const isStarted = t.status === 'in_progress' || t.status === 'paused';
+                      // Only show edit pencil for translated items in
+                      // checklist mode — cleaners can fix bad Spanish
+                      // labels. Requests (custom items) skipped since
+                      // their label is already the cleaner's own text.
+                      const canEditLabel = locale === 'es' && itemKey && !itemKey.startsWith('requested:');
+                      return (
+                        <div key={t.id} className={`flex items-start gap-1 rounded-xl border-2 transition-all ${
+                          isStarted
+                            ? 'border-stone-200 bg-stone-100 opacity-60'
+                            : checked
+                              ? 'border-amber-600 bg-amber-50'
+                              : 'border-stone-200 bg-white hover:border-stone-400'
+                        }`}>
+                          <button type="button"
+                            onClick={() => !isStarted && toggleTarget(t.id)}
+                            disabled={isStarted}
+                            className="flex items-start gap-2 px-3 py-2.5 text-left flex-1 min-w-0 disabled:cursor-not-allowed">
+                            <div className={`mt-0.5 w-4 h-4 rounded border-2 flex-shrink-0 flex items-center justify-center ${
+                              isStarted
+                                ? 'border-stone-400 bg-stone-300'
+                                : checked
+                                  ? 'border-amber-600 bg-amber-600'
+                                  : 'border-stone-300'
+                            }`}>
+                              {(checked || isStarted) && <Check size={11} className="text-white" />}
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <div className={`text-xs ${isStarted ? 'text-stone-500 line-through decoration-stone-400' : 'text-stone-900'}`}>
+                                {labelForTarget(t)}
+                              </div>
+                              {isStarted && (
+                                <span className="inline-block mt-0.5 text-[9px] uppercase tracking-wider font-mono px-1.5 py-0.5 rounded-full bg-amber-100 border border-amber-300 text-amber-800 font-bold">
+                                  {t.status === 'paused' ? 'Paused' : 'Started'}
+                                </span>
+                              )}
+                              {t.priority && (
+                                <span className="inline-block mt-0.5 text-[9px] uppercase tracking-wider font-mono px-1.5 py-0.5 rounded-full bg-red-50 border border-red-200 text-red-700 font-bold">
+                                  Priority
+                                </span>
+                              )}
+                            </div>
+                          </button>
+                          {canEditLabel && (
+                            <button type="button"
+                              onClick={(e) => { e.stopPropagation(); setEditingLabel({ key: itemKey, current: labelForTarget(t), hasOverride: overrides.has(itemKey) }); }}
+                              className="p-2 text-stone-400 hover:text-amber-700 flex-shrink-0"
+                              title="Editar nombre">
+                              <Edit2 size={12} />
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+              })}
+            </div>
+          </div>
+        );
+  };
+
   return (
     <div className="space-y-3">
       {/* Tabs (Active / Not started) removed — user feedback was that
@@ -3336,7 +3479,8 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
               const isOpen = category === c.id;
               const isEmpty = inChecklist && s.total === 0;
               return (
-                <div key={c.id} className="relative">
+                <React.Fragment key={c.id}>
+                <div className="relative">
                   <button type="button" onClick={() => {
                   // Toggle: tapping the open section closes it; tapping
                   // a closed one opens it (closing whatever was open).
@@ -3418,6 +3562,10 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
                     {s.hasRequested ? 'Requested' : 'Request'}
                   </button>
                 </div>
+                {/* 3b: the open section's item picker appears IMMEDIATELY
+                   under its own row, not below all four sections. */}
+                {checklistMode && checklistTargets.length > 0 && pickerTab === 'not_started' && category === c.id && renderSectionItemBox()}
+                </React.Fragment>
               );
             });
           })()}
@@ -3497,148 +3645,6 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
          there are no items in the open one, nothing renders here.
          Legacy bedrooms with 0 checklist items skip this panel and
          fall through to the custom-name + variant subgrid below. */}
-      {checklistMode && checklistTargets.length > 0 && pickerTab === 'not_started' && category && (() => {
-        const sectionLabels = { bedroom: 'Bedroom', vanity: 'Vanity', bathroom: 'Bathroom', general: 'General' };
-        // Show ALL non-done/non-blocked items so the cleaner sees both
-        // what they've already picked AND what's still available. The
-        // pending ones are interactive (checkboxes); the in_progress
-        // and paused ones are read-only and visually grayed out. This
-        // gives the cleaner a holistic view of the section at a glance
-        // rather than hiding what they've already started.
-        const items = checklistTargets.filter(t =>
-          (t.template_section || '').toLowerCase() === category &&
-          (t.status === 'pending' || t.status === 'in_progress' || t.status === 'paused')
-        );
-        const pendingCount = items.filter(t => t.status === 'pending').length;
-        if (items.length === 0) {
-          // Only show "all done/started" copy when there's at least
-          // one done item — otherwise legacy bedrooms with 0 in this
-          // section would see a misleading note.
-          const allItems = checklistTargets.filter(t =>
-            (t.template_section || '').toLowerCase() === category
-          );
-          if (allItems.length === 0) return null;
-          return (
-            <div className="rounded-2xl bg-emerald-50 border-2 border-emerald-200 p-3 text-center">
-              <Check size={18} className="inline text-emerald-700 mb-1" />
-              <div className="text-xs text-emerald-800 font-medium">
-                Every {sectionLabels[category]} item is done.
-              </div>
-            </div>
-          );
-        }
-        // Group by parent assignment so General with two variants
-        // shows the variant labels. Other sections flatten.
-        const showSubheaders = category === 'general';
-        const byAssignment = new Map();
-        items.forEach(t => {
-          const aid = t.assignment?.id;
-          if (!byAssignment.has(aid)) byAssignment.set(aid, { assignment: t.assignment, items: [] });
-          byAssignment.get(aid).items.push(t);
-        });
-        return (
-          <div className="rounded-2xl bg-emerald-50 border-2 border-emerald-200 p-3">
-            <div className="flex items-center gap-2 mb-2">
-              <FileText size={14} className="text-emerald-700 flex-shrink-0" />
-              <span className="text-[11px] uppercase tracking-wider font-mono text-emerald-800 font-bold flex-1">
-                {sectionLabels[category]} — pick what you'll start
-              </span>
-              <span className="text-[10px] font-mono text-emerald-700">
-                {pendingCount} left
-              </span>
-            </div>
-            <div className="space-y-2">
-              {Array.from(byAssignment.values()).map(group => {
-                // Human-readable label for the general variant — so
-                // the cleaner sees "Kitchen" or "LR / Patio / Water
-                // Heater" instead of just "variant D". Previously
-                // they'd see "Sink" with no idea WHICH sink (kitchen,
-                // vanity, etc.). The subheader now resolves this.
-                const generalVariantLabel = {
-                  a: 'LR / Patio / Water Heater',
-                  b: 'Fridge / Microwave / Breezeway',
-                  c: 'Vents / Stove / Oven / Dishwasher',
-                  d: 'Kitchen',
-                };
-                const variantKey = (group.assignment.general_variant || '').toLowerCase();
-                const variantHumanLabel = generalVariantLabel[variantKey] || null;
-                return (
-                <div key={group.assignment.id}>
-                  {showSubheaders && variantHumanLabel && (
-                    <div className="text-[11px] uppercase tracking-wider font-mono text-emerald-800 font-bold mb-1.5 px-1">
-                      {variantHumanLabel}
-                    </div>
-                  )}
-                  <div className="grid grid-cols-2 gap-1.5">
-                    {group.items.map(t => {
-                      const checked = selectedTargetIds.has(t.id);
-                      const itemKey = t.template_item_key || '';
-                      // Started/paused items are read-only chrome —
-                      // visible so the cleaner sees the full picture
-                      // of the section, but not interactive (they're
-                      // already underway).
-                      const isStarted = t.status === 'in_progress' || t.status === 'paused';
-                      // Only show edit pencil for translated items in
-                      // checklist mode — cleaners can fix bad Spanish
-                      // labels. Requests (custom items) skipped since
-                      // their label is already the cleaner's own text.
-                      const canEditLabel = locale === 'es' && itemKey && !itemKey.startsWith('requested:');
-                      return (
-                        <div key={t.id} className={`flex items-start gap-1 rounded-xl border-2 transition-all ${
-                          isStarted
-                            ? 'border-stone-200 bg-stone-100 opacity-60'
-                            : checked
-                              ? 'border-amber-600 bg-amber-50'
-                              : 'border-stone-200 bg-white hover:border-stone-400'
-                        }`}>
-                          <button type="button"
-                            onClick={() => !isStarted && toggleTarget(t.id)}
-                            disabled={isStarted}
-                            className="flex items-start gap-2 px-3 py-2.5 text-left flex-1 min-w-0 disabled:cursor-not-allowed">
-                            <div className={`mt-0.5 w-4 h-4 rounded border-2 flex-shrink-0 flex items-center justify-center ${
-                              isStarted
-                                ? 'border-stone-400 bg-stone-300'
-                                : checked
-                                  ? 'border-amber-600 bg-amber-600'
-                                  : 'border-stone-300'
-                            }`}>
-                              {(checked || isStarted) && <Check size={11} className="text-white" />}
-                            </div>
-                            <div className="flex-1 min-w-0">
-                              <div className={`text-sm ${isStarted ? 'text-stone-500 line-through decoration-stone-400' : 'text-stone-900'}`}>
-                                {labelForTarget(t)}
-                              </div>
-                              {isStarted && (
-                                <span className="inline-block mt-0.5 text-[9px] uppercase tracking-wider font-mono px-1.5 py-0.5 rounded-full bg-amber-100 border border-amber-300 text-amber-800 font-bold">
-                                  {t.status === 'paused' ? 'Paused' : 'Started'}
-                                </span>
-                              )}
-                              {t.priority && (
-                                <span className="inline-block mt-0.5 text-[9px] uppercase tracking-wider font-mono px-1.5 py-0.5 rounded-full bg-red-50 border border-red-200 text-red-700 font-bold">
-                                  Priority
-                                </span>
-                              )}
-                            </div>
-                          </button>
-                          {canEditLabel && (
-                            <button type="button"
-                              onClick={(e) => { e.stopPropagation(); setEditingLabel({ key: itemKey, current: labelForTarget(t), hasOverride: overrides.has(itemKey) }); }}
-                              className="p-2 text-stone-400 hover:text-amber-700 flex-shrink-0"
-                              title="Editar nombre">
-                              <Edit2 size={12} />
-                            </button>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              );
-              })}
-            </div>
-          </div>
-        );
-      })()}
 
       {/* Legacy variant subgrid — appears ONLY when there's no
          checklist context for General (either not in checklist mode,
@@ -3702,17 +3708,19 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
       {/* Custom naming lives in the "Custom" mode toggle above — no need
          for a separate name field inside the Quick picker. */}
 
+      {/* Start button only appears once the cleaner has actually picked
+         something to work on — a section's items (hasTargetPicks) or, for
+         General, at least one area. Before that there's nothing to start. */}
+      {(hasTargetPicks || (isGeneral && selectedSubs.size > 0) || (!checklistMode && category)) && (
       <div className="flex gap-2 pt-1">
         <button onClick={submit} disabled={!canSubmit}
           className="px-5 py-2 rounded-xl bg-stone-900 text-stone-50 font-medium text-xs disabled:opacity-50 flex items-center justify-center gap-1.5">
           <Play size={13} />
           {hasTargetPicks
             ? (() => {
-                // If every picked target is currently paused, this is
-                // a Resume action. Mixed or pending → Start workblock.
                 const pickedRows = checklistTargets.filter(t => selectedTargetIds.has(t.id));
                 const allPaused = pickedRows.length > 0 && pickedRows.every(t => t.status === 'paused');
-                const verb = allPaused ? 'Resume' : 'Start workblock';
+                const verb = allPaused ? 'Resume' : 'Start job';
                 return `${verb} · ${selectedTargetIds.size} item${selectedTargetIds.size === 1 ? '' : 's'}`;
               })()
             : isGeneral && selectedSubs.size > 1
@@ -3720,6 +3728,7 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
               : 'Start task'}
         </button>
       </div>
+      )}
       {editingLabel && (
         <EditItemLabelModal
           itemKey={editingLabel.key}
@@ -5069,6 +5078,46 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   //     time tracking + reports stay aligned with the legacy flow.
   // This is the bridge between the new checklist data model and the
   // existing tasks/work_blocks pipeline.
+  // Guarantee we have a REAL, existing work_block to attach tasks to. The
+  // FK "tasks_work_block_id_fkey" fails when activeBlock in state points at a
+  // block that's been closed+removed or is otherwise stale (e.g. a previous
+  // session). This checks the DB; if the block is gone, it opens a fresh one
+  // at the same bedroom and returns its id. Returns null only if we truly
+  // can't place the work (no bedroom context).
+  const ensureActiveBlock = async () => {
+    // If we think we have a block, verify it actually exists.
+    if (activeBlock?.id) {
+      try {
+        const { data: exists } = await supabase.from('work_blocks')
+          .select('id, end_time').eq('id', activeBlock.id).maybeSingle();
+        if (exists && !exists.end_time) return activeBlock; // valid & open
+      } catch { /* fall through to recreate */ }
+    }
+    // Need to (re)create a block. Figure out where.
+    const unitId = activeBlock?.unit_id || pendingStart?.unitId;
+    const partyId = activeBlock?.party_id || pendingStart?.partyId;
+    const assignmentId = activeBlock?.assignment_id || pendingStart?.assignmentId || null;
+    if (!shift?.id || !unitId || !partyId) return activeBlock || null;
+    try {
+      await closeAllMyOpenBlocks(null);
+      const { data, error } = await supabase.from('work_blocks')
+        .insert({
+          shift_id: shift.id, unit_id: unitId, party_id: partyId,
+          assignment_id: assignmentId,
+          bill_rate_at_work: shift.customer?.bill_rate_hourly || null,
+          is_preview: previewMode,
+        })
+        .select('*, unit:units(*), party:parties(*), tasks(*, photos(*, taken_by_employee:employees!taken_by(name)))').single();
+      if (error) { console.warn('[ensureActiveBlock] recreate failed', error); return activeBlock || null; }
+      setWorkBlocks(prev => [...prev.map(b => b.end_time ? b : { ...b, end_time: new Date().toISOString() }), data]);
+      setActiveBlock(data);
+      return data;
+    } catch (e) {
+      console.warn('[ensureActiveBlock] error', e);
+      return activeBlock || null;
+    }
+  };
+
   const startTasksFromChecklistItems = async ({ targets: pickedTargets, name, category }) => {
     if (!pickedTargets || pickedTargets.length === 0) return;
     // Stop the current active task before starting a new one (matches
@@ -5099,7 +5148,8 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       subcategory: null,
       is_preview: previewMode,
     };
-    if (activeBlock) ins.work_block_id = activeBlock.id;
+    const liveBlock = await ensureActiveBlock();
+    if (liveBlock?.id) ins.work_block_id = liveBlock.id;
     const { data: row, error } = await supabase.from('tasks')
       .insert(ins).select('*, photos(*, taken_by_employee:employees!taken_by(name))').single();
     if (error) {
@@ -5411,7 +5461,8 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     if (!nameToUse) return;
     if (activeTask) await stopTask(activeTask, false);
     const insert = { shift_id: shift.id, name: nameToUse, is_preview: previewMode };
-    if (activeBlock) insert.work_block_id = activeBlock.id;
+    const liveBlockT = await ensureActiveBlock();
+    if (liveBlockT?.id) insert.work_block_id = liveBlockT.id;
     if (category) insert.category = category;
     if (subcategory) insert.subcategory = subcategory;
     const { data, error } = await supabase.from('tasks').insert(insert).select('*, photos(*, taken_by_employee:employees!taken_by(name))').single();
@@ -5442,7 +5493,8 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       subcategory: first.subcategory || null,
       is_preview: previewMode,
     };
-    if (activeBlock) firstInsert.work_block_id = activeBlock.id;
+    const liveBlockP = await ensureActiveBlock();
+    if (liveBlockP?.id) firstInsert.work_block_id = liveBlockP.id;
     const { data: firstRow, error: firstErr } = await supabase.from('tasks')
       .insert(firstInsert).select('*, photos(*, taken_by_employee:employees!taken_by(name))').single();
     if (firstErr) { alert('Could not start task: ' + firstErr.message); return; }
@@ -5458,7 +5510,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       const now = new Date();
       const queueRows = rest.map((t, i) => ({
         shift_id: shift.id,
-        work_block_id: activeBlock?.id || null,
+        work_block_id: liveBlockP?.id || null,
         name: t.name,
         category: t.category || null,
         subcategory: t.subcategory || null,
@@ -7435,7 +7487,7 @@ function AssignmentWorkHistory({ propertyId, unitId, partyId, employee, defaultO
       <button onClick={() => setShow(v => !v)}
         className="w-full flex items-center justify-between gap-2 px-4 py-3 rounded-2xl bg-white border border-stone-200 active:scale-98 transition-transform">
         <span className="text-xs uppercase tracking-wider font-mono text-stone-500 flex items-center gap-2">
-          <Camera size={13} /> What's been done here
+          <Camera size={13} /> Bedroom history
         </span>
         <ChevronRight size={15} className={`text-stone-400 transition-transform ${show ? 'rotate-90' : ''}`} />
       </button>
@@ -7763,8 +7815,16 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
                     ) : (
                       <span>{j.propName}</span>
                     )}
-                    <span>{j.type ? `· ${assignmentTypeLabel(j.type)}` : ''}
-                    {j.items > 0 && ` · ${j.items} ${j.items === 1 ? 'task' : 'tasks'}`}</span>
+                    <span>{j.type ? `· ${assignmentTypeLabel(j.type)}` : ''}</span>
+                    {j.items > 0 && (
+                      <>
+                        <span>·</span>
+                        <button onClick={(e) => { e.stopPropagation(); setPeekJob(j); }}
+                          className="underline decoration-stone-400 underline-offset-2 hover:text-stone-700">
+                          {j.items} {j.items === 1 ? 'task' : 'tasks'}
+                        </button>
+                      </>
+                    )}
                   </div>
                 </div>
                 {/* Quick glance. Sits OUTSIDE the card button on purpose —
@@ -7808,9 +7868,8 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
                       )}
                     </span>
                   ))}
-                  {j.assignees.length === 0 && j.requested.length === 0 && (
-                    <span className="text-[10px] font-mono text-stone-400">Unassigned</span>
-                  )}
+                  {/* "Unassigned" label removed — the who's-on-this-job row
+                     stays empty until someone is actually assigned. */}
                   {canAssign && (
                     <button onClick={() => setAssignOpen(assignOpen === j.id ? null : j.id)}
                       className="text-[10px] font-mono px-2 py-0.5 rounded-full border border-dashed border-stone-300 text-stone-500 flex items-center gap-1">
@@ -32243,13 +32302,7 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
                 <div className="flex-1 min-w-0">
                   {(rep?.unit?.label || rep?.party?.label) ? (
                     <div className={`font-serif text-lg ${DC.title} leading-tight break-words`}>
-                      <span className="font-bold">{rep?.unit?.label || 'No unit'}</span>
-                      {rep?.party?.label && (
-                        <>
-                          <span className={`${DC.sep} mx-1.5`}>·</span>
-                          <span className="italic">{rep.party.label}</span>
-                        </>
-                      )}
+                      {unitPartyLabel(rep?.unit?.label, rep?.party?.label) || 'No unit'}
                     </div>
                   ) : (
                     <div className={`font-serif text-lg ${DC.title} font-bold`}>Checklist assignment</div>
@@ -32370,7 +32423,6 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
 
               {/* === TITLE + TYPE + SECTION BREAKDOWN === */}
               <div className="mb-2">
-                <div className={`font-serif text-sm ${DC.body}`}>{a?.title || 'Checklist assignment'}</div>
                 {a?.assignment_type && (
                   <div className="mt-1">
                     <AssignmentTypeChip type={a.assignment_type} />

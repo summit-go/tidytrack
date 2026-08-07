@@ -24,7 +24,7 @@ const PLANNED_TARGETS = {
   supabase: "src/lib/supabase.js",
   SUPABASE_URL: "src/lib/supabase.js",
   SUPABASE_ANON_KEY: "src/lib/supabase.js",
-  GOOGLE_TRANSLATE_API_KEY: "src/lib/supabase.js",
+  GOOGLE_TRANSLATE_API_KEY: "src/lib/translation.js",
   PHOTO_BUCKET: "src/lib/supabase.js",
   ASSIGNMENT_BUCKET: "src/lib/supabase.js",
   PM_UPLOAD_BUCKET: "src/lib/supabase.js",

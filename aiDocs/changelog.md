@@ -1,6 +1,18 @@
 # Changelog
 
-Concise history of changes, reverse chronological order
+Concise history of changes for each commit, reverse chronological order
+
+## 2026-08-07 - Phase A1: Foundations (`src/lib/`)
+
+- Extracted 8 lib modules from `App.jsx`: `supabase.js`, `constants.js`, `permissions.js`, `format.js`, `compare.js`, `photos.js`, `sessionStore.js`, `translation.js`
+- `App.jsx` now imports all A1 symbols from `src/lib/`; ~1,150 lines removed from monolith
+- `npm run build` passes (does not catch undefined function references); smoke checklist not yet run on this batch — would have failed on app load due to symbols accidentally removed from `App.jsx` alongside the lib cut
+
+## 2026-08-07 - Phase 0 audit & doc fixes
+
+- Verified Phase 0 deliverables: smoke checklist complete, inventory current (275 symbols), `src/lib/` empty, `npm run build` passes on `dev`
+- Roadmap header status updated to "Phase 0 complete — ready for Phase A"; added smoke-checklist link; clarified `dev` as extraction branch
+- `aiDocs/context.md`: linked split roadmap/plan/inventory and smoke-test checklist for agent discoverability
 
 ## 2026-08-07 - Baseline reset (main → dev)
 

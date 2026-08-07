@@ -106,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap116";
+const BUILD_TAG = "aug6-tap118";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -11671,6 +11671,19 @@ async function clearAssignmentBroadcast(assignmentId) {
   } catch (e) { console.warn('[notify] clear broadcast failed', e); }
 }
 
+// Remove the owner "new assignment to approve" bell notification(s) for an
+// assignment once it's been approved or rejected — so a resolved item doesn't
+// keep sitting in the bell (and the backfill won't recreate it because the
+// assignment is no longer pm_status='pending').
+async function clearPmAssignmentNotification(assignmentId) {
+  if (!assignmentId) return;
+  try {
+    await supabase.from('notifications').delete()
+      .eq('kind', 'pm_assignment')
+      .eq('link_id', assignmentId);
+  } catch (e) { console.warn('[notify] clear pm notification failed', e); }
+}
+
 // Bell icon + dropdown feed for the header. Shows unread count, lists recent
 // notifications (read + unread) as 7-day history, marks them read on open.
 function NotificationBell({ employee, isOwner, onNavigate }) {
@@ -11757,14 +11770,15 @@ function NotificationBell({ employee, isOwner, onNavigate }) {
     setOpen(o => !o);
     if (!open && unread > 0) {
       const unreadItems = items.filter(n => !n.read_at);
-      // Broadcast rows (recipient_scope set) are SHARED across cleaners —
-      // writing read_at would mark them read for everyone. So we only persist
-      // read on personal rows; broadcast rows are just dimmed locally and go
-      // away for real when the job is claimed (row deleted).
-      const personalIds = unreadItems.filter(n => !n.recipient_scope).map(n => n.id);
+      // Only the all_cleaners broadcast is truly shared across many people —
+      // writing read_at there would mark it read for everyone, so we skip DB
+      // for those (they clear when the job is claimed). Owner-scope rows and
+      // personal rows SHOULD persist read: the owner team is one audience, so
+      // once you've seen them they stay seen and don't pop back up.
+      const persistIds = unreadItems.filter(n => n.recipient_scope !== 'all_cleaners').map(n => n.id);
       setItems(prev => prev.map(n => (!n.read_at ? { ...n, read_at: new Date().toISOString() } : n)));
-      if (personalIds.length) {
-        try { await supabase.from('notifications').update({ read_at: new Date().toISOString() }).in('id', personalIds); }
+      if (persistIds.length) {
+        try { await supabase.from('notifications').update({ read_at: new Date().toISOString() }).in('id', persistIds); }
         catch (e) { console.warn('[notify] mark read failed', e); }
       }
     }
@@ -11812,18 +11826,30 @@ function NotificationBell({ employee, isOwner, onNavigate }) {
                 <div className="px-4 py-8 text-center text-sm text-stone-400">Nothing yet.</div>
               ) : (
                 items.map(n => {
-                  const clickable = !!onNavigate && (n.link_kind || n.kind);
+                  // Always tappable: tapping marks it read (grays it out) and,
+                  // if a navigation handler is wired on this screen, opens the
+                  // related screen too. Even without navigation, the tap clears
+                  // it so a resolved item stops nagging.
+                  const canNavigate = !!onNavigate && (n.link_kind || n.kind);
+                  const handleTap = async () => {
+                    // Persist read immediately for this row (owner/personal
+                    // scope) so it doesn't come back on reopen.
+                    if (!n.read_at && n.recipient_scope !== 'all_cleaners') {
+                      setItems(prev => prev.map(x => x.id === n.id ? { ...x, read_at: new Date().toISOString() } : x));
+                      try { await supabase.from('notifications').update({ read_at: new Date().toISOString() }).eq('id', n.id); } catch {}
+                    }
+                    if (canNavigate) { setOpen(false); onNavigate(n); }
+                  };
                   return (
-                  <div key={n.id} role={clickable ? 'button' : undefined}
-                    onClick={clickable ? () => { setOpen(false); onNavigate(n); } : undefined}
-                    className={`px-4 py-3 border-b border-stone-50 flex gap-3 ${n.read_at ? '' : 'bg-amber-50/40'} ${clickable ? 'hover:bg-stone-50 cursor-pointer active:scale-[0.99]' : ''}`}>
+                  <div key={n.id} role="button" onClick={handleTap}
+                    className={`px-4 py-3 border-b border-stone-50 flex gap-3 ${n.read_at ? 'bg-stone-100/70 opacity-60' : 'bg-amber-50/40'} hover:bg-stone-50 cursor-pointer active:scale-[0.99]`}>
                     <span className={`w-2 h-2 rounded-full mt-1.5 flex-shrink-0 ${KIND_DOT[n.kind] || KIND_DOT.other}`} />
                     <div className="min-w-0 flex-1">
                       <div className="text-sm text-stone-900 font-medium">{n.title}</div>
                       {n.body && <div className="text-xs text-stone-600 mt-0.5 whitespace-pre-wrap">{n.body}</div>}
                       <div className="text-[10px] font-mono text-stone-400 mt-1">{fmtWhen(n.created_at)}</div>
                     </div>
-                    {clickable && <ChevronRight size={14} className="text-stone-300 flex-shrink-0 self-center" />}
+                    {canNavigate && <ChevronRight size={14} className="text-stone-300 flex-shrink-0 self-center" />}
                   </div>
                   );
                 })
@@ -14821,6 +14847,36 @@ function PhotoZoomViewer({ photos, initialUrl, onClose, onResolveCurrent, employ
     setLocalResolveById(prev => ({ ...prev, [photo.id]: payload }));
     if (typeof onPhotoResolved === 'function') onPhotoResolved(photo, payload);
   };
+
+  // Owner/manager can correct a mis-tagged photo — e.g. a shot marked
+  // "Couldn't clean" by mistake. They can re-tag it to the right bucket or
+  // delete it outright. Uses local overlay state so the change shows at once.
+  const isOwnerMgr = !!employee && (employee.role === 'owner' || employee.role === 'manager');
+  const [retagOpen, setRetagOpen] = useState(false);
+  const [adminBusy, setAdminBusy] = useState(false);
+  const [gone, setGone] = useState({}); // photo.id -> true (deleted locally)
+  const retagPhoto = async (newKind) => {
+    setAdminBusy(true);
+    const { error } = await supabase.from('photos').update({ kind: newKind }).eq('id', photo.id);
+    setAdminBusy(false); setRetagOpen(false);
+    if (error) { alert('Could not change the tag: ' + error.message); return; }
+    // Overlay the new kind locally so the pill/label updates immediately.
+    setLocalResolveById(prev => ({ ...prev, [photo.id]: { ...(prev[photo.id] || {}), kind: newKind } }));
+    if (typeof onPhotoResolved === 'function') onPhotoResolved({ ...photo, kind: newKind }, { kind: newKind });
+  };
+  const deleteThisPhoto = async () => {
+    if (!confirm('Delete this photo? It will be removed from the job.')) return;
+    setAdminBusy(true);
+    // Soft-delete (recoverable), matching the cleaner's delete path.
+    const { error } = await supabase.from('photos').update({ deleted_at: new Date().toISOString() }).eq('id', photo.id);
+    setAdminBusy(false);
+    if (error) { alert('Could not delete: ' + error.message); return; }
+    setGone(prev => ({ ...prev, [photo.id]: true }));
+    if (typeof onPhotoResolved === 'function') onPhotoResolved(photo, { deleted_at: new Date().toISOString() });
+    // Move off the deleted photo: next one, or close if it was the last.
+    if (photos.length <= 1) { onClose(); return; }
+    setIdx(i => (i + 1) % photos.length);
+  };
   return (
     <div className="fixed inset-0 bg-stone-900/95 z-50 flex flex-col items-center justify-center p-4">
       <button onClick={onClose}
@@ -14909,6 +14965,35 @@ function PhotoZoomViewer({ photos, initialUrl, onClose, onResolveCurrent, employ
             className="px-4 py-2 rounded-full bg-emerald-700 hover:bg-emerald-800 text-white text-sm font-medium flex items-center gap-2 disabled:opacity-50">
             <Check size={14} /> {resolveBusy ? 'Saving…' : 'Mark resolved'}
           </button>
+        )}
+        {isOwnerMgr && (
+          <>
+            <div className="relative">
+              <button onClick={() => setRetagOpen(o => !o)} disabled={adminBusy}
+                className="px-4 py-2 rounded-full bg-stone-700 hover:bg-stone-600 text-stone-50 text-sm font-medium flex items-center gap-2 disabled:opacity-50">
+                <RotateCcw size={14} /> Change tag
+              </button>
+              {retagOpen && (
+                <div className="absolute bottom-full mb-2 left-1/2 -translate-x-1/2 w-44 rounded-xl bg-white border border-stone-200 shadow-xl overflow-hidden z-10">
+                  {[
+                    { k: 'before', label: 'Before' },
+                    { k: 'after', label: 'After' },
+                    { k: 'damage', label: 'Damage' },
+                    { k: KIND_CANNOT, label: "Couldn't clean" },
+                  ].filter(o => o.k !== photo.kind).map(o => (
+                    <button key={o.k} onClick={() => retagPhoto(o.k)} disabled={adminBusy}
+                      className="w-full text-left px-4 py-2.5 text-sm text-stone-800 hover:bg-stone-50 border-b border-stone-100 last:border-0 disabled:opacity-50">
+                      Change to {o.label}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+            <button onClick={deleteThisPhoto} disabled={adminBusy}
+              className="px-4 py-2 rounded-full bg-red-700 hover:bg-red-800 text-white text-sm font-medium flex items-center gap-2 disabled:opacity-50">
+              <Trash2 size={14} /> Delete
+            </button>
+          </>
         )}
       </div>
     </div>
@@ -28342,6 +28427,8 @@ function AssignmentList({ property, employee, onBack, onNew, onNewChecklist, onN
                   pm_rejection_reason: null,
                 }).in('id', ids);
                 if (ae) { alert('Bulk approve failed: ' + ae.message); return; }
+                // Clear the bell notifications for these now-approved ones.
+                for (const id of ids) await clearPmAssignmentNotification(id);
                 await load();
                 alert(`Approved ${ids.length} assignments. They're now visible to cleaners.`);
               }}
@@ -39387,6 +39474,7 @@ function ReviewAssignmentModal({ assignment, employee, onDone, onClose }) {
     }).eq('id', assignment.id);
     setBusy(false);
     if (e) { setError(e.message); return; }
+    await clearPmAssignmentNotification(assignment.id);
     onDone();
   };
 
@@ -39399,6 +39487,7 @@ function ReviewAssignmentModal({ assignment, employee, onDone, onClose }) {
     }).eq('id', assignment.id);
     setBusy(false);
     if (e) { setError(e.message); return; }
+    await clearPmAssignmentNotification(assignment.id);
     onDone();
   };
 
@@ -39421,6 +39510,7 @@ function ReviewAssignmentModal({ assignment, employee, onDone, onClose }) {
       .neq('status', 'done');
     setBusy(false);
     if (tErr) { setError(tErr.message); return; }
+    await clearPmAssignmentNotification(assignment.id);
     onDone();
   };
 
@@ -39433,6 +39523,7 @@ function ReviewAssignmentModal({ assignment, employee, onDone, onClose }) {
     }).eq('id', assignment.id);
     setBusy(false);
     if (e) { setError(e.message); return; }
+    await clearPmAssignmentNotification(assignment.id);
     onDone();
   };
 

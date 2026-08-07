@@ -147,7 +147,7 @@ import {
   translateText,
   autoTranslateAssignment,
 } from "../../../../lib/translation.js";
-import { buildTargetTitle, unitSizeLabel, shortenBedroom } from "../../../../lib/labels.js";
+import { buildTargetTitle, unitSizeLabel, shortenBedroom, partyDisplay, unitPartyLabel } from "../../../../lib/labels.js";
 import { splitTaskName } from "../../../../lib/tasks.js";
 import { useAssignmentSync } from "../../../../hooks/useAssignmentSync.js";
 import { useIdleDetector } from "../../../../hooks/useIdleDetector.js";
@@ -179,8 +179,8 @@ import { TranslateButton } from "../../../../components/TranslateButton.jsx";
 import { ZoomableImage } from "../../../../components/ZoomableImage.jsx";
 import { ItemsDropdown } from "../../cleaner/ItemsDropdown.jsx";
 import { ActivityTimelineView } from "../daily/ActivityTimelineView.jsx";
-import { SupplyChecklistManager } from "../../../../App.jsx";
-import { TranslationOverridesModal } from "../../../../App.jsx";
+import { SupplyChecklistManager } from "../../cleaner/SupplyChecklistManager.jsx";
+import { TranslationOverridesModal } from "../../../cross-cutting/TranslationOverridesModal.jsx";
 import { WhosWherePanel } from "../daily/WhosWherePanel.jsx";
 
 export function DailyCalendar({

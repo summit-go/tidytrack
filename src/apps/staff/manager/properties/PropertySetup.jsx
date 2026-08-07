@@ -147,7 +147,7 @@ import {
   translateText,
   autoTranslateAssignment,
 } from "../../../../lib/translation.js";
-import { buildTargetTitle, unitSizeLabel, shortenBedroom } from "../../../../lib/labels.js";
+import { buildTargetTitle, unitSizeLabel, shortenBedroom, partyDisplay, unitPartyLabel } from "../../../../lib/labels.js";
 import { splitTaskName } from "../../../../lib/tasks.js";
 import { useAssignmentSync } from "../../../../hooks/useAssignmentSync.js";
 import { useIdleDetector } from "../../../../hooks/useIdleDetector.js";

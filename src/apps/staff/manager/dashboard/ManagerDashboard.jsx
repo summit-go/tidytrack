@@ -147,7 +147,7 @@ import {
   translateText,
   autoTranslateAssignment,
 } from "../../../../lib/translation.js";
-import { buildTargetTitle, unitSizeLabel, shortenBedroom } from "../../../../lib/labels.js";
+import { buildTargetTitle, unitSizeLabel, shortenBedroom, partyDisplay, unitPartyLabel } from "../../../../lib/labels.js";
 import { splitTaskName } from "../../../../lib/tasks.js";
 import { useAssignmentSync } from "../../../../hooks/useAssignmentSync.js";
 import { useIdleDetector } from "../../../../hooks/useIdleDetector.js";
@@ -180,7 +180,7 @@ import { ZoomableImage } from "../../../../components/ZoomableImage.jsx";
 import { ItemsDropdown } from "../../cleaner/ItemsDropdown.jsx";
 import { DateRangePicker } from "../../../../App.jsx";
 import { GroupedByPartyView } from "../dashboard/GroupedByPartyView.jsx";
-import { LiveCleanersSheet } from "../../../../App.jsx";
+import { LiveCleanersSheet } from "../../cleaner/LiveCleanersSheet.jsx";
 import { ShiftDetail } from "../dashboard/ShiftDetail.jsx";
 import { ShiftList } from "../dashboard/ShiftList.jsx";
 import { ShiftsByCleanerView } from "../dashboard/ShiftsByCleanerView.jsx";

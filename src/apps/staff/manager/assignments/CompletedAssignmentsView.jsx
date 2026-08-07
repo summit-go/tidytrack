@@ -73,8 +73,7 @@ import {
   uploadMessagePhoto,
   deleteMessagePhoto,
 } from "../../../../lib/supabase.js";
-import {
-  ASSIGNMENT_TYPES,
+import {ASSIGNMENT_TYPES,
   assignmentTypeLabel,
   assignmentTypeMeta,
   BUILD_TAG,
@@ -97,6 +96,7 @@ import {
   STALE_IDLE_MIN,
   STALE_FORCE_MIN,
   MAX_BLOCK_HOURS,
+  QUICK_TYPES,
 } from "../../../../lib/constants.js";
 import {
   can,
@@ -147,7 +147,7 @@ import {
   translateText,
   autoTranslateAssignment,
 } from "../../../../lib/translation.js";
-import { buildTargetTitle, unitSizeLabel, shortenBedroom } from "../../../../lib/labels.js";
+import { buildTargetTitle, unitSizeLabel, shortenBedroom, partyDisplay, unitPartyLabel } from "../../../../lib/labels.js";
 import { splitTaskName } from "../../../../lib/tasks.js";
 import { useAssignmentSync } from "../../../../hooks/useAssignmentSync.js";
 import { useIdleDetector } from "../../../../hooks/useIdleDetector.js";

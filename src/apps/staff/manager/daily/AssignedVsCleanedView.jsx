@@ -147,7 +147,7 @@ import {
   translateText,
   autoTranslateAssignment,
 } from "../../../../lib/translation.js";
-import { buildTargetTitle, unitSizeLabel, shortenBedroom } from "../../../../lib/labels.js";
+import { buildTargetTitle, unitSizeLabel, shortenBedroom, partyDisplay, unitPartyLabel } from "../../../../lib/labels.js";
 import { splitTaskName } from "../../../../lib/tasks.js";
 import { useAssignmentSync } from "../../../../hooks/useAssignmentSync.js";
 import { useIdleDetector } from "../../../../hooks/useIdleDetector.js";
@@ -178,9 +178,9 @@ import { PhotoZoomViewer } from "../../../../components/PhotoZoomViewer.jsx";
 import { TranslateButton } from "../../../../components/TranslateButton.jsx";
 import { ZoomableImage } from "../../../../components/ZoomableImage.jsx";
 import { ItemsDropdown } from "../../cleaner/ItemsDropdown.jsx";
-import { AssignmentViewer } from "../../../../App.jsx";
+import { AssignmentViewer } from "../../../cross-cutting/AssignmentViewer.jsx";
 import { BedroomHistoryView } from "../daily/BedroomHistoryView.jsx";
-import { ChecklistAssignmentView } from "../../../../App.jsx";
+import { ChecklistAssignmentView } from "../../../cross-cutting/ChecklistAssignmentView.jsx";
 
 export function AssignedVsCleanedView({
   employee,

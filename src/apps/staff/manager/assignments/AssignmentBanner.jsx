@@ -147,7 +147,7 @@ import {
   translateText,
   autoTranslateAssignment,
 } from "../../../../lib/translation.js";
-import { buildTargetTitle, unitSizeLabel, shortenBedroom } from "../../../../lib/labels.js";
+import { buildTargetTitle, unitSizeLabel, shortenBedroom, partyDisplay, unitPartyLabel } from "../../../../lib/labels.js";
 import { splitTaskName } from "../../../../lib/tasks.js";
 import { useAssignmentSync } from "../../../../hooks/useAssignmentSync.js";
 import { useIdleDetector } from "../../../../hooks/useIdleDetector.js";
@@ -180,11 +180,11 @@ import { ZoomableImage } from "../../../../components/ZoomableImage.jsx";
 import { ItemsDropdown } from "../../cleaner/ItemsDropdown.jsx";
 import { AssignmentCard } from "../assignments/AssignmentCard.jsx";
 import { AssignmentList } from "../assignments/AssignmentList.jsx";
-import { AssignmentViewer } from "../../../../App.jsx";
-import { AttachmentModal } from "../../../../App.jsx";
-import { BlockedNoteModal } from "../../../../App.jsx";
-import { ChecklistAssignmentView } from "../../../../App.jsx";
-import { ReassignModal } from "../../../../App.jsx";
+import { AssignmentViewer } from "../../../cross-cutting/AssignmentViewer.jsx";
+import { AttachmentModal } from "../../../cross-cutting/AttachmentModal.jsx";
+import { BlockedNoteModal } from "../../../cross-cutting/BlockedNoteModal.jsx";
+import { ChecklistAssignmentView } from "../../../cross-cutting/ChecklistAssignmentView.jsx";
+import { ReassignModal } from "../../../cross-cutting/ReassignModal.jsx";
 
 export function AssignmentBanner({
   propertyId,

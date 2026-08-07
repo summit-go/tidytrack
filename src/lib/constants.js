@@ -1,3 +1,13 @@
+// Quick assignment clean types — for properties without full bedroom/template setup.
+export const QUICK_TYPES = [
+  { key: "standard", label: "Standard" },
+  { key: "deep", label: "Deep clean" },
+  { key: "move_out_check", label: "Move-out" },
+  { key: "cleaning_check", label: "Cleaning check" },
+  { key: "reclean", label: "Re-clean" },
+  { key: "trash_out", label: "Trash out" },
+];
+
 // The set of assignment types PMs can pick from when uploading.
 // Owners/managers can change the type when approving.
 export const ASSIGNMENT_TYPES = [

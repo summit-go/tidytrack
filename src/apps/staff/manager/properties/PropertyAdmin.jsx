@@ -147,7 +147,7 @@ import {
   translateText,
   autoTranslateAssignment,
 } from "../../../../lib/translation.js";
-import { buildTargetTitle, unitSizeLabel, shortenBedroom } from "../../../../lib/labels.js";
+import { buildTargetTitle, unitSizeLabel, shortenBedroom, partyDisplay, unitPartyLabel } from "../../../../lib/labels.js";
 import { splitTaskName } from "../../../../lib/tasks.js";
 import { useAssignmentSync } from "../../../../hooks/useAssignmentSync.js";
 import { useIdleDetector } from "../../../../hooks/useIdleDetector.js";
@@ -183,7 +183,7 @@ import { AssignmentDetail } from "../assignments/AssignmentDetail.jsx";
 import { AssignmentForm } from "../assignments/AssignmentForm.jsx";
 import { AssignmentList } from "../assignments/AssignmentList.jsx";
 import { BulkCreateUnits } from "../properties/BulkCreateUnits.jsx";
-import { ChecklistAssignmentWizard } from "../../../../App.jsx";
+import { ChecklistAssignmentWizard } from "../../../cross-cutting/ChecklistAssignmentWizard.jsx";
 import { PartyForm } from "../properties/PartyForm.jsx";
 import { PartyList } from "../properties/PartyList.jsx";
 import { PortalUsersAdmin } from "../team/PortalUsersAdmin.jsx";

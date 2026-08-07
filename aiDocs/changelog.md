@@ -2,6 +2,20 @@
 
 Concise history of changes for each commit, reverse chronological order
 
+## 2026-08-07 - Phase A9: Cross-cutting assignments (`src/apps/cross-cutting/`)
+
+- Extracted 20 cross-cutting assignment symbols into `src/apps/cross-cutting/`: modals/leaves (`WorkBlockAssignmentLink`, `SpanishTranslationPanel`, `WelcomeModal`, `IdleWarningModal`, `ChangePinModal`, `TranslationOverridesModal`, `SheetQuickViewModal`, `ReviewLine`, `NextUpModal`, `SwitchBedroomModal`, `ReassignModal`, `AttachmentModal`, `BlockedNoteModal`, `RequestNewItemModal`, `ReviewAssignmentModal`), views (`ChecklistAssignmentView`, `AssignmentViewer`, `SuggestedTabContent`), megacomponents (`ChecklistAssignmentWizard`, `AssignmentTabContent`)
+- Co-located `QUICK_TYPES` → `src/lib/constants.js` (used by manager quick-assignment forms)
+- Updated bridge imports in portal, manager, and cleaner consumers; `App.jsx` imports A9 symbols for `InboxView` (A10) internal use
+- `App.jsx` ~9,100 lines removed (~18.8k → ~9.7k); `npm run build` passes
+
+## 2026-08-07 - Phase A8: Portal tree (`src/apps/portal/`)
+
+- Extracted 18 portal component symbols into `src/apps/portal/`: menu/team/code modals, home, history, invoices, schedule, assignments (list/form/detail/sections), photo upload/sections, unit-day view, resolved-damage history, recheck modals
+- Shells remain in `App.jsx` for A5b: `PortalApp`, `PortalSignIn`, `PortalPropertyPicker`, `PortalDashboard`
+- Portal files bridge-import symbols still in `App.jsx`: `WelcomeModal`, `PortalMessagesTab` (A10), `ChecklistAssignmentWizard`, `InvoiceDocument`, `SpanishTranslationPanel`; plus `QuickAssignmentForm` from manager and `SearchableUnitPicker` from cleaner
+- `App.jsx` ~5,400 lines removed (~24k → ~18.8k); `npm run build` passes
+
 ## 2026-08-07 - Phase A6: Manager tabs (`src/apps/staff/manager/`)
 
 - Extracted 48 manager tab symbols into five folders: `daily/` (10), `dashboard/` (12), `team/` (4), `properties/` (13), `assignments/` (9)

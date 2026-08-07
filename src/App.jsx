@@ -106,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap130";
+const BUILD_TAG = "aug6-tap131";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -11281,26 +11281,27 @@ function ActiveWorkblockCard({ task, onStop, onAddPhoto }) {
             {damage.length > 0 && <span className="ml-2 text-red-700 font-bold">⚠ {damage.length} damage</span>}
             {cannot.length > 0 && <span className="ml-2 text-yellow-700 font-bold">⚠ {cannot.length} couldn't clean</span>}
           </div>
-          {/* Task list — shown as a compact scrollable dropdown. Shows even
-             for a single item so the cleaner always sees what's in this job.
-             The dropdown's own header carries the count (no redundant text). */}
+        </div>
+      </div>
+      {/* Bottom action row: camera (left) · items dropdown (middle) · Done (right). */}
+      <div className="flex items-center gap-2">
+        <button onClick={() => onAddPhoto(null)}
+          style={{ touchAction: 'manipulation' }}
+          className="px-4 py-2.5 rounded-xl bg-stone-900 hover:bg-stone-800 text-stone-50 text-sm font-medium inline-flex items-center gap-2 active:scale-95 transition-transform flex-shrink-0">
+          <Camera size={18} />
+          {(before.length + after.length + damage.length + cannot.length) > 0 && (
+            <span className="text-stone-300 font-mono text-xs">{before.length + after.length + damage.length + cannot.length}</span>
+          )}
+        </button>
+        <div className="flex-1 min-w-0">
           {parts.length >= 1 && <ItemsDropdown items={parts} />}
         </div>
         <button onClick={onStop}
           style={{ touchAction: 'manipulation' }}
-          className="px-3.5 py-1.5 rounded-full bg-stone-900 text-stone-50 text-xs font-medium active:scale-95 transition-transform flex-shrink-0">
+          className="px-5 py-2.5 rounded-xl bg-[#C99B5C] hover:bg-[#b8894f] text-white text-sm font-semibold active:scale-95 transition-transform flex-shrink-0">
           Done
         </button>
       </div>
-      {/* One camera button — icon only, sits on the left. */}
-      <button onClick={() => onAddPhoto(null)}
-        style={{ touchAction: 'manipulation' }}
-        className="px-4 py-2.5 rounded-xl bg-stone-900 hover:bg-stone-800 text-stone-50 text-sm font-medium inline-flex items-center gap-2 active:scale-95 transition-transform">
-        <Camera size={18} />
-        {(before.length + after.length + damage.length + cannot.length) > 0 && (
-          <span className="text-stone-300 font-mono text-xs">{before.length + after.length + damage.length + cannot.length}</span>
-        )}
-      </button>
     </div>
   );
 }
@@ -11484,15 +11485,26 @@ function PhotoModal({ kind, taskName, existing, onUpload, onSaveNote, onClose, e
       onClick={(e) => { if (e.target === e.currentTarget && !busy) onClose(); }}>
       <div className="bg-stone-50 w-full sm:max-w-md sm:rounded-3xl rounded-t-3xl max-h-[85vh] flex flex-col"
         style={{ touchAction: 'manipulation' }}>
-        <div className="flex items-center justify-between p-5 border-b border-stone-200">
-          <div>
+        <div className="flex items-start justify-between p-5 border-b border-stone-200 gap-3">
+          <div className="min-w-0 flex-1">
             <div className={`text-xs uppercase tracking-wider font-mono ${isCannot ? 'text-yellow-700 font-bold' : 'text-stone-500'}`}>
               {kind ? `${photoKindLabel(kind)} photo` : 'Add photo'}
             </div>
-            <div className="font-serif text-xl text-stone-900">{taskName}</div>
+            {(() => {
+              const nameParts = splitTaskName(taskName || '');
+              if (nameParts.length > 1) {
+                return (
+                  <>
+                    <div className="font-serif text-lg text-stone-900 leading-tight">{nameParts.length} tasks</div>
+                    <ItemsDropdown items={nameParts} />
+                  </>
+                );
+              }
+              return <div className="font-serif text-xl text-stone-900 break-words">{taskName}</div>;
+            })()}
           </div>
           <button onClick={onClose} disabled={busy}
-            className="p-2 rounded-full hover:bg-stone-100 disabled:opacity-50">
+            className="p-2 rounded-full hover:bg-stone-100 disabled:opacity-50 flex-shrink-0">
             <X size={20} className="text-stone-600" />
           </button>
         </div>
@@ -11581,18 +11593,6 @@ function PhotoModal({ kind, taskName, existing, onUpload, onSaveNote, onClose, e
                                   <Trash2 size={12} />
                                 </button>
                               )}
-                            </div>
-                          )}
-                          {/* Quick reassign tags under each photo (tap fallback
-                             for when drag isn't handy on a phone). */}
-                          {onChangeKind && (
-                            <div className="flex items-center gap-1 flex-wrap mt-1">
-                              {BUCKETS.filter(b => b.k !== p.kind).map(b => (
-                                <button key={b.k} onClick={() => onChangeKind(p.id, b.k)}
-                                  className="text-[9px] uppercase tracking-wider font-mono px-1.5 py-0.5 rounded-full border bg-white text-stone-500 border-stone-300 hover:bg-stone-100">
-                                  → {b.label}
-                                </button>
-                              ))}
                             </div>
                           )}
                         </div>

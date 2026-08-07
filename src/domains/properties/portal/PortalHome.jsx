@@ -102,6 +102,7 @@ import {
   isOwner,
   isManager,
   canSeeMoney,
+  canSeePortalInvoices,
   visibleProps,
 } from "../../../lib/permissions.js";
 import {
@@ -224,11 +225,7 @@ export function PortalHome({
   const setTab = setTabProp || setOwnTab;
   const asgSub = asgSubProp !== undefined ? asgSubProp : ownAsgSub;
   const setAsgSub = setAsgSubProp || setOwnAsgSub;
-  // Per-PM invoice access. Owners/managers viewing the portal (preview) and
-  // anyone with the can_view_invoices flag get the Invoices tab. A previewing
-  // owner (__preview) always sees it so they can check what a PM would.
-  const canViewInvoices =
-    !!portalUser?.can_view_invoices || !!portalUser?.__preview;
+  const canViewInvoices = canSeePortalInvoices(portalUser);
   // If invoices was the persisted tab but this user can't see it, fall back.
   useEffect(() => {
     if (tab === "invoices" && !canViewInvoices) setTab("history");

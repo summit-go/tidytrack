@@ -2,6 +2,13 @@
 
 Concise history of changes made for each commit, in reverse chronological order.
 
+## 2026-08-07 - Phase C Track 2 complete: Billing visibility gate
+
+- Added `canSeePortalInvoices(portalUser)` in `lib/permissions.js` — per-user `can_view_invoices` opt-in + owner preview (`__preview`); module comments document staff vs portal gates
+- Wired `PortalHome` to shared helper (replaced inline check)
+- T2c audit: staff money already centralized on `canSeeMoney` (`ManagerShell`, `DailyView`, `ManagerDashboard`, `ShiftDetail`, `EmployeeAdmin`, `PropertyAdmin`); no ad-hoc `view_pay_info` checks elsewhere
+- Behavior unchanged; `npm run build` passes; v1.6.3
+
 ## 2026-08-07 - Phase C Track 2 scope: code-as-source-of-truth for billing visibility
 
 - Decision: Track 2 is structural only — consolidate portal/staff money gates; do not implement `mvp.md` kind-based PM Staff rules unless explicitly scoped later

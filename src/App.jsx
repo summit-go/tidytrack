@@ -106,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap115";
+const BUILD_TAG = "aug6-tap116";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -11692,24 +11692,29 @@ function NotificationBell({ employee, isOwner, onNavigate }) {
       // notification yet (e.g. submitted before the bell existed). Create one
       // per assignment so the owner sees them in the bell, not just a screen.
       try {
-        const { data: pendingAsg } = await supabase.from('assignments')
-          .select('id, title, customer_id, customer:customers(name)')
-          .eq('source', 'pm').eq('pm_status', 'pending')
-          .is('deleted_at', null);
-        if (pendingAsg && pendingAsg.length) {
+        // Don't filter on deleted_at in the query itself — if that column is
+        // absent the whole query errors and the backfill silently no-ops.
+        // Filter it out in JS instead.
+        const { data: pendingAsg, error: paErr } = await supabase.from('assignments')
+          .select('id, title, customer_id, deleted_at, customer:customers(name)')
+          .eq('source', 'pm').eq('pm_status', 'pending');
+        if (paErr) console.warn('[notify] backfill query error', paErr);
+        const live = (pendingAsg || []).filter(a => !a.deleted_at);
+        if (live.length) {
           const { data: existing } = await supabase.from('notifications')
             .select('link_id')
             .eq('kind', 'pm_assignment')
-            .in('link_id', pendingAsg.map(a => a.id));
+            .in('link_id', live.map(a => a.id));
           const have = new Set((existing || []).map(r => r.link_id));
-          const toInsert = pendingAsg.filter(a => !have.has(a.id)).map(a => ({
+          const toInsert = live.filter(a => !have.has(a.id)).map(a => ({
             recipient_scope: 'owner', kind: 'pm_assignment',
             title: 'New assignment to approve',
             body: `${a.customer?.name || 'A property'} · ${a.title || 'Assignment'}`,
             link_kind: 'assignment', link_id: a.id,
           }));
           if (toInsert.length) {
-            await supabase.from('notifications').insert(toInsert);
+            const { error: insErr } = await supabase.from('notifications').insert(toInsert);
+            if (insErr) console.warn('[notify] backfill insert error', insErr);
           }
         }
       } catch (e) { console.warn('[notify] pm backfill skipped', e); }
@@ -28583,6 +28588,17 @@ function QuickAssignmentForm({ property, employee, portalUser = null, portalKind
         assigned_to: isPM ? null : (assignedTo || null),
       });
       if (te) throw te;
+      // Notify owners for approval when a PM created this (the fuller
+      // PortalAssignmentForm already does this; the Quick form must too, or
+      // PM quick-adds never hit the bell).
+      if (isPM) {
+        createNotification({
+          to: { scope: 'owner' }, kind: 'pm_assignment',
+          title: 'New assignment to approve',
+          body: `${property.name} · ${title}`,
+          linkKind: 'assignment', linkId: asg.id,
+        });
+      }
       setBusy(false);
       onSaved();
     } catch (e) {

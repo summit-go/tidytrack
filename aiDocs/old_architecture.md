@@ -4,16 +4,16 @@ Baseline architecture for the **pre-split monolith** (as of 08-06-2026). This de
 
 ## Stack
 
-| Layer      | Tech                                                        |
-| ---------- | ----------------------------------------------------------- |
-| UI         | React 18, Tailwind CSS, Lucide icons                        |
+| Layer      | Tech                                                                            |
+| ---------- | ------------------------------------------------------------------------------- |
+| UI         | React 18, Tailwind CSS, Lucide icons                                            |
 | Routing    | Hash routes (`#/portal`, `#/staff`; also `#portal`, `#staff`) — no react-router |
-| Build      | Vite                                                        |
-| Hosting    | Vercel (static deploy from GitHub)                          |
-| Backend    | Supabase — Postgres, Storage, Edge Functions                |
-| Client SDK | `@supabase/supabase-js`                                     |
-| Auth       | Custom PIN / portal-code auth — **not** Supabase Auth       |
-| Optional   | Google Cloud Translation API, Google Cloud Vision API (OCR) |
+| Build      | Vite                                                                            |
+| Hosting    | Vercel (static deploy from GitHub)                                              |
+| Backend    | Supabase — Postgres, Storage, Edge Functions                                    |
+| Client SDK | `@supabase/supabase-js`                                                         |
+| Auth       | Custom PIN / portal-code auth — **not** Supabase Auth                           |
+| Optional   | Google Cloud Translation API, Google Cloud Vision API (OCR)                     |
 
 ## Request flow
 
@@ -66,9 +66,9 @@ Supabase URL, anon key, and the optional Google API key are hardcoded at the top
 
 There is **no** `supabase.auth`. Sign-in is custom:
 
-| Audience                        | Credential            | Edge function mode | Session storage                                                        |
-| ------------------------------- | --------------------- | ------------------ | ---------------------------------------------------------------------- |
-| Staff (cleaners, leads, owners) | 4-digit PIN           | `mode: 'employee'` | `localStorage` key `tidytrack_session` → `{ employeeId }`              |
+| Audience                        | Credential                                          | Edge function mode | Session storage                                                        |
+| ------------------------------- | --------------------------------------------------- | ------------------ | ---------------------------------------------------------------------- |
+| Staff (cleaners, leads, owners) | 4-digit PIN                                         | `mode: 'employee'` | `localStorage` key `tidytrack_session` → `{ employeeId }`              |
 | Clients (PM portal)             | Portfolio access code (6+ chars, letters + numbers) | `mode: 'portal'`   | `localStorage` key `tidytrack_portal` → `{ userId, propertyId, code }` |
 
 On load, staff re-fetch the `employees` row by stored ID; portal re-fetch `portal_users` by stored ID.

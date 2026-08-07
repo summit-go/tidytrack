@@ -254,3 +254,28 @@ export async function clearPmAssignmentNotification(assignmentId) {
       .eq('link_id', assignmentId);
   } catch (e) { console.warn('[notify] clear pm notification failed', e); }
 }
+
+export function updateAssignmentScheduledDate(id, date) {
+  if (!id) return Promise.resolve({ data: null, error: null });
+  return supabase
+    .from('assignments')
+    .update({ scheduled_date: date || null })
+    .eq('id', id);
+}
+
+/** Paginate a Supabase query builder until all rows are fetched. */
+export async function fetchAllPages(buildQuery, pageSize = 1000) {
+  let data = [];
+  let error = null;
+  for (let from = 0; ; from += pageSize) {
+    const { data: page, error: pageError } = await buildQuery(from, from + pageSize - 1);
+    if (pageError) {
+      error = pageError;
+      break;
+    }
+    data = data.concat(page || []);
+    if (!page || page.length < pageSize) break;
+    if (from > 200000) break;
+  }
+  return { data, error };
+}

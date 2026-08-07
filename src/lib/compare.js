@@ -20,6 +20,13 @@ export function naturalCompare(a, b) {
 
 // Extract the building prefix from a unit label like "B3-205" → "B3"
 // Falls back to first non-numeric prefix, or null if no match.
+// Unit number after the dash, e.g. "B3-205" → 205
+export function unitNumberFromLabel(label) {
+  if (!label) return null;
+  const m = String(label).match(/-(\d+)/);
+  return m ? parseInt(m[1], 10) : null;
+}
+
 export function buildingFromLabel(label) {
   if (!label) return null;
   const s = String(label);

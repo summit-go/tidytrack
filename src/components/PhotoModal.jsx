@@ -11,7 +11,7 @@ import {
 import { supabase } from "../lib/supabase.js";
 import { KIND_CANNOT, photoKindLabel } from "../lib/constants.js";
 import { splitTaskName } from "../lib/tasks.js";
-import { ItemsDropdown } from "../apps/staff/cleaner/ItemsDropdown.jsx";
+import { ItemsDropdown } from "../apps/internal/cleaner/ItemsDropdown.jsx";
 import { PhotoZoomViewer } from "./PhotoZoomViewer.jsx";
 
 export function PhotoModal({

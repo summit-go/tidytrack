@@ -2,6 +2,23 @@
 
 Concise history of changes for each commit, reverse chronological order
 
+## 2026-08-07 - Phase B2: Trivial read-model consolidation
+
+- Added `src/lib/assignments.js` — `isPmApprovedAssignment`, `isVisibleAssignmentTarget`, `assignmentKeyFromTarget`, `dominantAssignmentStatus`
+- Added `fetchAllPages`, `updateAssignmentScheduledDate` to `lib/supabase.js`; `unitNumberFromLabel` to `lib/compare.js`; `localTodayStart` / `localTodayStartISO` to `lib/format.js`
+- Wired shared helpers across assignment/work-block consumers (cleaner, manager, portal, hooks)
+- Substantive read-model unification (shared hooks, history views, presence) deferred to Phase C track 1; `npm run build` passes
+
+## 2026-08-07 - Phase B1: MVP-aligned folder reshape
+
+- Restructured `src/` into MVP domain folders: `domains/{work,properties,billing,auth}/`, `apps/{internal,client}/`, `features/messaging/` (messaging unchanged)
+- **Work** — manager assignments/dashboard/daily, cross-cutting assignment components, cleaner work-block/task UI, portal work/history/photo tabs → `domains/work/`
+- **Properties** — `PropertyAdmin` tree + portal property screens → `domains/properties/`
+- **Billing** — `MoneyView` tree + `PortalInvoicesTab` → `domains/billing/`
+- **Auth** — staff/portal sign-in screens + `sessionStore` → `domains/auth/`
+- **Apps** — `StaffApp`/`BetaShell`/`ManagerShell`/`EmployeeApp` composers → `apps/internal/`; `PortalApp` shells → `apps/client/`
+- Pure moves + import updates only; `npm run build` passes; read-model consolidation deferred to Phase C
+
 ## 2026-08-07 - Phase A bridge-import fix
 
 - Fixed missing `isBetaFeaturesEnabled` import in `DailyCalendar.jsx` (runtime crash on manager daily view after sign-in)

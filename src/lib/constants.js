@@ -53,7 +53,7 @@ export const assignmentTypeLabel = (value) =>
 
 // App version — shown in the header. Bump per ai/notes/2026-08-07_semantic-versioning.md
 // before each deploy (patch = bug fix, minor = new feature, major = breaking change).
-export const APP_VERSION = "1.5.12";
+export const APP_VERSION = "1.6.0";
 export const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find((t) => t.value === value) || null;
 

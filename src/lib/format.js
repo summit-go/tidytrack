@@ -34,6 +34,15 @@ export const localTodayKey = () => {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 };
+
+/** Local midnight today as a Date (mutating setHours pattern used across work-block queries). */
+export const localTodayStart = () => {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  return d;
+};
+
+export const localTodayStartISO = () => localTodayStart().toISOString();
 // 'overdue' | 'today' | 'upcoming' | null
 export const assignmentDueKind = (scheduledDate) => {
   if (!scheduledDate) return null;

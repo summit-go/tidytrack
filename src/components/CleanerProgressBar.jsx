@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { LeaveWorkblockModal } from "../apps/staff/cleaner/LeaveWorkblockModal.jsx";
+import { LeaveWorkblockModal } from "../domains/work/cleaner/LeaveWorkblockModal.jsx";
 
 export function CleanerProgressBar({
   segments,

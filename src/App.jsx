@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from "react";
 import { TranslationProvider } from "./contexts/LocaleContext.jsx";
-import { RootRouter } from "./apps/RootRouter.jsx";
-import { StaffApp } from "./apps/staff/StaffApp.jsx";
-import { PortalApp } from "./apps/portal/PortalApp.jsx";
+import { RootRouter } from "./apps/internal/RootRouter.jsx";
+import { StaffApp } from "./apps/internal/StaffApp.jsx";
+import { PortalApp } from "./apps/client/PortalApp.jsx";
 
 // =================================================================
 // Top-level App — hash routing + TranslationProvider wrapper only.

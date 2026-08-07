@@ -141,7 +141,7 @@ import {
   readPhotoTakenAt,
   sharePhotos,
 } from "../../lib/photos.js";
-import { sessionStore } from "../../lib/sessionStore.js";
+import { sessionStore } from "../../domains/auth/sessionStore.js";
 import {
   SUPPORTED_TRANSLATE_LANGUAGES,
   TRANSLATION_ENABLED,
@@ -190,8 +190,8 @@ import { TabButton } from "../../components/TabButton.jsx";
 import { PhotoZoomViewer } from "../../components/PhotoZoomViewer.jsx";
 import { TranslateButton } from "../../components/TranslateButton.jsx";
 import { ZoomableImage } from "../../components/ZoomableImage.jsx";
-import { ReviewAssignmentModal } from "../../apps/cross-cutting/ReviewAssignmentModal.jsx";
-import { ReviewRecheckModal } from "../../apps/portal/ReviewRecheckModal.jsx";
+import { ReviewAssignmentModal } from "../../domains/work/cross-cutting/ReviewAssignmentModal.jsx";
+import { ReviewRecheckModal } from "../../domains/work/portal/ReviewRecheckModal.jsx";
 
 export function InboxView({ employee, onBack }) {
   const [tab, setTab] = useState("assignments");

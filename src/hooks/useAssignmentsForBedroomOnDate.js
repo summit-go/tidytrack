@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { supabase } from "../lib/supabase.js";
+import { isPmApprovedAssignment } from "../lib/assignments.js";
 
 // =================================================================
 // useAssignmentsForBedroomOnDate — find assignments tied to a bedroom
@@ -61,8 +62,7 @@ export function useAssignmentsForBedroomOnDate({
           t.assignment?.customer_id === propertyId &&
           t.assignment?.active &&
           !t.assignment?.deleted_at &&
-          (t.assignment?.source !== "pm" ||
-            t.assignment?.pm_status === "approved"),
+          isPmApprovedAssignment(t.assignment),
       );
 
       // Same-day match: scheduled_date matches, OR scheduled_date is null

@@ -141,7 +141,7 @@ import {
   readPhotoTakenAt,
   sharePhotos,
 } from "../../lib/photos.js";
-import { sessionStore } from "../../lib/sessionStore.js";
+import { sessionStore } from "../../domains/auth/sessionStore.js";
 import {
   SUPPORTED_TRANSLATE_LANGUAGES,
   TRANSLATION_ENABLED,

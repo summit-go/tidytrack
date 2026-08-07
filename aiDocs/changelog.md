@@ -2,6 +2,20 @@
 
 Concise history of changes for each commit, reverse chronological order
 
+## 2026-08-07 - Phase A6: Manager tabs (`src/apps/staff/manager/`)
+
+- Extracted 48 manager tab symbols into five folders: `daily/` (10), `dashboard/` (12), `team/` (4), `properties/` (13), `assignments/` (9)
+- Co-located label helpers `buildTargetTitle`, `unitSizeLabel`, `shortenBedroom` → `src/lib/labels.js`
+- Manager tab files bridge-import A9/cleaner symbols still in `App.jsx`: `LiveCleanersSheet`, `ChecklistAssignmentWizard`, `ChecklistAssignmentView`, `AssignmentViewer`, `ReassignModal`, `AssignPicker`, `BedBathPicker`, `DateRangePicker`, `InboxView`, `MoveBlockModal`, `SearchableUnitPicker`, `SupplyChecklistManager`, `WorkBlockAssignmentLink`, `AttachmentModal`, `SpanishTranslationPanel`, `TranslationOverridesModal`, `BlockedNoteModal`
+- `App.jsx` ~18,100 lines removed (~56k → ~38k); `npm run build` passes
+
+## 2026-08-07 - Phase A4: Shared leaf components (`src/components/`)
+
+- Extracted 19 shared leaf components to `src/components/` (chips, progress bars, photo modals, translation UI, `Header`, `NotificationBell`, etc.)
+- Early bridge extractions for A4 dependencies: `LeaveWorkblockModal` and `ItemsDropdown` → `src/apps/staff/cleaner/`; `splitTaskName` → `src/lib/tasks.js`
+- `App.jsx` imports all A4 symbols; ~2,400 lines removed from monolith
+- `npm run build` passes
+
 ## 2026-08-07 - Phase A2 + A3: Hooks and contexts
 
 - Extracted 7 hooks to `src/hooks/`: `useAssignmentSync`, `useIdleDetector`, `usePagePersistence`, `useItemLabelOverrides`, `useTick`, `useUnreadCount`, `useAssignmentsForBedroomOnDate`

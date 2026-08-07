@@ -2,6 +2,12 @@
 
 Concise history of changes made for each commit, in reverse chronological order.
 
+## 2026-08-07 - Track 3 follow-up: trim billing import bloat
+
+- Removed ~1,800 lines of copy-pasted App.jsx-era unused imports across 11 billing files (each file now imports only what it uses)
+- Fixed missing `ShiftsByCleanerView` import in `ExportView.jsx` (payroll tab would have failed at runtime)
+- `npm run build` passes; behavior unchanged
+
 ## 2026-08-07 - Phase C Track 3 complete: Money module boundaries
 
 - Reorganized flat `domains/billing/manager/` into submodules: `shared/` (invoiceAmounts, InvoiceDocument), `priceBook/`, `invoices/`, `payroll/`, `reporting/`; `MoneyView` shell stays in `manager/`

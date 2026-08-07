@@ -97,13 +97,7 @@ import {
   STALE_FORCE_MIN,
   MAX_BLOCK_HOURS,
 } from "../../../lib/constants.js";
-import {
-  can,
-  isOwner,
-  isManager,
-  canSeeMoney,
-  visibleProps,
-} from "../../../lib/permissions.js";
+import { can, canSeeMoney, isLead, isOwner, visibleProps } from "../../../lib/permissions.js";
 import {
   fmtTime,
   fmtTimeShort,
@@ -419,7 +413,7 @@ export function AssignedVsCleanedView({
   // Audit is owner-side, but we still gate Mark done by permission
   // (owner / manager always; cleaners need explicit can() permission).
   // Reopen is more permissive — anyone with an employee identity.
-  const isStaff = employee?.role === "owner" || employee?.role === "manager";
+  const isStaff = isLead(employee);
   const canMarkDone = isStaff || can(employee, "mark_assignments_done");
   const canReopen = !!employee?.id;
 

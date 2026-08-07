@@ -100,8 +100,9 @@ import {
 import {
   can,
   isOwner,
-  isManager,
+  isLead,
   canSeeMoney,
+  migrateLeadPersistenceKeys,
   visibleProps,
 } from "../../lib/permissions.js";
 import {
@@ -191,21 +192,24 @@ import { PhotoZoomViewer } from "../../components/PhotoZoomViewer.jsx";
 import { TranslateButton } from "../../components/TranslateButton.jsx";
 import { ZoomableImage } from "../../components/ZoomableImage.jsx";
 import { DailyView } from "../../domains/work/daily/DailyView.jsx";
-import { ManagerDashboard } from "../../domains/work/dashboard/ManagerDashboard.jsx";
-import { EmployeeAdmin } from "./manager/team/EmployeeAdmin.jsx";
+import { LeadDashboard } from "../../domains/work/dashboard/LeadDashboard.jsx";
+import { EmployeeAdmin } from "./lead/team/EmployeeAdmin.jsx";
 import { PropertyAdmin } from "../../domains/properties/admin/PropertyAdmin.jsx";
 import { AssignmentsTab } from "../../domains/work/assignments/AssignmentsTab.jsx";
-import { MoneyView } from "../../domains/billing/manager/MoneyView.jsx";
+import { MoneyView } from "../../domains/billing/lead/MoneyView.jsx";
 import { EmployeeApp } from "./cleaner/EmployeeApp.jsx";
 import { StaffMessagesTab } from "../../features/messaging/StaffMessagesTab.jsx";
 import { PortalApp } from "../client/PortalApp.jsx";
 
-export function ManagerShell({ employee, onSignOut }) {
+export function LeadShell({ employee, onSignOut }) {
+  useEffect(() => {
+    migrateLeadPersistenceKeys(employee?.id);
+  }, [employee?.id]);
   // Persist the active tab in localStorage so an accidental refresh
   // brings the user back to where they were (Assignments, Properties,
   // etc) instead of always dumping them on Daily.
   const [tab, setTab] = usePagePersistence(
-    `manager_tab_${employee.id}`,
+    `lead_tab_${employee.id}`,
     "daily",
   );
   const [showMessages, setShowMessages] = useState(false);
@@ -218,7 +222,7 @@ export function ManagerShell({ employee, onSignOut }) {
   // while the owner is previewing the cleaner/PM side keeps them there,
   // rather than snapping back to the manager view every reload.
   const [previewMode, setPreviewMode] = usePagePersistence(
-    `manager_preview_cleaner_${employee.id}`,
+    `lead_preview_cleaner_${employee.id}`,
     false,
   );
   const showMoneyTabs = canSeeMoney(employee); // owner or view_pay_info
@@ -227,11 +231,11 @@ export function ManagerShell({ employee, onSignOut }) {
   // Reshapes the bottom nav so each mode only shows its own tabs.
   // Managers keep the flat nav.
   const [mode, setMode] = usePagePersistence(
-    `manager_mode_${employee.id}`,
+    `lead_mode_${employee.id}`,
     "ops",
   ); // 'ops' | 'business'
   const [pmPreview, setPmPreview] = usePagePersistence(
-    `manager_preview_pm_${employee.id}`,
+    `lead_preview_pm_${employee.id}`,
     false,
   );
   // Cleaner-preview and PM-preview are mutually exclusive. If a stale
@@ -368,7 +372,7 @@ export function ManagerShell({ employee, onSignOut }) {
           />
         )}
         {tab === "dashboard" && (
-          <ManagerDashboard
+          <LeadDashboard
             employee={employee}
             onSignOut={onSignOut}
             onOpenMessages={openMessages}

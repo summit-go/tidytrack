@@ -14,6 +14,7 @@ import { isTextTranslateConfigured } from "../lib/translation.js";
 import { useUnreadCount } from "../hooks/useUnreadCount.js";
 import { useLocale } from "../contexts/LocaleContext.jsx";
 import { PreviewContext } from "../contexts/PreviewContext.jsx";
+import { isLeadOrOwnerRole, isLeadRole } from "../lib/permissions.js";
 import { NotificationBell } from "./NotificationBell.jsx";
 
 export function Header({
@@ -36,7 +37,7 @@ export function Header({
   // managers keep the ⋯ menu (it also holds their admin tools). cleanerView is
   // forced by the cleaner shell so this holds even when an owner is
   // previewing-as-cleaner or a Beta account (whose real role is owner/manager).
-  const isCleaner = cleanerView || (role !== "owner" && role !== "manager");
+  const isCleaner = cleanerView || (!isLeadOrOwnerRole(role));
   const unread = useUnreadCount({
     employee: showMessagesIcon ? employee : null,
   });
@@ -75,9 +76,9 @@ export function Header({
               Owner
             </span>
           )}
-          {role === "manager" && (
+          {isLeadRole(role) && (
             <span className="text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-stone-700 text-stone-50">
-              Manager
+              Lead
             </span>
           )}
         </div>
@@ -134,7 +135,7 @@ export function Header({
         <div className="flex items-center gap-2" data-no-translate>
           <NotificationBell
             employee={employee}
-            isOwner={role === "owner" || role === "manager"}
+            isOwner={isLeadOrOwnerRole(role)}
             onNavigate={onNotificationNavigate}
           />
           {/* Everything that used to sit as separate icons (language, messages,

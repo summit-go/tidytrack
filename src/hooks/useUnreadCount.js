@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { supabase } from "../lib/supabase.js";
+import { isLead } from "../lib/permissions.js";
 
 // ---- Hook: unread message count ----
 export function useUnreadCount({ employee = null, customer = null, refreshKey = 0 }) {
@@ -31,7 +32,7 @@ export function useUnreadCount({ employee = null, customer = null, refreshKey = 
           // For owners and managers, also count unread property threads.
           // Per-thread read state uses conversation_participants — if no row
           // exists for this employee, treat the thread as fully unread.
-          if (employee.role === "owner" || employee.role === "manager") {
+          if (isLead(employee)) {
             const { data: convs } = await supabase
               .from("conversations")
               .select("id, last_message_at")

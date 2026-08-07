@@ -97,13 +97,7 @@ import {
   STALE_FORCE_MIN,
   MAX_BLOCK_HOURS,
 } from "../../../lib/constants.js";
-import {
-  can,
-  isOwner,
-  isManager,
-  canSeeMoney,
-  visibleProps,
-} from "../../../lib/permissions.js";
+import { can, canSeeMoney, isLead, isOwner, visibleProps } from "../../../lib/permissions.js";
 import {
   fmtTime,
   fmtTimeShort,
@@ -511,7 +505,7 @@ export function ChecklistAssignmentView({
     // Cleaners just read. The setStatus handler is the same one the
     // checklist already uses for per-item status changes.
     const canActOnItems =
-      employee?.role === "owner" || employee?.role === "manager";
+      isLead(employee);
     const sections = {
       bedroom: [],
       vanity: [],

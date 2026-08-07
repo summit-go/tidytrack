@@ -18,7 +18,7 @@ Internal (works for the cleaning company) and Clients (hired the cleaning compan
 - **Property Owner**: Owns the building/unit tied to a Property Manager's account. Same portal as Property Manager, with a different badge/permissions.
 - **PM Staff**: Works for the Property Manager. Same portal view as Property Manager, EXCEPT they must never see invoices/billing — that visibility is reserved for Property Manager and Property Owner only.
 
-> Note: the codebase currently names the internal "Lead" role `manager` internally. This is a naming collision with the client-side "Property Manager" — the two are unrelated people. Until the code is updated, "Lead" in this doc maps to the `manager` role/value in code.
+> Note: internal staff **Lead** role is stored as `employees.role = 'lead'`. Legacy rows may still hold `'manager'` until [`sql/2026-08-07_manager-to-lead-role.sql`](../sql/2026-08-07_manager-to-lead-role.sql) runs; code accepts both on read. **Property Manager** (portal) is unrelated — portal user kind / labels unchanged.
 
 ## Key concepts
 

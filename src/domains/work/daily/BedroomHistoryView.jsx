@@ -97,13 +97,7 @@ import {
   STALE_FORCE_MIN,
   MAX_BLOCK_HOURS,
 } from "../../../lib/constants.js";
-import {
-  can,
-  isOwner,
-  isManager,
-  canSeeMoney,
-  visibleProps,
-} from "../../../lib/permissions.js";
+import { can, canSeeMoney, isLead, isOwner, visibleProps } from "../../../lib/permissions.js";
 import {
   fmtTime,
   fmtTimeShort,
@@ -191,7 +185,7 @@ export function BedroomHistoryView({
   employee,
   onBack,
 }) {
-  const isStaff = employee?.role === "owner" || employee?.role === "manager";
+  const isStaff = isLead(employee);
   const [data, setData] = useState({ days: [], loading: true });
   const [openedAssignment, setOpenedAssignment] = useState(null);
   // Pull a wide window in one query so the date pills can show

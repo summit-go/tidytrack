@@ -97,13 +97,7 @@ import {
   STALE_FORCE_MIN,
   MAX_BLOCK_HOURS,
 } from "../../../lib/constants.js";
-import {
-  can,
-  isOwner,
-  isManager,
-  canSeeMoney,
-  visibleProps,
-} from "../../../lib/permissions.js";
+import { FIELD_STAFF_ROLES, can, canSeeMoney, isLead, isLeadOnly, isOwner, visibleProps } from "../../../lib/permissions.js";
 import {
   fmtTime,
   fmtTimeShort,
@@ -213,7 +207,7 @@ export function AssignmentDetail({
       .from("employees")
       .select("id, name, role")
       .eq("active", true)
-      .in("role", ["employee", "manager"])
+      .in("role", FIELD_STAFF_ROLES)
       .order("name");
     setEmployees(emps || []);
     setLoaded(true);
@@ -468,7 +462,7 @@ export function AssignmentDetail({
                           {employees.map((emp) => (
                             <option key={emp.id} value={emp.id}>
                               {emp.name}
-                              {emp.role === "manager" ? " (manager)" : ""}
+                              {isLeadOnly(emp) ? " (lead)" : ""}
                             </option>
                           ))}
                         </select>

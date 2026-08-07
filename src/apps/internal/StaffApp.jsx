@@ -97,13 +97,7 @@ import {
   STALE_FORCE_MIN,
   MAX_BLOCK_HOURS,
 } from "../../lib/constants.js";
-import {
-  can,
-  isOwner,
-  isManager,
-  canSeeMoney,
-  visibleProps,
-} from "../../lib/permissions.js";
+import { can, canSeeMoney, isLead, isLeadOnly, isOwner, visibleProps } from "../../lib/permissions.js";
 import {
   fmtTime,
   fmtTimeShort,
@@ -193,7 +187,7 @@ import { ZoomableImage } from "../../components/ZoomableImage.jsx";
 import { SignIn } from "../../domains/auth/SignIn.jsx";
 import { ConfigError } from "../../domains/auth/ConfigError.jsx";
 import { BetaShell } from "./BetaShell.jsx";
-import { ManagerShell } from "./ManagerShell.jsx";
+import { LeadShell } from "./LeadShell.jsx";
 import { EmployeeApp } from "./cleaner/EmployeeApp.jsx";
 
 export function StaffApp() {
@@ -257,7 +251,7 @@ export function StaffApp() {
     try {
       for (let i = localStorage.length - 1; i >= 0; i--) {
         const k = localStorage.key(i);
-        if (k && k.startsWith("tidytrack_page_manager_preview_"))
+        if (k && k.startsWith("tidytrack_page_lead_preview_"))
           localStorage.removeItem(k);
       }
     } catch {}
@@ -271,11 +265,8 @@ export function StaffApp() {
   if (session.employee.is_beta_tester) {
     return <BetaShell employee={session.employee} onSignOut={signOut} />;
   }
-  if (
-    session.employee.role === "manager" ||
-    session.employee.role === "owner"
-  ) {
-    return <ManagerShell employee={session.employee} onSignOut={signOut} />;
+  if (isLead(session.employee)) {
+    return <LeadShell employee={session.employee} onSignOut={signOut} />;
   }
   // Cleaner path. The supply checklist gate now lives inside EmployeeApp so it
   // also covers Beta accounts and preview — see the gate there.

@@ -101,7 +101,7 @@ import {
 import {
   can,
   isOwner,
-  isManager,
+  isLead,
   canSeeMoney,
   visibleProps,
 } from "../../../lib/permissions.js";

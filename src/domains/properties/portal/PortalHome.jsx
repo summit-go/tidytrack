@@ -1,4 +1,10 @@
-import React, { useState, useEffect, useCallback, useRef, useContext } from "react";
+import React, {
+  useState,
+  useEffect,
+  useCallback,
+  useRef,
+  useContext,
+} from "react";
 import {
   Search,
   Clock,
@@ -100,7 +106,7 @@ import {
 import {
   can,
   isOwner,
-  isManager,
+  isLead,
   canSeePortalInvoices,
   visibleProps,
 } from "../../../lib/permissions.js";
@@ -162,7 +168,10 @@ import { useItemLabelOverrides } from "../../../hooks/useItemLabelOverrides.js";
 import { useTick } from "../../../hooks/useTick.js";
 import { useUnreadCount } from "../../../hooks/useUnreadCount.js";
 import { useAssignmentsForBedroomOnDate } from "../../../hooks/useAssignmentsForBedroomOnDate.js";
-import { useLocale, TranslationProvider } from "../../../contexts/LocaleContext.jsx";
+import {
+  useLocale,
+  TranslationProvider,
+} from "../../../contexts/LocaleContext.jsx";
 import { PreviewContext } from "../../../contexts/PreviewContext.jsx";
 import { AssignmentTypeChip } from "../../../components/chips/AssignmentTypeChip.jsx";
 import { PriorityChip } from "../../../components/chips/PriorityChip.jsx";
@@ -271,12 +280,6 @@ export function PortalHome({
         const portalStart = `${property.portal_start_date}T00:00:00Z`;
         if (portalStart > since) since = portalStart;
       }
-      console.log(
-        "[Portal] filtering from:",
-        since,
-        "| portal_start_date:",
-        property.portal_start_date,
-      );
 
       if (property.property_type === "multi_unit") {
         // Pull both: work_blocks in window, AND the current status of every

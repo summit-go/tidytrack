@@ -100,7 +100,7 @@ import {
 import {
   can,
   isOwner,
-  isManager,
+  isLead,
   canSeeMoney,
   visibleProps,
 } from "../../../lib/permissions.js";
@@ -185,7 +185,7 @@ import { BulkCreateUnits } from "./BulkCreateUnits.jsx";
 import { ChecklistAssignmentWizard } from "../../work/cross-cutting/ChecklistAssignmentWizard.jsx";
 import { PartyForm } from "./PartyForm.jsx";
 import { PartyList } from "./PartyList.jsx";
-import { PortalUsersAdmin } from "../../../apps/internal/manager/team/PortalUsersAdmin.jsx";
+import { PortalUsersAdmin } from "../../../apps/internal/lead/team/PortalUsersAdmin.jsx";
 import { PropertyForm } from "./PropertyForm.jsx";
 import { PropertySetup } from "./PropertySetup.jsx";
 import { QuickAssignmentForm } from "../../work/assignments/QuickAssignmentForm.jsx";

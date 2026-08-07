@@ -100,7 +100,7 @@ import {
 import {
   can,
   isOwner,
-  isManager,
+  isLead,
   canSeeMoney,
   visibleProps,
 } from "../../lib/permissions.js";
@@ -190,7 +190,7 @@ import { TabButton } from "../../components/TabButton.jsx";
 import { PhotoZoomViewer } from "../../components/PhotoZoomViewer.jsx";
 import { TranslateButton } from "../../components/TranslateButton.jsx";
 import { ZoomableImage } from "../../components/ZoomableImage.jsx";
-import { ManagerShell } from "./ManagerShell.jsx";
+import { LeadShell } from "./LeadShell.jsx";
 import { EmployeeApp } from "./cleaner/EmployeeApp.jsx";
 import { PortalApp } from "../client/PortalApp.jsx";
 
@@ -268,7 +268,7 @@ export function BetaShell({ employee, onSignOut }) {
   // cleaner experience, not a half-finished one.
   let inner;
   if (view === "beta") {
-    inner = <ManagerShell employee={employee} onSignOut={onSignOut} />;
+    inner = <LeadShell employee={employee} onSignOut={onSignOut} />;
   } else if (view === "employee") {
     inner = <EmployeeApp employee={employee} onSignOut={onSignOut} />;
   } else {

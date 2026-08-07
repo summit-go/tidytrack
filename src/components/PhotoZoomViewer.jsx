@@ -3,6 +3,7 @@ import { X, Check, AlertCircle, Languages, RotateCcw, Trash2 } from "lucide-reac
 import { supabase } from "../lib/supabase.js";
 import { KIND_CANNOT, FLAG_KINDS } from "../lib/constants.js";
 import { fmtDate } from "../lib/format.js";
+import { isLead, isLeadOnly } from "../lib/permissions.js";
 
 export function PhotoZoomViewer({
   photos,
@@ -37,7 +38,7 @@ export function PhotoZoomViewer({
   //   • caller didn't already wire onResolveCurrent (PM portal does)
   const canSelfResolve =
     !!employee &&
-    (employee.role === "owner" || employee.role === "manager") &&
+    (isLead(employee)) &&
     FLAG_KINDS.includes(photo.kind) &&
     !photo.resolved_at &&
     !onResolveCurrent;
@@ -66,7 +67,7 @@ export function PhotoZoomViewer({
   // "Couldn't clean" by mistake. They can re-tag it to the right bucket or
   // delete it outright. Uses local overlay state so the change shows at once.
   const isOwnerMgr =
-    !!employee && (employee.role === "owner" || employee.role === "manager");
+    !!employee && (isLead(employee));
   const [retagOpen, setRetagOpen] = useState(false);
   const [adminBusy, setAdminBusy] = useState(false);
   const [gone, setGone] = useState({}); // photo.id -> true (deleted locally)

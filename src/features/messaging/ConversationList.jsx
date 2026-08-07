@@ -97,13 +97,7 @@ import {
   STALE_FORCE_MIN,
   MAX_BLOCK_HOURS,
 } from "../../lib/constants.js";
-import {
-  can,
-  isOwner,
-  isManager,
-  canSeeMoney,
-  visibleProps,
-} from "../../lib/permissions.js";
+import { can, canSeeMoney, isLead, isOwner, visibleProps } from "../../lib/permissions.js";
 import {
   fmtTime,
   fmtTimeShort,
@@ -203,7 +197,7 @@ export function ConversationList({
   const [loaded, setLoaded] = useState(false);
   const [showNewMenu, setShowNewMenu] = useState(false);
   const canSeeThreads =
-    employee.role === "owner" || employee.role === "manager";
+    isLead(employee);
 
   const load = async () => {
     setLoaded(false);

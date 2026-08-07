@@ -97,13 +97,7 @@ import {
   STALE_FORCE_MIN,
   MAX_BLOCK_HOURS,
 } from "../../../lib/constants.js";
-import {
-  can,
-  isOwner,
-  isManager,
-  canSeeMoney,
-  visibleProps,
-} from "../../../lib/permissions.js";
+import { can, canSeeMoney, isLead, isOwner, visibleProps } from "../../../lib/permissions.js";
 import {
   fmtTime,
   fmtTimeShort,
@@ -230,7 +224,7 @@ export function AssignmentViewer({ target, onClose, employee }) {
   // Owner / manager can always act. Cleaners need explicit permission
   // (mark_assignments_done) to mark done. Anyone with an employee
   // identity can Reopen since it just sends an item back to pending.
-  const isStaff = employee?.role === "owner" || employee?.role === "manager";
+  const isStaff = isLead(employee);
   const canMarkDone = isStaff || can(employee, "mark_assignments_done");
   const canReopen = !!employee?.id;
 

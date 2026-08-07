@@ -97,13 +97,7 @@ import {
   STALE_FORCE_MIN,
   MAX_BLOCK_HOURS,
 } from "../../../lib/constants.js";
-import {
-  can,
-  isOwner,
-  isManager,
-  canSeeMoney,
-  visibleProps,
-} from "../../../lib/permissions.js";
+import { can, canSeeMoney, isLead, isLeadOrOwnerRole, isOwner, visibleProps } from "../../../lib/permissions.js";
 import {
   fmtTime,
   fmtTimeShort,
@@ -197,7 +191,7 @@ export function SpanishTranslationPanel({ assignment, viewerRole }) {
   const hasSpanish = !!(spanish && spanish.trim());
   // Only owners and managers see translation pipeline errors / skipped notes.
   // PMs and cleaners just see "in progress" or the final ES pill.
-  const isStaff = viewerRole === "owner" || viewerRole === "manager";
+  const isStaff = isLeadOrOwnerRole(viewerRole);
 
   const retry = async () => {
     if (!assignment.file_url) return;

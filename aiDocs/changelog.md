@@ -2,6 +2,15 @@
 
 Concise history of changes made for each commit, in reverse chronological order.
 
+## 2026-08-07 - Phase C Track 4 complete: manager → lead naming
+
+- Centralized staff role helpers in `lib/permissions.js` (`ROLE_LEAD`, `isLead`, `isLeadRole`, `normalizeRole`, etc.); `isManager` deprecated alias
+- Renamed `ManagerShell` → `LeadShell`, `ManagerDashboard` → `LeadDashboard`; folders `apps/internal/lead/`, `domains/billing/lead/`
+- Staff UI labels/badges say "Lead"; `EmployeeForm` writes `lead`; legacy `manager` DB rows still readable
+- localStorage keys migrated (`manager_*` → `lead_*`) via `migrateLeadPersistenceKeys` on LeadShell mount
+- Optional SQL: `sql/2026-08-07_manager-to-lead-role.sql`; Property Manager portal strings untouched
+- Track 4 roadmap at `ai/roadmaps/2026-08-07_phase-c-naming_roadmap.md`; `npm run build` passes
+
 ## 2026-08-07 - Track 3 follow-up: trim billing import bloat
 
 - Removed ~1,800 lines of copy-pasted App.jsx-era unused imports across 11 billing files (each file now imports only what it uses)

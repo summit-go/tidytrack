@@ -97,13 +97,7 @@ import {
   STALE_FORCE_MIN,
   MAX_BLOCK_HOURS,
 } from "../../../../lib/constants.js";
-import {
-  can,
-  isOwner,
-  isManager,
-  canSeeMoney,
-  visibleProps,
-} from "../../../../lib/permissions.js";
+import { ROLE_LEAD, can, canSeeMoney, isLeadOrOwnerRole, isLeadRole, isOwner, normalizeRole, roleForDb, visibleProps } from "../../../../lib/permissions.js";
 import {
   fmtTime,
   fmtTimeShort,
@@ -190,7 +184,7 @@ export function EmployeeForm({
   const defaultRespForRole = (r) => {
     const all = {};
     CAPABILITIES.forEach((c) => {
-      all[c.key] = r === "manager" || r === "owner";
+      all[c.key] = isLeadRole(r) || r === "owner";
     });
     return all;
   };
@@ -205,7 +199,7 @@ export function EmployeeForm({
   // it, and showing existing PINs is itself an exposure. Blank on an edit
   // means "leave the PIN unchanged".
   const [pin, setPin] = useState("");
-  const [role, setRole] = useState(employee?.role || "employee");
+  const [role, setRole] = useState(normalizeRole(employee?.role || "employee"));
   const [active, setActive] = useState(employee?.active ?? true);
   const [phone, setPhone] = useState(employee?.phone || "");
   const [payRate, setPayRate] = useState(
@@ -224,14 +218,14 @@ export function EmployeeForm({
   // when the user actually changes it. Without this, the role-defaults
   // effect would fire on mount and overwrite saved capabilities with
   // empty defaults — which was a real bug that hid existing toggles.
-  const initialRoleRef = useRef(employee?.role || "employee");
+  const initialRoleRef = useRef(normalizeRole(employee?.role || "employee"));
 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const isSelf = employee?.id === currentUserId;
   const canEditOwner = currentUserRole === "owner";
-  // Only owners + managers benefit from notification settings (cleaners use the app directly)
-  const showNotificationSettings = role === "owner" || role === "manager";
+  // Only owners + leads benefit from notification settings (cleaners use the app directly)
+  const showNotificationSettings = isLeadOrOwnerRole(role);
 
   // When the user actually changes the role (and hasn't manually edited
   // toggles), reset the responsibilities to that role's defaults. Skips
@@ -286,7 +280,7 @@ export function EmployeeForm({
     // uniqueness), so the browser never writes a plaintext PIN.
     const payload = {
       name: name.trim(),
-      role,
+      role: roleForDb(role),
       active,
       phone: cleanPhone || null,
       sms_opt_in: smsOptIn,
@@ -456,11 +450,11 @@ export function EmployeeForm({
               <div className="font-medium text-stone-900 text-sm">Employee</div>
             </button>
             <button
-              onClick={() => setRole("manager")}
+              onClick={() => setRole(ROLE_LEAD)}
               type="button"
-              className={`p-3 rounded-xl border-2 text-left ${role === "manager" ? "border-stone-900 bg-white" : "border-stone-200 bg-white/50"}`}
+              className={`p-3 rounded-xl border-2 text-left ${isLeadRole(role) ? "border-stone-900 bg-white" : "border-stone-200 bg-white/50"}`}
             >
-              <div className="font-medium text-stone-900 text-sm">Manager</div>
+              <div className="font-medium text-stone-900 text-sm">Lead</div>
             </button>
             {canEditOwner && (
               <button
@@ -539,9 +533,9 @@ export function EmployeeForm({
               Owners have every capability automatically. Toggles below are
               shown for reference but can't be turned off.
             </p>
-          ) : role === "manager" ? (
+          ) : isLeadRole(role) ? (
             <p className="text-[11px] text-stone-500 -mt-2">
-              Managers default to all capabilities on. Turn off anything they
+              Leads default to all capabilities on. Turn off anything they
               shouldn't have.
             </p>
           ) : (

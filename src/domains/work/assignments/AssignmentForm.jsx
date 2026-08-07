@@ -97,13 +97,7 @@ import {
   STALE_FORCE_MIN,
   MAX_BLOCK_HOURS,
 } from "../../../lib/constants.js";
-import {
-  can,
-  isOwner,
-  isManager,
-  canSeeMoney,
-  visibleProps,
-} from "../../../lib/permissions.js";
+import { FIELD_STAFF_ROLES, can, canSeeMoney, isLead, isLeadOnly, isOwner, visibleProps } from "../../../lib/permissions.js";
 import {
   fmtTime,
   fmtTimeShort,
@@ -204,7 +198,7 @@ export function AssignmentForm({ property, employee, onCancel, onSaved }) {
         .from("employees")
         .select("id, name, role")
         .eq("active", true)
-        .in("role", ["employee", "manager"])
+        .in("role", FIELD_STAFF_ROLES)
         .order("name");
       setEmployees(emps || []);
     })();
@@ -691,7 +685,7 @@ export function AssignmentForm({ property, employee, onCancel, onSaved }) {
                         {employees.map((e) => (
                           <option key={e.id} value={e.id}>
                             {e.name}
-                            {e.role === "manager" ? " (manager)" : ""}
+                            {isLeadOnly(e) ? " (lead)" : ""}
                           </option>
                         ))}
                       </select>

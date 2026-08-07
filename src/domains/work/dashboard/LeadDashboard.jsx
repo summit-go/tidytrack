@@ -100,7 +100,7 @@ import {
 import {
   can,
   isOwner,
-  isManager,
+  isLead,
   canSeeMoney,
   visibleProps,
 } from "../../../lib/permissions.js";
@@ -185,7 +185,7 @@ import { ShiftList } from "./ShiftList.jsx";
 import { ShiftsByCleanerView } from "./ShiftsByCleanerView.jsx";
 import { StatCard } from "./StatCard.jsx";
 
-export function ManagerDashboard({
+export function LeadDashboard({
   employee,
   onSignOut,
   onOpenMessages,

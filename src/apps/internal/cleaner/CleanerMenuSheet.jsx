@@ -97,13 +97,7 @@ import {
   STALE_FORCE_MIN,
   MAX_BLOCK_HOURS,
 } from "../../../lib/constants.js";
-import {
-  can,
-  isOwner,
-  isManager,
-  canSeeMoney,
-  visibleProps,
-} from "../../../lib/permissions.js";
+import { can, canSeeMoney, isLead, isLeadOnly, isOwner, visibleProps } from "../../../lib/permissions.js";
 import {
   fmtTime,
   fmtTimeShort,
@@ -215,9 +209,9 @@ export function CleanerMenuSheet({
       <span className="text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-amber-500 text-stone-900">
         Owner
       </span>
-    ) : employee?.role === "manager" ? (
+    ) : isLeadOnly(employee) ? (
       <span className="text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-stone-700 text-stone-50">
-        Manager
+        Lead
       </span>
     ) : null;
 

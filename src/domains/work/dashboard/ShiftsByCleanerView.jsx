@@ -97,13 +97,7 @@ import {
   STALE_FORCE_MIN,
   MAX_BLOCK_HOURS,
 } from "../../../lib/constants.js";
-import {
-  can,
-  isOwner,
-  isManager,
-  canSeeMoney,
-  visibleProps,
-} from "../../../lib/permissions.js";
+import { can, canSeeMoney, isLead, isLeadOnly, isOwner, visibleProps } from "../../../lib/permissions.js";
 import {
   fmtTime,
   fmtTimeShort,
@@ -1412,7 +1406,7 @@ export function ShiftsByCleanerView({
                               />
                             </button>
                             {(currentEmployee?.role === "owner" ||
-                              currentEmployee?.role === "manager") && (
+                              isLeadOnly(currentEmployee)) && (
                               <button
                                 onClick={async () => {
                                   if (

@@ -97,13 +97,7 @@ import {
   STALE_FORCE_MIN,
   MAX_BLOCK_HOURS,
 } from "../../../../lib/constants.js";
-import {
-  can,
-  isOwner,
-  isManager,
-  canSeeMoney,
-  visibleProps,
-} from "../../../../lib/permissions.js";
+import { can, canSeeMoney, isLead, isLeadOnly, isOwner, visibleProps } from "../../../../lib/permissions.js";
 import {
   fmtTime,
   fmtTimeShort,
@@ -304,9 +298,9 @@ export function EmployeeAdmin({ employee, onSignOut, onOpenMessages, onLogoClick
                             Owner
                           </span>
                         )}
-                        {e.role === "manager" && (
+                        {isLeadOnly(e) && (
                           <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-200 text-stone-700">
-                            Manager
+                            Lead
                           </span>
                         )}
                         {!e.active && (

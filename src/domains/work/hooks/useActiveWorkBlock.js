@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { supabase, PHOTO_BUCKET } from "../../../lib/supabase.js";
 import { KIND_CANNOT } from "../../../lib/constants.js";
 import { isPmApprovedAssignment } from "../../../lib/assignments.js";
+import { isLead } from "../../../lib/permissions.js";
 import { compressImage, readPhotoTakenAt } from "../../../lib/photos.js";
 import {
   isTextTranslateConfigured,
@@ -441,7 +442,7 @@ export function useActiveWorkBlock({
   const undoClosedBlock = async (block) => {
     if (!block?.id) return;
     const canUndoAnyone =
-      employee?.role === "owner" || employee?.role === "manager";
+      isLead(employee);
     const isMine = block.shift_id === shift?.id;
     if (!canUndoAnyone && !isMine) {
       alert(tt("You can only undo work blocks you started yourself."));
@@ -513,7 +514,7 @@ export function useActiveWorkBlock({
   const moveClosedBlock = (block) => {
     if (!block?.id) return;
     const canMoveAnyone =
-      employee?.role === "owner" || employee?.role === "manager";
+      isLead(employee);
     const isMine = block.shift_id === shift?.id;
     if (!canMoveAnyone && !isMine) {
       alert(tt("You can only move work blocks you started yourself."));
@@ -526,7 +527,7 @@ export function useActiveWorkBlock({
   const undoBlock = async () => {
     if (!activeBlock) return;
     const canUndoAnyone =
-      employee?.role === "owner" || employee?.role === "manager";
+      isLead(employee);
     const isMine = activeBlock.shift_id === shift?.id;
     if (!canUndoAnyone && !isMine) {
       alert(tt("You can only undo a work block you started yourself."));
@@ -822,7 +823,7 @@ export function useActiveWorkBlock({
       .find((p) => p.id === photoId);
     if (!photo) return;
     const canDeleteAny =
-      employee?.role === "owner" || employee?.role === "manager";
+      isLead(employee);
     const isMine = photo.taken_by === employee?.id;
     if (!canDeleteAny && !isMine) {
       alert(tt("You can only delete photos you took."));

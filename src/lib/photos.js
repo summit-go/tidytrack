@@ -127,3 +127,86 @@ export function canShareFiles() {
     typeof navigator.canShare === 'function' &&
     typeof navigator.share === 'function';
 }
+
+export async function readPhotoTakenAt(file) {
+  try {
+    if (!file || !file.arrayBuffer) return null;
+    const buf = await file.arrayBuffer();
+    const view = new DataView(buf);
+    if (view.byteLength < 4 || view.getUint16(0) !== 0xffd8) return null; // not JPEG
+    let offset = 2;
+    while (offset + 4 < view.byteLength) {
+      const marker = view.getUint16(offset);
+      if (marker === 0xffe1) {
+        // APP1 (EXIF)
+        const exifStart = offset + 4;
+        if (view.getUint32(exifStart) !== 0x45786966) return null; // "Exif"
+        const tiff = exifStart + 6;
+        const little = view.getUint16(tiff) === 0x4949;
+        const u16 = (o) => view.getUint16(o, little);
+        const u32 = (o) => view.getUint32(o, little);
+        const ifd0 = tiff + u32(tiff + 4);
+        const readDate = (ifd) => {
+          const n = u16(ifd);
+          for (let i = 0; i < n; i++) {
+            const e = ifd + 2 + i * 12;
+            const tag = u16(e);
+            if (tag === 0x9003 || tag === 0x0132) {
+              // DateTimeOriginal / DateTime
+              const valOff = tiff + u32(e + 8);
+              let s = "";
+              for (let j = 0; j < 19 && valOff + j < view.byteLength; j++)
+                s += String.fromCharCode(view.getUint8(valOff + j));
+              const m = s.match(
+                /^(\d{4}):(\d{2}):(\d{2})\s(\d{2}):(\d{2}):(\d{2})/,
+              );
+              if (m) return `${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}`;
+            }
+          }
+          return null;
+        };
+        // Prefer the EXIF sub-IFD's DateTimeOriginal; fall back to IFD0 DateTime.
+        const n0 = u16(ifd0);
+        let exifPtr = null;
+        for (let i = 0; i < n0; i++) {
+          const e = ifd0 + 2 + i * 12;
+          if (u16(e) === 0x8769) {
+            exifPtr = tiff + u32(e + 8);
+            break;
+          }
+        }
+        return (exifPtr && readDate(exifPtr)) || readDate(ifd0);
+      }
+      if ((marker & 0xff00) !== 0xff00) break;
+      offset += 2 + view.getUint16(offset + 2);
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export async function sharePhotos(photos, contextFn) {
+  if (!canShareFiles()) return false;
+  try {
+    const files = [];
+    for (const p of photos) {
+      const ctx = typeof contextFn === "function" ? contextFn(p) : contextFn;
+      const filename = photoFilename(p, ctx);
+      const resp = await fetch(p.public_url);
+      if (!resp.ok) continue;
+      const blob = await resp.blob();
+      files.push(
+        new File([blob], filename, { type: blob.type || "image/jpeg" }),
+      );
+    }
+    if (files.length === 0) return false;
+    if (!navigator.canShare({ files })) return false;
+    await navigator.share({ files, title: "Cleaning photos" });
+    return true;
+  } catch (e) {
+    if (e.name === "AbortError") return true; // User cancelled — not an error
+    console.error("[sharePhotos] failed", e);
+    return false;
+  }
+}

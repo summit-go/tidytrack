@@ -186,7 +186,7 @@ import { TranslateButton } from "../../../components/TranslateButton.jsx";
 import { ZoomableImage } from "../../../components/ZoomableImage.jsx";
 import { ItemsDropdown } from "./ItemsDropdown.jsx";
 import { LeaveWorkblockModal } from "./LeaveWorkblockModal.jsx";
-import { resolveItemLabel } from "../../../App.jsx";
+import { resolveItemLabel } from "../../../lib/pickerLabels.js";
 
 export function JobPeekModal({ job, employee, onClose }) {
   const { locale } = useLocale();

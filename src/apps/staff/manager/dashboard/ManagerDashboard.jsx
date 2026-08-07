@@ -178,7 +178,7 @@ import { PhotoZoomViewer } from "../../../../components/PhotoZoomViewer.jsx";
 import { TranslateButton } from "../../../../components/TranslateButton.jsx";
 import { ZoomableImage } from "../../../../components/ZoomableImage.jsx";
 import { ItemsDropdown } from "../../cleaner/ItemsDropdown.jsx";
-import { DateRangePicker } from "../../../../App.jsx";
+import { DateRangePicker } from "../money/DateRangePicker.jsx";
 import { GroupedByPartyView } from "../dashboard/GroupedByPartyView.jsx";
 import { LiveCleanersSheet } from "../../cleaner/LiveCleanersSheet.jsx";
 import { ShiftDetail } from "../dashboard/ShiftDetail.jsx";

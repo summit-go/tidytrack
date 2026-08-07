@@ -136,6 +136,7 @@ import {
   photoFilename,
   buildZipBlob,
   canShareFiles,
+  readPhotoTakenAt,
 } from "../../../lib/photos.js";
 import { sessionStore } from "../../../lib/sessionStore.js";
 import {
@@ -202,7 +203,7 @@ import { PreparingBlockView } from "./PreparingBlockView.jsx";
 import { PropertyHub } from "./PropertyHub.jsx";
 import { PropertyPicker } from "./PropertyPicker.jsx";
 import { SimpleShiftView } from "./SimpleShiftView.jsx";
-import { StaffMessagesTab } from "../../../App.jsx";
+import { StaffMessagesTab } from "../../../features/messaging/StaffMessagesTab.jsx";
 import { SupplyChecklistGate } from "./SupplyChecklistGate.jsx";
 import { UnitPicker } from "./UnitPicker.jsx";
 import { ViewOnlyDashboard } from "./ViewOnlyDashboard.jsx";
@@ -3104,7 +3105,6 @@ export function EmployeeApp({
           photoModal={photoModal}
           onClosePhotoModal={() => setPhotoModal(null)}
           onUploadPhoto={uploadPhoto}
-          onChangePhotoKind={changePhotoKind}
           onChangePhotoKind={changePhotoKind}
           onSavePhotoNote={savePhotoNote}
           onOpenMessages={() => setShowMessages(true)}

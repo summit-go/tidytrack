@@ -123,6 +123,9 @@ import {
   localDayKey,
   fmtInvoiceDate,
   toDateKey,
+  isoToLocalInput,
+  localInputToISO,
+  shiftBillableAmount,
 } from "../../lib/format.js";
 import {
   naturalCompare,
@@ -136,6 +139,8 @@ import {
   photoFilename,
   buildZipBlob,
   canShareFiles,
+  readPhotoTakenAt,
+  sharePhotos,
 } from "../../lib/photos.js";
 import { sessionStore } from "../../lib/sessionStore.js";
 import {
@@ -155,6 +160,8 @@ import {
   unitPartyLabel,
   bathroomNumberForBedroom,
 } from "../../lib/labels.js";
+import { resolveItemLabel } from "../../lib/pickerLabels.js";
+import { generatePortalUserCode } from "../../lib/portal.js";
 import { splitTaskName } from "../../lib/tasks.js";
 import { useAssignmentSync } from "../../hooks/useAssignmentSync.js";
 import { useIdleDetector } from "../../hooks/useIdleDetector.js";
@@ -184,121 +191,63 @@ import { TabButton } from "../../components/TabButton.jsx";
 import { PhotoZoomViewer } from "../../components/PhotoZoomViewer.jsx";
 import { TranslateButton } from "../../components/TranslateButton.jsx";
 import { ZoomableImage } from "../../components/ZoomableImage.jsx";
-import { InvoiceDocument } from "../staff/manager/money/InvoiceDocument.jsx";
+import { MessageThread } from "./MessageThread.jsx";
 
-export function PortalInvoicesTab({ property }) {
-  const [invoices, setInvoices] = useState(null);
-  const [viewId, setViewId] = useState(null);
+export function PortalMessagesTab({
+  property,
+  portalKind,
+  onClose,
+  onPropertyRefresh,
+}) {
+  const [conversationId, setConversationId] = useState(null);
+  const [loaded, setLoaded] = useState(false);
 
-  const load = async () => {
-    const { data, error } = await supabase
-      .from("invoices")
-      .select(
-        "id, invoice_number, title, created_at, invoice_date, due_date, sent_at, total, status",
-      )
-      .eq("customer_id", property.id)
-      .in("status", ["sent", "paid"])
-      .order("sent_at", { ascending: false, nullsFirst: false })
-      .order("created_at", { ascending: false });
-    if (error) {
-      console.warn("[portal invoices] load failed", error);
-      setInvoices([]);
-      return;
-    }
-    setInvoices(data || []);
-  };
   useEffect(() => {
-    load(); /* eslint-disable-next-line */
+    (async () => {
+      // Find or create the property thread for this property
+      const { data: existing } = await supabase
+        .from("conversations")
+        .select("id")
+        .eq("customer_id", property.id)
+        .eq("kind", "property_thread")
+        .maybeSingle();
+      if (existing) {
+        setConversationId(existing.id);
+      } else {
+        const { data: created } = await supabase
+          .from("conversations")
+          .insert({ kind: "property_thread", customer_id: property.id })
+          .select()
+          .single();
+        if (created) setConversationId(created.id);
+      }
+      setLoaded(true);
+    })();
   }, [property.id]);
 
-  const fmtDay = (iso) =>
-    iso
-      ? new Date(iso).toLocaleDateString("en-US", {
-          month: "short",
-          day: "numeric",
-          year: "numeric",
-        })
-      : "—";
-
-  if (viewId) {
+  if (!loaded)
     return (
-      <InvoiceDocument
-        invoiceId={viewId}
-        readOnly
-        onBack={() => setViewId(null)}
-      />
-    );
-  }
-
-  if (invoices === null) {
-    return (
-      <div className="px-5 py-10 text-center text-stone-400 text-sm">
-        Loading…
+      <div className="px-5 pt-6">
+        <Splash text="Loading…" />
       </div>
     );
-  }
+  if (!conversationId)
+    return (
+      <div className="px-5 pt-6 text-stone-400">Could not load messages.</div>
+    );
+
+  const handleBack =
+    onClose || (() => onPropertyRefresh && onPropertyRefresh());
 
   return (
-    <div className="px-5 pt-4 pb-28">
-      <div className="mb-4">
-        <h2 className="font-serif text-2xl text-stone-900 mb-1">Invoices</h2>
-        <p className="text-sm text-stone-600">
-          Invoices from Summit Clean for {property.name}. Tap one to view or
-          download.
-        </p>
-      </div>
-
-      {invoices.length === 0 ? (
-        <div className="rounded-2xl bg-stone-50 border border-stone-200 p-8 text-center">
-          <FileText size={22} className="inline text-stone-300 mb-2" />
-          <div className="text-sm text-stone-500">No invoices yet.</div>
-          <div className="text-[11px] text-stone-400 font-mono mt-1">
-            They'll show up here once they're sent to you.
-          </div>
-        </div>
-      ) : (
-        <div className="space-y-2.5">
-          {invoices.map((inv) => {
-            const paid = inv.status === "paid";
-            return (
-              <button
-                key={inv.id}
-                onClick={() => setViewId(inv.id)}
-                className="w-full text-left rounded-2xl bg-white border border-stone-200 p-4 hover:border-stone-400 active:scale-[0.99] transition-all flex items-center justify-between gap-3"
-              >
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <span className="font-serif text-lg text-stone-900">
-                      {inv.invoice_number
-                        ? `#${inv.invoice_number}`
-                        : inv.title || "Invoice"}
-                    </span>
-                    <span
-                      className={`text-[9px] uppercase tracking-wider font-mono px-1.5 py-0.5 rounded-full font-bold ${
-                        paid
-                          ? "bg-emerald-100 text-emerald-800 border border-emerald-200"
-                          : "bg-blue-100 text-blue-800 border border-blue-200"
-                      }`}
-                    >
-                      {paid ? "Paid" : "Received"}
-                    </span>
-                  </div>
-                  <div className="text-[11px] text-stone-500 font-mono mt-1">
-                    Sent {fmtDay(inv.sent_at || inv.created_at)}
-                    {inv.due_date && ` · due ${fmtDay(inv.due_date)}`}
-                  </div>
-                </div>
-                <div className="flex items-center gap-2 flex-shrink-0">
-                  <span className="font-mono text-lg text-stone-900 tabular-nums">
-                    {inv.total != null ? fmtMoney(Number(inv.total)) : "—"}
-                  </span>
-                  <ChevronRight size={16} className="text-stone-400" />
-                </div>
-              </button>
-            );
-          })}
-        </div>
-      )}
-    </div>
+    <MessageThread
+      conversationId={conversationId}
+      otherName="Summit Clean team"
+      asPmCustomer={property}
+      pmActorKind={portalKind || "pm"}
+      isPropertyThread={true}
+      propertyName={property.name}
+      onBack={handleBack}
+    />
   );
 }

@@ -1,8 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { Splash } from "../components/Splash.jsx";
 import { LandingPage } from "./LandingPage.jsx";
-// Bridge import — StaffApp moves to src/apps/staff/StaffApp.jsx in A5b.
-import { StaffApp } from "../App.jsx";
+import { StaffApp } from "./staff/StaffApp.jsx";
 
 // Decides between LandingPage and StaffApp at the root URL based on remembered choice.
 export function RootRouter() {

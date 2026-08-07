@@ -2,6 +2,21 @@
 
 Concise history of changes for each commit, reverse chronological order
 
+## 2026-08-07 - Phase A bridge-import fix
+
+- Fixed missing `isBetaFeaturesEnabled` import in `DailyCalendar.jsx` (runtime crash on manager daily view after sign-in)
+- Patched `extract-a6-manager-tabs.mjs` and `extract-a10-a5b.mjs` to add bridge import for `isBetaFeaturesEnabled` consumers
+- Roadmap/plan v1.4: documented deferred `money/` tab; filled changelog gaps for A5a and A7
+
+## 2026-08-07 - Phase A10 + A5b: Messaging + late shells (Phase A exit)
+
+- **A10** — Extracted 7 messaging symbols to `src/features/messaging/`: `StaffMessagesTab`, `ConversationList`, `NewDmPicker`, `NewPropertyThreadPicker`, `MessageThread`, `PortalMessagesTab`, `InboxView`
+- **A5b** — Extracted late shells: `StaffApp`, `BetaShell` (+ `readBetaView`/`writeBetaView`/`isBetaFeaturesEnabled`), `ManagerShell`, `PortalApp`, `PortalSignIn`, `PortalPropertyPicker`, `PortalDashboard`
+- **Deferred A6 money** — Also extracted money tab symbols still in `App.jsx` to `src/apps/staff/manager/money/` (required for thin entry)
+- Co-located lib orphans: `resolveItemLabel` + picker dictionaries → `src/lib/pickerLabels.js`; `generatePortalUserCode` → `src/lib/portal.js`; `readPhotoTakenAt`/`sharePhotos`, `shiftBillableAmount`/`isoToLocalInput`/`localInputToISO` → existing lib modules
+- `App.jsx` is now ~37 lines (route switch + `TranslationProvider` only); inventory regenerated (1 symbol)
+- Updated bridge imports across portal, manager, cleaner consumers; `npm run build` passes
+
 ## 2026-08-07 - Phase A9: Cross-cutting assignments (`src/apps/cross-cutting/`)
 
 - Extracted 20 cross-cutting assignment symbols into `src/apps/cross-cutting/`: modals/leaves (`WorkBlockAssignmentLink`, `SpanishTranslationPanel`, `WelcomeModal`, `IdleWarningModal`, `ChangePinModal`, `TranslationOverridesModal`, `SheetQuickViewModal`, `ReviewLine`, `NextUpModal`, `SwitchBedroomModal`, `ReassignModal`, `AttachmentModal`, `BlockedNoteModal`, `RequestNewItemModal`, `ReviewAssignmentModal`), views (`ChecklistAssignmentView`, `AssignmentViewer`, `SuggestedTabContent`), megacomponents (`ChecklistAssignmentWizard`, `AssignmentTabContent`)
@@ -16,6 +31,14 @@ Concise history of changes for each commit, reverse chronological order
 - Portal files bridge-import symbols still in `App.jsx`: `WelcomeModal`, `PortalMessagesTab` (A10), `ChecklistAssignmentWizard`, `InvoiceDocument`, `SpanishTranslationPanel`; plus `QuickAssignmentForm` from manager and `SearchableUnitPicker` from cleaner
 - `App.jsx` ~5,400 lines removed (~24k → ~18.8k); `npm run build` passes
 
+## 2026-08-07 - Phase A7: Cleaner tree (`src/apps/staff/cleaner/`)
+
+- Extracted 47 cleaner symbols into `src/apps/staff/cleaner/`: `EmployeeApp` shell, supply/property/unit pickers, work-block flow (including `InlineBedroomTasks`), tasks/photos, team-on-site, cards/lists, nav/menu, `AssignmentsPanel`
+- Early bridge extractions for A7 dependencies: `ItemsDropdown`, `LeaveWorkblockModal` (pulled forward from A4/A7 boundary)
+- Co-located label helpers → `src/lib/labels.js` where shared with manager tabs
+- Cleaner files bridge-import symbols still in `App.jsx` at extraction time (A9 megacomponents, messaging, cross-cutting modals)
+- `App.jsx` ~8,700 lines removed (~38k → ~29k); `npm run build` passes
+
 ## 2026-08-07 - Phase A6: Manager tabs (`src/apps/staff/manager/`)
 
 - Extracted 48 manager tab symbols into five folders: `daily/` (10), `dashboard/` (12), `team/` (4), `properties/` (13), `assignments/` (9)
@@ -28,6 +51,13 @@ Concise history of changes for each commit, reverse chronological order
 - Extracted 19 shared leaf components to `src/components/` (chips, progress bars, photo modals, translation UI, `Header`, `NotificationBell`, etc.)
 - Early bridge extractions for A4 dependencies: `LeaveWorkblockModal` and `ItemsDropdown` → `src/apps/staff/cleaner/`; `splitTaskName` → `src/lib/tasks.js`
 - `App.jsx` imports all A4 symbols; ~2,400 lines removed from monolith
+- `npm run build` passes
+
+## 2026-08-07 - Phase A5a: Early routing shells (`src/apps/`)
+
+- Extracted `RootRouter`, `LandingPage` → `src/apps/`
+- Extracted `SignIn`, `ConfigError` → `src/apps/staff/`
+- `RootRouter` bridge-imports `StaffApp` (moved to A5b); hash routing unchanged
 - `npm run build` passes
 
 ## 2026-08-07 - Phase A2 + A3: Hooks and contexts

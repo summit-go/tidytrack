@@ -123,6 +123,9 @@ import {
   localDayKey,
   fmtInvoiceDate,
   toDateKey,
+  isoToLocalInput,
+  localInputToISO,
+  shiftBillableAmount,
 } from "../../../../lib/format.js";
 import {
   naturalCompare,
@@ -136,6 +139,8 @@ import {
   photoFilename,
   buildZipBlob,
   canShareFiles,
+  readPhotoTakenAt,
+  sharePhotos,
 } from "../../../../lib/photos.js";
 import { sessionStore } from "../../../../lib/sessionStore.js";
 import {
@@ -147,7 +152,16 @@ import {
   translateText,
   autoTranslateAssignment,
 } from "../../../../lib/translation.js";
-import { buildTargetTitle, unitSizeLabel, shortenBedroom, partyDisplay, unitPartyLabel } from "../../../../lib/labels.js";
+import {
+  buildTargetTitle,
+  unitSizeLabel,
+  shortenBedroom,
+  partyDisplay,
+  unitPartyLabel,
+  bathroomNumberForBedroom,
+} from "../../../../lib/labels.js";
+import { resolveItemLabel } from "../../../../lib/pickerLabels.js";
+import { generatePortalUserCode } from "../../../../lib/portal.js";
 import { splitTaskName } from "../../../../lib/tasks.js";
 import { useAssignmentSync } from "../../../../hooks/useAssignmentSync.js";
 import { useIdleDetector } from "../../../../hooks/useIdleDetector.js";
@@ -177,115 +191,65 @@ import { TabButton } from "../../../../components/TabButton.jsx";
 import { PhotoZoomViewer } from "../../../../components/PhotoZoomViewer.jsx";
 import { TranslateButton } from "../../../../components/TranslateButton.jsx";
 import { ZoomableImage } from "../../../../components/ZoomableImage.jsx";
-import { ItemsDropdown } from "../../cleaner/ItemsDropdown.jsx";
-import { AssignedVsCleanedView } from "../daily/AssignedVsCleanedView.jsx";
-import { BedroomHistoryView } from "../daily/BedroomHistoryView.jsx";
-import { DailyCalendar } from "../daily/DailyCalendar.jsx";
-import { DailyDayDetail } from "../daily/DailyDayDetail.jsx";
-import { DailyUnitDayDetail } from "../daily/DailyUnitDayDetail.jsx";
-import { InboxView } from "../../../../features/messaging/InboxView.jsx";
 
-export function DailyView({ employee, onSignOut, onOpenMessages, onLogoClick }) {
-  const [view, setView] = useState({ kind: "calendar" });
-  const showMoney = canSeeMoney(employee);
-  // Persistent state for the Assigned vs Cleaned audit so its filters
-  // / property / date range survive a side trip into BedroomHistoryView.
-  // Lifted from AssignedVsCleanedView itself because that component
-  // unmounts when the user navigates to a bedroom's history and back —
-  // local useState would reset every time. Held at this level (the
-  // common parent of both views) so neither leg of the journey loses it.
-  const todayISO = new Date().toISOString().split("T")[0];
-  const [auditState, setAuditState] = useState({
-    selectedPropertyId: "",
-    start: todayISO,
-    end: todayISO,
-    filterBuildings: [],
-    filterStatuses: [],
-    collapsedBuildings: [],
-    scrollY: 0,
-  });
+export function MoneyView({ employee, onSignOut, onOpenMessages, onLogoClick }) {
+  const [subTab, setSubTab] = useState("invoices"); // 'invoices' | 'payroll' | 'reports' | 'profit'
 
-  const openBedroomHistory = (params) =>
-    setView({ kind: "bedroom-history", ...params, from: view });
-
-  if (view.kind === "day") {
-    return (
-      <DailyDayDetail
-        date={view.date}
+  const ChildView =
+    subTab === "invoices"
+      ? InvoiceView
+      : subTab === "payments"
+        ? InvoicePaymentsReport
+        : subTab === "payroll"
+          ? ExportView
+          : subTab === "profit"
+            ? ProfitReportView
+            : CleaningsReportView;
+  return (
+    <div>
+      <ScreenId id="OW-MONEY" />
+      <ChildView
         employee={employee}
-        showMoney={showMoney}
-        onBack={() => setView({ kind: "calendar" })}
-        onOpenUnit={(propertyId, unitId, unitLabel, propertyName) =>
-          setView({
-            kind: "unit-day",
-            date: view.date,
-            propertyId,
-            unitId,
-            unitLabel,
-            propertyName,
-          })
+        onSignOut={onSignOut}
+        onOpenMessages={onOpenMessages}
+        onLogoClick={onLogoClick}
+        topToggle={
+          <div className="px-5 pt-4">
+            <div className="flex items-center gap-1 p-1 bg-stone-100 rounded-xl">
+              <button
+                onClick={() => setSubTab("invoices")}
+                className={`flex-1 py-2 px-3 rounded-lg text-xs font-medium transition-colors flex items-center justify-center gap-1.5 ${subTab === "invoices" ? "bg-white shadow-sm text-stone-900" : "text-stone-500"}`}
+              >
+                <FileText size={13} /> Invoices
+              </button>
+              <button
+                onClick={() => setSubTab("payments")}
+                className={`flex-1 py-2 px-3 rounded-lg text-xs font-medium transition-colors flex items-center justify-center gap-1.5 ${subTab === "payments" ? "bg-white shadow-sm text-stone-900" : "text-stone-500"}`}
+              >
+                <Check size={13} /> Payments
+              </button>
+              <button
+                onClick={() => setSubTab("payroll")}
+                className={`flex-1 py-2 px-3 rounded-lg text-xs font-medium transition-colors flex items-center justify-center gap-1.5 ${subTab === "payroll" ? "bg-white shadow-sm text-stone-900" : "text-stone-500"}`}
+              >
+                <DollarSign size={13} /> Payroll
+              </button>
+              <button
+                onClick={() => setSubTab("reports")}
+                className={`flex-1 py-2 px-3 rounded-lg text-xs font-medium transition-colors flex items-center justify-center gap-1.5 ${subTab === "reports" ? "bg-white shadow-sm text-stone-900" : "text-stone-500"}`}
+              >
+                <ClipboardList size={13} /> Cleanings
+              </button>
+              <button
+                onClick={() => setSubTab("profit")}
+                className={`flex-1 py-2 px-3 rounded-lg text-xs font-medium transition-colors flex items-center justify-center gap-1.5 ${subTab === "profit" ? "bg-white shadow-sm text-stone-900" : "text-stone-500"}`}
+              >
+                <DollarSign size={13} /> Profit
+              </button>
+            </div>
+          </div>
         }
       />
-    );
-  }
-  if (view.kind === "unit-day") {
-    return (
-      <DailyUnitDayDetail
-        date={view.date}
-        propertyId={view.propertyId}
-        unitId={view.unitId}
-        unitLabel={view.unitLabel}
-        propertyName={view.propertyName}
-        employee={employee}
-        showMoney={showMoney}
-        onBack={() => setView({ kind: "day", date: view.date })}
-        onOpenBedroomHistory={openBedroomHistory}
-      />
-    );
-  }
-  if (view.kind === "bedroom-history") {
-    return (
-      <BedroomHistoryView
-        propertyId={view.propertyId}
-        propertyName={view.propertyName}
-        unitId={view.unitId}
-        unitLabel={view.unitLabel}
-        partyId={view.partyId}
-        partyLabel={view.partyLabel}
-        employee={employee}
-        onBack={() => setView(view.from || { kind: "calendar" })}
-      />
-    );
-  }
-  if (view.kind === "inbox") {
-    return (
-      <InboxView
-        employee={employee}
-        onBack={() => setView({ kind: "calendar" })}
-      />
-    );
-  }
-  if (view.kind === "assigned-vs-cleaned") {
-    return (
-      <AssignedVsCleanedView
-        employee={employee}
-        onBack={() => setView({ kind: "calendar" })}
-        onOpenBedroomHistory={openBedroomHistory}
-        persistedState={auditState}
-        onStateChange={setAuditState}
-      />
-    );
-  }
-
-  return (
-    <DailyCalendar
-      employee={employee}
-      onSignOut={onSignOut}
-      onPickDay={(date) => setView({ kind: "day", date })}
-      onOpenInbox={() => setView({ kind: "inbox" })}
-      onOpenAssignedVsCleaned={() => setView({ kind: "assigned-vs-cleaned" })}
-      onOpenMessages={onOpenMessages}
-      onLogoClick={onLogoClick}
-    />
+    </div>
   );
 }

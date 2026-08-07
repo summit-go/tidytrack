@@ -109,3 +109,31 @@ export const toDateKey = (d) => {
   const dy = String(d.getDate()).padStart(2, '0');
   return `${yr}-${mo}-${dy}`;
 };
+
+export function shiftBillableAmount(s, showMoney) {
+  if (!showMoney || !s.end_time) return 0;
+  if (s.customer?.property_type === "multi_unit") {
+    return (s.work_blocks || []).reduce((sum, b) => {
+      if (!b.end_time) return sum;
+      const h = (new Date(b.end_time) - new Date(b.start_time)) / 1000 / 3600;
+      return (
+        sum + h * (b.bill_rate_at_work || s.customer?.bill_rate_hourly || 0)
+      );
+    }, 0);
+  }
+  if (s.bill_rate_at_work) return shiftBillableHours(s) * s.bill_rate_at_work;
+  return 0;
+}
+
+export function isoToLocalInput(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+export function localInputToISO(local) {
+  if (!local) return null;
+  // new Date('YYYY-MM-DDTHH:MM') is interpreted as local time
+  return new Date(local).toISOString();
+}

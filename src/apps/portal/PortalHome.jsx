@@ -190,7 +190,7 @@ import { PortalHistoryTab } from "./PortalHistoryTab.jsx";
 import { PortalInvoicesTab } from "./PortalInvoicesTab.jsx";
 import { PortalLangToggle } from "./PortalLangToggle.jsx";
 import { PortalMenuSheet } from "./PortalMenuSheet.jsx";
-import { PortalMessagesTab } from "../../App.jsx";
+import { PortalMessagesTab } from "../../features/messaging/PortalMessagesTab.jsx";
 import { PortalPhotoUploadTab } from "./PortalPhotoUploadTab.jsx";
 import { PortalScheduleTab } from "./PortalScheduleTab.jsx";
 import { PortalTeamModal } from "./PortalTeamModal.jsx";

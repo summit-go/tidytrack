@@ -92,6 +92,7 @@ const BRIDGE_SYMBOLS = [
   "SearchableUnitPicker",
   "StatusIcon",
   "Stepper",
+  "isBetaFeaturesEnabled",
 ];
 
 const SHARED_PREAMBLE = `import React, { useState, useEffect, useCallback, useRef, useContext } from "react";

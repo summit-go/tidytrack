@@ -178,6 +178,7 @@ import { PhotoZoomViewer } from "../../../../components/PhotoZoomViewer.jsx";
 import { TranslateButton } from "../../../../components/TranslateButton.jsx";
 import { ZoomableImage } from "../../../../components/ZoomableImage.jsx";
 import { ItemsDropdown } from "../../cleaner/ItemsDropdown.jsx";
+import { isBetaFeaturesEnabled } from "../../BetaShell.jsx";
 import { ActivityTimelineView } from "../daily/ActivityTimelineView.jsx";
 import { SupplyChecklistManager } from "../../cleaner/SupplyChecklistManager.jsx";
 import { TranslationOverridesModal } from "../../../cross-cutting/TranslationOverridesModal.jsx";

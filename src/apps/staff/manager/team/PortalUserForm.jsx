@@ -1,3 +1,4 @@
+import { generatePortalUserCode } from "../../../../lib/portal.js";
 import React, { useState, useEffect, useCallback, useRef, useContext } from "react";
 import {
   Search,

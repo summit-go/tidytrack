@@ -136,6 +136,7 @@ import {
   photoFilename,
   buildZipBlob,
   canShareFiles,
+  sharePhotos,
 } from "../../lib/photos.js";
 import { sessionStore } from "../../lib/sessionStore.js";
 import {

@@ -188,7 +188,7 @@ import { ItemsDropdown } from "./ItemsDropdown.jsx";
 import { LeaveWorkblockModal } from "./LeaveWorkblockModal.jsx";
 import { EditItemLabelModal } from "./EditItemLabelModal.jsx";
 import { RequestItemsModal } from "./RequestItemsModal.jsx";
-import { resolveItemLabel } from "../../../App.jsx";
+import { resolveItemLabel } from "../../../lib/pickerLabels.js";
 
 export function TaskCategoryPicker({
   busy,

@@ -106,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap131";
+const BUILD_TAG = "aug6-tap132";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -9848,7 +9848,7 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
           existing={(tasks.find(t => t.id === photoModal.taskId)?.photos || []).filter(p => !p.deleted_at)}
           employee={employee}
           onDeletePhoto={onDeletePhoto ? (photoId) => onDeletePhoto(photoId, photoModal.taskId) : null}
-          onUpload={(file) => onUploadPhoto(photoModal.taskId, photoModal.kind, file)}
+          onUpload={(file, chosenKind) => onUploadPhoto(photoModal.taskId, chosenKind || photoModal.kind, file)}
           onChangeKind={onChangePhotoKind ? (photoId, newKind) => onChangePhotoKind(photoId, photoModal.taskId, newKind) : null}
           onSaveNote={onSavePhotoNote}
           onClose={onClosePhotoModal} />
@@ -10286,7 +10286,7 @@ function SimpleShiftView({ shift, tasks, activeTask, employeeName, employee, onS
           existing={(tasks.find(t => t.id === photoModal.taskId)?.photos || []).filter(p => !p.deleted_at)}
           employee={employee}
           onDeletePhoto={onDeletePhoto ? (photoId) => onDeletePhoto(photoId, photoModal.taskId) : null}
-          onUpload={(file) => onUploadPhoto(photoModal.taskId, photoModal.kind, file)}
+          onUpload={(file, chosenKind) => onUploadPhoto(photoModal.taskId, chosenKind || photoModal.kind, file)}
           onChangeKind={onChangePhotoKind ? (photoId, newKind) => onChangePhotoKind(photoId, photoModal.taskId, newKind) : null}
           onSaveNote={onSavePhotoNote}
           onClose={onClosePhotoModal} />
@@ -11451,9 +11451,11 @@ function PhotoModal({ kind, taskName, existing, onUpload, onSaveNote, onClose, e
     let failed = 0;
     try {
       // Upload each selected photo in turn (gallery multi-select or one shot).
+      // Uploads go into the CURRENTLY SELECTED bucket tab, so the cleaner
+      // chooses before/after/damage/couldn't-clean up front (no auto-assign).
       for (const file of files) {
         try {
-          const uploaded = await onUpload(file);
+          const uploaded = await onUpload(file, bucketTab);
           if (uploaded && uploaded.id) last = uploaded;
         } catch (err) { failed++; console.warn('[photo] one upload failed', err); }
       }
@@ -11519,7 +11521,7 @@ function PhotoModal({ kind, taskName, existing, onUpload, onSaveNote, onClose, e
               can. Your manager and the property manager both see it.
             </div>
           )}
-          {existingPhotos.length > 0 && (() => {
+          {(() => {
             const BUCKETS = [
               { k: 'before', label: 'Before', active: 'bg-stone-900 text-white border-stone-900' },
               { k: 'after', label: 'After', active: 'bg-stone-900 text-white border-stone-900' },
@@ -11530,8 +11532,13 @@ function PhotoModal({ kind, taskName, existing, onUpload, onSaveNote, onClose, e
             const shown = existingPhotos.filter(p => p.kind === bucketTab);
             return (
               <div className="mb-4">
-                {/* Bucket tabs — tap to view that bucket. Also drop targets:
-                   drag a photo onto a tab to move it into that bucket. */}
+                <div className="text-[11px] uppercase tracking-wider font-mono text-stone-500 mb-1.5">
+                  Which bucket?
+                </div>
+                {/* Bucket tabs — tap to choose which bucket you're adding to /
+                   viewing. Also drop targets: drag a photo onto a tab to move
+                   it there. The cleaner picks the bucket BEFORE taking or
+                   uploading, so nothing auto-assigns. */}
                 <div className="flex items-center gap-1.5 flex-wrap mb-3">
                   {BUCKETS.map(b => (
                     <button key={b.k}
@@ -11545,14 +11552,14 @@ function PhotoModal({ kind, taskName, existing, onUpload, onSaveNote, onClose, e
                     </button>
                   ))}
                 </div>
-                {onChangeKind && (
+                {onChangeKind && existingPhotos.length > 0 && (
                   <div className="text-[11px] text-stone-500 mb-2">
-                    Drag a photo onto a bucket to move it, or use the tags under each photo.
+                    Drag a photo onto a bucket to move it there.
                   </div>
                 )}
                 {shown.length === 0 ? (
-                  <div className="text-center py-6 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-xl mb-2">
-                    No {BUCKETS.find(b => b.k === bucketTab)?.label.toLowerCase()} photos yet.
+                  <div className="text-center py-4 text-stone-400 text-xs border-2 border-dashed border-stone-200 rounded-xl mb-2">
+                    No {BUCKETS.find(b => b.k === bucketTab)?.label.toLowerCase()} photos yet — take or upload one below.
                   </div>
                 ) : (
                   <div className="grid grid-cols-2 gap-2">
@@ -11664,6 +11671,9 @@ function PhotoModal({ kind, taskName, existing, onUpload, onSaveNote, onClose, e
             </div>
           ) : (
             <div className="space-y-2.5">
+              <div className="text-[11px] uppercase tracking-wider font-mono text-stone-500">
+                Adding to <span className={`font-bold ${bucketTab === 'damage' ? 'text-red-600' : bucketTab === KIND_CANNOT ? 'text-yellow-700' : 'text-stone-800'}`}>{photoKindLabel(bucketTab)}</span> — tap a bucket above to change
+              </div>
               {/* Take a live photo with the camera. */}
               <label className="block w-full p-6 border-2 border-dashed rounded-2xl text-center cursor-pointer transition-colors border-stone-300 hover:border-stone-900">
                 <Camera size={28} className="mx-auto mb-2 text-stone-400" />

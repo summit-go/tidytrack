@@ -23,4 +23,4 @@ There is no styleguide yet. If one is added later, link it here.
 ## Rules for agents
 
 - Update `aiDocs/changelog.md` with every commit.
-- Git operations are read-only for agents. Humans make commits — do not `git commit`, `git push`, or otherwise write to git history yourself.
+- Git operations are read-only for agents. Humans make stages, commits, and pushes — do not `git commit`, `git push`, or otherwise write to git history yourself.

@@ -106,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap126";
+const BUILD_TAG = "aug6-tap127";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -9011,6 +9011,86 @@ function OtherWorkblocksHere({ unitId, partyId, currentBlockId, currentEmployeeI
 // pause/done). Conditional rendering inside it for "no block yet"
 // would tangle the logic. Cleaner to have a dedicated screen.
 // =================================================================
+// Inline task list for the "ready to start" screen — the same content the
+// quick-glance modal used to show, but rendered right under the card so the
+// cleaner sees what they'll clean without opening a separate screen. Grouped
+// by section, two columns, read-only.
+function InlineBedroomTasks({ propertyId, unitId, partyId, employee }) {
+  const { locale } = useLocale();
+  const { overrides } = useItemLabelOverrides(propertyId, locale, employee);
+  const [items, setItems] = useState([]);
+  const [loaded, setLoaded] = useState(false);
+  const [open, setOpen] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!unitId || !partyId) { setLoaded(true); return; }
+      const { data, error } = await supabase.from('assignment_targets')
+        .select('id, status, template_item_key, template_section, status_notes, assignment:assignments!inner(active, deleted_at)')
+        .eq('unit_id', unitId).eq('party_id', partyId);
+      if (cancelled) return;
+      if (error) { setLoaded(true); return; }
+      const live = (data || []).filter(t => t.assignment?.active && !t.assignment?.deleted_at && t.status !== 'done' && t.status !== 'blocked');
+      setItems(live);
+      setLoaded(true);
+    })();
+    return () => { cancelled = true; };
+  }, [unitId, partyId]);
+
+  const labelFor = (t) => {
+    if (t.status_notes && (t.template_item_key?.startsWith?.('requested:') || t.template_item_key?.startsWith?.('custom_'))) return t.status_notes;
+    const key = t.template_item_key || '';
+    const fallback = key.replace(/^[a-z]+:/, '').replace(/_/g, ' ').replace(/^./, c => c.toUpperCase());
+    return resolveItemLabel(key, locale, overrides, fallback);
+  };
+
+  if (loaded && items.length === 0) return null;
+
+  const SECTIONS = ['bedroom', 'vanity', 'bathroom', 'general'];
+  const bySection = {};
+  items.forEach(t => { const s = (t.template_section || 'other').toLowerCase(); (bySection[s] = bySection[s] || []).push(t); });
+  const order = [...SECTIONS.filter(s => bySection[s]), ...Object.keys(bySection).filter(s => !SECTIONS.includes(s))];
+
+  return (
+    <div className="mb-4 rounded-2xl bg-white border border-stone-200 overflow-hidden">
+      <button onClick={() => setOpen(o => !o)}
+        className="w-full flex items-center justify-between px-4 py-3 active:scale-[0.99] transition">
+        <span className="text-xs uppercase tracking-wider font-mono text-stone-500 flex items-center gap-2">
+          <FileText size={13} /> What you'll clean here{loaded ? ` · ${items.length}` : ''}
+        </span>
+        <ChevronRight size={15} className={`text-stone-400 transition-transform ${open ? 'rotate-90' : ''}`} />
+      </button>
+      {open && (
+        <div className="px-4 pb-4">
+          {!loaded ? (
+            <div className="text-center py-4 text-stone-400 text-sm">Loading…</div>
+          ) : (
+            <div className="space-y-3">
+              {order.map(sec => (
+                <div key={sec}>
+                  <div className="text-[10px] uppercase tracking-wider font-mono text-stone-400 mb-1.5">
+                    {sec} ({bySection[sec].length})
+                  </div>
+                  <div className="grid grid-cols-2 gap-1">
+                    {bySection[sec].map(t => (
+                      <div key={t.id} className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-stone-50 border border-stone-200">
+                        <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
+                          t.status === 'in_progress' ? 'bg-amber-500' : t.status === 'paused' ? 'bg-amber-400' : 'bg-stone-300'}`} />
+                        <span className="text-xs text-stone-700 min-w-0 break-words">{labelFor(t)}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function PreparingBlockView({ shift, pendingStart, employeeName, employee,
   onSignOut, onCancel, onStart, onSendBackToPending, onReopen, onOpenMessages, onOpenBedroomHistory, onJoinBlock, onExit, busy }) {
   const handleLogoClick = () => onCancel();
@@ -9128,6 +9208,12 @@ function PreparingBlockView({ shift, pendingStart, employeeName, employee,
         <AssignmentBanner propertyId={shift.customer_id}
           unitId={pendingStart.unitId} partyId={pendingStart.partyId}
           employee={employee} workScreen onStartCleaning={onStart} />
+
+        {/* 3: the task list shown INLINE so the cleaner sees exactly what
+           they'll clean without opening a separate quick-glance screen. */}
+        <InlineBedroomTasks propertyId={shift.customer_id}
+          unitId={pendingStart.unitId} partyId={pendingStart.partyId}
+          employee={employee} />
 
         {/* What's already happened here — including anyone working it
            right now, with their photos. You should never have to start a
@@ -11300,6 +11386,12 @@ function PhotoModal({ kind, taskName, existing, onUpload, onSaveNote, onClose, e
   // When the cleaner taps an existing photo in the grid, open the
   // full-screen zoom viewer so they can inspect detail + read notes.
   const [zoomPhoto, setZoomPhoto] = useState(null);
+  // Which bucket's photos are shown in the grid. Defaults to the kind the
+  // modal opened with (or 'before' for the single-camera flow). Clicking a
+  // bucket tab shows only that bucket's photos.
+  const [bucketTab, setBucketTab] = useState(kind || 'before');
+  // Drag-and-drop: which photo id is being dragged (for the drop targets).
+  const [dragId, setDragId] = useState(null);
   const inputRef = useRef(null);
   const existingPhotos = Array.isArray(existing) ? existing : [];
   // "Couldn't clean" gets its own yellow treatment so a cleaner glancing
@@ -11347,7 +11439,7 @@ function PhotoModal({ kind, taskName, existing, onUpload, onSaveNote, onClose, e
           if (uploaded && uploaded.id) last = uploaded;
         } catch (err) { failed++; console.warn('[photo] one upload failed', err); }
       }
-      if (last) { setLastUploaded(last); setNoteDraft(''); }
+      if (last) { setLastUploaded(last); setNoteDraft(''); if (last.kind) setBucketTab(last.kind); }
       if (failed) setError(`${failed} photo${failed === 1 ? '' : 's'} failed to upload. The rest went through.`);
     } finally {
       setBusy(false);
@@ -11398,85 +11490,102 @@ function PhotoModal({ kind, taskName, existing, onUpload, onSaveNote, onClose, e
               can. Your manager and the property manager both see it.
             </div>
           )}
-          {existingPhotos.length > 0 && (
-            <div className="grid grid-cols-2 gap-2 mb-4">
-              {existingPhotos.map(p => {
-                const canDelete = !!onDeletePhoto && (
-                  employee?.role === 'owner' || employee?.role === 'manager' ||
-                  p.taken_by === employee?.id
-                );
-                return (
-                  <div key={p.id} className="relative">
-                    <button type="button"
-                      onClick={() => setZoomPhoto(p)}
-                      className="block aspect-square w-full rounded-xl overflow-hidden active:opacity-80 transition-opacity">
-                      <img src={p.public_url} alt="" loading="lazy"
-                        className="w-full h-full object-cover" />
+          {existingPhotos.length > 0 && (() => {
+            const BUCKETS = [
+              { k: 'before', label: 'Before', active: 'bg-stone-900 text-white border-stone-900' },
+              { k: 'after', label: 'After', active: 'bg-stone-900 text-white border-stone-900' },
+              { k: 'damage', label: 'Damage', active: 'bg-red-600 text-white border-red-600' },
+              { k: KIND_CANNOT, label: "Couldn't clean", active: 'bg-yellow-500 text-white border-yellow-500' },
+            ];
+            const countFor = (k) => existingPhotos.filter(p => p.kind === k).length;
+            const shown = existingPhotos.filter(p => p.kind === bucketTab);
+            return (
+              <div className="mb-4">
+                {/* Bucket tabs — tap to view that bucket. Also drop targets:
+                   drag a photo onto a tab to move it into that bucket. */}
+                <div className="flex items-center gap-1.5 flex-wrap mb-3">
+                  {BUCKETS.map(b => (
+                    <button key={b.k}
+                      onClick={() => setBucketTab(b.k)}
+                      onDragOver={(e) => { if (dragId) e.preventDefault(); }}
+                      onDrop={(e) => { e.preventDefault(); if (dragId && onChangeKind) { onChangeKind(dragId, b.k); setBucketTab(b.k); } setDragId(null); }}
+                      className={`text-[11px] uppercase tracking-wider font-mono px-2.5 py-1.5 rounded-full border transition flex items-center gap-1 ${
+                        bucketTab === b.k ? b.active : 'bg-white text-stone-500 border-stone-300 hover:bg-stone-100'
+                      } ${dragId ? 'ring-2 ring-offset-1 ring-stone-400' : ''}`}>
+                      {b.label} <span className="opacity-70">({countFor(b.k)})</span>
                     </button>
-                    {/* Took-extra toggle — flags this item as extra work. */}
-                    <button type="button"
-                      onClick={(e) => { e.stopPropagation(); toggleExtra(p); }}
-                      className={`absolute top-1.5 left-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold flex items-center gap-1 shadow-md ${extraFlags[p.id] ? 'bg-amber-500 text-white border border-amber-400' : 'bg-white text-amber-700 border-2 border-amber-400'}`}>
-                      <Clock size={12} /> {extraFlags[p.id] ? 'Extra ✓' : '+ Mark extra'}
-                    </button>
-                    {/* Attribution + delete overlay row. Sits at the
-                       bottom of the thumbnail. Trash only renders when
-                       the current cleaner is allowed to delete this
-                       photo (owner/manager OR the cleaner who took it). */}
-                    {(p.taken_by || canDelete) && (
-                      <div className="absolute bottom-0 left-0 right-0 px-2 py-1.5 bg-gradient-to-t from-stone-900/80 to-transparent rounded-b-xl flex items-end justify-between gap-2">
-                        <div className="text-[10px] font-mono text-stone-100 truncate">
-                          {p.taken_by === employee?.id
-                            ? 'by you'
-                            : (p.taken_by_employee?.name
-                                ? `by ${p.taken_by_employee.name}`
-                                : (p.taken_by ? 'shared' : ''))}
-                        </div>
-                        {canDelete && (
-                          <button type="button"
-                            onClick={(e) => { e.stopPropagation(); onDeletePhoto(p.id); }}
-                            className="p-1 rounded-full bg-stone-900/70 hover:bg-red-700 text-stone-100 hover:text-white">
-                            <Trash2 size={12} />
-                          </button>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          )}
-          {/* Per-photo bucket assignment — the cleaner tags each photo
-             into before / after / damage / couldn't clean, and can change
-             it here if it landed in the wrong bucket. */}
-          {existingPhotos.length > 0 && onChangeKind && (
-            <div className="mb-4 space-y-2">
-              {existingPhotos.map(p => (
-                <div key={`kind-${p.id}`} className="flex items-center gap-2">
-                  <img src={p.public_url} alt="" loading="lazy" className="w-9 h-9 rounded-lg object-cover flex-shrink-0" />
-                  <div className="flex items-center gap-1 flex-wrap">
-                    {[
-                      { k: 'before', label: 'Before' },
-                      { k: 'after', label: 'After' },
-                      { k: 'damage', label: 'Damage' },
-                      { k: KIND_CANNOT, label: "Couldn't clean" },
-                    ].map(o => (
-                      <button key={o.k} onClick={() => onChangeKind(p.id, o.k)}
-                        className={`text-[10px] uppercase tracking-wider font-mono px-2 py-1 rounded-full border transition ${
-                          p.kind === o.k
-                            ? (o.k === 'damage' ? 'bg-red-600 text-white border-red-600'
-                               : o.k === KIND_CANNOT ? 'bg-yellow-500 text-white border-yellow-500'
-                               : 'bg-stone-900 text-white border-stone-900')
-                            : 'bg-white text-stone-500 border-stone-300 hover:bg-stone-100'
-                        }`}>
-                        {o.label}
-                      </button>
-                    ))}
-                  </div>
+                  ))}
                 </div>
-              ))}
-            </div>
-          )}
+                {onChangeKind && (
+                  <div className="text-[11px] text-stone-500 mb-2">
+                    Drag a photo onto a bucket to move it, or use the tags under each photo.
+                  </div>
+                )}
+                {shown.length === 0 ? (
+                  <div className="text-center py-6 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-xl mb-2">
+                    No {BUCKETS.find(b => b.k === bucketTab)?.label.toLowerCase()} photos yet.
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-2 gap-2">
+                    {shown.map(p => {
+                      const canDelete = !!onDeletePhoto && (
+                        employee?.role === 'owner' || employee?.role === 'manager' ||
+                        p.taken_by === employee?.id
+                      );
+                      return (
+                        <div key={p.id} className="relative"
+                          draggable={!!onChangeKind}
+                          onDragStart={() => setDragId(p.id)}
+                          onDragEnd={() => setDragId(null)}>
+                          <button type="button"
+                            onClick={() => setZoomPhoto(p)}
+                            className={`block aspect-square w-full rounded-xl overflow-hidden active:opacity-80 transition-opacity ${dragId === p.id ? 'opacity-40' : ''}`}>
+                            <img src={p.public_url} alt="" loading="lazy"
+                              className="w-full h-full object-cover" />
+                          </button>
+                          <button type="button"
+                            onClick={(e) => { e.stopPropagation(); toggleExtra(p); }}
+                            className={`absolute top-1.5 left-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold flex items-center gap-1 shadow-md ${extraFlags[p.id] ? 'bg-amber-500 text-white border border-amber-400' : 'bg-white text-amber-700 border-2 border-amber-400'}`}>
+                            <Clock size={12} /> {extraFlags[p.id] ? 'Extra ✓' : '+ Mark extra'}
+                          </button>
+                          {(p.taken_by || canDelete) && (
+                            <div className="absolute bottom-0 left-0 right-0 px-2 py-1.5 bg-gradient-to-t from-stone-900/80 to-transparent rounded-b-xl flex items-end justify-between gap-2">
+                              <div className="text-[10px] font-mono text-stone-100 truncate">
+                                {p.taken_by === employee?.id
+                                  ? 'by you'
+                                  : (p.taken_by_employee?.name
+                                      ? `by ${p.taken_by_employee.name}`
+                                      : (p.taken_by ? 'shared' : ''))}
+                              </div>
+                              {canDelete && (
+                                <button type="button"
+                                  onClick={(e) => { e.stopPropagation(); onDeletePhoto(p.id); }}
+                                  className="p-1 rounded-full bg-stone-900/70 hover:bg-red-700 text-stone-100 hover:text-white">
+                                  <Trash2 size={12} />
+                                </button>
+                              )}
+                            </div>
+                          )}
+                          {/* Quick reassign tags under each photo (tap fallback
+                             for when drag isn't handy on a phone). */}
+                          {onChangeKind && (
+                            <div className="flex items-center gap-1 flex-wrap mt-1">
+                              {BUCKETS.filter(b => b.k !== p.kind).map(b => (
+                                <button key={b.k} onClick={() => onChangeKind(p.id, b.k)}
+                                  className="text-[9px] uppercase tracking-wider font-mono px-1.5 py-0.5 rounded-full border bg-white text-stone-500 border-stone-300 hover:bg-stone-100">
+                                  → {b.label}
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
           {error && (
             <div className="mb-3 p-3 rounded-xl bg-red-50 border border-red-200 text-red-700 text-sm flex items-start gap-2">
               <AlertCircle size={16} className="flex-shrink-0 mt-0.5" /><span>{error}</span>

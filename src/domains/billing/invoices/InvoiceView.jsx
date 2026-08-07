@@ -190,12 +190,12 @@ import { TabButton } from "../../../components/TabButton.jsx";
 import { PhotoZoomViewer } from "../../../components/PhotoZoomViewer.jsx";
 import { TranslateButton } from "../../../components/TranslateButton.jsx";
 import { ZoomableImage } from "../../../components/ZoomableImage.jsx";
-import { DateRangePicker } from "./DateRangePicker.jsx";
-import { InvoiceDocument } from "./InvoiceDocument.jsx";
+import { DateRangePicker } from "../../../components/DateRangePicker.jsx";
+import { InvoiceDocument } from "../shared/InvoiceDocument.jsx";
 import { InvoiceDraftEditor } from "./InvoiceDraftEditor.jsx";
 import { InvoiceList } from "./InvoiceList.jsx";
 import { InvoicePreview } from "./InvoicePreview.jsx";
-import { PriceBookEditor } from "./PriceBookEditor.jsx";
+import { PriceBookEditor } from "../priceBook/PriceBookEditor.jsx";
 
 export function InvoiceView({
   employee,

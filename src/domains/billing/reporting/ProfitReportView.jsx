@@ -190,7 +190,7 @@ import { TabButton } from "../../../components/TabButton.jsx";
 import { PhotoZoomViewer } from "../../../components/PhotoZoomViewer.jsx";
 import { TranslateButton } from "../../../components/TranslateButton.jsx";
 import { ZoomableImage } from "../../../components/ZoomableImage.jsx";
-import { DateRangePicker } from "./DateRangePicker.jsx";
+import { DateRangePicker } from "../../../components/DateRangePicker.jsx";
 
 export function ProfitReportView({
   employee,

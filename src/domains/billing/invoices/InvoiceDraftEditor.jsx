@@ -205,8 +205,8 @@ import {
   extraAmount,
   lineAmount,
   lineFullAmount,
-} from "./invoiceAmounts.js";
-import { InvoiceDocument } from "./InvoiceDocument.jsx";
+} from "../shared/invoiceAmounts.js";
+import { InvoiceDocument } from "../shared/InvoiceDocument.jsx";
 
 export function InvoiceDraftEditor({
   property,

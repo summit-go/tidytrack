@@ -2,6 +2,14 @@
 
 Concise history of changes made for each commit, in reverse chronological order.
 
+## 2026-08-07 - Phase C Track 3 complete: Money module boundaries
+
+- Reorganized flat `domains/billing/manager/` into submodules: `shared/` (invoiceAmounts, InvoiceDocument), `priceBook/`, `invoices/`, `payroll/`, `reporting/`; `MoneyView` shell stays in `manager/`
+- Fixed portal→manager leak: `PortalInvoicesTab` now imports `InvoiceDocument` from `billing/shared/`
+- Moved `DateRangePicker` to `src/components/` (shared by billing + work dashboard); trimmed App.jsx-era unused imports
+- Trimmed `MoneyView` to tab-shell imports only (~260 → ~75 lines of imports/logic)
+- Track 3 roadmap at `ai/roadmaps/2026-08-07_phase-c-money-boundaries_roadmap.md`; behavior unchanged; `npm run build` passes
+
 ## 2026-08-07 - Phase C Track 2 complete: Billing visibility gate
 
 - Added `canSeePortalInvoices(portalUser)` in `lib/permissions.js` — per-user `can_view_invoices` opt-in + owner preview (`__preview`); module comments document staff vs portal gates

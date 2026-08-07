@@ -190,7 +190,7 @@ import { TabButton } from "../../../components/TabButton.jsx";
 import { PhotoZoomViewer } from "../../../components/PhotoZoomViewer.jsx";
 import { TranslateButton } from "../../../components/TranslateButton.jsx";
 import { ZoomableImage } from "../../../components/ZoomableImage.jsx";
-import { InvoiceDocument } from "./InvoiceDocument.jsx";
+import { InvoiceDocument } from "../shared/InvoiceDocument.jsx";
 
 export function InvoicePaymentsReport({
   employee,

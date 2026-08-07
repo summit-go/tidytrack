@@ -394,8 +394,9 @@ export function ManagerDashboard({
         ? `since ${fmtD(dateFrom)}`
         : `through ${fmtD(dateTo)}`;
 
-  const chip = (on, onClick, content) => (
+  const chip = (key, on, onClick, content) => (
     <button
+      key={key}
       onClick={onClick}
       className={`px-3 py-1 rounded-full text-xs font-mono flex items-center gap-1.5 ${on ? "bg-stone-900 text-stone-50" : "bg-white border border-stone-300 text-stone-600"}`}
     >
@@ -496,6 +497,7 @@ export function ManagerDashboard({
                   <div className="flex gap-1.5 flex-wrap">
                     {availableCleaners.map((c) =>
                       chip(
+                        c.id,
                         filterCleaners.has(c.id),
                         () => toggleCleaner(c.id),
                         c.name,
@@ -513,6 +515,7 @@ export function ManagerDashboard({
                   <div className="flex gap-1.5 flex-wrap">
                     {availableProperties.map((p) =>
                       chip(
+                        p.id,
                         filterProperties.has(p.id),
                         () => toggleProperty(p.id),
                         p.name,
@@ -528,6 +531,7 @@ export function ManagerDashboard({
                 </div>
                 <div className="flex gap-1.5 flex-wrap">
                   {chip(
+                    "open",
                     filterStatuses.has("open"),
                     () => toggleStatus("open"),
                     <>
@@ -536,6 +540,7 @@ export function ManagerDashboard({
                     </>,
                   )}
                   {chip(
+                    "in_progress",
                     filterStatuses.has("in_progress"),
                     () => toggleStatus("in_progress"),
                     <>
@@ -544,6 +549,7 @@ export function ManagerDashboard({
                     </>,
                   )}
                   {chip(
+                    "completed",
                     filterStatuses.has("completed"),
                     () => toggleStatus("completed"),
                     <>

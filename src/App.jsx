@@ -25,7 +25,6 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 // =================================================================
 const GOOGLE_TRANSLATE_API_KEY = "AIzaSyD7ceHPryMzs45hWJOyFNBxtOzQOEmJcSA";
 
-
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // ============================================================
@@ -96,7 +95,7 @@ const ASSIGNMENT_MAX_SIZE_MB = 20; // sanity cap on upload size
 const ASSIGNMENT_TYPES = [
   { value: 'cleaning_check', label: 'Cleaning check', short: 'Cleaning check', color: 'bg-sky-100 text-sky-800 border-sky-300' },
   { value: 'deep',           label: 'Deep clean',     short: 'Deep clean',     color: 'bg-purple-100 text-purple-800 border-purple-300' },
-  { value: 'move_out_check', label: 'Move-out check', short: 'Move-out check', color: 'bg-orange-100 text-orange-800 border-orange-300' },
+  { value: 'move_out_check', label: 'Move out',      short: 'Move out',       color: 'bg-orange-100 text-orange-800 border-orange-300' },
   { value: 'reclean',        label: 'Reclean',        short: 'Reclean',        color: 'bg-yellow-100 text-yellow-800 border-yellow-300' },
   { value: 'trash_out',      label: 'Trash out',      short: 'Trash out',      color: 'bg-lime-100 text-lime-800 border-lime-300' },
   { value: 'standard',       label: 'Standard clean', short: 'Standard clean', color: 'bg-emerald-100 text-emerald-800 border-emerald-300' },
@@ -107,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap119";
+const BUILD_TAG = "aug6-tap122";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -2000,6 +1999,33 @@ function ItemsDropdown({ items }) {
 // (supply_checklist_items); each sign-off is recorded
 // (supply_checklist_confirmations).
 // =================================================================
+// A small custom confirm dialog — replaces the browser's OK/Cancel popup
+// where we want branded styling and control over the button labels
+// (e.g. "Confirm" / "Cancel" instead of "OK" / "Cancel").
+function ConfirmModal({ open, title, message, confirmLabel = 'Confirm', cancelLabel = 'Cancel', onConfirm, onCancel, busy = false, danger = false }) {
+  if (!open) return null;
+  return (
+    <div className="fixed inset-0 z-[70] bg-stone-900/70 flex items-center justify-center p-5"
+      onClick={onCancel}>
+      <div onClick={(e) => e.stopPropagation()}
+        className="bg-white w-full max-w-sm rounded-3xl p-6 shadow-xl">
+        {title && <div className="font-serif text-lg text-stone-900 mb-1.5">{title}</div>}
+        {message && <div className="text-sm text-stone-600 mb-5 whitespace-pre-wrap">{message}</div>}
+        <div className="flex gap-2">
+          <button onClick={onCancel} disabled={busy}
+            className="flex-1 py-2.5 rounded-full bg-white border border-stone-300 text-stone-700 text-sm font-medium active:scale-95 transition disabled:opacity-50">
+            {cancelLabel}
+          </button>
+          <button onClick={onConfirm} disabled={busy}
+            className={`flex-1 py-2.5 rounded-full text-white text-sm font-semibold active:scale-95 transition disabled:opacity-50 ${danger ? 'bg-red-600 hover:bg-red-700' : 'bg-amber-700 hover:bg-amber-800'}`}>
+            {busy ? 'Working…' : confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function SupplyChecklistGate({ employee, onDone, onSignOut }) {
   const [items, setItems] = useState(null); // null = still loading
   const [checked, setChecked] = useState({});
@@ -2229,7 +2255,7 @@ function SupplyChecklistManager({ onClose }) {
 }
 
 // =================================================================
-function AddressLink({ address, icon = 'pin', className = '' }) {
+function AddressLink({ address, icon = 'pin', className = '', label = null }) {
   if (!address) return null;
   const mapsUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address)}`;
   const openMaps = (e) => {
@@ -2241,9 +2267,9 @@ function AddressLink({ address, icon = 'pin', className = '' }) {
     <span onClick={openMaps} role="link" tabIndex={0}
       onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') openMaps(e); }}
       className={`inline-flex items-center gap-1 cursor-pointer hover:underline active:opacity-60 ${className}`}
-      title="Open in maps">
+      title={`Open in maps: ${address}`}>
       {icon === 'pin' && <MapPin size={11} className="flex-shrink-0" />}
-      <span className="truncate">{address}</span>
+      <span className="truncate">{label || address}</span>
     </span>
   );
 }
@@ -3283,7 +3309,7 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
       {(!checklistMode || checklistTargets.length === 0 || pickerTab === 'not_started') && (
       <div>
         <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Pick what you'll clean</label>
-        <div className="grid grid-cols-4 gap-2">
+        <div className="flex flex-col gap-1.5">
           {(() => {
             // Per-section counts. total = pending+in_progress (work
             // that exists at this bedroom for this section), busy =
@@ -3345,20 +3371,13 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
                     }
                   }
                 }}
-                  className={`w-full pt-6 pb-3 px-1.5 min-h-[92px] rounded-xl border-2 font-medium text-sm transition-all flex flex-col items-center justify-center gap-1.5 ${
+                  className={`w-full py-3 pl-4 pr-20 rounded-xl border-2 font-medium text-sm transition-all flex items-center justify-between gap-3 ${
                     isOpen ? 'border-stone-900 bg-stone-900 text-stone-50' :
                     isEmpty ? 'border-stone-100 bg-stone-50 text-stone-400' :
                     'border-stone-200 bg-white text-stone-700 hover:border-stone-400'
                   }`}>
-                  <span className="leading-tight text-center">{c.label}</span>
-                  {/* Status chip below the section name. Replaces the
-                     bare "(busy/total)" count from before. Reads:
-                       - "Not assigned" when this section has 0 items
-                         in the assignment (i.e. don't need to clean)
-                       - "Started" when any item is in_progress
-                       - "Not started" otherwise.
-                     Count goes inline next to the chip so the cleaner
-                     can still see X/Y at a glance. */}
+                  <span className="leading-tight text-left">{c.label}</span>
+                  {/* Status chip — now inline on the right side of the row. */}
                   {inChecklist && (() => {
                     let chipText, chipColor;
                     if (s.total === 0) {
@@ -3372,9 +3391,9 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
                       chipColor = isOpen ? 'bg-stone-700 text-stone-200' : 'bg-stone-100 text-stone-600 border border-stone-200';
                     }
                     return (
-                      <span className={`text-[8px] uppercase tracking-wide font-mono font-bold px-1.5 py-0.5 rounded-full max-w-full inline-flex items-center ${chipColor}`}>
-                        <span className="truncate">{chipText}</span>
-                        {s.total > 0 && <span className="ml-1 opacity-75 flex-shrink-0">{s.busy}/{s.total}</span>}
+                      <span className={`text-[10px] uppercase tracking-wide font-mono font-bold px-2 py-0.5 rounded-full inline-flex items-center flex-shrink-0 ${chipColor}`}>
+                        <span>{chipText}</span>
+                        {s.total > 0 && <span className="ml-1 opacity-75">{s.busy}/{s.total}</span>}
                       </span>
                     );
                   })()}
@@ -3391,10 +3410,10 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
                     e.stopPropagation();
                     setRequestModalSection(c.id);
                   }}
-                    className={`absolute top-1.5 right-1.5 text-[8px] uppercase tracking-wider font-mono px-1.5 py-0.5 rounded-md transition-colors font-bold ${
+                    className={`absolute top-1/2 -translate-y-1/2 right-2 text-[9px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full transition-colors font-bold border ${
                       s.hasRequested
-                        ? (isOpen ? 'bg-amber-200 text-amber-900' : 'bg-amber-100 text-amber-800 border border-amber-300 hover:bg-amber-200')
-                        : (isOpen ? 'text-stone-400 hover:text-stone-200 hover:bg-stone-800' : 'text-stone-400 hover:text-stone-600 hover:bg-stone-100')
+                        ? 'bg-amber-100 text-amber-800 border-amber-300 hover:bg-amber-200'
+                        : 'bg-amber-500 text-white border-amber-500 hover:bg-amber-600'
                     }`}>
                     {s.hasRequested ? 'Requested' : 'Request'}
                   </button>
@@ -3680,26 +3699,13 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
         </div>
       )}
 
-      {(!checklistMode || checklistTargets.length === 0 || pickerTab === 'not_started') && category && (
-        <div>
-          <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">
-            Custom name <span className="normal-case text-stone-400">(optional)</span>
-          </label>
-          <input type="text" value={customName} onChange={(e) => setCustomName(e.target.value)}
-            placeholder={isGeneral && selectedSubs.size === 0 ? 'Defaults to "General"' :
-                         isGeneral && selectedSubs.size > 1 ? 'Custom prefix for all selected' :
-                         `Defaults to "${(isGeneral && selectedSubs.size === 1 ?
-                           cat.subcategories.find(s => s.id === Array.from(selectedSubs)[0])?.label :
-                           cat.label) || ''}"`}
-            className="w-full px-3 py-2.5 rounded-xl border border-stone-300 bg-white focus:outline-none focus:border-stone-900 text-stone-900 text-sm"
-            onKeyDown={(e) => e.key === 'Enter' && submit()} />
-        </div>
-      )}
+      {/* Custom naming lives in the "Custom" mode toggle above — no need
+         for a separate name field inside the Quick picker. */}
 
       <div className="flex gap-2 pt-1">
         <button onClick={submit} disabled={!canSubmit}
-          className="flex-1 py-3 rounded-xl bg-stone-900 text-stone-50 font-medium text-sm disabled:opacity-50 flex items-center justify-center gap-1.5">
-          <Play size={14} />
+          className="px-5 py-2 rounded-xl bg-stone-900 text-stone-50 font-medium text-xs disabled:opacity-50 flex items-center justify-center gap-1.5">
+          <Play size={13} />
           {hasTargetPicks
             ? (() => {
                 // If every picked target is currently paused, this is
@@ -3903,6 +3909,9 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   // before they're really ready to start). `null` when no pending start.
   // Shape: { unitId, partyId, unitLabel, partyLabel }
   const [pendingStart, setPendingStart] = useState(null);
+  // Custom finish-confirmation modal (replaces the browser confirm on
+  // "We are done here"). null = closed.
+  const [finishConfirmOpen, setFinishConfirmOpen] = useState(false);
   const [newTaskName, setNewTaskName] = useState('');
   const [loaded, setLoaded] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -4797,7 +4806,6 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   }
 
   const finishBlock = async () => {
-    if (!confirm(`Done in ${activeBlock.party?.label} at ${activeBlock.unit?.label}? You'll go back to the assignments.`)) return;
     setBusy(true);
     if (activeTask) await stopTask(activeTask, false);
     const ts = new Date().toISOString();
@@ -5722,7 +5730,6 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
               <h2 className="text-3xl font-light text-stone-900 tracking-tight mb-1">
                 Your <span className="font-serif italic text-amber-700">work</span>
               </h2>
-              <p className="text-xs text-stone-500">Tap a job to clock in and start.</p>
             </div>
             <CleanerWorkList employee={employee} currentPropertyId={null}
               onStartJob={startJob} onGoToBedroom={null} onSwitchProperty={null} />
@@ -5734,11 +5741,6 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
               <Clock size={18} />
               <span>Clock in without a job</span>
             </button>
-            <button onClick={startViewOnly} disabled={busy}
-              className="mt-6 px-5 py-2.5 rounded-full bg-white border border-stone-300 hover:border-stone-500 text-stone-700 text-sm font-medium flex items-center gap-2 active:scale-95 transition-transform disabled:opacity-50">
-              <Eye size={14} /> Just look around (no clock-in)
-            </button>
-            <p className="text-[11px] text-stone-400 mt-2">View messages, properties &amp; assignments without tracking time.</p>
           </div>
         </>)}
 
@@ -5835,8 +5837,17 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       busy={busy} />);
   }
   if (isMulti && activeBlock) {
-    return withIdleModal(<BlockView shift={shift} block={activeBlock} tasks={tasks} activeTask={activeTask}
-      employeeName={employee.name} employee={employee} onSignOut={signOutWithCleanup} onFinish={finishBlock}
+    return withIdleModal(<>
+      <ConfirmModal
+        open={finishConfirmOpen}
+        title="Close out this assignment?"
+        message="You will close out this entire assignment. Confirm?"
+        confirmLabel="Confirm" cancelLabel="Cancel"
+        busy={busy}
+        onCancel={() => setFinishConfirmOpen(false)}
+        onConfirm={async () => { await finishBlock(); setFinishConfirmOpen(false); }} />
+      <BlockView shift={shift} block={activeBlock} tasks={tasks} activeTask={activeTask}
+      employeeName={employee.name} employee={employee} onSignOut={signOutWithCleanup} onFinish={() => setFinishConfirmOpen(true)}
       onExit={async () => {
         // ✓ mark-complete / ✕ delete from the working screen should also CLOSE
         // the timer session. Without this the block was left open (paused) and
@@ -5875,7 +5886,8 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       onSwitchProperty={switchProperty}
       cleanerTab={cleanerTab} setCleanerTab={setCleanerTab}
       previewMode={previewMode}
-      busy={busy} />);
+      busy={busy} />
+    </>);
   }
   return withIdleModal(<SimpleShiftView shift={shift} tasks={tasks} activeTask={activeTask}
     employeeName={employee.name} employee={employee} onSignOut={signOutWithCleanup} onClockOut={clockOut}
@@ -6155,7 +6167,7 @@ function CleanerBottomNav({ active, onChange }) {
   return (
     <div className="fixed bottom-0 left-0 right-0 z-30 bg-white border-t border-stone-200 flex"
       style={{ paddingBottom: 'env(safe-area-inset-bottom, 0px)' }}>
-      <Item id="home"        label="My Jobs"     useLogo />
+      <Item id="home"        label="Today"       useLogo />
       <Item id="assignments" label="Assignments" Icon={ClipboardList} />
       <Item id="more"        label="More"        Icon={Menu} />
     </div>
@@ -7119,10 +7131,10 @@ function JobPeekModal({ job, employee, onClose }) {
           <div className="flex items-start justify-between gap-2">
             <div className="min-w-0 flex-1">
               <div className="text-[10px] uppercase tracking-wider text-stone-400 font-mono">Quick glance — nothing is started</div>
-              <div className="font-serif text-xl text-stone-900 truncate">
+              <div className="font-serif text-base text-stone-900 truncate">
                 {unitPartyLabel(job.unitLabel, job.partyLabel) || 'Job'}
               </div>
-              <div className="text-xs text-stone-500 font-mono mt-0.5 truncate">
+              <div className="text-[11px] text-stone-500 font-mono mt-0.5 truncate">
                 {job.propName}{job.type ? ` · ${assignmentTypeLabel(job.type)}` : ''}
               </div>
             </div>
@@ -7146,11 +7158,6 @@ function JobPeekModal({ job, employee, onClose }) {
               </span>
             ))}
           </div>
-          {job.propAddress && (
-            <div className="text-[10px] text-blue-600 font-mono mt-2 underline decoration-blue-300 underline-offset-2">
-              <AddressLink address={job.propAddress} className="text-blue-600" />
-            </div>
-          )}
         </div>
 
         {/* Section tabs. Sticky under the header so they stay reachable
@@ -7183,15 +7190,15 @@ function JobPeekModal({ job, employee, onClose }) {
                   {sec} ({bySection[sec].length})
                 </div>
               )}
-              <div className="space-y-1">
+              <div className="grid grid-cols-2 gap-1">
                 {bySection[sec].map(t => (
-                  <div key={t.id} className="flex items-center gap-2 px-3 py-2 rounded-xl bg-white border border-stone-200">
+                  <div key={t.id} className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-white border border-stone-200">
                     <span className={`w-2 h-2 rounded-full flex-shrink-0 ${
                       t.status === 'done' ? 'bg-emerald-500'
                       : t.status === 'in_progress' ? 'bg-amber-500'
                       : t.status === 'blocked' ? 'bg-red-500'
                       : 'bg-stone-300'}`} />
-                    <span className={`text-sm flex-1 ${t.status === 'done' ? 'text-stone-400 line-through' : 'text-stone-700'}`}>
+                    <span className={`text-xs flex-1 min-w-0 break-words ${t.status === 'done' ? 'text-stone-400 line-through' : 'text-stone-700'}`}>
                       {labelFor(t)}
                     </span>
                   </div>
@@ -7219,8 +7226,26 @@ const partyDisplay = (label) => {
   const l = String(label || '').trim();
   return l.toLowerCase() === 'main' ? '' : l;
 };
-const unitPartyLabel = (unitLabel, partyLabel) =>
-  [String(unitLabel || '').trim(), partyDisplay(partyLabel)].filter(Boolean).join(' · ');
+// Format a unit + party label compactly as "(B1) 202:2" — building in
+// parens, apartment number, then the bedroom number after a colon. Drops
+// the word "Bedroom". Falls back gracefully when the label doesn't parse.
+//   unitLabel  "B1-202"     → building "B1", apt "202"
+//   partyLabel "Bedroom 2"  → ":2"  (just the number)
+const unitPartyLabel = (unitLabel, partyLabel) => {
+  const raw = String(unitLabel || '').trim();
+  // Split building prefix from apartment: "B1-202" → ["B1","202"], also
+  // handles "B10-237". If there's no dash, treat the whole thing as apt.
+  let building = '', apt = raw;
+  const dash = raw.indexOf('-');
+  if (dash > 0) { building = raw.slice(0, dash); apt = raw.slice(dash + 1); }
+  // Bedroom number from the party label ("Bedroom 3" / "BR 3" → "3").
+  const pl = partyDisplay(partyLabel);
+  const bnum = pl ? (String(pl).match(/(\d+)/)?.[1] || '') : '';
+  let out = building ? `(${building}) ${apt}` : apt;
+  if (bnum) out += `:${bnum}`;
+  else if (pl && !/^bedroom/i.test(pl)) out += ` · ${pl}`; // non-bedroom party (e.g. a named area)
+  return out;
+};
 
 // =================================================================
 // ASSIGNMENT WORK HISTORY — every assignment ever run at ONE bedroom,
@@ -7716,7 +7741,7 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
                     <button onClick={() => openJob(j)}
                       title={here ? 'Open this job' : 'Switch to this job'}
                       className="min-w-0 text-left rounded-lg -m-1 p-1 hover:bg-stone-50 active:scale-[0.99] transition group inline-flex items-center gap-1">
-                      <span className="font-serif text-lg text-stone-900 truncate group-hover:underline decoration-stone-300 underline-offset-2">{unitPartyLabel(j.unitLabel, j.partyLabel) || 'Job'}</span>
+                      <span className="font-serif text-base text-stone-900 truncate group-hover:underline decoration-stone-300 underline-offset-2">{unitPartyLabel(j.unitLabel, j.partyLabel) || 'Job'}</span>
                       <ChevronRight size={15} className="text-stone-300 group-hover:text-stone-500 flex-shrink-0" />
                     </button>
                     <span className="flex items-center gap-1 flex-shrink-0">
@@ -7731,9 +7756,15 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
                       {j.priority && <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-red-100 text-red-700 font-bold flex items-center gap-1"><AlertCircle size={9} /> Priority</span>}
                     </span>
                   </div>
-                  <div className="text-xs text-stone-500 font-mono mt-0.5 flex items-center gap-1">
-                    <Building2 size={11} /> {j.propName}{j.type ? ` · ${assignmentTypeLabel(j.type)}` : ''}
-                    {j.items > 0 && ` · ${j.items} ${j.items === 1 ? 'item' : 'items'}`}
+                  <div className="text-[11px] text-stone-500 font-mono mt-0.5 flex items-center gap-1 flex-wrap">
+                    <Building2 size={10} />
+                    {j.propAddress ? (
+                      <AddressLink address={j.propAddress} icon="none" label={j.propName} className="text-blue-600 font-medium" />
+                    ) : (
+                      <span>{j.propName}</span>
+                    )}
+                    <span>{j.type ? `· ${assignmentTypeLabel(j.type)}` : ''}
+                    {j.items > 0 && ` · ${j.items} ${j.items === 1 ? 'task' : 'tasks'}`}</span>
                   </div>
                 </div>
                 {/* Quick glance. Sits OUTSIDE the card button on purpose —
@@ -7744,12 +7775,6 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
                   <Eye size={16} />
                 </button>
                 </div>
-                {j.propAddress && (
-                  <div className="text-[10px] text-blue-600 font-mono mt-0.5 underline decoration-blue-300 underline-offset-2">
-                    <AddressLink address={j.propAddress} className="text-blue-600" />
-                  </div>
-                )}
-
                 {/* Who's on this job */}
                 <div className="flex items-center gap-1.5 flex-wrap mt-2">
                   {/* Someone is physically in there right now — worth knowing
@@ -7872,7 +7897,7 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
                     <span className={`text-[11px] font-mono ${j.scheduledDate && j.scheduledDate < todayKey ? 'text-red-600' : j.scheduledDate === todayKey ? 'text-emerald-700' : 'text-stone-400'}`}>{fmtDue(j.scheduledDate)}</span>
                   )}
                   <div className="flex items-center gap-2">
-                    {!mine && !iRequested(j) && !canAssign && (
+                    {false && !mine && !iRequested(j) && !canAssign && (
                       <button onClick={() => requestJob(j)} disabled={busyId === j.id}
                         className="text-[11px] font-medium px-2.5 py-1 rounded-full bg-stone-100 text-stone-700 disabled:opacity-50">Request</button>
                     )}
@@ -8930,34 +8955,10 @@ function PreparingBlockView({ shift, pendingStart, employeeName, employee,
       <div className="bg-stone-900 text-stone-50 px-5 py-5 sticky top-0 z-10 shadow-md">
         <div className="flex items-center justify-between mb-3 gap-2 flex-wrap">
           <button onClick={onCancel}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-stone-700 hover:bg-stone-600 text-stone-50 text-xs font-medium border border-stone-500 active:scale-95 transition">
-            <Home size={12} /> Property home
+            title="Back"
+            className="p-2 rounded-full bg-white text-stone-900 active:scale-95 transition">
+            <ArrowLeft size={18} />
           </button>
-          <div className="flex items-center gap-2 flex-wrap">
-            {/* Send back to pending: cleaner navigated here by mistake
-               or changed their mind. Resets any of their in_progress
-               or paused targets at this bedroom back to pending so
-               the next cleaner sees a fresh state, then sends them
-               home. Doesn't touch other cleaners' work. */}
-            {onSendBackToPending && (
-              <button onClick={onSendBackToPending} disabled={busy}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-stone-700 hover:bg-stone-600 text-stone-50 text-xs font-medium border border-stone-500 active:scale-95 transition disabled:opacity-50">
-                <ArrowLeft size={12} /> Send back to pending
-              </button>
-            )}
-            {/* Bedroom history shortcut so the cleaner can see what was
-               last done here before they start — useful for catching
-               "wrong bedroom" mistakes early. */}
-            {onOpenBedroomHistory && (
-              <button onClick={() => onOpenBedroomHistory({
-                  unitId: pendingStart.unitId, unitLabel: pendingStart.unitLabel,
-                  partyId: pendingStart.partyId, partyLabel: pendingStart.partyLabel
-                })}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-stone-700 hover:bg-stone-600 text-stone-50 text-xs font-medium border border-stone-500 active:scale-95 transition">
-                <Clock size={12} /> History
-              </button>
-            )}
-          </div>
         </div>
         <div className="text-xs uppercase tracking-widest text-amber-400 font-mono">Ready to start</div>
         {/* Property name, prominent — so a cleaner who just switched here
@@ -9028,11 +9029,6 @@ function PreparingBlockView({ shift, pendingStart, employeeName, employee,
         <AssignmentBanner propertyId={shift.customer_id}
           unitId={pendingStart.unitId} partyId={pendingStart.partyId}
           employee={employee} workScreen onStartCleaning={onStart} />
-
-        <button onClick={onCancel} disabled={busy}
-          className="mt-3 w-full py-3 rounded-2xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold disabled:opacity-50 mb-3 flex items-center justify-center gap-2">
-          <ArrowLeft size={16} /> Back to assignments
-        </button>
 
         {/* What's already happened here — including anyone working it
            right now, with their photos. You should never have to start a
@@ -9368,7 +9364,7 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
               partyId: block.party.id, partyLabel: block.party.label
             })}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-stone-200 hover:bg-stone-300 text-stone-700 text-xs font-mono active:scale-95">
-            <Clock size={12} /> View this bedroom's history
+            <Clock size={12} /> Bedroom history
           </button>
         </div>
       )}
@@ -9486,15 +9482,15 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
            → this cleaner leaves, others stay (leaveBlock warns + routes); the
            LAST one to leave closes the whole bedroom. No second confirm here —
            each handler owns its own warning. */}
-        <div className="mt-6">
+        <div className="mt-6 flex justify-center">
           <button
             onClick={() => {
               if (totalActive > 1 && onLeaveBlock) return onLeaveBlock();
               return onFinish();
             }}
             disabled={busy}
-            className="w-full py-4 rounded-2xl bg-amber-700 hover:bg-amber-800 text-stone-50 text-base font-bold flex items-center justify-center gap-2 active:scale-98 transition-transform disabled:opacity-50">
-            <Check size={18} />
+            className="mx-auto px-6 py-2.5 rounded-full bg-amber-700 hover:bg-amber-800 text-stone-50 text-sm font-semibold flex items-center justify-center gap-2 active:scale-95 transition-transform disabled:opacity-50">
+            <Check size={15} />
             We are done here
           </button>
           {totalActive > 1 && onLeaveBlock && (
@@ -9682,21 +9678,8 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
          Tapping another bedroom routes through onGoToBedroom, which
          raises the switch-bedroom prompt rather than silently
          abandoning the open block. */}
-      <div className="mx-4 mt-6 mb-2">
-        <button onClick={() => setShowWorkList(v => !v)}
-          className="w-full flex items-center justify-between gap-2 px-4 py-3 rounded-2xl bg-white border border-stone-200 active:scale-98 transition-transform">
-          <span className="text-xs uppercase tracking-wider font-mono text-stone-500 flex items-center gap-2">
-            <Layers size={13} /> Your other jobs
-          </span>
-          <ChevronRight size={15} className={`text-stone-400 transition-transform ${showWorkList ? 'rotate-90' : ''}`} />
-        </button>
-      </div>
-      {showWorkList && (
-        <div className="-mt-1">
-          <CleanerWorkList employee={employee} currentPropertyId={shift.customer_id}
-            onGoToBedroom={onGoToBedroom} onSwitchProperty={onSwitchProperty} />
-        </div>
-      )}
+      {/* "Your other jobs" was removed from this screen — the cleaner
+         focuses on the work in hand; other jobs are on the Today tab. */}
 
       {/* Persistent bottom nav — lets the cleaner peek at Assignments
          or More without finishing/pausing the workblock. The block
@@ -32178,6 +32161,7 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
               load();
             } : null}
             onTogglePriority={togglePriority}
+                canPrioritize={can(employee, 'mark_assignments_done') || can(employee, 'upload_assignments')}
               canMarkDone={can(employee, 'mark_assignments_done') || t.started_by === employee?.id}
               canMarkDoneAlways={can(employee, 'mark_assignments_done')}
               ownerView={isOwner(employee)}
@@ -32371,7 +32355,7 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
                       className={`text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full ${DC.chip} flex items-center gap-1`}>
                       <Eye size={10} /> Quick glance
                     </button>
-                    {onOpenBedroomHistory && rep?.unit_id && rep?.party_id && (
+                    {!workScreen && onOpenBedroomHistory && rep?.unit_id && rep?.party_id && (
                       <button onClick={() => onOpenBedroomHistory({
                           unitId: rep.unit_id, unitLabel: rep.unit?.label,
                           partyId: rep.party_id, partyLabel: rep.party?.label
@@ -32392,10 +32376,11 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
                     <AssignmentTypeChip type={a.assignment_type} />
                   </div>
                 )}
-                <div className={`text-[11px] font-mono ${DC.muted} mt-1`}>
-                  {total} {total === 1 ? 'item' : 'items'}
+                <button onClick={() => setOpened(rep)}
+                  className={`text-[11px] font-mono ${DC.muted} mt-1 text-left underline decoration-stone-400 underline-offset-2 hover:opacity-80`}>
+                  {total} {total === 1 ? 'task' : 'tasks'}
                   {sectionBits.length > 0 && <> · {sectionBits.join(' · ')}</>}
-                </div>
+                </button>
               </div>
 
               {/* === DONE / IN PROGRESS chips ===
@@ -32455,7 +32440,7 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
                   </button>
                   </OwnerOnly>
                 )}
-                {!isAllDone && (
+                {false && !isAllDone && (
                   <button onClick={() => setReassignTarget(rep)} disabled={busy}
                     className={`h-9 px-3 rounded-lg border ${DC.outlineBtn} text-xs font-medium flex items-center gap-1 disabled:opacity-50`}>
                     <User size={12} /> Reassign
@@ -32578,7 +32563,7 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
 }
 
 // Reusable card for one assignment target, used in banner + panel
-function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPending, onDone, onReopen, onBlocked, onReassign, onDelete, onGoToBedroom, onOpenBedroomHistory, onTogglePriority, canMarkDone = true, canMarkDoneAlways = false, currentEmployeeId, propertyId, canEditDates = false, onSetDueDate, dark = false, workScreen = false, onStartCleaning = null, onExit = null, ownerView = false }) {
+function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPending, onDone, onReopen, onBlocked, onReassign, onDelete, onGoToBedroom, onOpenBedroomHistory, onTogglePriority, canPrioritize = false, canMarkDone = true, canMarkDoneAlways = false, currentEmployeeId, propertyId, canEditDates = false, onSetDueDate, dark = false, workScreen = false, onStartCleaning = null, onExit = null, ownerView = false }) {
   const t = target;
   // Dark variant — used when this card is folded into the cleaner's black
   // "Working on" header. Only the neutral surfaces flip; colored status /
@@ -32677,7 +32662,7 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
           <div className="flex items-center gap-1.5 flex-wrap">
             {/* Priority toggle (gray ↔ red) when parent passes it; else
                read-only chip. */}
-            {!isDone && onTogglePriority ? (
+            {!isDone && onTogglePriority && canPrioritize ? (
               <button
                 onClick={(e) => { e.stopPropagation(); onTogglePriority(t); }}
                 disabled={busy}
@@ -34310,6 +34295,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                 onBlocked={() => setStatusModal({ target: t })}
                 onReassign={() => setReassignTarget(t)}
                 onTogglePriority={togglePriority}
+                canPrioritize={can(employee, 'mark_assignments_done') || can(employee, 'upload_assignments')}
               canMarkDone={can(employee, 'mark_assignments_done') || t.started_by === employee?.id}
               canMarkDoneAlways={can(employee, 'mark_assignments_done')}
               ownerView={isOwner(employee)}
@@ -34872,6 +34858,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                             onBlocked={() => setStatusModal({ target: t })}
                             onReassign={() => setReassignTarget(t)}
                             onTogglePriority={togglePriority}
+                canPrioritize={can(employee, 'mark_assignments_done') || can(employee, 'upload_assignments')}
                             canMarkDone={can(employee, 'mark_assignments_done') || t.started_by === employee?.id}
               canMarkDoneAlways={can(employee, 'mark_assignments_done')}
               ownerView={isOwner(employee)}
@@ -36076,6 +36063,36 @@ function AssignmentViewer({ target, onClose, employee }) {
 // Status changes write directly to assignment_targets and rely on the
 // existing realtime sync to push updates to other viewers.
 // =================================================================
+// In-app attachment viewer — shows the assignment's uploaded file (photo or
+// PDF) in an overlay instead of opening a whole new browser tab/screen.
+function AttachmentModal({ url, kind, onClose }) {
+  if (!url) return null;
+  const isPdf = (kind && String(kind).toLowerCase().includes('pdf')) || /\.pdf($|\?)/i.test(url);
+  return (
+    <div className="fixed inset-0 z-[70] bg-stone-900/90 flex flex-col" onClick={onClose}>
+      <div className="flex items-center justify-between px-4 py-3 flex-shrink-0">
+        <span className="text-stone-200 text-xs font-mono uppercase tracking-wider">Attachment</span>
+        <div className="flex items-center gap-2">
+          <a href={url} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()}
+            className="px-3 py-1.5 rounded-full bg-stone-700 text-stone-100 text-xs font-medium">Open full</a>
+          <button onClick={onClose} className="p-2 rounded-full bg-stone-800 text-stone-100">
+            <X size={18} />
+          </button>
+        </div>
+      </div>
+      <div className="flex-1 min-h-0 px-3 pb-4" onClick={(e) => e.stopPropagation()}>
+        {isPdf ? (
+          <iframe src={url} title="Attachment" className="w-full h-full rounded-xl bg-white" />
+        ) : (
+          <div className="w-full h-full flex items-center justify-center overflow-auto">
+            <img src={url} alt="Attachment" className="max-w-full max-h-full rounded-xl object-contain" />
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function ChecklistAssignmentView({ assignment, employee, onClose, onOpenSheet, onOpenSibling, quickGlance = false }) {
   const [targets, setTargets] = useState([]);
   const [templateInfo, setTemplateInfo] = useState({ variants: [], items: [] });
@@ -36085,6 +36102,7 @@ function ChecklistAssignmentView({ assignment, employee, onClose, onOpenSheet, o
   // per-item status.
   const [workBlocks, setWorkBlocks] = useState([]);
   const [loaded, setLoaded] = useState(false);
+  const [attachmentOpen, setAttachmentOpen] = useState(false);
   const [tab, setTab] = useState('not_started'); // 'not_started' | 'in_progress' | 'done'
   // Sub-tab inside "Not started" — lets the cleaner view items
   // by main section (Bedroom / Vanity / Bathroom / General) as a
@@ -36446,6 +36464,10 @@ function ChecklistAssignmentView({ assignment, employee, onClose, onOpenSheet, o
       </div>
     ) : (
     <div className="fixed inset-0 bg-stone-50 z-50 flex flex-col">
+      {attachmentOpen && (
+        <AttachmentModal url={assignment.file_url} kind={assignment.file_kind}
+          onClose={() => setAttachmentOpen(false)} />
+      )}
       {/* Global cleaner progress bar — same 5 segments as the rest of
          the app. Inside an assignment the cleaner has filled the first
          3 segments (Property, Assignment, Items). "Working" is filled
@@ -36466,10 +36488,10 @@ function ChecklistAssignmentView({ assignment, employee, onClose, onOpenSheet, o
             className="p-2 -ml-2 rounded-full bg-stone-800 hover:bg-stone-700">
             <ArrowLeft size={20} />
           </button>
-          {onOpenSheet && assignment.file_url && (
-            <button onClick={onOpenSheet}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-stone-700 hover:bg-stone-600 text-stone-50 text-xs font-medium border border-stone-500 active:scale-95 transition">
-              <Eye size={12} /> View attachment
+          {assignment.file_url && (
+            <button onClick={() => setAttachmentOpen(true)}
+              className="flex items-center gap-1.5 px-3.5 py-2 rounded-full bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold active:scale-95 transition">
+              <Eye size={13} /> View attachment
             </button>
           )}
         </div>
@@ -36487,10 +36509,9 @@ function ChecklistAssignmentView({ assignment, employee, onClose, onOpenSheet, o
             Bathroom {bathroomNum} (shared between bedrooms {bathroomNum === 1 ? '1 & 2' : '3 & 4'})
           </div>
         )}
-        {/* Inline progress text — replaces the previous per-assignment
-           progress bar since the global bar now shows workflow state. */}
+        {/* Inline progress text. */}
         <div className="mt-3 text-[11px] font-mono text-stone-400">
-          {doneCount} of {total} items done
+          {doneCount} of {total} tasks done
           {counts.in_progress > 0 && ` · ${counts.in_progress} in progress`}
           {isAllDone && <span className="text-emerald-400 font-bold ml-1">✓ All done!</span>}
         </div>

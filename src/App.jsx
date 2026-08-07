@@ -106,7 +106,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap124";
+const BUILD_TAG = "aug6-tap126";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -2124,6 +2124,17 @@ function SupplyChecklistGate({ employee, onDone, onSignOut }) {
         </div>
         <div className="flex-1 overflow-y-auto">
           <div className="px-4 py-3">
+            <div className="flex justify-end mb-2">
+              <button
+                onClick={() => {
+                  const allOn = items.length > 0 && items.every(it => checked[it.id]);
+                  if (allOn) { setChecked({}); }
+                  else { const next = {}; items.forEach(it => { next[it.id] = true; }); setChecked(next); }
+                }}
+                className="text-xs font-mono px-3 py-1.5 rounded-full bg-stone-900 text-stone-50 active:scale-95 transition">
+                {items.length > 0 && items.every(it => checked[it.id]) ? 'Clear all' : 'Select all'}
+              </button>
+            </div>
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
               {items.map(it => {
                 const on = !!checked[it.id];
@@ -3277,6 +3288,24 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
                 </div>
               );
               })}
+              {/* 6: Start button sits right under the picked tasks so the
+                 cleaner doesn't have to scroll past all sections. */}
+              {(hasTargetPicks || (isGeneral && selectedSubs.size > 0)) && (
+                <div className="mt-3">
+                  <button onClick={submit} disabled={!canSubmit}
+                    className="px-5 py-2 rounded-xl bg-stone-900 text-stone-50 font-medium text-xs disabled:opacity-50 inline-flex items-center gap-1.5">
+                    <Play size={13} />
+                    {hasTargetPicks
+                      ? (() => {
+                          const pickedRows = checklistTargets.filter(t => selectedTargetIds.has(t.id));
+                          const allPaused = pickedRows.length > 0 && pickedRows.every(t => t.status === 'paused');
+                          const verb = allPaused ? 'Resume' : 'Start job';
+                          return `${verb} · ${selectedTargetIds.size} item${selectedTargetIds.size === 1 ? '' : 's'}`;
+                        })()
+                      : `Start 1 task (${selectedSubs.size} areas)`}
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         );
@@ -3711,7 +3740,7 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
       {/* Start button only appears once the cleaner has actually picked
          something to work on — a section's items (hasTargetPicks) or, for
          General, at least one area. Before that there's nothing to start. */}
-      {(hasTargetPicks || (isGeneral && selectedSubs.size > 0) || (!checklistMode && category)) && (
+      {(!checklistMode && category) && (
       <div className="flex gap-2 pt-1">
         <button onClick={submit} disabled={!canSubmit}
           className="px-5 py-2 rounded-xl bg-stone-900 text-stone-50 font-medium text-xs disabled:opacity-50 flex items-center justify-center gap-1.5">
@@ -5553,20 +5582,36 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   };
 
   const uploadPhoto = async (taskId, kind, file) => {
+    // The single-camera flow may pass a null kind — the cleaner assigns the
+    // bucket afterward. Default new photos to 'after' (the most common) so
+    // there's always a valid bucket; they can reassign in the modal.
+    const useKind = kind || 'after';
     // Read the original capture time from the file's EXIF BEFORE compressing
     // (compression strips metadata). Null when the photo has no EXIF date.
     const takenAt = await readPhotoTakenAt(file);
     const compressed = await compressImage(file);
-    const path = `${shift.id}/${taskId}/${kind}_${Date.now()}.jpg`;
+    const path = `${shift.id}/${taskId}/${useKind}_${Date.now()}.jpg`;
     const { error: upErr } = await supabase.storage.from(PHOTO_BUCKET).upload(path, compressed, { contentType: 'image/jpeg' });
     if (upErr) { alert('Upload failed: ' + upErr.message); return; }
     const { data: { publicUrl } } = supabase.storage.from(PHOTO_BUCKET).getPublicUrl(path);
     const { data: photo, error: pErr } = await supabase.from('photos')
-      .insert({ task_id: taskId, kind, storage_path: path, public_url: publicUrl, is_preview: previewMode, taken_by: employee?.id || null, taken_at: takenAt }).select().single();
+      .insert({ task_id: taskId, kind: useKind, storage_path: path, public_url: publicUrl, is_preview: previewMode, taken_by: employee?.id || null, taken_at: takenAt }).select().single();
     if (pErr) { alert('Could not save photo: ' + pErr.message); return; }
     setTasks(prev => prev.map(t => t.id === taskId ? { ...t, photos: [...(t.photos || []), photo] } : t));
     // Return the new row so callers (PhotoModal) can attach a note to it
     return photo;
+  };
+
+  // Reassign a photo to a different bucket (before / after / damage /
+  // couldn't clean). Used by the single-camera flow so the cleaner can tag
+  // a photo after taking it, and fix it if it lands in the wrong bucket.
+  const changePhotoKind = async (photoId, taskId, newKind) => {
+    if (!photoId || !newKind) return;
+    setTasks(prev => prev.map(t => t.id === taskId
+      ? { ...t, photos: (t.photos || []).map(p => p.id === photoId ? { ...p, kind: newKind } : p) }
+      : t));
+    const { error } = await supabase.from('photos').update({ kind: newKind }).eq('id', photoId);
+    if (error) { alert('Could not change the photo tag: ' + error.message); }
   };
 
   // Attach a short note to a previously-uploaded photo. Used by the
@@ -5926,6 +5971,8 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       onAddPhoto={(taskId, kind) => setPhotoModal({ taskId, kind })}
       photoModal={photoModal} onClosePhotoModal={() => setPhotoModal(null)}
       onUploadPhoto={uploadPhoto}
+    onChangePhotoKind={changePhotoKind}
+      onChangePhotoKind={changePhotoKind}
       onSavePhotoNote={savePhotoNote}
       onOpenMessages={() => setShowMessages(true)}
       onOpenBedroomHistory={setBedroomHistory}
@@ -7827,13 +7874,6 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
                     )}
                   </div>
                 </div>
-                {/* Quick glance. Sits OUTSIDE the card button on purpose —
-                   tapping the card clocks you in, and peeking shouldn't. */}
-                <button onClick={(e) => { e.stopPropagation(); setPeekJob(j); }}
-                  title="Peek inside — doesn't clock you in"
-                  className="p-2 rounded-xl border border-stone-200 text-stone-500 hover:text-stone-900 hover:border-stone-400 active:scale-95 flex-shrink-0">
-                  <Eye size={16} />
-                </button>
                 </div>
                 {/* Who's on this job */}
                 <div className="flex items-center gap-1.5 flex-wrap mt-2">
@@ -9178,7 +9218,7 @@ function UndoMoveMenu({ disabled, canUndo, canMove, onUndo, onMoveBedroom, onMov
 
 function BlockView({ shift, block, tasks, activeTask, employeeName, employee, onSignOut, onFinish, onExit, onPause, onUndo, onReopen,
   newTaskName, setNewTaskName, onStartTask, onStartTasksFromPicker, onStartChecklistItems, onReleaseTargets, onStopTask, onResumeTask, onAddPhoto,
-  photoModal, onClosePhotoModal, onUploadPhoto, onSavePhotoNote, onOpenMessages, onOpenBedroomHistory,
+  photoModal, onClosePhotoModal, onUploadPhoto, onChangePhotoKind, onSavePhotoNote, onOpenMessages, onOpenBedroomHistory,
   onMoveBlock, onMoveMultiple, onLeaveBlock, onJoinBlock, onDeletePhoto, onGoToBedroom, onSwitchProperty, cleanerTab, setCleanerTab, previewMode, busy }) {
   useTick(true);
   const blockElapsed = Date.now() - new Date(block.start_time).getTime();
@@ -9699,10 +9739,11 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
       {photoModal && (
         <PhotoModal kind={photoModal.kind}
           taskName={tasks.find(t => t.id === photoModal.taskId)?.name}
-          existing={(tasks.find(t => t.id === photoModal.taskId)?.photos || []).filter(p => p.kind === photoModal.kind && !p.deleted_at)}
+          existing={(tasks.find(t => t.id === photoModal.taskId)?.photos || []).filter(p => !p.deleted_at)}
           employee={employee}
           onDeletePhoto={onDeletePhoto ? (photoId) => onDeletePhoto(photoId, photoModal.taskId) : null}
           onUpload={(file) => onUploadPhoto(photoModal.taskId, photoModal.kind, file)}
+          onChangeKind={onChangePhotoKind ? (photoId, newKind) => onChangePhotoKind(photoId, photoModal.taskId, newKind) : null}
           onSaveNote={onSavePhotoNote}
           onClose={onClosePhotoModal} />
       )}
@@ -9998,7 +10039,7 @@ function MoveBlockModalInline({ block, propertyId, shiftId, currentEmployeeId, m
 // =================================================================
 function SimpleShiftView({ shift, tasks, activeTask, employeeName, employee, onSignOut, onClockOut, onSwitchProperty, onAttachProperty,
   newTaskName, setNewTaskName, onStartTask, onStartTasksFromPicker, onStartChecklistItems, onReleaseTargets, onStopTask, onResumeTask, onAddPhoto,
-  photoModal, onClosePhotoModal, onUploadPhoto, onSavePhotoNote, onDeletePhoto, onOpenMessages, onOpenChangePin, busy }) {
+  photoModal, onClosePhotoModal, onUploadPhoto, onChangePhotoKind, onSavePhotoNote, onDeletePhoto, onOpenMessages, onOpenChangePin, busy }) {
   const [showMenu, setShowMenu] = useState(false);
   const [taskInputMode, setTaskInputMode] = useState('picker'); // 'picker' | 'custom'
   useTick(true);
@@ -10136,10 +10177,11 @@ function SimpleShiftView({ shift, tasks, activeTask, employeeName, employee, onS
       {photoModal && (
         <PhotoModal kind={photoModal.kind}
           taskName={tasks.find(t => t.id === photoModal.taskId)?.name}
-          existing={(tasks.find(t => t.id === photoModal.taskId)?.photos || []).filter(p => p.kind === photoModal.kind && !p.deleted_at)}
+          existing={(tasks.find(t => t.id === photoModal.taskId)?.photos || []).filter(p => !p.deleted_at)}
           employee={employee}
           onDeletePhoto={onDeletePhoto ? (photoId) => onDeletePhoto(photoId, photoModal.taskId) : null}
           onUpload={(file) => onUploadPhoto(photoModal.taskId, photoModal.kind, file)}
+          onChangeKind={onChangePhotoKind ? (photoId, newKind) => onChangePhotoKind(photoId, photoModal.taskId, newKind) : null}
           onSaveNote={onSavePhotoNote}
           onClose={onClosePhotoModal} />
       )}
@@ -11145,30 +11187,17 @@ function ActiveWorkblockCard({ task, onStop, onAddPhoto }) {
           Done
         </button>
       </div>
-      {/* Four buckets, 2x2 rather than four cramped across — these are
-         thumb targets on a phone, often with gloves on. */}
-      <div className="grid grid-cols-2 gap-2">
-        <button onClick={() => onAddPhoto('before')}
-          style={{ touchAction: 'manipulation' }}
-          className="px-2 py-3 rounded-xl bg-white hover:bg-amber-100 border border-amber-200 text-stone-700 text-xs font-medium flex items-center justify-center gap-1.5 active:scale-95 transition-transform">
-          <Camera size={13} /> Before {before.length > 0 && <span className="text-amber-700 font-mono">({before.length})</span>}
-        </button>
-        <button onClick={() => onAddPhoto('after')}
-          style={{ touchAction: 'manipulation' }}
-          className="px-2 py-3 rounded-xl bg-white hover:bg-amber-100 border border-amber-200 text-stone-700 text-xs font-medium flex items-center justify-center gap-1.5 active:scale-95 transition-transform">
-          <Camera size={13} /> After {after.length > 0 && <span className="text-amber-700 font-mono">({after.length})</span>}
-        </button>
-        <button onClick={() => onAddPhoto('damage')}
-          style={{ touchAction: 'manipulation' }}
-          className="px-2 py-3 rounded-xl bg-red-50 hover:bg-red-100 border border-red-200 text-red-700 text-xs font-medium flex items-center justify-center gap-1.5 active:scale-95 transition-transform">
-          <Camera size={13} /> Damage {damage.length > 0 && <span className="font-mono">({damage.length})</span>}
-        </button>
-        <button onClick={() => onAddPhoto(KIND_CANNOT)}
-          style={{ touchAction: 'manipulation' }}
-          className="px-2 py-3 rounded-xl bg-yellow-50 hover:bg-yellow-100 border border-yellow-300 text-yellow-800 text-xs font-medium flex items-center justify-center gap-1.5 active:scale-95 transition-transform">
-          <Camera size={13} /> Couldn't clean {cannot.length > 0 && <span className="font-mono">({cannot.length})</span>}
-        </button>
-      </div>
+      {/* One camera button — the cleaner takes/uploads a photo, then picks
+         which bucket it belongs to (before / after / damage / couldn't
+         clean) and can reassign it later if needed. */}
+      <button onClick={() => onAddPhoto(null)}
+        style={{ touchAction: 'manipulation' }}
+        className="w-full px-3 py-3.5 rounded-xl bg-stone-900 hover:bg-stone-800 text-stone-50 text-sm font-medium flex items-center justify-center gap-2 active:scale-95 transition-transform">
+        <Camera size={16} /> Add photo
+        {(before.length + after.length + damage.length + cannot.length) > 0 && (
+          <span className="text-stone-300 font-mono">({before.length + after.length + damage.length + cannot.length})</span>
+        )}
+      </button>
     </div>
   );
 }
@@ -11243,33 +11272,21 @@ function TaskCard({ task, isActive, onStop, onResume, onAddPhoto }) {
         )}
       </div>
       {/* Spacer so the Done button is well-separated from the photo grid below — prevents ghost taps on iOS */}
-      <div className="grid grid-cols-2 gap-2 mt-2">
-        <button onClick={() => onAddPhoto('before')}
+      <div className="mt-2">
+        <button onClick={() => onAddPhoto(null)}
           style={{ touchAction: 'manipulation' }}
-          className="px-2 py-3 rounded-xl bg-stone-100 hover:bg-stone-200 text-stone-700 text-xs font-medium flex items-center justify-center gap-1.5 active:scale-95 transition-transform">
-          <Camera size={13} /> Before {before.length > 0 && <span className="text-amber-700 font-mono">({before.length})</span>}
-        </button>
-        <button onClick={() => onAddPhoto('after')}
-          style={{ touchAction: 'manipulation' }}
-          className="px-2 py-3 rounded-xl bg-stone-100 hover:bg-stone-200 text-stone-700 text-xs font-medium flex items-center justify-center gap-1.5 active:scale-95 transition-transform">
-          <Camera size={13} /> After {after.length > 0 && <span className="text-amber-700 font-mono">({after.length})</span>}
-        </button>
-        <button onClick={() => onAddPhoto('damage')}
-          style={{ touchAction: 'manipulation' }}
-          className="px-2 py-3 rounded-xl bg-red-50 hover:bg-red-100 text-red-700 text-xs font-medium flex items-center justify-center gap-1.5 active:scale-95 transition-transform">
-          <Camera size={13} /> Damage {damage.length > 0 && <span className="font-mono">({damage.length})</span>}
-        </button>
-        <button onClick={() => onAddPhoto(KIND_CANNOT)}
-          style={{ touchAction: 'manipulation' }}
-          className="px-2 py-3 rounded-xl bg-yellow-50 hover:bg-yellow-100 text-yellow-800 text-xs font-medium flex items-center justify-center gap-1.5 active:scale-95 transition-transform">
-          <Camera size={13} /> Couldn't clean {cannot.length > 0 && <span className="font-mono">({cannot.length})</span>}
+          className="w-full px-3 py-3 rounded-xl bg-stone-900 hover:bg-stone-800 text-stone-50 text-sm font-medium flex items-center justify-center gap-2 active:scale-95 transition-transform">
+          <Camera size={15} /> Add photo
+          {(before.length + after.length + damage.length + cannot.length) > 0 && (
+            <span className="text-stone-300 font-mono">({before.length + after.length + damage.length + cannot.length})</span>
+          )}
         </button>
       </div>
     </div>
   );
 }
 
-function PhotoModal({ kind, taskName, existing, onUpload, onSaveNote, onClose, employee, onDeletePhoto }) {
+function PhotoModal({ kind, taskName, existing, onUpload, onSaveNote, onClose, employee, onDeletePhoto, onChangeKind }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   // Track the most recently uploaded photo so we can attach an
@@ -11361,7 +11378,7 @@ function PhotoModal({ kind, taskName, existing, onUpload, onSaveNote, onClose, e
         <div className="flex items-center justify-between p-5 border-b border-stone-200">
           <div>
             <div className={`text-xs uppercase tracking-wider font-mono ${isCannot ? 'text-yellow-700 font-bold' : 'text-stone-500'}`}>
-              {photoKindLabel(kind)} photo
+              {kind ? `${photoKindLabel(kind)} photo` : 'Add photo'}
             </div>
             <div className="font-serif text-xl text-stone-900">{taskName}</div>
           </div>
@@ -11427,6 +11444,37 @@ function PhotoModal({ kind, taskName, existing, onUpload, onSaveNote, onClose, e
                   </div>
                 );
               })}
+            </div>
+          )}
+          {/* Per-photo bucket assignment — the cleaner tags each photo
+             into before / after / damage / couldn't clean, and can change
+             it here if it landed in the wrong bucket. */}
+          {existingPhotos.length > 0 && onChangeKind && (
+            <div className="mb-4 space-y-2">
+              {existingPhotos.map(p => (
+                <div key={`kind-${p.id}`} className="flex items-center gap-2">
+                  <img src={p.public_url} alt="" loading="lazy" className="w-9 h-9 rounded-lg object-cover flex-shrink-0" />
+                  <div className="flex items-center gap-1 flex-wrap">
+                    {[
+                      { k: 'before', label: 'Before' },
+                      { k: 'after', label: 'After' },
+                      { k: 'damage', label: 'Damage' },
+                      { k: KIND_CANNOT, label: "Couldn't clean" },
+                    ].map(o => (
+                      <button key={o.k} onClick={() => onChangeKind(p.id, o.k)}
+                        className={`text-[10px] uppercase tracking-wider font-mono px-2 py-1 rounded-full border transition ${
+                          p.kind === o.k
+                            ? (o.k === 'damage' ? 'bg-red-600 text-white border-red-600'
+                               : o.k === KIND_CANNOT ? 'bg-yellow-500 text-white border-yellow-500'
+                               : 'bg-stone-900 text-white border-stone-900')
+                            : 'bg-white text-stone-500 border-stone-300 hover:bg-stone-100'
+                        }`}>
+                        {o.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ))}
             </div>
           )}
           {error && (
@@ -32312,7 +32360,7 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
                   {/* Mini-row 1: Priority + status — Mark Priority is
                      a bulk toggle here since the card represents N items. */}
                   <div className="flex items-center gap-1.5 flex-wrap justify-end">
-                    {!isAllDone ? (
+                    {!isAllDone && (can(employee, 'mark_assignments_done') || can(employee, 'upload_assignments')) ? (
                       <button onClick={(e) => { e.stopPropagation(); bulkTogglePriority(items); }} disabled={busy}
                         className={`text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full border inline-flex items-center gap-1 transition-colors disabled:opacity-50 ${anyPriority
                             ? 'bg-red-100 text-red-800 border-red-300 font-bold hover:bg-red-200'
@@ -32402,12 +32450,9 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
                       </span>
                     ) : null)))}
                   </div>
-                  {/* Mini-row 2: View doc + History */}
+                  {/* Mini-row 2: History (Quick glance removed — the "X task"
+                     count link peeks; the eye pill was redundant). */}
                   <div className="flex items-center gap-1.5 flex-wrap justify-end">
-                    <button onClick={() => setOpened(rep)}
-                      className={`text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full ${DC.chip} flex items-center gap-1`}>
-                      <Eye size={10} /> Quick glance
-                    </button>
                     {!workScreen && onOpenBedroomHistory && rep?.unit_id && rep?.party_id && (
                       <button onClick={() => onOpenBedroomHistory({
                           unitId: rep.unit_id, unitLabel: rep.unit?.label,
@@ -32428,11 +32473,13 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
                     <AssignmentTypeChip type={a.assignment_type} />
                   </div>
                 )}
-                <button onClick={() => setOpened(rep)}
-                  className={`text-[11px] font-mono ${DC.muted} mt-1 text-left underline decoration-stone-400 underline-offset-2 hover:opacity-80`}>
-                  {total} {total === 1 ? 'task' : 'tasks'}
+                <div className={`text-[11px] font-mono ${DC.muted} mt-1`}>
+                  <button onClick={() => setOpened(rep)}
+                    className="text-left underline decoration-stone-400 underline-offset-2 hover:opacity-80">
+                    {total} {total === 1 ? 'task' : 'tasks'}
+                  </button>
                   {sectionBits.length > 0 && <> · {sectionBits.join(' · ')}</>}
-                </button>
+                </div>
               </div>
 
               {/* === DONE / IN PROGRESS chips ===

@@ -20,3 +20,6 @@ dist/
 *.local
 desktop.ini
 thumbs.db
+
+# local agent docs
+ai/

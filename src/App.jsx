@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { createClient } from '@supabase/supabase-js';
 import {
+  Search,
   Clock, Camera, LogOut, ChevronRight, ChevronLeft, ChevronDown, Plus, Pause, Play, Check,
   ArrowLeft, Users, Image as ImageIcon, Download, X, MapPin,
   Briefcase, Delete, AlertCircle, UserPlus, Building2,
@@ -106,7 +107,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap132";
+const BUILD_TAG = "aug6-tap135";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -8299,8 +8300,7 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
       <div className="bg-stone-900 text-stone-50 px-5 py-5 sticky top-0 z-10 shadow-md">
         <div className="flex items-start justify-between mb-3 gap-2">
           <div className="min-w-0 flex-1">
-            <div className="text-xs uppercase tracking-widest text-stone-400 font-mono">You're at</div>
-            <div className="flex items-center gap-2 mt-1">
+            <div className="flex items-center gap-2">
               <Building2 size={22} className="text-amber-400 shrink-0" />
               <div className="font-serif text-2xl text-stone-50 leading-tight">{shift.customer?.name}</div>
             </div>
@@ -8312,11 +8312,6 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
             </button>
           </div>
         </div>
-        {shift.customer?.address && (
-          <div className="mt-2 text-xs text-stone-300">
-            <AddressLink address={shift.customer.address} className="text-stone-300" />
-          </div>
-        )}
         <div className="mt-2 flex items-center gap-2 text-xs text-stone-400 font-mono flex-wrap">
           <span className="inline-flex items-center gap-1 text-stone-200"><Clock size={11} /> {fmtTime(elapsed)} <span className="text-stone-400 normal-case">clocked in</span></span>
           <span className="text-stone-600">·</span>
@@ -8338,7 +8333,8 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
           {/* Paused / open work blocks — so a cleaner can always get back
              into what they were doing. (An ACTIVE block takes over the
              whole screen, so these are the paused/unfinished ones.) */}
-          {workBlocks.filter(b => !b.end_time).length > 0 && (
+          {/* Paused blocks section hidden for now (kept in code, gated off). */}
+          {false && workBlocks.filter(b => !b.end_time).length > 0 && (
             <div className="px-4 pt-4">
               <div className="text-xs uppercase tracking-wider text-amber-800 font-mono mb-2">Working on now</div>
               <div className="space-y-2">
@@ -32857,7 +32853,7 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
   }, [t.unit_id, t.party_id, isDone, propertyId, t.status]);
 
   return (
-    <div className={`p-2.5 sm:p-3 rounded-xl border ${isDone ? D.cardDone : D.card}`}>
+    <div className={`${dark ? 'p-2.5 sm:p-3 rounded-xl border' : 'p-4 rounded-2xl border shadow-sm'} ${isDone ? D.cardDone : D.card}`}>
       {/* === HEADER ROW =================================================
          On mobile the title takes a full-width row of its own and the
          chip group (priority / status / view doc / history) drops to
@@ -33852,6 +33848,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
   // that side. Replaces the old day-of / last-3 / older quick tabs.
   const [dateFrom, setDateFrom] = useState(''); // YYYY-MM-DD inclusive start
   const [dateTo, setDateTo] = useState('');     // YYYY-MM-DD inclusive end
+  const [aptSearch, setAptSearch] = useState(''); // apartment-number search (Done tab)
   // Done view defaults to the last 2 days — that's what you're almost
   // always looking for, and scrolling through weeks of finished work to
   // find today's was the complaint. 'all' widens it.
@@ -34350,6 +34347,12 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
       const hit = Array.from(filterCategories).some(c => cats.has(c));
       if (!hit) return false;
     }
+    // Apartment-number search (Done tab) — matches the unit label.
+    if (aptSearch.trim()) {
+      const q = aptSearch.trim().toLowerCase();
+      const label = `${t.unit?.label || ''} ${t.party?.label || ''}`.toLowerCase();
+      if (!label.includes(q)) return false;
+    }
     return true;
   });
 
@@ -34716,7 +34719,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                       // assignments at one bedroom) still gets a
                       // useful "open one of them" affordance.
                       bulkCard = (
-                        <div key={`bulk-${groupKey}`} className="rounded-xl border border-stone-200 bg-white p-3">
+                        <div key={`bulk-${groupKey}`} className="rounded-2xl border border-stone-200 bg-white p-4 shadow-sm">
                           {/* Cleaner request banner — shows at the very
                              top of the card whenever a cleaner has
                              submitted a request at this bedroom that's
@@ -34801,27 +34804,29 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                             <div className="flex-1 min-w-0">
                               {canGoToBedroom ? (
                                 <button onClick={() => startAndGo(firstTarget)} disabled={busy}
-                                  className="block text-left w-full font-serif text-sm text-stone-900 leading-tight break-words hover:underline disabled:opacity-50">
-                                  <span className="font-bold">{group.unit?.label || unitLabel}</span>
-                                  <span className="text-stone-400 mx-1.5">·</span>
-                                  <span className="italic">{bedLabel}</span>
+                                  className="block text-left w-full font-serif text-base text-stone-900 leading-tight break-words hover:underline disabled:opacity-50">
+                                  {unitPartyLabel(group.unit?.label || unitLabel, bedLabel)}
                                 </button>
                               ) : (
-                                <div className="font-serif text-sm text-stone-900 leading-tight break-words">
-                                  <span className="font-bold">{group.unit?.label || unitLabel}</span>
-                                  <span className="text-stone-400 mx-1.5">·</span>
-                                  <span className="italic">{bedLabel}</span>
+                                <div className="font-serif text-base text-stone-900 leading-tight break-words">
+                                  {unitPartyLabel(group.unit?.label || unitLabel, bedLabel)}
                                 </div>
                               )}
                             </div>
                             <div className="flex flex-col items-end gap-1 flex-shrink-0">
                               <div className="flex items-center gap-1.5 flex-wrap justify-end">
-                                <button onClick={(e) => { e.stopPropagation(); bulkTogglePriority(newItems); }} disabled={busy}
-                                  className={`text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full border inline-flex items-center gap-1 transition-colors disabled:opacity-50 ${anyPriority
-                                      ? 'bg-red-100 text-red-800 border-red-300 font-bold hover:bg-red-200'
-                                      : 'bg-stone-100 text-stone-500 border-stone-200 hover:bg-stone-200'}`}>
-                                  <AlertCircle size={10} /> {anyPriority ? 'Priority' : 'Mark priority'}
-                                </button>
+                                {(can(employee, 'mark_assignments_done') || can(employee, 'upload_assignments')) ? (
+                                  <button onClick={(e) => { e.stopPropagation(); bulkTogglePriority(newItems); }} disabled={busy}
+                                    className={`text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full border inline-flex items-center gap-1 transition-colors disabled:opacity-50 ${anyPriority
+                                        ? 'bg-red-100 text-red-800 border-red-300 font-bold hover:bg-red-200'
+                                        : 'bg-stone-100 text-stone-500 border-stone-200 hover:bg-stone-200'}`}>
+                                    <AlertCircle size={10} /> {anyPriority ? 'Priority' : 'Mark priority'}
+                                  </button>
+                                ) : anyPriority ? (
+                                  <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full border bg-red-100 text-red-800 border-red-300 font-bold inline-flex items-center gap-1">
+                                    <AlertCircle size={10} /> Priority
+                                  </span>
+                                ) : null}
                                 <span className={`text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full border ${statusPill.color}`}>
                                   {statusPill.label}
                                 </span>
@@ -34941,19 +34946,18 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                               </div>
                             </div>
                           </div>
-                          {/* === ASSIGNMENT TITLE + TYPE + SECTION BREAKDOWN === */}
-                          <div className="mb-2">
+                          {/* === TYPE + TASK COUNT (new card style) === */}
+                          <div className="mb-2 flex items-center gap-2 flex-wrap text-[11px] font-mono text-stone-500">
                             {firstTarget?.assignment?.assignment_type && (
-                              <div className="mt-1">
-                                <AssignmentTypeChip type={firstTarget.assignment.assignment_type} />
-                              </div>
+                              <AssignmentTypeChip type={firstTarget.assignment.assignment_type} />
                             )}
-                            <div className="text-[11px] font-mono text-stone-500 mt-1">
-                              {newItems.length} {newItems.length === 1 ? 'item' : 'items'}
-                              {sectionBits.length > 0 && (
-                                <> · {sectionBits.join(' · ')}</>
-                              )}
-                            </div>
+                            <button onClick={(e) => { e.stopPropagation(); setOpened(firstTarget); }}
+                              className="underline decoration-stone-400 underline-offset-2 hover:text-stone-700">
+                              {newItems.length} {newItems.length === 1 ? 'task' : 'tasks'}
+                            </button>
+                            {sectionBits.length > 0 && (
+                              <span className="text-stone-400">· {sectionBits.join(' · ')}</span>
+                            )}
                           </div>
                           {/* === BULK ACTION BUTTONS ===
                              Start = navigate to bedroom (no status flip).
@@ -35212,6 +35216,22 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
 
   return (
     <div>
+      {/* Apartment search — Done view only. Type an apartment/bedroom
+         number to jump to it. */}
+      {isDoneView && targets.length > 0 && (
+        <div className="mb-3 relative">
+          <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-stone-400" />
+          <input type="text" value={aptSearch} onChange={(e) => setAptSearch(e.target.value)}
+            placeholder="Search apartment number…"
+            className="w-full pl-9 pr-8 py-2 rounded-xl border border-stone-300 bg-white text-sm text-stone-700 focus:outline-none focus:border-stone-900" />
+          {aptSearch && (
+            <button onClick={() => setAptSearch('')}
+              className="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded-full hover:bg-stone-100 text-stone-400">
+              <X size={14} />
+            </button>
+          )}
+        </div>
+      )}
       {/* Filters bar: toggle to expand, pills inside. Counts active filters
          on the button so the user knows when filters are narrowing things. */}
       {targets.length > 0 && (availableTypes.length > 1 || availableCleaners.length > 0 || availableCategories.length > 0 || isDoneView) && (
@@ -35249,46 +35269,8 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                   </div>
                 </div>
               )}
-              {/* Cleaner — dropdown (was a wall of chips) */}
-              {availableCleaners.length > 0 && (
-                <div>
-                  <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1">Cleaner</div>
-                  <select
-                    value={filterCleaners.size === 1 ? [...filterCleaners][0] : (filterCleaners.size === 0 ? '' : '__multi__')}
-                    onChange={(e) => {
-                      const v = e.target.value;
-                      if (v === '') setFilterCleaners(new Set());
-                      else if (v !== '__multi__') setFilterCleaners(new Set([v]));
-                    }}
-                    className="w-full px-3 py-2 rounded-lg border border-stone-300 bg-white text-sm text-stone-700">
-                    <option value="">All cleaners</option>
-                    {filterCleaners.size > 1 && <option value="__multi__">{filterCleaners.size} selected</option>}
-                    {availableCleaners.map(c => (
-                      <option key={c.id} value={c.id}>{c.name}</option>
-                    ))}
-                  </select>
-                </div>
-              )}
-              {/* Task category — what kind of work happened at the bedroom */}
-              {availableCategories.length > 0 && (
-                <div>
-                  <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1">
-                    Task category
-                  </div>
-                  <div className="flex gap-1.5 flex-wrap">
-                    {availableCategories.map(c => {
-                      const active = filterCategories.has(c.id);
-                      return (
-                        <button key={c.id} onClick={() => toggleCategory(c.id)}
-                          className={`px-2.5 py-1 rounded-full text-xs font-mono flex items-center gap-1 ${active ? 'bg-stone-900 text-stone-50' : 'bg-white border border-stone-300 text-stone-600'}`}>
-                          {active && <Check size={10} />}
-                          {c.label}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
+              {/* Cleaner and Task-category filters removed per request —
+                 the Done tab keeps only Cleaning type + a date range. */}
               {/* Completed-date RANGE — pick a start and end day. Leave a
                  side blank for an open-ended range. Only shown on the
                  Done-family tabs where completed dates exist. */}

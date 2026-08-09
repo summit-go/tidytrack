@@ -107,7 +107,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap135";
+const BUILD_TAG = "aug6-tap137";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -5148,6 +5148,72 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     }
   };
 
+  // GENERAL IS ALWAYS ITS OWN WORK BLOCK.
+  // Bedroom / vanity / bathroom work can share a block — it's all the same
+  // bedroom. General (kitchen, living room, hallways) is apartment-wide work
+  // that gets billed and reviewed separately, so it must never be folded into
+  // a block that already holds bedroom-side work, and bedroom-side work must
+  // never be folded into a general block. When a cleaner crosses that line we
+  // close the running block and open a fresh one at the same bedroom, stamped
+  // with the new section straight away.
+  const SECTIONS = ['bedroom', 'vanity', 'bathroom', 'general'];
+  const blockSectionOf = (block) => {
+    if (!block) return null;
+    if (block.main_section) return block.main_section;
+    // No stamp yet (legacy block, or the stamp write hasn't landed): fall back
+    // to what's actually in the block.
+    const cats = (tasks || [])
+      .filter(t => t.work_block_id === block.id && SECTIONS.includes(t.category))
+      .map(t => t.category);
+    if (cats.length === 0) return null;
+    const counts = {};
+    cats.forEach(c => { counts[c] = (counts[c] || 0) + 1; });
+    return Object.keys(counts).sort((a, b) => counts[b] - counts[a])[0] || null;
+  };
+  const crossesGeneralLine = (blockSec, nextSec) => {
+    if (!blockSec || !nextSec) return false;
+    if (blockSec === nextSec) return false;
+    return blockSec === 'general' || nextSec === 'general';
+  };
+  // Returns the block new tasks in `category` should be attached to, splitting
+  // off a new one when general and non-general work would otherwise mix.
+  const ensureActiveBlockForSection = async (category) => {
+    const live = await ensureActiveBlock();
+    const nextSec = SECTIONS.includes(category) ? category : null;
+    if (!live?.id || !nextSec) return live;
+    const curSec = blockSectionOf(live);
+    if (!crossesGeneralLine(curSec, nextSec)) return live;
+    // Close the running block, then open a fresh one at the same bedroom.
+    try {
+      if (activeTask) await stopTask(activeTask, false);
+      const ts = new Date().toISOString();
+      await supabase.from('work_blocks').update({ end_time: ts }).eq('id', live.id);
+      const { data, error } = await supabase.from('work_blocks')
+        .insert({
+          shift_id: shift.id,
+          unit_id: live.unit_id,
+          party_id: live.party_id,
+          assignment_id: live.assignment_id || null,
+          main_section: nextSec,
+          bill_rate_at_work: shift.customer?.bill_rate_hourly || null,
+          is_preview: previewMode,
+        })
+        .select('*, unit:units(*), party:parties(*), tasks(*, photos(*, taken_by_employee:employees!taken_by(name)))').single();
+      if (error || !data) {
+        console.warn('[section split] could not open a new block, staying put', error);
+        return live;
+      }
+      setWorkBlocks(prev => [...prev.map(b => b.id === live.id ? { ...b, end_time: ts } : b), data]);
+      setActiveBlock(data);
+      setTasks(data.tasks || []);
+      setActiveTask(null);
+      return data;
+    } catch (e) {
+      console.warn('[section split] failed', e);
+      return live;
+    }
+  };
+
   const startTasksFromChecklistItems = async ({ targets: pickedTargets, name, category }) => {
     if (!pickedTargets || pickedTargets.length === 0) return;
     // Stop the current active task before starting a new one (matches
@@ -5178,7 +5244,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       subcategory: null,
       is_preview: previewMode,
     };
-    const liveBlock = await ensureActiveBlock();
+    const liveBlock = await ensureActiveBlockForSection(category);
     if (liveBlock?.id) ins.work_block_id = liveBlock.id;
     const { data: row, error } = await supabase.from('tasks')
       .insert(ins).select('*, photos(*, taken_by_employee:employees!taken_by(name))').single();
@@ -5491,7 +5557,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     if (!nameToUse) return;
     if (activeTask) await stopTask(activeTask, false);
     const insert = { shift_id: shift.id, name: nameToUse, is_preview: previewMode };
-    const liveBlockT = await ensureActiveBlock();
+    const liveBlockT = await ensureActiveBlockForSection(category);
     if (liveBlockT?.id) insert.work_block_id = liveBlockT.id;
     if (category) insert.category = category;
     if (subcategory) insert.subcategory = subcategory;
@@ -5523,7 +5589,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       subcategory: first.subcategory || null,
       is_preview: previewMode,
     };
-    const liveBlockP = await ensureActiveBlock();
+    const liveBlockP = await ensureActiveBlockForSection(first.category);
     if (liveBlockP?.id) firstInsert.work_block_id = liveBlockP.id;
     const { data: firstRow, error: firstErr } = await supabase.from('tasks')
       .insert(firstInsert).select('*, photos(*, taken_by_employee:employees!taken_by(name))').single();
@@ -7630,6 +7696,7 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
   };
   const [peekJob, setPeekJob] = useState(null); // read-only quick glance
   const [collapsedDates, setCollapsedDates] = useState(new Set()); // date-group keys that are collapsed
+  const [buildingFilter, setBuildingFilter] = useState(null); // 'B1' | null = all buildings
   const saveDue = async (j, date) => {
     setEditDueId(null); setBusyId(j.id);
     const { data, error } = await supabase.from('assignments')
@@ -7814,7 +7881,7 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
     const t = new Date(); t.setDate(t.getDate() + 1);
     return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`;
   })();
-  const list = (sub === 'mine' ? jobs.filter(j => isMine(j)) : jobs)
+  const baseList = (sub === 'mine' ? jobs.filter(j => isMine(j)) : jobs)
     .slice()
     .sort((a, b) =>
       dueRank(a.scheduledDate) - dueRank(b.scheduledDate)
@@ -7824,6 +7891,34 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
       || (sub === 'all' ? ((isMine(b) ? 1 : 0) - (isMine(a) ? 1 : 0)) : 0)
       || naturalCompare(a.propName, b.propName)
       || naturalCompare(a.unitLabel, b.unitLabel));
+
+  // ---- Building filter pills -------------------------------------------
+  // Only properties that actually label their units by building get pills.
+  // Carriage Cove writes "B1-202" (building 1, apartment 202); Bridges writes
+  // "E109" with no building at all, so it never produces a pill and its jobs
+  // are never filtered out — picking a building simply narrows to that
+  // building's apartments.
+  const buildingOf = (unitLabel) => {
+    const m = String(unitLabel || '').trim().match(/^B\s*(\d+)\s*-/i);
+    return m ? `B${Number(m[1])}` : null;
+  };
+  const buildingCounts = (() => {
+    const m = new Map();
+    baseList.forEach(j => {
+      const b = buildingOf(j.unitLabel);
+      if (!b) return;
+      m.set(b, (m.get(b) || 0) + 1);
+    });
+    return Array.from(m.entries())
+      .sort((a, b) => naturalCompare(a[0], b[0]));
+  })();
+  const noBuildingCount = baseList.filter(j => !buildingOf(j.unitLabel)).length;
+  // One building is not a choice — only show the row when there are 2+.
+  const showBuildingPills = buildingCounts.length > 1;
+  const activeBuilding = showBuildingPills ? buildingFilter : null;
+  const list = activeBuilding
+    ? baseList.filter(j => buildingOf(j.unitLabel) === activeBuilding)
+    : baseList;
   // Priority jobs float to a pinned section at the very top, regardless of
   // date — "do these first" supersedes the date buckets. They're pulled out
   // of the date sections below so they don't show twice.
@@ -8072,6 +8167,29 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
         <button onClick={() => setSub('mine')} className={`flex-1 py-2 rounded-lg text-xs font-medium ${sub === 'mine' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>Assigned to me</button>
         <button onClick={() => setSub('all')} className={`flex-1 py-2 rounded-lg text-xs font-medium ${sub === 'all' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>All pending</button>
       </div>
+      {/* Building pills — same idea as the Assignments board. Only appears for
+         properties whose units carry a building prefix (B1-202). Properties
+         that don't use buildings, like Bridges, never show a pill and their
+         jobs sit under All. */}
+      {showBuildingPills && (
+        <div className="flex gap-1.5 overflow-x-auto pb-2 mb-2 -mx-1 px-1">
+          <button onClick={() => setBuildingFilter(null)}
+            className={`text-[11px] font-mono px-2.5 py-1 rounded-full whitespace-nowrap flex-shrink-0 transition-colors ${!activeBuilding ? 'bg-stone-900 text-stone-50' : 'bg-stone-100 text-stone-600 hover:bg-stone-200'}`}>
+            All ({baseList.length})
+          </button>
+          {buildingCounts.map(([b, n]) => (
+            <button key={b} onClick={() => setBuildingFilter(activeBuilding === b ? null : b)}
+              className={`text-[11px] font-mono px-2.5 py-1 rounded-full whitespace-nowrap flex-shrink-0 transition-colors ${activeBuilding === b ? 'bg-stone-900 text-stone-50' : 'bg-stone-100 text-stone-600 hover:bg-stone-200'}`}>
+              {b} ({n})
+            </button>
+          ))}
+          {noBuildingCount > 0 && (
+            <span className="text-[11px] font-mono px-2.5 py-1 text-stone-400 whitespace-nowrap flex-shrink-0">
+              +{noBuildingCount} without a building
+            </span>
+          )}
+        </div>
+      )}
       {!loaded ? (
         <div className="text-center py-8 text-stone-400 text-sm">Loading…</div>
       ) : list.length === 0 ? (
@@ -12287,6 +12405,32 @@ function ManagerShell({ employee, onSignOut }) {
     if (m === 'ops' && !['daily', 'dashboard', 'assignments'].includes(tab)) setTab('daily');
     if (m === 'business' && !['props', 'money', 'team'].includes(tab)) setTab('props');
   };
+  // The bottom nav is position:fixed, so it sits ON TOP of the page. The
+  // spacer underneath the content has to be exactly as tall as the nav or
+  // the last rows of a screen end up hidden behind it — which on a phone
+  // reads as "the bar isn't staying at the bottom". The owner nav is two
+  // rows (hat toggle + tabs) and grows/shrinks with the font scale, so we
+  // MEASURE it instead of guessing a Tailwind height.
+  const navRef = useRef(null);
+  const [navH, setNavH] = useState(0);
+  useEffect(() => {
+    const el = navRef.current;
+    if (!el) return;
+    const measure = () => setNavH(el.offsetHeight || 0);
+    measure();
+    let ro = null;
+    if (typeof ResizeObserver !== 'undefined') {
+      ro = new ResizeObserver(measure);
+      ro.observe(el);
+    }
+    window.addEventListener('resize', measure);
+    window.addEventListener('orientationchange', measure);
+    return () => {
+      if (ro) ro.disconnect();
+      window.removeEventListener('resize', measure);
+      window.removeEventListener('orientationchange', measure);
+    };
+  }, [isOwner, mode, showMoneyTabs]);
   // Keep the active tab valid for the current mode (handles stale
   // persisted tabs after a refresh).
   useEffect(() => {
@@ -12367,7 +12511,7 @@ function ManagerShell({ employee, onSignOut }) {
 
   return (
     <PreviewContext.Provider value={{ onPreview: () => setPreviewMode(true), isOwner: employee?.role === 'owner' }}>
-    <div className="min-h-screen bg-stone-50">
+    <div className="min-h-screen bg-stone-50" style={{ minHeight: '100dvh' }}>
       {tab === 'daily'       && <DailyView         employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} onLogoClick={goHome} />}
       {tab === 'dashboard'   && <ManagerDashboard  employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} onLogoClick={goHome} />}
       {tab === 'team'        && <EmployeeAdmin    employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} onLogoClick={goHome} />}
@@ -12375,10 +12519,15 @@ function ManagerShell({ employee, onSignOut }) {
       {tab === 'assignments' && <AssignmentsTab   employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} onLogoClick={goHome} />}
       {showMoneyTabs && tab === 'money' && <MoneyView employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} onLogoClick={goHome} />}
 
-      {/* Spacer so the two-row owner nav doesn't cover the last content. */}
-      {isOwner && <div aria-hidden className="h-20 print:hidden" />}
+      {/* Spacer so the fixed nav never covers the last row of content. Height
+         comes from the live measurement above, plus the phone's home-indicator
+         inset. */}
+      <div aria-hidden className="print:hidden"
+        style={{ height: navH ? `calc(${navH}px + env(safe-area-inset-bottom, 0px))` : (isOwner ? '7rem' : '4.5rem') }} />
 
-      <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-stone-200 px-1 py-2 z-30 print:hidden">
+      <div ref={navRef}
+        className="fixed bottom-0 left-0 right-0 bg-white border-t border-stone-200 px-1 pt-2 z-30 print:hidden"
+        style={{ paddingBottom: 'calc(0.5rem + env(safe-area-inset-bottom, 0px))' }}>
         {isOwner ? (
           <div className="max-w-md mx-auto">
             {/* Operations / Business hat toggle — color-coded so the two
@@ -12907,15 +13056,37 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
     await loadPay();
   };
 
+  // Load pay rows back to the OLDEST shift on screen, not just the start of
+  // this month. Viewing a range that reaches into last month used to load no
+  // pay rows for those days, so already-paid work reappeared as owed.
+  // Paginated for the same reason every other query here is: PostgREST stops
+  // at 1000 rows and would silently drop the rest.
+  const payFrom = (() => {
+    let min = null;
+    (shifts || []).forEach(s => {
+      const k = localDayKey(s.start_time);
+      if (!min || k < min) min = k;
+    });
+    return (min && min < monthStart) ? min : monthStart;
+  })();
   const loadPay = async () => {
-    const { data, error } = await supabase.from('employee_pay_days')
-      .select('*').gte('work_date', monthStart);
-    if (error) return; // table not created yet
+    const PAGE = 1000;
+    let rows = [];
+    for (let from = 0; ; from += PAGE) {
+      const { data, error } = await supabase.from('employee_pay_days')
+        .select('*').gte('work_date', payFrom)
+        .order('id', { ascending: true })
+        .range(from, from + PAGE - 1);
+      if (error) return; // table not created yet
+      rows = rows.concat(data || []);
+      if (!data || data.length < PAGE) break;
+      if (from > 100000) break;
+    }
     const m = {};
-    (data || []).forEach(r => { m[payKey(r.employee_id, r.work_date, r.customer_id, r.assignment_id, r.unit_id)] = r; });
+    rows.forEach(r => { m[payKey(r.employee_id, r.work_date, r.customer_id, r.assignment_id, r.unit_id)] = r; });
     setPayDays(m);
   };
-  useEffect(() => { loadPay(); /* eslint-disable-next-line */ }, []);
+  useEffect(() => { loadPay(); /* eslint-disable-next-line */ }, [payFrom]);
 
   const payOwed = (dayShifts) => {
     const rate = Number(dayShifts[0]?.employee?.pay_rate_hourly) || 0;
@@ -12923,6 +13094,110 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
     const ms = dayShifts.filter(s => s.end_time).reduce((sum, s) => sum + shiftBillableMs(s), 0);
     return (ms / 3600000) * rate;
   };
+  // ---- ONE source of truth for a day's pay ------------------------------
+  // The cleaner-card header and the expanded day strips used to compute the
+  // day's Owe / Paid separately. The header only ever looked for a
+  // day+property row (assignment_id null), but flat-rate properties are paid
+  // per ASSIGNMENT — so once you marked each apartment paid, the header still
+  // found no row, fell back to hours x rate, and reported money owed that the
+  // strips underneath said was already paid. Both now read from this.
+  const dayPayBreakdown = (empId, dateKey, dayShifts) => {
+    const out = { legacy: null, strips: [], dayOwed: 0, dayPaid: 0 };
+    // A day recorded before per-property pay keeps its single bundled row.
+    const legacyRow = payDays[payKey(empId, dateKey, null)];
+    if (legacyRow) {
+      const hasFlat = legacyRow.flat_amount != null;
+      const owed = hasFlat ? Number(legacyRow.flat_amount) : payOwed(dayShifts);
+      const paid = !!legacyRow.paid_at;
+      out.legacy = { row: legacyRow, key: payKey(empId, dateKey, null), hasFlat, owed, paid, stale: isUnpaidStale(dateKey, paid) };
+      if (paid) out.dayPaid += owed; else out.dayOwed += owed;
+      return out;
+    }
+    groupByProperty(dayShifts).forEach(pg => {
+      const sample = pg.shifts[0];
+      const isHourly = (sample?.customer?.bill_mode === 'hourly');
+      // Hourly property (Carriage Cove): ONE strip for the whole property,
+      // priced by hours.
+      if (isHourly) {
+        const key = payKey(empId, dateKey, pg.id, null);
+        const row = payDays[key];
+        const hasFlat = row?.flat_amount != null;
+        const owed = hasFlat ? Number(row.flat_amount) : payOwed(pg.shifts);
+        const paid = !!row?.paid_at;
+        if (paid) out.dayPaid += owed; else out.dayOwed += owed;
+        const pMs = pg.shifts.filter(x => x.end_time).reduce((sum, x) => sum + shiftBillableMs(x), 0);
+        const pBlocks = pg.shifts.reduce((n, x) => n + (x.work_blocks?.length || 0), 0);
+        const apts = new Set();
+        pg.shifts.forEach(x => (x.work_blocks || []).forEach(b => { if (b.unit?.label) apts.add(b.unit.label); }));
+        out.strips.push({ pg, assignmentId: null, unitId: null, title: pg.name, sub: null, key, row, hasFlat, owed, paid,
+                          pMs, pBlocks, aptCount: apts.size, hourly: true, stale: isUnpaidStale(dateKey, paid) });
+        return;
+      }
+      // Flat-rate property (Bridges, Citifront): ONE strip per ASSIGNMENT.
+      const byAsg = new Map();
+      pg.shifts.forEach(x => (x.work_blocks || []).forEach(b => {
+        const aId = b.assignment_id || null;
+        const gkey = aId || `legacy:${b.unit?.label || ''}:${b.party?.label || ''}`;
+        if (!byAsg.has(gkey)) {
+          byAsg.set(gkey, {
+            assignmentId: aId,
+            unitId: b.unit_id || null,
+            unitLabel: b.unit?.label || '',
+            size: unitSizeLabel(b.unit),
+            type: b.assignment?.assignment_type || '',
+            ms: 0, blocks: 0,
+          });
+        }
+        const g = byAsg.get(gkey);
+        g.blocks += 1;
+        if (b.end_time) g.ms += (new Date(b.end_time) - new Date(b.start_time));
+      }));
+      // Fold untagged (legacy) blocks into a unit's tagged line when that unit
+      // has exactly ONE tagged assignment.
+      {
+        const groupsArr = Array.from(byAsg.entries());
+        const taggedByUnit = new Map();
+        groupsArr.forEach(([, g]) => {
+          if (g.assignmentId) {
+            const u = g.unitLabel || '';
+            taggedByUnit.set(u, (taggedByUnit.get(u) || 0) + 1);
+          }
+        });
+        groupsArr.forEach(([gkey, g]) => {
+          if (g.assignmentId) return;
+          const u = g.unitLabel || '';
+          if (taggedByUnit.get(u) !== 1) return;
+          const target = groupsArr.find(([, t]) => t.assignmentId && (t.unitLabel || '') === u);
+          if (!target) return;
+          target[1].blocks += g.blocks;
+          target[1].ms += g.ms;
+          byAsg.delete(gkey);
+        });
+      }
+      Array.from(byAsg.values())
+        .sort((a, b) => naturalCompare(a.unitLabel, b.unitLabel) || naturalCompare(a.type, b.type))
+        .forEach(g => {
+          const asgId = g.assignmentId;
+          const unitKeyId = asgId ? null : (g.unitId || null);
+          const key = payKey(empId, dateKey, pg.id, asgId, unitKeyId);
+          const row = payDays[key];
+          const hasFlat = row?.flat_amount != null;
+          const owed = hasFlat ? Number(row.flat_amount) : 0; // flat: you enter it
+          const paid = !!row?.paid_at;
+          if (paid) out.dayPaid += owed; else out.dayOwed += owed;
+          const subParts = [g.size, g.type ? assignmentTypeLabel(g.type) : null].filter(Boolean);
+          out.strips.push({
+            pg, assignmentId: asgId, unitId: unitKeyId, title: g.unitLabel || pg.name,
+            sub: subParts.join(' · ') + (g.blocks > 1 ? ` · ${g.blocks} visits` : ''),
+            key, row, hasFlat, owed, paid,
+            pMs: g.ms, pBlocks: g.blocks, aptCount: 1, hourly: false,
+            legacy: !asgId, stale: isUnpaidStale(dateKey, paid),
+          });
+        });
+    });
+    return out;
+  };
+
   const togglePaid = async (empId, dateKey, custId, amount, assignmentId = null, unitId = null) => {
     const key = payKey(empId, dateKey, custId, assignmentId, unitId);
     const existing = payDays[key];
@@ -13173,13 +13448,10 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
                 // A day that already has a pre-split pay row keeps the old
                 // bundled strip. Per-property pay starts from days that have
                 // no record yet — nothing historical is rewritten or hidden.
-                const legacyRow = payDays[payKey(empId, d.key, null)];
-                if (legacyRow) {
-                  const hasFlat = legacyRow.flat_amount != null;
-                  const owed = hasFlat ? Number(legacyRow.flat_amount) : payOwed(d.shifts);
-                  const paid = !!legacyRow.paid_at;
-                  const key = payKey(empId, d.key, null);
-                  const stale = isUnpaidStale(d.key, paid);
+                const bd = dayPayBreakdown(empId, d.key, d.shifts);
+                const legacyRow = bd.legacy?.row || null;
+                if (bd.legacy) {
+                  const { hasFlat, owed, paid, key, stale } = bd.legacy;
                   return (
                     <div className={`px-4 py-2.5 border-t ${stale ? 'bg-amber-50 border-amber-200' : 'border-stone-100'}`}>
                       {/* Same top-row shape as the per-property strips: label on
@@ -13255,113 +13527,16 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
                     </div>
                   );
                 }
-                const propGroups = groupByProperty(d.shifts);
-                if (propGroups.length === 0) {
+                // Strips + day totals come from the shared breakdown so this list and
+                // the Owe / Paid on the cleaner header can never disagree.
+                const { strips, dayOwed, dayPaid } = bd;
+                if (strips.length === 0) {
                   return (
                     <div className="px-4 py-2.5 border-t border-stone-100 text-[11px] font-mono text-stone-400">
                       No property on these shifts — pay can't be split.
                     </div>
                   );
                 }
-                let dayOwed = 0, dayPaid = 0;
-                const strips = [];
-                propGroups.forEach(pg => {
-                  const sample = pg.shifts[0];
-                  const isHourly = (sample?.customer?.bill_mode === 'hourly');
-                  // Hourly property (Carriage Cove): keep ONE grouped strip for
-                  // the whole property, priced by hours — unchanged behavior.
-                  if (isHourly) {
-                    const key = payKey(empId, d.key, pg.id, null);
-                    const row = payDays[key];
-                    const hasFlat = row?.flat_amount != null;
-                    const owed = hasFlat ? Number(row.flat_amount) : payOwed(pg.shifts);
-                    const paid = !!row?.paid_at;
-                    if (paid) dayPaid += owed; else dayOwed += owed;
-                    const pMs = pg.shifts.filter(s => s.end_time).reduce((sum, s) => sum + shiftBillableMs(s), 0);
-                    const pBlocks = pg.shifts.reduce((n, s) => n + (s.work_blocks?.length || 0), 0);
-                    const apts = new Set();
-                    pg.shifts.forEach(s => (s.work_blocks || []).forEach(b => { if (b.unit?.label) apts.add(b.unit.label); }));
-                    strips.push({ pg, assignmentId: null, title: pg.name, sub: null, key, row, hasFlat, owed, paid, pMs, pBlocks,
-                                  aptCount: apts.size, hourly: true, stale: isUnpaidStale(d.key, paid) });
-                    return;
-                  }
-                  // Flat-rate property (Bridges, Citifront): ONE strip per
-                  // ASSIGNMENT. Group this property's blocks by assignment_id
-                  // (legacy null blocks fall back to a per-unit:party key so
-                  // they still show, just not merged across jobs).
-                  const byAsg = new Map();
-                  pg.shifts.forEach(s => (s.work_blocks || []).forEach(b => {
-                    const aId = b.assignment_id || null;
-                    const gkey = aId || `legacy:${b.unit?.label || ''}:${b.party?.label || ''}`;
-                    if (!byAsg.has(gkey)) {
-                      byAsg.set(gkey, {
-                        assignmentId: aId,
-                        unitId: b.unit_id || null,
-                        unitLabel: b.unit?.label || '',
-                        size: unitSizeLabel(b.unit),
-                        type: b.assignment?.assignment_type || '',
-                        ms: 0, blocks: 0,
-                      });
-                    }
-                    const g = byAsg.get(gkey);
-                    g.blocks += 1;
-                    if (b.end_time) g.ms += (new Date(b.end_time) - new Date(b.start_time));
-                  }));
-                  // Fold untagged (legacy) blocks into a unit's tagged line when
-                  // that unit has exactly ONE tagged assignment — the untagged
-                  // blocks are almost certainly older clock-ins of the same job,
-                  // so E109 shouldn't show as "E109 · Move-out" AND a separate
-                  // untagged "E109". If a unit has TWO+ tagged assignments we
-                  // can't know which the untagged blocks belong to, so we leave
-                  // them as their own line rather than guess wrong.
-                  {
-                    const groupsArr = Array.from(byAsg.entries()); // [gkey, g]
-                    // tagged assignment count per unit label
-                    const taggedByUnit = new Map();
-                    groupsArr.forEach(([, g]) => {
-                      if (g.assignmentId) {
-                        const u = g.unitLabel || '';
-                        taggedByUnit.set(u, (taggedByUnit.get(u) || 0) + 1);
-                      }
-                    });
-                    groupsArr.forEach(([gkey, g]) => {
-                      if (g.assignmentId) return;               // only fold legacy lines
-                      const u = g.unitLabel || '';
-                      if (taggedByUnit.get(u) !== 1) return;    // 0 tagged → keep as own; 2+ → ambiguous, keep
-                      // find that unit's single tagged line and merge into it
-                      const target = groupsArr.find(([, t]) => t.assignmentId && (t.unitLabel || '') === u);
-                      if (!target) return;
-                      target[1].blocks += g.blocks;
-                      target[1].ms += g.ms;
-                      byAsg.delete(gkey);
-                    });
-                  }
-                  const asgList = Array.from(byAsg.values())
-                    .sort((a, b) => naturalCompare(a.unitLabel, b.unitLabel) || naturalCompare(a.type, b.type));
-                  asgList.forEach(g => {
-                    // Assignment-tagged lines key by assignment_id. Legacy
-                    // blocks with no assignment_id key by UNIT instead, so two
-                    // untagged apartments (D108, F404) are separate pay rows
-                    // and separate edit states — not one shared row.
-                    const asgId = g.assignmentId;
-                    const unitKeyId = asgId ? null : (g.unitId || null);
-                    const key = payKey(empId, d.key, pg.id, asgId, unitKeyId);
-                    const row = payDays[key];
-                    const hasFlat = row?.flat_amount != null;
-                    const owed = hasFlat ? Number(row.flat_amount) : 0; // flat: no auto amount, you enter it
-                    const paid = !!row?.paid_at;
-                    if (paid) dayPaid += owed; else dayOwed += owed;
-                    const title = g.unitLabel || pg.name;
-                    const subParts = [g.size, g.type ? assignmentTypeLabel(g.type) : null].filter(Boolean);
-                    strips.push({
-                      pg, assignmentId: asgId, unitId: unitKeyId, title,
-                      sub: subParts.join(' · ') + (g.blocks > 1 ? ` · ${g.blocks} visits` : ''),
-                      key, row, hasFlat, owed, paid,
-                      pMs: g.ms, pBlocks: g.blocks, aptCount: 1, hourly: false,
-                      legacy: !asgId, stale: isUnpaidStale(d.key, paid),
-                    });
-                  });
-                });
                 return (
                   <div className="border-t border-stone-100">
                     {strips.map(st => (
@@ -13449,7 +13624,7 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
                     ))}
                     {strips.length > 1 && (
                       <div className="px-4 py-2 bg-stone-50 border-t border-stone-200 flex items-center justify-between gap-2 text-xs font-mono">
-                        <span className="text-[10px] uppercase tracking-wider text-stone-500">Day total · {strips.length} properties</span>
+                        <span className="text-[10px] uppercase tracking-wider text-stone-500">Day total · {strips.length} lines</span>
                         <span className="flex items-center gap-2">
                           {dayPaid > 0 && <span className="text-emerald-700">Paid {fmtMoney(dayPaid)}</span>}
                           <span className={dayOwed > 0 ? 'text-stone-900 font-bold' : 'text-stone-400'}>
@@ -13531,22 +13706,15 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
             // day paid instantly moves that amount from Owe to Paid.
             let cOwe = 0, cPaid = 0;
             if (showMoney) {
-              // Sum the same per-property buckets the detail view pays out of,
-              // so the header number always equals the strips underneath it.
+              // Exactly the strips the expanded day shows — same helper, same
+              // keys — so the header can never claim money is owed on work
+              // that's already been marked paid line by line.
               const cDayMap = {};
               c.shifts.forEach(s => { const k = localDayKey(s.start_time); (cDayMap[k] = cDayMap[k] || []).push(s); });
               Object.entries(cDayMap).forEach(([k, ds]) => {
-                const legacy = payDays[payKey(c.id, k, null)];
-                if (legacy) {
-                  const amt = legacy.flat_amount != null ? Number(legacy.flat_amount) : payOwed(ds);
-                  if (legacy.paid_at) cPaid += amt; else cOwe += amt;
-                  return;
-                }
-                groupByProperty(ds).forEach(pg => {
-                  const row = payDays[payKey(c.id, k, pg.id)];
-                  const amt = row?.flat_amount != null ? Number(row.flat_amount) : payOwed(pg.shifts);
-                  if (row?.paid_at) cPaid += amt; else cOwe += amt;
-                });
+                const bd = dayPayBreakdown(c.id, k, ds);
+                cOwe += bd.dayOwed;
+                cPaid += bd.dayPaid;
               });
             }
             return (
@@ -32852,268 +33020,226 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
     })();
   }, [t.unit_id, t.party_id, isDone, propertyId, t.status]);
 
+  // Card chrome — same shape as the Today-tab job card: white rounded-2xl,
+  // thin stone border, red border only when the job is flagged priority.
+  // Built as one string per state so two border colours never collide.
+  const surface = isDone
+    ? (dark ? 'bg-slate-900/70 opacity-90' : 'bg-stone-50 opacity-90')
+    : (dark ? 'bg-slate-900' : 'bg-white');
+  const ring = (t.priority && !isDone)
+    ? 'border-2 border-red-300'
+    : (dark ? 'border border-slate-600' : 'border border-stone-200');
+  const cardTitle = unitPartyLabel(t.unit?.label, t.party?.label) || 'Whole property';
+  // Small pill used by every secondary action in the footer row.
+  const pillBtn = `text-[11px] font-medium px-2.5 py-1 rounded-full border inline-flex items-center gap-1 active:scale-95 transition disabled:opacity-50`;
+
   return (
-    <div className={`${dark ? 'p-2.5 sm:p-3 rounded-xl border' : 'p-4 rounded-2xl border shadow-sm'} ${isDone ? D.cardDone : D.card}`}>
-      {/* === HEADER ROW =================================================
-         On mobile the title takes a full-width row of its own and the
-         chip group (priority / status / view doc / history) drops to
-         the line below — that's the only way to guarantee long
-         apartment labels never get cut off on a phone. From `sm:`
-         and up there's enough horizontal room to put the title on
-         the left and chips on the right. */}
-      <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5 mb-2">
-        <div className="flex-shrink min-w-0 mr-1">
-          {(t.unit?.label || t.party?.label) ? (
-            canGo ? (
-              // Bedroom title is the primary navigation target on the
-              // card — tapping the bold "B4-115 · Bedroom 2" header
-              // jumps the cleaner straight into that bedroom (same
-              // path as the Start / Go to this bedroom buttons).
-              // Underline-on-hover hint so it reads as tappable.
-              <button onClick={onGoToBedroom} disabled={busy}
-                className={`block text-left w-full font-serif text-lg ${D.title} leading-tight break-words hover:underline disabled:opacity-50`}>
-                <span className="font-bold">{t.unit?.label || 'No unit'}</span>
-                {partyDisplay(t.party?.label) && (
-                  <>
-                    <span className={`${D.sep} mx-1.5`}>·</span>
-                    <span className="italic">{partyDisplay(t.party?.label)}</span>
-                  </>
-                )}
-              </button>
-            ) : (
-              <div className={`font-serif text-lg ${D.title} leading-tight break-words`}>
-                <span className="font-bold">{t.unit?.label || 'No unit'}</span>
-                {partyDisplay(t.party?.label) && (
-                  <>
-                    <span className={`${D.sep} mx-1.5`}>·</span>
-                    <span className="italic">{partyDisplay(t.party?.label)}</span>
-                  </>
-                )}
-              </div>
-            )
+    <div className={`${dark ? 'p-3' : 'p-3.5'} rounded-2xl ${surface} ${ring}`}>
+      {/* === TITLE ROW =================================================
+         Matches the Today tab: compact serif label + chevron is the tap
+         target, status / priority chips sit to the right. */}
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0 flex-1">
+          {canGo ? (
+            <button onClick={onGoToBedroom} disabled={busy} title="Go to this bedroom"
+              className="max-w-full min-w-0 text-left rounded-lg -m-1 p-1 hover:bg-stone-500/10 active:scale-[0.99] transition group inline-flex items-center gap-1 disabled:opacity-50">
+              <span className={`font-serif text-base ${D.title} truncate group-hover:underline decoration-stone-300 underline-offset-2`}>{cardTitle}</span>
+              <ChevronRight size={15} className="text-stone-400 group-hover:text-stone-600 flex-shrink-0" />
+            </button>
           ) : (
-            <div className={`font-serif text-lg ${D.title} font-bold`}>Whole property</div>
+            <div className={`font-serif text-base ${D.title} truncate`}>{cardTitle}</div>
           )}
-        </div>
-        <div className="flex flex-wrap items-center gap-1.5 sm:ml-auto">
-          {/* Mini-row 1: Priority + Status — right-aligned. */}
-          <div className="flex items-center gap-1.5 flex-wrap">
-            {/* Priority toggle (gray ↔ red) when parent passes it; else
-               read-only chip. */}
-            {!isDone && onTogglePriority && canPrioritize ? (
-              <button
-                onClick={(e) => { e.stopPropagation(); onTogglePriority(t); }}
-                disabled={busy}
-                className={`text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full border inline-flex items-center gap-1 transition-colors disabled:opacity-50 ${t.priority
-                    ? 'bg-red-100 text-red-800 border-red-300 font-bold hover:bg-red-200'
-                    : 'bg-stone-100 text-stone-500 border-stone-200 hover:bg-stone-200'}`}>
-                <AlertCircle size={10} /> {t.priority ? 'Priority' : 'Mark priority'}
-              </button>
-            ) : (
-              <PriorityChip on={t.priority && !isDone} />
+
+          {/* Meta line — mono, one line, same as "Carriage Cove · Move out ·
+             1 task" on the Today tab. Here it carries the assignment title,
+             the cleaning type, and the two peek links. */}
+          <div className={`text-[11px] ${D.muted} font-mono mt-0.5 flex items-center gap-1 flex-wrap`}>
+            <FileText size={10} className="flex-shrink-0" />
+            {t.assignment?.title && <span className="truncate max-w-[14rem]">{t.assignment.title}</span>}
+            {t.assignment?.assignment_type && (
+              <span>{t.assignment?.title ? '· ' : ''}{assignmentTypeLabel(t.assignment.assignment_type)}</span>
             )}
-            {/* Status pill — read-only, just a visual cue. */}
-            <span className={`text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full border ${s.color}`}>
-              {s.label}
-            </span>
-            {/* Due-date signal — tappable to reschedule when permitted. */}
-            {!isDone && (() => {
-              const kind = assignmentDueKind(localDate);
-              const cls = kind === 'overdue' ? 'bg-red-100 text-red-700 border-red-200'
-                : kind === 'today' ? 'bg-emerald-100 text-emerald-800 border-emerald-200'
-                : 'bg-stone-100 text-stone-600 border-stone-200';
-              const label = !localDate ? 'Set date'
-                : kind === 'overdue' ? `Overdue · ${fmtDueDate(localDate)}`
-                : kind === 'today' ? 'Today'
-                : fmtDueDate(localDate);
-              if (editingDate && canEditDates) {
-                return (
-                  <DueDateEditor compact value={localDate}
-                    onSave={(d) => { commitDate(d); setEditingDate(false); }}
-                    onCancel={() => setEditingDate(false)} />
-                );
-              }
-              if (canEditDates) {
-                return (
-                  <button onClick={() => setEditingDate(true)}
-                    className={`text-[10px] font-mono px-2 py-0.5 rounded-full border flex items-center gap-1 ${localDate ? cls : 'bg-white text-stone-500 border-dashed border-stone-300'}`}>
-                    <Calendar size={9} /> {label}
-                  </button>
-                );
-              }
-              if (!localDate) return null;
-              return (
-                <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full border flex items-center gap-1 ${cls}`}>
-                  <Calendar size={9} /> {label}
-                </span>
-              );
-            })()}
-          </div>
-          {/* Mini-row 2: View doc + History — right-aligned. Stays a
-             separate mini-row so the chip pairs never split awkwardly:
-             priority sits next to status, view doc next to history. */}
-          <div className="flex items-center gap-1.5 flex-wrap justify-end">
+            {(t.assignment?.title || t.assignment?.assignment_type) && <span>·</span>}
             <button onClick={onView}
-              className={`text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full ${D.chip} flex items-center gap-1`}>
-              <Eye size={10} /> Quick glance
+              className="underline decoration-stone-400 underline-offset-2 hover:text-stone-700">
+              Quick glance
             </button>
             {onOpenBedroomHistory && t.unit_id && t.party_id && (
-              <button onClick={() => onOpenBedroomHistory({
-                  unitId: t.unit_id, unitLabel: t.unit?.label,
-                  partyId: t.party_id, partyLabel: t.party?.label
-                })} disabled={busy}
-                className={`text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full ${D.chip} flex items-center gap-1 disabled:opacity-50`}>
-                <Clock size={10} /> History
-              </button>
+              <>
+                <span>·</span>
+                <button onClick={() => onOpenBedroomHistory({
+                    unitId: t.unit_id, unitLabel: t.unit?.label,
+                    partyId: t.party_id, partyLabel: t.party?.label
+                  })} disabled={busy}
+                  className="underline decoration-stone-400 underline-offset-2 hover:text-stone-700 disabled:opacity-50">
+                  History
+                </button>
+              </>
             )}
           </div>
         </div>
-      </div>
 
-      {/* === TITLE + TYPE ===============================================
-         Assignment title (move-out check / standard / etc), cleaning
-         type chip, assignee. Tappable when canGo so cleaner can jump
-         from the title alone. */}
-      <div className="mb-2">
-        {canGo ? (
-          <button onClick={onGoToBedroom} disabled={busy}
-            className={`text-left w-full font-serif text-sm ${dark ? 'text-stone-200' : 'text-stone-700'} hover:underline disabled:opacity-50`}>
-            {t.assignment?.title}
-          </button>
-        ) : (
-          <div className={`font-serif text-sm ${dark ? 'text-stone-200' : 'text-stone-700'}`}>{t.assignment?.title}</div>
-        )}
-        {(t.assignment?.assignment_type || (t.assignedTo?.name && !isDone)) && (
-          <div className="mt-1 flex items-center gap-1.5 flex-wrap">
-            <AssignmentTypeChip type={t.assignment?.assignment_type} />
-            {t.assignedTo?.name && !isDone && (
-              <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-purple-100 text-purple-800 border border-purple-300 inline-flex items-center gap-1">
-                <User size={10} /> {t.assignedTo.name}
-              </span>
-            )}
-          </div>
-        )}
-        {t.assignment?.notes && (
-          <div className="text-xs text-stone-600 mt-1 line-clamp-2">{t.assignment.notes}</div>
-        )}
-        {t.status === 'in_progress' && t.starter?.name && (
-          <div className="text-xs text-amber-700 font-mono mt-1">
-            Started by {t.starter.name}{t.started_at && ` · ${fmtClock(t.started_at)}`}
-          </div>
-        )}
-        {t.status === 'paused' && t.starter?.name && (
-          <div className="text-xs text-blue-700 font-mono mt-1 flex items-center gap-1">
-            <Pause size={10} />
-            Paused by {t.starter.name}
-          </div>
-        )}
-        {activeCleaners.length > 0 && (
-          <div className="text-xs text-emerald-700 font-mono mt-1 flex items-center gap-1">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-            {activeCleaners.length === 1 ? `${activeCleaners[0]} is here` : `${activeCleaners.length} cleaners here: ${activeCleaners.join(', ')}`}
-          </div>
-        )}
-        {isDone && t.completed_at && (
-          <div className="text-xs text-emerald-700 font-mono mt-1">
-            {t.completer?.name ? `Done by ${t.completer.name} · ` : 'Done '}{fmtDateWithDay(t.completed_at)} {fmtClock(t.completed_at)}
-          </div>
-        )}
-        {t.status_notes && (
-          <div className="text-xs text-red-700 italic mt-1">"{t.status_notes}"</div>
-        )}
-      </div>
-
-      {/* === ACTION BUTTON ROW =========================================
-         All buttons share h-9 / px-3 / text-xs / inline-flex so they
-         line up symmetrically regardless of which subset is showing.
-         Order: Start → Pause → Move to pending → Done → Reopen →
-         Blocked → Reassign. Reassign no longer has ml-auto so the
-         row stays uniform. */}
-      <div className="flex gap-2 flex-wrap items-center">
-        {/* Start cleaning — small, sits with the other card actions (prep
-           screen only; passed as onStartCleaning). */}
-        {onStartCleaning && !isDone && (
-          <button onClick={onStartCleaning} disabled={busy}
-            className="h-9 px-3 rounded-lg bg-stone-900 hover:bg-stone-800 text-white text-xs font-semibold flex items-center gap-1 disabled:opacity-50">
-            <Play size={13} /> Start cleaning
-          </button>
-        )}
-        {/* "Go to bedroom" replaces the old "Start" — Start just flipped a
-           status without taking you anywhere, which was confusing. This opens
-           the bedroom (where the real "Start cleaning" lives). Only shows off
-           the working screen (canGo is false once you're in the bedroom). */}
-        {canGo && (
-          <button onClick={onGoToBedroom} disabled={busy}
-            className="h-9 px-3 rounded-lg bg-stone-900 hover:bg-stone-800 text-white text-xs font-medium flex items-center gap-1 disabled:opacity-50">
-            Go to bedroom <ChevronRight size={13} />
-          </button>
-        )}
-        {onPause && (t.status === 'in_progress') && (
-          <button onClick={onPause} disabled={busy}
-            className="h-9 px-3 rounded-lg border border-blue-200 hover:bg-blue-50 text-blue-700 text-xs font-medium flex items-center gap-1 disabled:opacity-50">
-            <Pause size={12} /> Pause
-          </button>
-        )}
-        {onMoveToPending && t.status === 'paused' && (
-          <button onClick={onMoveToPending} disabled={busy}
-            className={`h-9 px-3 rounded-lg border ${D.outlineBtn} text-xs font-medium flex items-center gap-1 disabled:opacity-50`}>
-            <ArrowLeft size={12} /> Move to pending
-          </button>
-        )}
-        {/* "Mark complete" full button removed — the corner ✓ (permission-
-           gated, with a confirm) is the single mark-complete action now. */}
-        {(isDone || t.status === 'blocked') && (
-          <button onClick={onReopen} disabled={busy}
-            className={`h-9 px-3 rounded-lg border ${D.outlineBtn} text-xs font-medium flex items-center gap-1 disabled:opacity-50`}>
-            <Play size={12} /> Reopen
-          </button>
-        )}
-        {ownerView && (t.status === 'pending' || t.status === 'in_progress' || t.status === 'paused') && (() => {
-          // Block is owner-only now. Owners can block without starting, so
-          // it's never disabled for them here.
-          return (
-            <OwnerOnly employee={{ role: 'owner' }}>
-            <button onClick={onBlocked} disabled={busy}
-              title="Owners only"
-              className="h-9 px-3 rounded-lg text-xs font-medium flex items-center gap-1 border border-red-200 hover:bg-red-50 text-red-700 disabled:opacity-50">
-              <AlertCircle size={12} /> Block
+        {/* Right-hand chips: status, then priority. */}
+        <span className="flex items-center gap-1 flex-shrink-0 flex-wrap justify-end">
+          <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full border ${s.color}`}>{s.label}</span>
+          {!isDone && onTogglePriority && canPrioritize ? (
+            <button onClick={(e) => { e.stopPropagation(); onTogglePriority(t); }} disabled={busy}
+              title={t.priority ? 'Remove priority' : 'Mark priority'}
+              className={`text-[10px] font-mono px-2 py-0.5 rounded-full inline-flex items-center gap-1 transition-colors disabled:opacity-50 ${t.priority
+                ? 'bg-red-100 text-red-700 font-bold hover:bg-red-200'
+                : 'bg-white border border-dashed border-stone-300 text-stone-500 hover:bg-stone-100'}`}>
+              <AlertCircle size={9} /> {t.priority ? 'Priority' : 'Mark priority'}
             </button>
-            </OwnerOnly>
-          );
-        })()}
-        {onReassign && (t.unit_id || t.party_id) && (
-          <button onClick={onReassign} disabled={busy}
-            className={`h-9 px-3 rounded-lg border ${D.outlineBtn} text-xs font-medium flex items-center gap-1 disabled:opacity-50`}>
-            <Edit2 size={12} /> Reassign
-          </button>
-        )}
-        {/* Delete an assignment uploaded by mistake (owner/uploader only) —
-           pushed to the right end to mirror the checklist card. */}
-        {/* Owner/manager corner actions on the working screen:
-           ✓ = mark this assignment complete → Done. ✕ = delete a mistaken upload. */}
-        {((canMarkDoneAlways && !isDone) || onDelete) && (
-          <div className="ml-auto flex items-center gap-1.5">
-            {canMarkDoneAlways && !isDone && (
-              <button onClick={() => { if (confirm('Mark this whole assignment complete? It closes out this assignment and moves it to Done.')) { onDone(); if (onExit) onExit(); } }} disabled={busy}
-                title="Mark this assignment complete → Done"
-                className="w-9 h-9 rounded-lg flex items-center justify-center bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-50">
-                <Check size={16} />
-              </button>
-            )}
-            {onDelete && (
-              <button onClick={() => { if (onDelete) { onDelete(); if (onExit) onExit(); } }} disabled={busy}
-                title="Delete this assignment (uploaded by mistake)"
-                className={`w-9 h-9 rounded-lg flex items-center justify-center border disabled:opacity-50 ${dark ? 'bg-slate-800 hover:bg-red-950 border-slate-600 text-red-300' : 'bg-white hover:bg-red-50 border-stone-300 text-red-600'}`}>
-                <X size={16} />
-              </button>
-            )}
-          </div>
-        )}
+          ) : t.priority && !isDone ? (
+            <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-red-100 text-red-700 font-bold flex items-center gap-1">
+              <AlertCircle size={9} /> Priority
+            </span>
+          ) : null}
+        </span>
       </div>
 
-      {/* The big full-width "Go to this bedroom" button was removed — it's now
-         a compact "Go to bedroom" button in the action row above, per the
-         card-consolidation. */}
+      {/* === WHO'S ON IT ===============================================
+         Same chip row as the Today tab — cleaners physically in the room,
+         then who it's assigned to, then who started / paused / finished. */}
+      {(activeCleaners.length > 0 || (t.assignedTo?.name && !isDone) || t.starter?.name || (isDone && t.completed_at)) && (
+        <div className="flex items-center gap-1.5 flex-wrap mt-2">
+          {activeCleaners.map((n, i) => (
+            <span key={`${n}-${i}`} className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 flex items-center gap-1">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+              {n} is here
+            </span>
+          ))}
+          {t.assignedTo?.name && !isDone && (
+            <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full flex items-center gap-1 ${t.assignedTo?.id === currentEmployeeId ? 'bg-indigo-100 text-indigo-700' : 'bg-stone-100 text-stone-600'}`}>
+              <User size={9} /> {t.assignedTo.name}
+            </span>
+          )}
+          {t.status === 'in_progress' && t.starter?.name && (
+            <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 flex items-center gap-1">
+              <Play size={9} /> Started by {t.starter.name}{t.started_at && ` · ${fmtClock(t.started_at)}`}
+            </span>
+          )}
+          {t.status === 'paused' && t.starter?.name && (
+            <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-blue-100 text-blue-800 flex items-center gap-1">
+              <Pause size={9} /> Paused by {t.starter.name}
+            </span>
+          )}
+          {isDone && t.completed_at && (
+            <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 flex items-center gap-1">
+              <Check size={9} /> {t.completer?.name ? `${t.completer.name} · ` : ''}{fmtDateWithDay(t.completed_at)} {fmtClock(t.completed_at)}
+            </span>
+          )}
+        </div>
+      )}
+
+      {/* Notes — assignment notes and any blocked/status note. */}
+      {t.assignment?.notes && (
+        <div className={`text-xs ${dark ? 'text-stone-300' : 'text-stone-600'} mt-1.5 line-clamp-2`}>{t.assignment.notes}</div>
+      )}
+      {t.status_notes && (
+        <div className="text-xs text-red-700 italic mt-1.5">"{t.status_notes}"</div>
+      )}
+
+      {/* === FOOTER ROW ================================================
+         Due date on the left, actions on the right, primary action as the
+         amber pill — the same footer the Today tab uses. */}
+      <div className="flex items-center justify-between mt-2 gap-2 flex-wrap">
+        <div className="flex items-center gap-1.5">
+          {!isDone ? (() => {
+            const kind = assignmentDueKind(localDate);
+            const cls = kind === 'overdue' ? 'bg-red-100 text-red-700 border-red-200'
+              : kind === 'today' ? 'bg-emerald-100 text-emerald-800 border-emerald-200'
+              : 'bg-stone-100 text-stone-600 border-stone-200';
+            const label = !localDate ? 'Set date'
+              : kind === 'overdue' ? `Overdue · ${fmtDueDate(localDate)}`
+              : kind === 'today' ? 'Today'
+              : fmtDueDate(localDate);
+            if (editingDate && canEditDates) {
+              return (
+                <DueDateEditor compact value={localDate}
+                  onSave={(d) => { commitDate(d); setEditingDate(false); }}
+                  onCancel={() => setEditingDate(false)} />
+              );
+            }
+            if (canEditDates) {
+              return (
+                <button onClick={() => setEditingDate(true)}
+                  className={`text-[11px] font-mono px-2 py-0.5 rounded-full border flex items-center gap-1 ${localDate ? cls : 'bg-white text-stone-500 border-dashed border-stone-300'}`}>
+                  <Calendar size={9} /> {label}
+                </button>
+              );
+            }
+            if (!localDate) return null;
+            return (
+              <span className={`text-[11px] font-mono px-2 py-0.5 rounded-full border flex items-center gap-1 ${cls}`}>
+                <Calendar size={9} /> {label}
+              </span>
+            );
+          })() : null}
+        </div>
+
+        <div className="flex items-center gap-1.5 flex-wrap justify-end">
+          {onPause && t.status === 'in_progress' && (
+            <button onClick={onPause} disabled={busy}
+              className={`${pillBtn} border-blue-200 hover:bg-blue-50 text-blue-700`}>
+              <Pause size={11} /> Pause
+            </button>
+          )}
+          {onMoveToPending && t.status === 'paused' && (
+            <button onClick={onMoveToPending} disabled={busy}
+              className={`${pillBtn} ${D.outlineBtn}`}>
+              <ArrowLeft size={11} /> Move to pending
+            </button>
+          )}
+          {(isDone || t.status === 'blocked') && (
+            <button onClick={onReopen} disabled={busy}
+              className={`${pillBtn} ${D.outlineBtn}`}>
+              <Play size={11} /> Reopen
+            </button>
+          )}
+          {ownerView && (t.status === 'pending' || t.status === 'in_progress' || t.status === 'paused') && (
+            <OwnerOnly employee={{ role: 'owner' }}>
+              <button onClick={onBlocked} disabled={busy} title="Owners only"
+                className={`${pillBtn} border-red-200 hover:bg-red-50 text-red-700`}>
+                <AlertCircle size={11} /> Block
+              </button>
+            </OwnerOnly>
+          )}
+          {onReassign && (t.unit_id || t.party_id) && (
+            <button onClick={onReassign} disabled={busy}
+              className={`${pillBtn} ${D.outlineBtn}`}>
+              <Edit2 size={11} /> Reassign
+            </button>
+          )}
+          {canMarkDoneAlways && !isDone && (
+            <button onClick={() => { if (confirm('Mark this whole assignment complete? It closes out this assignment and moves it to Done.')) { onDone(); if (onExit) onExit(); } }} disabled={busy}
+              title="Mark this assignment complete → Done"
+              className="w-7 h-7 rounded-full flex items-center justify-center bg-emerald-600 hover:bg-emerald-700 text-white active:scale-95 transition disabled:opacity-50">
+              <Check size={14} />
+            </button>
+          )}
+          {onDelete && (
+            <button onClick={() => { if (onDelete) { onDelete(); if (onExit) onExit(); } }} disabled={busy}
+              title="Delete this assignment (uploaded by mistake)"
+              className={`w-7 h-7 rounded-full flex items-center justify-center border active:scale-95 transition disabled:opacity-50 ${dark ? 'bg-slate-800 hover:bg-red-950 border-slate-600 text-red-300' : 'bg-white hover:bg-red-50 border-stone-300 text-red-600'}`}>
+              <X size={14} />
+            </button>
+          )}
+          {/* Primary action — amber pill, exactly like Start on the Today tab. */}
+          {onStartCleaning && !isDone && (
+            <button onClick={onStartCleaning} disabled={busy}
+              className="text-[11px] font-medium px-3 py-1.5 rounded-full bg-amber-600 hover:bg-amber-700 text-white flex items-center gap-1 active:scale-95 transition disabled:opacity-50">
+              <Play size={12} /> Start cleaning
+            </button>
+          )}
+          {canGo && (
+            <button onClick={onGoToBedroom} disabled={busy}
+              className="text-[11px] font-medium px-3 py-1.5 rounded-full bg-amber-600 hover:bg-amber-700 text-white flex items-center gap-1 active:scale-95 transition disabled:opacity-50">
+              Go to bedroom <ChevronRight size={12} />
+            </button>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
@@ -34719,7 +34845,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                       // assignments at one bedroom) still gets a
                       // useful "open one of them" affordance.
                       bulkCard = (
-                        <div key={`bulk-${groupKey}`} className="rounded-2xl border border-stone-200 bg-white p-4 shadow-sm">
+                        <div key={`bulk-${groupKey}`} className={`rounded-2xl bg-white p-3.5 ${anyPriority && !allDone ? 'border-2 border-red-300' : 'border border-stone-200'}`}>
                           {/* Cleaner request banner — shows at the very
                              top of the card whenever a cleaner has
                              submitted a request at this bedroom that's
@@ -34804,11 +34930,12 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                             <div className="flex-1 min-w-0">
                               {canGoToBedroom ? (
                                 <button onClick={() => startAndGo(firstTarget)} disabled={busy}
-                                  className="block text-left w-full font-serif text-base text-stone-900 leading-tight break-words hover:underline disabled:opacity-50">
-                                  {unitPartyLabel(group.unit?.label || unitLabel, bedLabel)}
+                                  className="max-w-full min-w-0 text-left rounded-lg -m-1 p-1 hover:bg-stone-50 active:scale-[0.99] transition group inline-flex items-center gap-1 disabled:opacity-50">
+                                  <span className="font-serif text-base text-stone-900 truncate group-hover:underline decoration-stone-300 underline-offset-2">{unitPartyLabel(group.unit?.label || unitLabel, bedLabel)}</span>
+                                  <ChevronRight size={15} className="text-stone-400 group-hover:text-stone-600 flex-shrink-0" />
                                 </button>
                               ) : (
-                                <div className="font-serif text-base text-stone-900 leading-tight break-words">
+                                <div className="font-serif text-base text-stone-900 truncate">
                                   {unitPartyLabel(group.unit?.label || unitLabel, bedLabel)}
                                 </div>
                               )}
@@ -34830,131 +34957,38 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                                 <span className={`text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full border ${statusPill.color}`}>
                                   {statusPill.label}
                                 </span>
-                                {(() => {
-                                  const asg = (newItems[0] || firstTarget)?.assignment;
-                                  const sd = asg?.scheduled_date;
-                                  // Done work has a completion date, not a due
-                                  // date. "Overdue" on a finished job is a
-                                  // contradiction — overdue means unfinished
-                                  // past its due date. Show when it finished.
-                                  const grpDone = newItems.every(t => t.status === 'done') && newItems.length > 0;
-                                  const doneAtT = newItems.map(t => t.completed_at).filter(Boolean).sort().slice(-1)[0] || null;
-                                  if (canViewTimelineT) {
-                                    return (
-                                      <div className="relative inline-block">
-                                        <button onClick={(e) => { e.stopPropagation(); setTimelineOpenT(timelineOpenT === asg?.id ? null : asg?.id); }}
-                                          className={`text-[10px] font-mono px-2 py-0.5 rounded-full border inline-flex items-center gap-1 ${grpDone ? 'bg-stone-900 text-white border-stone-900'
-                                            : sd ? (sd < todayKeyT ? 'bg-red-100 text-red-700 border-red-200' : sd === todayKeyT ? 'bg-emerald-100 text-emerald-800 border-emerald-200' : 'bg-stone-100 text-stone-600 border-stone-200')
-                                            : 'bg-white text-stone-500 border-dashed border-stone-300'}`}>
-                                          {grpDone ? <><Check size={9} /> {doneAtT ? `Done ${fmtDueDate(String(doneAtT).slice(0, 10))}` : 'Done'}</>
-                                            : <><Calendar size={9} /> {sd ? fmtDueDate(sd) : 'Set due date'}</>}
-                                          <ChevronRight size={10} className="rotate-90 opacity-60" />
-                                        </button>
-                                        {timelineOpenT === asg?.id && (
-                                          <>
-                                            <div className="fixed inset-0 z-30" onClick={(e) => { e.stopPropagation(); setTimelineOpenT(null); }} />
-                                            <div className="absolute right-0 top-full mt-1 z-40 w-60 rounded-xl bg-white border border-stone-200 shadow-xl overflow-hidden text-left" onClick={(e) => e.stopPropagation()}>
-                                              <div className="px-3 pt-2.5 pb-1 text-[10px] uppercase tracking-wider font-mono text-stone-400">Timeline</div>
-                                              <div className="px-3 pb-2 space-y-1.5">
-                                                <div className="flex items-center justify-between gap-3">
-                                                  <span className="text-[11px] text-stone-500 flex items-center gap-1.5"><FileText size={11} /> Submitted</span>
-                                                  <span className={`text-[11px] font-mono ${asg?.created_at ? 'text-stone-800' : 'text-stone-400'}`}>{asg?.created_at ? fmtStampT(asg.created_at) : '—'}</span>
-                                                </div>
-                                                <div className="flex items-center justify-between gap-3">
-                                                  <span className="text-[11px] text-stone-500 flex items-center gap-1.5"><UserPlus size={11} /> Accepted</span>
-                                                  <span className={`text-[11px] font-mono ${(asg?.approved_at || asg?.pm_status === 'approved' || !asg?.pm_status) ? 'text-emerald-700' : 'text-stone-400'}`}>
-                                                    {asg?.approved_at ? fmtStampT(asg.approved_at)
-                                                      : (!asg?.pm_status || asg?.pm_status === 'approved') ? (asg?.created_at ? `${fmtStampT(asg.created_at)} · auto` : 'Auto')
-                                                      : asg?.pm_status === 'pending' ? 'Awaiting you'
-                                                      : asg?.pm_status === 'rejected' ? 'Rejected' : 'Not yet'}
-                                                  </span>
-                                                </div>
-                                                <div className="flex items-center justify-between gap-3">
-                                                  <span className="text-[11px] text-stone-500 flex items-center gap-1.5"><Check size={11} /> Done</span>
-                                                  <span className={`text-[11px] font-mono ${doneAtT ? 'text-stone-800' : 'text-stone-400'}`}>{doneAtT ? fmtStampT(doneAtT) : 'Not yet'}</span>
-                                                </div>
-                                                <div className="flex items-center justify-between gap-3 pt-1 border-t border-stone-100">
-                                                  <span className="text-[11px] text-stone-500 flex items-center gap-1.5"><Calendar size={11} /> Due</span>
-                                                  <span className="text-[11px] font-mono text-stone-800">{sd ? fmtDueDate(sd) : '—'}</span>
-                                                </div>
-                                              </div>
-                                              {canEditDatesT && (
-                                                <button onClick={(e) => { e.stopPropagation(); setTimelineOpenT(null); setDueDraftT(sd || ''); setEditDueId(asg?.id); }}
-                                                  className="w-full border-t border-stone-100 px-3 py-2 text-[11px] font-mono text-stone-600 hover:bg-stone-50 text-left flex items-center gap-1.5">
-                                                  <Edit2 size={11} /> Change due date
-                                                </button>
-                                              )}
-                                            </div>
-                                          </>
-                                        )}
-                                      </div>
-                                    );
-                                  }
-                                  if (grpDone) {
-                                    const last = newItems
-                                      .map(t => t.completed_at).filter(Boolean).sort().slice(-1)[0];
-                                    return (
-                                      <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-stone-900 text-white inline-flex items-center gap-1">
-                                        <Check size={9} /> {last ? `Done ${fmtDueDate(String(last).slice(0,10))}` : 'Done'}
-                                      </span>
-                                    );
-                                  }
-                                  if (editDueId === asg?.id) return (
-                                    <span className="inline-flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
-                                      <input type="date" autoFocus defaultValue={sd || ''}
-                                        onChange={(e) => setDueDraftT(e.target.value)}
-                                        className="text-[10px] font-mono px-1.5 py-0.5 rounded border border-stone-400 bg-white" />
-                                      <button onClick={(e) => { e.stopPropagation(); saveDueT(asg?.id, dueDraftT || null); setEditDueId(null); }}
-                                        className="text-[10px] px-1.5 py-0.5 rounded bg-stone-900 text-white">Save</button>
-                                      <button onClick={(e) => { e.stopPropagation(); setEditDueId(null); }}
-                                        className="text-[10px] px-1 text-stone-500">Cancel</button>
-                                    </span>
-                                  );
-                                  if (canEditDatesT) return (
-                                    <button onClick={(e) => { e.stopPropagation(); setDueDraftT(sd || ''); setEditDueId(asg?.id); }}
-                                      className={`text-[10px] font-mono px-2 py-0.5 rounded-full border inline-flex items-center gap-1 ${sd
-                                        ? (sd < todayKeyT ? 'bg-red-100 text-red-700 border-red-200'
-                                           : sd === todayKeyT ? 'bg-emerald-100 text-emerald-800 border-emerald-200'
-                                           : 'bg-stone-100 text-stone-600 border-stone-200')
-                                        : 'bg-white text-stone-500 border-dashed border-stone-300'}`}>
-                                      <Calendar size={9} /> {sd
-                                        ? (sd < todayKeyT ? `Overdue · ${fmtDueDate(sd)}` : sd === todayKeyT ? 'Today' : fmtDueDate(sd))
-                                        : 'Set due date'}
-                                    </button>
-                                  );
-                                  return sd ? (
-                                    <span className="text-[10px] font-mono px-2 py-0.5 rounded-full border bg-stone-100 text-stone-600 border-stone-200 inline-flex items-center gap-1">
-                                      <Calendar size={9} /> {sd === todayKeyT ? 'Today' : fmtDueDate(sd)}
-                                    </span>
-                                  ) : null;
-                                })()}
-                              </div>
-                              <div className="flex items-center gap-1.5 flex-wrap justify-end">
-                                <button onClick={(e) => { e.stopPropagation(); setOpened(firstTarget); }}
-                                  className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-100 hover:bg-stone-200 text-stone-700 flex items-center gap-1">
-                                  <Eye size={10} /> Quick glance
-                                </button>
-                                {onOpenBedroomHistory && firstTarget?.unit_id && firstTarget?.party_id && (
-                                  <button onClick={(e) => { e.stopPropagation(); onOpenBedroomHistory({
-                                      unitId: firstTarget.unit_id, unitLabel: group.unit?.label,
-                                      partyId: firstTarget.party_id, partyLabel: bedLabel,
-                                    }); }} disabled={busy}
-                                    className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-100 hover:bg-stone-200 text-stone-700 flex items-center gap-1 disabled:opacity-50">
-                                    <Clock size={10} /> History
-                                  </button>
-                                )}
                               </div>
                             </div>
                           </div>
-                          {/* === TYPE + TASK COUNT (new card style) === */}
-                          <div className="mb-2 flex items-center gap-2 flex-wrap text-[11px] font-mono text-stone-500">
+                          {/* === META LINE — same as the Today-tab card: type, task count,
+                             and the peek links, all in one mono line. */}
+                          <div className="text-[11px] font-mono text-stone-500 mb-2 flex items-center gap-1 flex-wrap">
+                            <FileText size={10} className="flex-shrink-0" />
                             {firstTarget?.assignment?.assignment_type && (
-                              <AssignmentTypeChip type={firstTarget.assignment.assignment_type} />
+                              <span>{assignmentTypeLabel(firstTarget.assignment.assignment_type)}</span>
                             )}
+                            <span>·</span>
                             <button onClick={(e) => { e.stopPropagation(); setOpened(firstTarget); }}
                               className="underline decoration-stone-400 underline-offset-2 hover:text-stone-700">
                               {newItems.length} {newItems.length === 1 ? 'task' : 'tasks'}
                             </button>
+                            <span>·</span>
+                            <button onClick={(e) => { e.stopPropagation(); setOpened(firstTarget); }}
+                              className="underline decoration-stone-400 underline-offset-2 hover:text-stone-700">
+                              Quick glance
+                            </button>
+                            {onOpenBedroomHistory && firstTarget?.unit_id && firstTarget?.party_id && (
+                              <>
+                                <span>·</span>
+                                <button onClick={(e) => { e.stopPropagation(); onOpenBedroomHistory({
+                                    unitId: firstTarget.unit_id, unitLabel: group.unit?.label,
+                                    partyId: firstTarget.party_id, partyLabel: bedLabel,
+                                  }); }} disabled={busy}
+                                  className="underline decoration-stone-400 underline-offset-2 hover:text-stone-700 disabled:opacity-50">
+                                  History
+                                </button>
+                              </>
+                            )}
                             {sectionBits.length > 0 && (
                               <span className="text-stone-400">· {sectionBits.join(' · ')}</span>
                             )}
@@ -34976,16 +35010,112 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                                         sequentially would be ugly; keeping it on
                                         one. Most apt cases have 1 assignment per
                                         bedroom in the new model anyway. */}
-                          <div className="flex gap-2 flex-wrap items-center">
-                            {canGoToBedroom && (
-                              <button onClick={() => startAndGo(firstTarget)} disabled={busy}
-                                className="h-9 px-3 rounded-lg bg-stone-900 hover:bg-stone-800 text-white text-xs font-medium flex items-center gap-1 disabled:opacity-50">
-                                Go to bedroom <ChevronRight size={13} />
-                              </button>
-                            )}
+                          {/* === FOOTER — due date left, actions right, amber primary. */}
+                          <div className="flex items-center justify-between gap-2 flex-wrap">
+                            <div className="flex items-center gap-1.5">
+                              {(() => {
+                                const asg = (newItems[0] || firstTarget)?.assignment;
+                                const sd = asg?.scheduled_date;
+                                // Done work has a completion date, not a due
+                                // date. "Overdue" on a finished job is a
+                                // contradiction — overdue means unfinished
+                                // past its due date. Show when it finished.
+                                const grpDone = newItems.every(t => t.status === 'done') && newItems.length > 0;
+                                const doneAtT = newItems.map(t => t.completed_at).filter(Boolean).sort().slice(-1)[0] || null;
+                                if (canViewTimelineT) {
+                                  return (
+                                    <div className="relative inline-block">
+                                      <button onClick={(e) => { e.stopPropagation(); setTimelineOpenT(timelineOpenT === asg?.id ? null : asg?.id); }}
+                                        className={`text-[10px] font-mono px-2 py-0.5 rounded-full border inline-flex items-center gap-1 ${grpDone ? 'bg-stone-900 text-white border-stone-900'
+                                          : sd ? (sd < todayKeyT ? 'bg-red-100 text-red-700 border-red-200' : sd === todayKeyT ? 'bg-emerald-100 text-emerald-800 border-emerald-200' : 'bg-stone-100 text-stone-600 border-stone-200')
+                                          : 'bg-white text-stone-500 border-dashed border-stone-300'}`}>
+                                        {grpDone ? <><Check size={9} /> {doneAtT ? `Done ${fmtDueDate(String(doneAtT).slice(0, 10))}` : 'Done'}</>
+                                          : <><Calendar size={9} /> {sd ? fmtDueDate(sd) : 'Set due date'}</>}
+                                        <ChevronRight size={10} className="rotate-90 opacity-60" />
+                                      </button>
+                                      {timelineOpenT === asg?.id && (
+                                        <>
+                                          <div className="fixed inset-0 z-30" onClick={(e) => { e.stopPropagation(); setTimelineOpenT(null); }} />
+                                          <div className="absolute left-0 top-full mt-1 z-40 w-60 rounded-xl bg-white border border-stone-200 shadow-xl overflow-hidden text-left" onClick={(e) => e.stopPropagation()}>
+                                            <div className="px-3 pt-2.5 pb-1 text-[10px] uppercase tracking-wider font-mono text-stone-400">Timeline</div>
+                                            <div className="px-3 pb-2 space-y-1.5">
+                                              <div className="flex items-center justify-between gap-3">
+                                                <span className="text-[11px] text-stone-500 flex items-center gap-1.5"><FileText size={11} /> Submitted</span>
+                                                <span className={`text-[11px] font-mono ${asg?.created_at ? 'text-stone-800' : 'text-stone-400'}`}>{asg?.created_at ? fmtStampT(asg.created_at) : '—'}</span>
+                                              </div>
+                                              <div className="flex items-center justify-between gap-3">
+                                                <span className="text-[11px] text-stone-500 flex items-center gap-1.5"><UserPlus size={11} /> Accepted</span>
+                                                <span className={`text-[11px] font-mono ${(asg?.approved_at || asg?.pm_status === 'approved' || !asg?.pm_status) ? 'text-emerald-700' : 'text-stone-400'}`}>
+                                                  {asg?.approved_at ? fmtStampT(asg.approved_at)
+                                                    : (!asg?.pm_status || asg?.pm_status === 'approved') ? (asg?.created_at ? `${fmtStampT(asg.created_at)} · auto` : 'Auto')
+                                                    : asg?.pm_status === 'pending' ? 'Awaiting you'
+                                                    : asg?.pm_status === 'rejected' ? 'Rejected' : 'Not yet'}
+                                                </span>
+                                              </div>
+                                              <div className="flex items-center justify-between gap-3">
+                                                <span className="text-[11px] text-stone-500 flex items-center gap-1.5"><Check size={11} /> Done</span>
+                                                <span className={`text-[11px] font-mono ${doneAtT ? 'text-stone-800' : 'text-stone-400'}`}>{doneAtT ? fmtStampT(doneAtT) : 'Not yet'}</span>
+                                              </div>
+                                              <div className="flex items-center justify-between gap-3 pt-1 border-t border-stone-100">
+                                                <span className="text-[11px] text-stone-500 flex items-center gap-1.5"><Calendar size={11} /> Due</span>
+                                                <span className="text-[11px] font-mono text-stone-800">{sd ? fmtDueDate(sd) : '—'}</span>
+                                              </div>
+                                            </div>
+                                            {canEditDatesT && (
+                                              <button onClick={(e) => { e.stopPropagation(); setTimelineOpenT(null); setDueDraftT(sd || ''); setEditDueId(asg?.id); }}
+                                                className="w-full border-t border-stone-100 px-3 py-2 text-[11px] font-mono text-stone-600 hover:bg-stone-50 text-left flex items-center gap-1.5">
+                                                <Edit2 size={11} /> Change due date
+                                              </button>
+                                            )}
+                                          </div>
+                                        </>
+                                      )}
+                                    </div>
+                                  );
+                                }
+                                if (grpDone) {
+                                  const last = newItems
+                                    .map(t => t.completed_at).filter(Boolean).sort().slice(-1)[0];
+                                  return (
+                                    <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-stone-900 text-white inline-flex items-center gap-1">
+                                      <Check size={9} /> {last ? `Done ${fmtDueDate(String(last).slice(0,10))}` : 'Done'}
+                                    </span>
+                                  );
+                                }
+                                if (editDueId === asg?.id) return (
+                                  <span className="inline-flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+                                    <input type="date" autoFocus defaultValue={sd || ''}
+                                      onChange={(e) => setDueDraftT(e.target.value)}
+                                      className="text-[10px] font-mono px-1.5 py-0.5 rounded border border-stone-400 bg-white" />
+                                    <button onClick={(e) => { e.stopPropagation(); saveDueT(asg?.id, dueDraftT || null); setEditDueId(null); }}
+                                      className="text-[10px] px-1.5 py-0.5 rounded bg-stone-900 text-white">Save</button>
+                                    <button onClick={(e) => { e.stopPropagation(); setEditDueId(null); }}
+                                      className="text-[10px] px-1 text-stone-500">Cancel</button>
+                                  </span>
+                                );
+                                if (canEditDatesT) return (
+                                  <button onClick={(e) => { e.stopPropagation(); setDueDraftT(sd || ''); setEditDueId(asg?.id); }}
+                                    className={`text-[10px] font-mono px-2 py-0.5 rounded-full border inline-flex items-center gap-1 ${sd
+                                      ? (sd < todayKeyT ? 'bg-red-100 text-red-700 border-red-200'
+                                         : sd === todayKeyT ? 'bg-emerald-100 text-emerald-800 border-emerald-200'
+                                         : 'bg-stone-100 text-stone-600 border-stone-200')
+                                      : 'bg-white text-stone-500 border-dashed border-stone-300'}`}>
+                                    <Calendar size={9} /> {sd
+                                      ? (sd < todayKeyT ? `Overdue · ${fmtDueDate(sd)}` : sd === todayKeyT ? 'Today' : fmtDueDate(sd))
+                                      : 'Set due date'}
+                                  </button>
+                                );
+                                return sd ? (
+                                  <span className="text-[10px] font-mono px-2 py-0.5 rounded-full border bg-stone-100 text-stone-600 border-stone-200 inline-flex items-center gap-1">
+                                    <Calendar size={9} /> {sd === todayKeyT ? 'Today' : fmtDueDate(sd)}
+                                  </span>
+                                ) : null;
+                              })()}
+                            </div>
+                            <div className="flex items-center gap-1.5 flex-wrap justify-end">
                             {allDone && can(employee, 'mark_assignments_done') && (
                               <button onClick={() => { if (confirm(`Reopen ${bedLabel}? It goes back to Pending so it can be worked again.`)) bulkUpdateStatus(newItems, 'pending'); }} disabled={busy}
-                                className="h-9 px-3 rounded-lg border border-amber-300 hover:bg-amber-50 text-amber-800 text-xs font-medium flex items-center gap-1 disabled:opacity-50">
+                                className="px-2.5 py-1 rounded-full border border-amber-300 hover:bg-amber-50 text-amber-800 text-[11px] font-medium flex items-center gap-1 disabled:opacity-50">
                                 <RotateCcw size={12} /> Reopen
                               </button>
                             )}
@@ -34999,7 +35129,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                                 const running = newItems.filter(t => t.status === 'in_progress');
                                 bulkUpdateStatus(running, 'paused');
                               }} disabled={busy}
-                                className="h-9 px-3 rounded-lg border border-blue-300 hover:bg-blue-50 text-blue-700 text-xs font-medium flex items-center gap-1 disabled:opacity-50">
+                                className="px-2.5 py-1 rounded-full border border-blue-300 hover:bg-blue-50 text-blue-700 text-[11px] font-medium flex items-center gap-1 disabled:opacity-50">
                                 <Pause size={12} /> Pause
                               </button>
                             )}
@@ -35015,7 +35145,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                                 // bedroom" as a second step.
                                 startAndGo(firstTarget);
                               }} disabled={busy}
-                                className="h-9 px-3 rounded-lg border border-amber-300 hover:bg-amber-50 text-amber-700 text-xs font-medium flex items-center gap-1 disabled:opacity-50">
+                                className="px-2.5 py-1 rounded-full border border-amber-300 hover:bg-amber-50 text-amber-700 text-[11px] font-medium flex items-center gap-1 disabled:opacity-50">
                                 <Play size={12} /> Resume
                               </button>
                             )}
@@ -35050,7 +35180,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                                   }
                                 }
                               }} disabled={busy}
-                                className="h-9 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-medium flex items-center gap-1 disabled:opacity-50">
+                                className="px-2.5 py-1 rounded-full bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-medium flex items-center gap-1 disabled:opacity-50">
                                 <Check size={12} /> Finished all tasks
                               </button>
                             )}
@@ -35058,14 +35188,14 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                               <OwnerOnly employee={employee}>
                               <button onClick={() => setStatusModal({ target: firstTarget, bulkRows: newItems })} disabled={busy}
                                 title="Owners only"
-                                className="h-9 px-3 rounded-lg border border-red-200 hover:bg-red-50 text-red-700 text-xs font-medium flex items-center gap-1 disabled:opacity-50">
+                                className="px-2.5 py-1 rounded-full border border-red-200 hover:bg-red-50 text-red-700 text-[11px] font-medium flex items-center gap-1 disabled:opacity-50">
                                 <AlertCircle size={12} /> Block
                               </button>
                               </OwnerOnly>
                             )}
                             {!allDone && (
                               <button onClick={() => setReassignTarget(firstTarget)} disabled={busy}
-                                className="h-9 px-3 rounded-lg border border-stone-300 hover:bg-stone-50 text-stone-700 text-xs font-medium flex items-center gap-1 disabled:opacity-50">
+                                className="px-2.5 py-1 rounded-full border border-stone-300 hover:bg-stone-50 text-stone-700 text-[11px] font-medium flex items-center gap-1 disabled:opacity-50">
                                 <User size={12} /> Reassign
                               </button>
                             )}
@@ -35078,10 +35208,17 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                                 load(); if (onUpdate) onUpdate();
                               }} disabled={busy}
                                 title="Delete this assignment (uploaded by mistake)"
-                                className="ml-auto w-9 h-9 rounded-lg flex items-center justify-center border border-stone-300 bg-white hover:bg-red-50 text-red-600 disabled:opacity-50">
+                                className="w-7 h-7 rounded-full flex items-center justify-center border border-stone-300 bg-white hover:bg-red-50 text-red-600 disabled:opacity-50">
                                 <X size={16} />
                               </button>
                             )}
+                              {canGoToBedroom && (
+                                <button onClick={() => startAndGo(firstTarget)} disabled={busy}
+                                  className="text-[11px] font-medium px-3 py-1.5 rounded-full bg-amber-600 hover:bg-amber-700 text-white flex items-center gap-1 active:scale-95 transition disabled:opacity-50">
+                                  Go to bedroom <ChevronRight size={12} />
+                                </button>
+                              )}
+                            </div>
                           </div>
                           {/* Full-width "Go to this bedroom" bar removed — it's a
                              small button in the action row now. */}

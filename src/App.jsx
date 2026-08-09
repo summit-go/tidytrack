@@ -26,6 +26,7 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 // =================================================================
 const GOOGLE_TRANSLATE_API_KEY = "AIzaSyD7ceHPryMzs45hWJOyFNBxtOzQOEmJcSA";
 
+
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // ============================================================
@@ -105,10 +106,20 @@ const ASSIGNMENT_TYPES = [
 const assignmentTypeLabel = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value)?.label || value || '';
 
+// Property name trimmed down for button labels — "Bridges Apartments" reads
+// as "Bridges Upload" on a button, not "Bridges Apartments Upload". Names
+// without a generic suffix (Carriage Cove) come through untouched.
+const shortPropertyName = (name) =>
+  String(name || '').replace(/\s+(apartments?|apts?|properties|property)\s*$/i, '').trim();
+const uploadButtonLabel = (name) => {
+  const short = shortPropertyName(name);
+  return short ? `${short} Upload` : 'New assignment';
+};
+
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap139";
+const BUILD_TAG = "aug6-tap140";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -38452,20 +38463,22 @@ function PortalAssignmentsTab({ property, portalKind, portalUser }) {
         </p>
       </div>
 
-      {/* Quick assignment — enabled per-property. Fast builder, no cleaner
-         picker; lands as a draft for owner approval. */}
+      {/* Both upload buttons are labelled with the PM's own property, so the
+         Bridges portal says "Bridges Upload" and the Carriage Cove portal
+         says "Carriage Cove Upload". Which of the two shows is still driven
+         by the per-property pmMethods flags. */}
       {showQuick && (
         <button onClick={() => setView({ kind: 'quick' })}
           className="w-full py-4 rounded-2xl bg-stone-900 text-stone-50 font-medium flex items-center justify-center gap-2">
-          <Building2 size={18} /> Quick assignment
+          <Building2 size={18} /> {uploadButtonLabel(property?.name)}
         </button>
       )}
 
-      {/* Checklist wizard — structured "New assignment". Shown per-property. */}
+      {/* Checklist wizard — structured upload. Shown per-property. */}
       {showChecklist && (
         <button onClick={() => setView({ kind: 'wizard' })}
           className={`w-full py-4 rounded-2xl font-medium flex items-center justify-center gap-2 ${showQuick ? 'border-2 border-stone-300 bg-white text-stone-700' : 'bg-stone-900 text-stone-50'}`}>
-          <Plus size={18} /> New assignment
+          <Plus size={18} /> {uploadButtonLabel(property?.name)}
         </button>
       )}
 

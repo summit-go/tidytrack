@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap150";
+const BUILD_TAG = "aug6-tap151";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -2968,6 +2968,12 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
   // bathroom/general variants for the apartment (so we can hide
   // unused variant groups in the General picker).
   const [checklistTargets, setChecklistTargets] = useState([]);
+  // Items at this bedroom that are already finished (or blocked). Kept apart
+  // from checklistTargets — which drives everything startable — so the picker
+  // can SHOW them without them ever becoming selectable. Without this the
+  // section read "1/3" while the finish dialog said "of 5": the two done
+  // items simply weren't loaded.
+  const [checklistDone, setChecklistDone] = useState([]);
   // selectedTargetIds is the cleaner's pick within a section's
   // checklist items. They tap items + Start to flip them to
   // in_progress. Reset when category changes.
@@ -2994,12 +3000,14 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
   // bathroom by variant so it's informational only here.
   const checklistMode = !!(customerId && unitId && partyId);
   const loadChecklistTargets = async () => {
-    if (!checklistMode) { setChecklistTargets([]); return; }
+    if (!checklistMode) { setChecklistTargets([]); setChecklistDone([]); return; }
+    // One query for EVERY item at this bedroom, then split by status. The
+    // finished ones are shown greyed out so the section's count and its item
+    // list always describe the same set of work.
     const { data } = await supabase.from('assignment_targets')
       .select('*, assignment:assignments!inner(id, customer_id, active, source, pm_status, deleted_at, sheet_type, assignment_type, template_set_id, bathroom_variant, general_variant)')
-      .eq('unit_id', unitId).eq('party_id', partyId)
-      .not('status', 'in', '(done,blocked)');
-    const open = (data || []).filter(t =>
+      .eq('unit_id', unitId).eq('party_id', partyId);
+    const usable = (data || []).filter(t =>
       t.assignment?.customer_id === customerId &&
       t.assignment?.active &&
       !t.assignment?.deleted_at &&
@@ -3008,7 +3016,8 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
       // assignments don't have item-level granularity to pick from.
       !!t.assignment?.template_set_id
     );
-    setChecklistTargets(open);
+    setChecklistTargets(usable.filter(t => t.status !== 'done' && t.status !== 'blocked'));
+    setChecklistDone(usable.filter(t => t.status === 'done' || t.status === 'blocked'));
   };
   useEffect(() => {
     loadChecklistTargets();
@@ -3240,11 +3249,17 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
           (t.status === 'pending' || t.status === 'in_progress' || t.status === 'paused')
         );
         const pendingCount = items.filter(t => t.status === 'pending').length;
+        // Already-finished items in this section. Shown read-only at the
+        // bottom so the list accounts for every item the counts mention —
+        // "2 of 5 done" now has five rows to point at.
+        const sectionDone = checklistDone.filter(t =>
+          (t.template_section || '').toLowerCase() === category
+        );
         if (items.length === 0) {
           // Only show "all done/started" copy when there's at least
           // one done item — otherwise legacy bedrooms with 0 in this
           // section would see a misleading note.
-          const allItems = checklistTargets.filter(t =>
+          const allItems = checklistDone.filter(t =>
             (t.template_section || '').toLowerCase() === category
           );
           if (allItems.length === 0) return null;
@@ -3274,7 +3289,7 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
                 {sectionLabels[category]} — pick what you'll start
               </span>
               <span className="text-[10px] font-mono text-emerald-700">
-                {pendingCount} left
+                {sectionDone.length}/{items.length + sectionDone.length} done · {pendingCount} left
               </span>
             </div>
             <div className="space-y-2">
@@ -3365,6 +3380,28 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
                 </div>
               );
               })}
+              {/* Finished items — greyed, struck through, not selectable. They
+                 exist so the section's item list matches its count instead of
+                 quietly hiding work that was done in an earlier session. */}
+              {sectionDone.length > 0 && (
+                <div className="mt-3 pt-2 border-t border-emerald-200">
+                  <div className="text-[10px] uppercase tracking-wider font-mono text-emerald-800 mb-1.5">
+                    Already done ({sectionDone.length})
+                  </div>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    {sectionDone.map(t => (
+                      <div key={t.id}
+                        className="flex items-start gap-2 px-2.5 py-2 rounded-lg border border-stone-200 bg-stone-100 opacity-70">
+                        <div className={`mt-0.5 w-3.5 h-3.5 rounded border-2 flex-shrink-0 flex items-center justify-center ${t.status === 'blocked' ? 'border-red-400 bg-red-400' : 'border-emerald-600 bg-emerald-600'}`}>
+                          {t.status === 'blocked' ? <X size={10} className="text-white" /> : <Check size={10} className="text-white" />}
+                        </div>
+                        <span className="text-xs text-stone-500 line-through truncate">{labelForTarget(t)}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {/* 6: Start button sits right under the picked tasks so the
                  cleaner doesn't have to scroll past all sections. */}
               {(hasTargetPicks || (isGeneral && selectedSubs.size > 0)) && (
@@ -3565,25 +3602,39 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
             // in_progress (currently being worked). hasRequested = at
             // least one requested-by target exists in this section, so
             // the section card can show a "Requested" badge.
+            // total  = every item in the section, finished ones included
+            // done   = already finished (or blocked)
+            // left   = still to do
+            // busy   = currently in someone's workblock
+            // The chip shows done/total so it reads the same way as the
+            // "I'm done here" dialog: 2 of 5 done, not 1 of 3 remaining.
             const stats = {
-              bedroom:  { busy: 0, total: 0, hasRequested: false },
-              vanity:   { busy: 0, total: 0, hasRequested: false },
-              bathroom: { busy: 0, total: 0, hasRequested: false },
-              general:  { busy: 0, total: 0, hasRequested: false },
+              bedroom:  { busy: 0, total: 0, done: 0, left: 0, hasRequested: false },
+              vanity:   { busy: 0, total: 0, done: 0, left: 0, hasRequested: false },
+              bathroom: { busy: 0, total: 0, done: 0, left: 0, hasRequested: false },
+              general:  { busy: 0, total: 0, done: 0, left: 0, hasRequested: false },
             };
             checklistTargets.forEach(t => {
               const sec = (t.template_section || '').toLowerCase();
               if (!(sec in stats)) return;
               if (t.requested_by) stats[sec].hasRequested = true;
-              if (t.status === 'done') return;
               stats[sec].total += 1;
+              stats[sec].left += 1;
               if (t.status === 'in_progress') stats[sec].busy += 1;
             });
+            checklistDone.forEach(t => {
+              const sec = (t.template_section || '').toLowerCase();
+              if (!(sec in stats)) return;
+              stats[sec].total += 1;
+              stats[sec].done += 1;
+            });
             return TASK_CATEGORIES.map(c => {
-              const s = stats[c.id] || { busy: 0, total: 0, hasRequested: false };
-              const inChecklist = checklistMode && checklistTargets.length > 0;
+              const s = stats[c.id] || { busy: 0, total: 0, done: 0, left: 0, hasRequested: false };
+              const inChecklist = checklistMode && (checklistTargets.length > 0 || checklistDone.length > 0);
               const isOpen = category === c.id;
-              const isEmpty = inChecklist && s.total === 0;
+              // Nothing left to pick — either the section isn't assigned here
+              // at all, or every item in it is finished.
+              const isEmpty = inChecklist && s.left === 0;
               return (
                 <React.Fragment key={c.id}>
                 <div className="relative">
@@ -3633,6 +3684,9 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
                     if (s.total === 0) {
                       chipText = 'Not assigned';
                       chipColor = isOpen ? 'bg-stone-700 text-stone-300' : 'bg-stone-100 text-stone-500 border border-stone-200';
+                    } else if (s.left === 0) {
+                      chipText = 'All done';
+                      chipColor = isOpen ? 'bg-emerald-200 text-emerald-900' : 'bg-emerald-100 text-emerald-800 border border-emerald-300';
                     } else if (s.busy > 0) {
                       chipText = 'Started';
                       chipColor = isOpen ? 'bg-amber-200 text-amber-900' : 'bg-amber-100 text-amber-800 border border-amber-300';
@@ -3643,7 +3697,7 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
                     return (
                       <span className={`text-[10px] uppercase tracking-wide font-mono font-bold px-2 py-0.5 rounded-full inline-flex items-center flex-shrink-0 ${chipColor}`}>
                         <span>{chipText}</span>
-                        {s.total > 0 && <span className="ml-1 opacity-75">{s.busy}/{s.total}</span>}
+                        {s.total > 0 && <span className="ml-1 opacity-75">{s.done}/{s.total}</span>}
                       </span>
                     );
                   })()}
@@ -5142,7 +5196,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       // warning can say "Bedroom — 5 of 10 done, 5 left" instead of a bare
       // total. template_section is what the picker groups by.
       let q = supabase.from('assignment_targets')
-        .select('id, status, template_section, assignment:assignments!inner(customer_id, active, source, pm_status, deleted_at)')
+        .select('id, status, template_section, started_by, assignment:assignments!inner(customer_id, active, source, pm_status, deleted_at)')
         .eq('unit_id', activeBlock.unit_id).eq('party_id', activeBlock.party_id);
       if (activeBlock.assignment_id) q = q.eq('assignment_id', activeBlock.assignment_id);
       const { data: allRows } = await q;
@@ -5150,7 +5204,13 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
         t.assignment?.customer_id === shift?.customer_id &&
         t.assignment?.active && !t.assignment?.deleted_at &&
         (t.assignment?.source !== 'pm' || t.assignment?.pm_status === 'approved'));
-      open = live.filter(t => ['pending', 'in_progress', 'paused'].includes(t.status));
+      // Anything THIS cleaner has started is about to close out as done when
+      // they confirm, so the dialog counts it as done rather than as left.
+      // Otherwise finishing an item and then tapping "I'm done here" reads
+      // "2 of 5 done" when the truthful answer is 3.
+      const willClose = (t) =>
+        (t.status === 'in_progress' || t.status === 'paused') && t.started_by === employee.id;
+      open = live.filter(t => ['pending', 'in_progress', 'paused'].includes(t.status) && !willClose(t));
       // Section breakdown, in the same order the picker lists them.
       const SEC_ORDER = ['bedroom', 'bathroom', 'vanity', 'general'];
       const SEC_LABEL = { bedroom: 'Bedroom', bathroom: 'Bathroom', vanity: 'Vanity', general: 'General' };
@@ -5159,7 +5219,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
         const sec = (t.template_section || 'other').toLowerCase();
         if (!bySec[sec]) bySec[sec] = { total: 0, done: 0, left: 0 };
         bySec[sec].total += 1;
-        if (t.status === 'done' || t.status === 'blocked') bySec[sec].done += 1;
+        if (t.status === 'done' || t.status === 'blocked' || willClose(t)) bySec[sec].done += 1;
         else bySec[sec].left += 1;
       });
       breakdown = Object.keys(bySec)

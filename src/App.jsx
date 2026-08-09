@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap141";
+const BUILD_TAG = "aug6-tap144";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -276,7 +276,7 @@ async function translateText(strings, targetLang) {
 // Locale persists in localStorage and is per-device, not per-user
 // (matches the cleaner's preference, doesn't broadcast to PMs).
 // =================================================================
-const LocaleContext = React.createContext({ locale: 'en', setLocale: () => {} });
+const LocaleContext = React.createContext({ locale: 'en', setLocale: () => {}, applyEmployeeLocale: () => {} });
 const PreviewContext = React.createContext(null);
 
 function useLocale() {
@@ -297,16 +297,45 @@ function saveTranslationCache(cache) {
   try { localStorage.setItem('tidytrack_translations_es', JSON.stringify(cache)); } catch {}
 }
 
+// ---- Language preference storage ---------------------------------------
+// The language choice is stored PER EMPLOYEE, not per device. The old global
+// 'tidytrack_locale' key meant that when a Spanish-speaking cleaner signed in
+// on a device, their language was written to the device — and it stayed there
+// for whoever signed in next. Refreshing the page then "randomly" came up in
+// Spanish for someone who never asked for it.
+const LOCALE_KEY = 'tidytrack_locale';                      // signed-out / PM portal
+const localeKeyFor = (empId) => `tidytrack_locale_${empId}`; // an actual person's choice
+const sniffDeviceLocale = () => {
+  try {
+    // Accept 'es' / 'es-MX' / 'es-ES' / etc. as Spanish.
+    const nav = (typeof navigator !== 'undefined' && navigator.language) || 'en';
+    return nav.toLowerCase().startsWith('es') ? 'es' : 'en';
+  } catch { return 'en'; }
+};
+// Who is signed in on this device, read synchronously so the very first paint
+// is already in the right language (no English-then-Spanish flash).
+const currentSessionEmployeeId = () => {
+  try {
+    const raw = localStorage.getItem('tidytrack_session');
+    return raw ? (JSON.parse(raw)?.employeeId || null) : null;
+  } catch { return null; }
+};
+
 function TranslationProvider({ children }) {
+  const employeeIdRef = useRef(currentSessionEmployeeId());
   const [locale, setLocaleState] = useState(() => {
     try {
-      // Saved preference wins; otherwise sniff the device. We accept
-      // 'es' / 'es-MX' / 'es-ES' / etc. as Spanish.
-      const saved = localStorage.getItem('tidytrack_locale');
+      const empId = employeeIdRef.current;
+      if (empId) {
+        // Signed in: ONLY this person's own explicit choice counts. A locale
+        // left behind by whoever used the device before is ignored outright.
+        const own = localStorage.getItem(localeKeyFor(empId));
+        if (own) return own;
+        return sniffDeviceLocale();
+      }
+      const saved = localStorage.getItem(LOCALE_KEY);
       if (saved) return saved;
-      const nav = (typeof navigator !== 'undefined' && navigator.language) || 'en';
-      if (nav.toLowerCase().startsWith('es')) return 'es';
-      return 'en';
+      return sniffDeviceLocale();
     } catch { return 'en'; }
   });
 
@@ -329,8 +358,40 @@ function TranslationProvider({ children }) {
     } catch {}
   }, [locale]);
 
+  // Called when a session is restored or a cleaner signs in. Applies THEIR
+  // saved choice, or the language on their employee record if they've never
+  // picked one. It never silently switches someone back to English — only an
+  // explicit tap on the language toggle does that.
+  const applyEmployeeLocale = (employee, opts = {}) => {
+    const empId = employee?.id || null;
+    employeeIdRef.current = empId;
+    if (!empId) return;
+    let own = null;
+    try { own = localStorage.getItem(localeKeyFor(empId)); } catch {}
+    const next = own || employee?.locale || null;
+    if (!next) return;
+    // Seed this person's key the first time so every later refresh resolves
+    // synchronously from storage — no flash, and no chance of a reload loop.
+    if (!own) { try { localStorage.setItem(localeKeyFor(empId), next); } catch {} }
+    if (next === locale) return;
+    if (locale === 'es' && next === 'en') {
+      // Going back to English needs a reload (Spanish is applied by rewriting
+      // text nodes in place). Only do that on an actual account switch, never
+      // on a plain refresh.
+      if (opts.reloadOnDowngrade) window.location.reload();
+      return;
+    }
+    setLocaleState(next);
+  };
+
   const setLocale = (newLocale) => {
-    try { localStorage.setItem('tidytrack_locale', newLocale); } catch {}
+    // Write the choice against the person who made it, and keep the
+    // signed-out key in step for the sign-in screen and the PM portal.
+    try {
+      const empId = employeeIdRef.current || currentSessionEmployeeId();
+      if (empId) localStorage.setItem(localeKeyFor(empId), newLocale);
+      localStorage.setItem(LOCALE_KEY, newLocale);
+    } catch {}
     // Switching back to English: easiest reset is a reload, since we
     // mutated text nodes in place and can't reliably restore originals
     // after React re-renders.
@@ -449,7 +510,7 @@ function TranslationProvider({ children }) {
   }, [locale]);
 
   return (
-    <LocaleContext.Provider value={{ locale, setLocale }}>
+    <LocaleContext.Provider value={{ locale, setLocale, applyEmployeeLocale }}>
       {children}
     </LocaleContext.Provider>
   );
@@ -1074,6 +1135,7 @@ function StaffApp() {
   const [session, setSession] = useState(null);
   const [loaded, setLoaded] = useState(false);
   const [configError, setConfigError] = useState(false);
+  const { applyEmployeeLocale } = useLocale();
 
   useEffect(() => {
     if (SUPABASE_URL.includes('PASTE_') || SUPABASE_ANON_KEY.includes('PASTE_')) {
@@ -1083,7 +1145,11 @@ function StaffApp() {
       const s = await sessionStore.get();
       if (s?.employeeId) {
         const { data } = await supabase.from('employees').select('*').eq('id', s.employeeId).maybeSingle();
-        if (data) setSession({ employee: data });
+        if (data) {
+          // Language follows the PERSON, not the device.
+          applyEmployeeLocale(data);
+          setSession({ employee: data });
+        }
         else await sessionStore.clear();
       }
       setLoaded(true);
@@ -1097,12 +1163,11 @@ function StaffApp() {
     return <SignIn onSignIn={async (employee) => {
       // Remember they chose staff (in case localStorage was cleared)
       try { localStorage.setItem('tt_role_choice', 'staff'); } catch {}
-      // Apply per-employee language pref before any UI mounts so the
-      // cleaner sees the right locale immediately on this device.
-      if (employee?.locale) {
-        try { localStorage.setItem('tidytrack_locale', employee.locale); } catch {}
-      }
+      // Apply this person's language before any UI mounts. Written under
+      // THEIR key — signing in no longer leaves your language behind on the
+      // device for whoever signs in next.
       await sessionStore.set({ employeeId: employee.id });
+      applyEmployeeLocale(employee, { reloadOnDowngrade: true });
       setSession({ employee });
     }} />;
   }
@@ -4479,6 +4544,8 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       return [...closed, data];
     });
     setActiveBlock(data); setTasks(data.tasks || []); setBlockStartFlow(null);
+    logAction({ type: 'open_block', blockId: data.id, unitId: data.unit_id, partyId: data.party_id,
+      label: `Opened the workblock at ${data.unit?.label || 'this apartment'}${data.party?.label ? ` · ${data.party.label}` : ''}` });
   };
 
   const _DEPRECATED_onPickBlockParty_LEGACY_UNUSED = async (party, workNotes) => {
@@ -4517,6 +4584,8 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       return [...closed, data];
     });
     setActiveBlock(data); setTasks(data.tasks || []); setBlockStartFlow(null);
+    logAction({ type: 'open_block', blockId: data.id, unitId: data.unit_id, partyId: data.party_id,
+      label: `Opened the workblock at ${data.unit?.label || 'this apartment'}${data.party?.label ? ` · ${data.party.label}` : ''}` });
     // No auto-start: tapping "Start cleaning" only starts the WORK BLOCK
     // timer. Targets stay pending until the cleaner explicitly picks
     // them in the task picker. This stops the surprise where every
@@ -4602,6 +4671,96 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     setClosedMoveTarget(block);
   };
 
+  // ===== ACTION JOURNAL =========================================
+  // A short in-memory history of the last few things this cleaner did, so
+  // "Undo last action" can reverse exactly one step instead of nuking a
+  // whole workblock. Session-only by design: it holds enough to fix a
+  // mis-tap, not an audit trail.
+  const [actionLog, setActionLog] = useState([]); // newest first
+  const logAction = (entry) => {
+    if (!entry?.type) return;
+    setActionLog(prev => [{ ...entry, at: Date.now() }, ...prev].slice(0, 5));
+  };
+  const lastAction = actionLog[0] || null;
+
+  // Is anyone ELSE inside this workblock? True when another cleaner is a
+  // live participant, or when the block holds tasks created under someone
+  // else's shift. Deleting a shared block takes their work down with it,
+  // so every destructive path checks this first.
+  const blockSharedWithOthers = async (blockId) => {
+    if (!blockId) return false;
+    try {
+      const { data: parts } = await supabase.from('work_block_participants')
+        .select('employee_id').eq('work_block_id', blockId).is('left_at', null);
+      if ((parts || []).some(p => p.employee_id && p.employee_id !== employee?.id)) return true;
+      const { data: rows } = await supabase.from('tasks')
+        .select('id, shift_id').eq('work_block_id', blockId).limit(500);
+      return (rows || []).some(t => t.shift_id && t.shift_id !== shift?.id);
+    } catch (e) {
+      console.warn('[blockSharedWithOthers] check failed, assuming shared', e);
+      return true; // fail safe: never delete when we can't tell
+    }
+  };
+  const SHARED_BLOCK_MSG = "Other cleaners are working in this workblock. Undoing it would delete their tasks and photos too, so it's blocked.\n\nLeave the workblock instead — your work and theirs both stay.";
+
+  const undoLastAction = async () => {
+    if (!lastAction) return;
+    const a = lastAction;
+    const drop = () => setActionLog(prev => prev.filter(x => x !== a));
+    setBusy(true);
+    try {
+      if (a.type === 'open_block' || a.type === 'join_block') {
+        const blockId = a.blockId;
+        if (a.type === 'open_block') {
+          if (await blockSharedWithOthers(blockId)) { alert(tt(SHARED_BLOCK_MSG)); return; }
+          // Put back any items this cleaner advanced, then remove the block.
+          if (employee?.id && a.unitId && a.partyId) {
+            await supabase.from('assignment_targets')
+              .update({ status: 'pending', started_at: null, started_by: null })
+              .eq('unit_id', a.unitId).eq('party_id', a.partyId)
+              .eq('started_by', employee.id).eq('status', 'in_progress');
+          }
+          await supabase.from('tasks').delete().eq('work_block_id', blockId);
+          await supabase.from('work_blocks').delete().eq('id', blockId);
+          setWorkBlocks(prev => prev.filter(b => b.id !== blockId));
+        } else {
+          // Joining is undone by leaving — nothing of theirs is touched.
+          await supabase.from('work_block_participants')
+            .update({ left_at: new Date().toISOString() })
+            .eq('work_block_id', blockId).eq('employee_id', employee.id).is('left_at', null);
+        }
+        setActiveBlock(null); setTasks([]); setActiveTask(null); setCleanerTab('home');
+      } else if (a.type === 'start_task') {
+        await supabase.from('tasks').delete().eq('id', a.taskId);
+        setTasks(prev => prev.filter(t => t.id !== a.taskId));
+        if (activeTask === a.taskId) setActiveTask(null);
+        // Roll the checklist items back to exactly the status they held.
+        for (const t of (a.targets || [])) {
+          await supabase.from('assignment_targets')
+            .update({
+              status: t.status,
+              started_at: t.status === 'pending' ? null : t.started_at || null,
+              started_by: t.status === 'pending' ? null : t.started_by || null,
+            })
+            .eq('id', t.id);
+        }
+      } else if (a.type === 'stop_task') {
+        await supabase.from('tasks').update({ end_time: null }).eq('id', a.taskId);
+        setTasks(prev => prev.map(t => t.id === a.taskId ? { ...t, end_time: null } : t));
+        setActiveTask(a.taskId);
+      } else if (a.type === 'resume_task') {
+        await supabase.from('tasks').update({ end_time: a.prevEnd || new Date().toISOString() }).eq('id', a.taskId);
+        setTasks(prev => prev.map(t => t.id === a.taskId ? { ...t, end_time: a.prevEnd } : t));
+        if (activeTask === a.taskId) setActiveTask(null);
+      }
+      drop();
+    } catch (e) {
+      alert('Could not undo that: ' + (e.message || e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const undoBlock = async () => {
     if (!activeBlock) return;
     const canUndoAnyone = employee?.role === 'owner' || employee?.role === 'manager';
@@ -4633,6 +4792,13 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       if (!confirm(tt(`This will permanently delete ${photoCount} photo${photoCount === 1 ? '' : 's'} that can't be recovered. Are you absolutely sure?`))) return;
     }
     setBusy(true);
+    // Never delete a workblock somebody else is inside — their tasks and
+    // photos hang off the same block and go down with it.
+    if (await blockSharedWithOthers(activeBlock.id)) {
+      setBusy(false);
+      alert(tt(SHARED_BLOCK_MSG));
+      return;
+    }
     try {
       // 1. Revert assignment_targets the cleaner advanced during this
       //    block. Scope to (unit_id, party_id, started_by=employee.id,
@@ -4758,6 +4924,8 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
         setActiveBlock(refreshed);
         setTasks(refreshed.tasks || []);
         setCleanerTab('home');
+        logAction({ type: 'join_block', blockId: refreshed.id,
+          label: `Joined the workblock at ${refreshed.unit?.label || 'this apartment'}` });
       }
     } catch (e) {
       alert('Could not join: ' + (e.message || e));
@@ -5286,6 +5454,12 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     setTasks(prev => [...prev, row]);
     setActiveTask(row.id);
     setNewTaskName('');
+    logAction({
+      type: 'start_task', taskId: row.id,
+      // Remember what each item's status WAS so undo puts it back exactly.
+      targets: pickedTargets.map(t => ({ id: t.id, status: t.status, started_at: t.started_at, started_by: t.started_by })),
+      label: `Started \u201c${splitTaskName(name)[0] || name}\u201d`,
+    });
   };
 
   // Cleaner taps the X on an in-progress item — "I started this but
@@ -5468,6 +5642,8 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     setActiveBlock(data);
     setTasks(data.tasks || []);
     setPendingStart(null);
+    logAction({ type: 'open_block', blockId: data.id, unitId: data.unit_id, partyId: data.party_id,
+      label: `Opened the workblock at ${data.unit?.label || 'this apartment'}${data.party?.label ? ` · ${data.party.label}` : ''}` });
     // No auto-start: starting the work block only starts the TIMER.
     // The cleaner explicitly picks items from the picker (or taps
     // Start on individual assignment cards) to flip them to
@@ -5670,13 +5846,22 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     await supabase.from('tasks').update({ end_time: ts }).eq('id', taskId);
     if (refetch) setTasks(prev => prev.map(t => t.id === taskId ? { ...t, end_time: ts } : t));
     if (activeTask === taskId) setActiveTask(null);
+    // Only log the deliberate "I'm done with this" taps. The silent stops we
+    // fire before starting something else aren't actions the cleaner took.
+    if (refetch) {
+      const t = (tasks || []).find(x => x.id === taskId);
+      logAction({ type: 'stop_task', taskId, label: `Marked \u201c${splitTaskName(t?.name || 'task')[0] || 'task'}\u201d done` });
+    }
   };
 
   const resumeTask = async (taskId) => {
     if (activeTask) await stopTask(activeTask, false);
+    const prev = (tasks || []).find(x => x.id === taskId);
     await supabase.from('tasks').update({ end_time: null }).eq('id', taskId);
-    setTasks(prev => prev.map(t => t.id === taskId ? { ...t, end_time: null } : t));
+    setTasks(prevT => prevT.map(t => t.id === taskId ? { ...t, end_time: null } : t));
     setActiveTask(taskId);
+    logAction({ type: 'resume_task', taskId, prevEnd: prev?.end_time || null,
+      label: `Reopened \u201c${splitTaskName(prev?.name || 'task')[0] || 'task'}\u201d` });
   };
 
   const uploadPhoto = async (taskId, kind, file) => {
@@ -6062,6 +6247,8 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       }}
       onPause={() => setActiveBlock(null)}
       onUndo={undoBlock}
+      onUndoLast={undoLastAction}
+      lastActionLabel={lastAction?.label || null}
       onReopen={reopenBlock}
       newTaskName={newTaskName} setNewTaskName={setNewTaskName}
       onStartTask={startTask} onStartTasksFromPicker={startTasksFromPicker}
@@ -9400,7 +9587,7 @@ function PreparingBlockView({ shift, pendingStart, employeeName, employee,
 //   • Wrong workblock    → same move flow but reset items at source
 // Replaces the two separate inline links that used to live here so
 // the header stays tidy + the options are discoverable together.
-function UndoMoveMenu({ disabled, canUndo, canMove, onUndo, onMoveBedroom, onMoveWorkblock }) {
+function UndoMoveMenu({ disabled, canUndo, canMove, onUndo, onMoveBedroom, onMoveWorkblock, onUndoLast, lastActionLabel }) {
   const [open, setOpen] = useState(false);
   // Close popover on outside-tap. We attach a window-level mousedown
   // listener while open and remove it when closed.
@@ -9433,6 +9620,19 @@ function UndoMoveMenu({ disabled, canUndo, canMove, onUndo, onMoveBedroom, onMov
       </button>
       {open && (
         <div className="absolute z-40 top-full right-0 mt-1 w-72 bg-stone-50 rounded-2xl shadow-xl border border-stone-200 overflow-hidden">
+          {/* Undo last action sits FIRST — it's the smallest, safest fix and
+             the one a cleaner reaches for most. It reverses exactly one step
+             and never touches another cleaner's work. */}
+          {onUndoLast && lastActionLabel && (
+            <button onClick={() => { setOpen(false); onUndoLast(); }}
+              className="w-full text-left px-4 py-3 bg-amber-50 hover:bg-amber-100 border-b border-amber-200 flex items-start gap-3">
+              <Undo2 size={16} className="text-amber-800 flex-shrink-0 mt-0.5" />
+              <div className="min-w-0">
+                <div className="text-sm font-medium text-stone-900">Undo last action</div>
+                <div className="text-xs text-stone-600 mt-0.5">{lastActionLabel}</div>
+              </div>
+            </button>
+          )}
           {canUndo && (
             <button onClick={() => { setOpen(false); onUndo(); }}
               className="w-full text-left px-4 py-3 hover:bg-stone-100 border-b border-stone-100 flex items-start gap-3">
@@ -9472,7 +9672,8 @@ function UndoMoveMenu({ disabled, canUndo, canMove, onUndo, onMoveBedroom, onMov
 function BlockView({ shift, block, tasks, activeTask, employeeName, employee, onSignOut, onFinish, onExit, onPause, onUndo, onReopen,
   newTaskName, setNewTaskName, onStartTask, onStartTasksFromPicker, onStartChecklistItems, onReleaseTargets, onStopTask, onResumeTask, onAddPhoto,
   photoModal, onClosePhotoModal, onUploadPhoto, onChangePhotoKind, onSavePhotoNote, onOpenMessages, onOpenBedroomHistory,
-  onMoveBlock, onMoveMultiple, onLeaveBlock, onJoinBlock, onDeletePhoto, onGoToBedroom, onSwitchProperty, cleanerTab, setCleanerTab, previewMode, busy }) {
+  onMoveBlock, onMoveMultiple, onLeaveBlock, onJoinBlock, onDeletePhoto, onGoToBedroom, onSwitchProperty, cleanerTab, setCleanerTab, previewMode, busy,
+  onUndoLast, lastActionLabel }) {
   useTick(true);
   const blockElapsed = Date.now() - new Date(block.start_time).getTime();
   const activeTaskObj = tasks.find(t => t.id === activeTask);
@@ -9710,11 +9911,13 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
          the assignment read as a single dark section. */}
       <AssignmentBanner propertyId={shift.customer_id} unitId={block.unit_id} partyId={block.party_id} employee={employee} onOpenBedroomHistory={onOpenBedroomHistory} dark workScreen onExit={onExit}
         propertyName={shift.customer?.name} elapsedMs={blockElapsed}
-        undoSlot={(onUndo || canMoveBlock) ? (
+        undoSlot={(onUndo || canMoveBlock || lastActionLabel) ? (
           <UndoMoveMenu
             disabled={busy}
             canUndo={!!onUndo}
             canMove={!!canMoveBlock}
+            onUndoLast={onUndoLast}
+            lastActionLabel={lastActionLabel}
             onUndo={onUndo}
             onMoveBedroom={() => { setMoveMode('bedroom'); setMoveModalOpen(true); }}
             onMoveWorkblock={() => { setMoveMode('workblock'); setMoveModalOpen(true); }}
@@ -9800,18 +10003,29 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
                         <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" /> Running
                       </span>
                     </div>
-                    <div className="text-[11px] text-stone-500 font-mono mt-1.5">
+                    <div className="text-[11px] text-stone-500 font-mono mt-1.5 mb-3">
                       started {fmtClock(t.start_time)} · {fmtTimeShort(Date.now() - new Date(t.start_time).getTime())}
                     </div>
-                    {splitTaskName(t.name).length > 1 && (
-                      <div className="mt-2"><ItemsDropdown items={splitTaskName(t.name)} /></div>
-                    )}
-                    <button onClick={() => onAddPhoto(t.id, null)} disabled={busy}
-                      className="mt-3 w-full py-2.5 rounded-xl bg-stone-900 text-stone-50 text-sm font-medium flex items-center justify-center gap-1.5 active:scale-98 transition-transform disabled:opacity-50">
-                      <Camera size={15} /> Add photo
-                      {(t.photos || []).filter(p => !p.deleted_at).length > 0 &&
-                        ` (${(t.photos || []).filter(p => !p.deleted_at).length})`}
-                    </button>
+                    {/* Same bottom row as every other task card: camera left,
+                       items middle, action right. Marking it Done is the
+                       owner's call — you can still shoot photos into it. */}
+                    <div className="flex items-center gap-2">
+                      <button onClick={() => onAddPhoto(t.id, null)} disabled={busy}
+                        aria-label="Add photo"
+                        className="px-4 py-2.5 rounded-xl bg-stone-900 hover:bg-stone-800 text-stone-50 text-sm font-medium inline-flex items-center gap-2 active:scale-95 transition-transform disabled:opacity-50 flex-shrink-0">
+                        <Camera size={18} />
+                        {(t.photos || []).filter(p => !p.deleted_at).length > 0 && (
+                          <span className="text-stone-300 font-mono text-xs">{(t.photos || []).filter(p => !p.deleted_at).length}</span>
+                        )}
+                      </button>
+                      <div className="flex-1 min-w-0">
+                        <ItemsDropdown items={splitTaskName(t.name)} />
+                      </div>
+                      <button onClick={() => onStopTask(t.id)} disabled={busy}
+                        className="px-5 py-2.5 rounded-xl bg-[#C99B5C] hover:bg-[#b8894f] text-white text-sm font-semibold active:scale-95 transition-transform disabled:opacity-50 flex-shrink-0">
+                        Done
+                      </button>
+                    </div>
                   </div>
                 ))}
               </div>
@@ -9970,11 +10184,30 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
                               <Play size={14} /> Start
                             </button>
                           </div>
-                          <div className="mt-2.5 flex flex-wrap gap-x-3 gap-y-1">
-                            {bTasks.map(t => (
-                              <span key={t.id} className="font-serif text-[15px] text-stone-900">{splitTaskName(t.name)[0] || t.name}</span>
-                            ))}
-                          </div>
+                          {(() => {
+                            // Headline is the SECTION this workblock covered —
+                            // "General — Fridge", not "Clean fridge inside".
+                            // "Clean fridge inside" is an ITEM under Fridge,
+                            // which is a subsection of General; it belongs in
+                            // the dropdown with the rest of the items, not as
+                            // the card's title.
+                            const labels = Array.from(new Set(
+                              bTasks.map(t => taskCategoryShortLabel(t.category, t.subcategory)).filter(Boolean)
+                            ));
+                            const cap = (x) => x ? x.charAt(0).toUpperCase() + x.slice(1) : x;
+                            const headline = labels.length > 0
+                              ? labels.join(' · ')
+                              : (b.main_section ? cap(b.main_section) : `${bTasks.length} task${bTasks.length === 1 ? '' : 's'}`);
+                            const items = bTasks.flatMap(t => splitTaskName(t.name));
+                            return (
+                              <>
+                                <div className="mt-2.5 font-serif text-[17px] text-stone-900 leading-tight">{headline}</div>
+                                {items.length > 0 && (
+                                  <div className="mt-2"><ItemsDropdown items={items} /></div>
+                                )}
+                              </>
+                            );
+                          })()}
                           <div className="mt-2 text-[10px] text-stone-500 font-mono">
                             {(() => {
                               // Prefix the day when this block isn't from today,
@@ -11524,7 +11757,7 @@ function TaskCard({ task, isActive, onStop, onResume, onAddPhoto }) {
   return (
     <div className={`rounded-2xl p-4 border-2 transition-all ${isActive ? 'border-amber-300 bg-amber-50/50' : 'border-stone-200 bg-white'}`}
       style={{ touchAction: 'manipulation' }}>
-      <div className="flex items-start justify-between mb-4">
+      <div className="flex items-start justify-between mb-3">
         <div className="flex-1 min-w-0">
           <div className="flex items-start gap-2 mb-1 flex-wrap">
             {isDone && <Check size={14} className="text-emerald-600 flex-shrink-0 mt-1.5" />}
@@ -11561,34 +11794,37 @@ function TaskCard({ task, isActive, onStop, onResume, onAddPhoto }) {
           <div className="text-xs text-stone-500 font-mono">
             {fmtClock(task.start_time)}{task.end_time && ` — ${fmtClock(task.end_time)}`} · {fmtTimeShort(elapsed)}
           </div>
-          {/* Multi-item list as a compact scrollable dropdown (active + done). */}
-          {(() => { const parts = splitTaskName(task.name); return parts.length > 1 ? <ItemsDropdown items={parts} /> : null; })()}
+        </div>
+      </div>
+      {/* Bottom action row — identical to the active job card: camera on the
+         left, item list in the middle, Done / Reopen on the right. */}
+      <div className="flex items-center gap-2">
+        <button onClick={() => onAddPhoto(null)}
+          style={{ touchAction: 'manipulation' }}
+          aria-label="Add photo"
+          className="px-4 py-2.5 rounded-xl bg-stone-900 hover:bg-stone-800 text-stone-50 text-sm font-medium inline-flex items-center gap-2 active:scale-95 transition-transform flex-shrink-0">
+          <Camera size={18} />
+          {(before.length + after.length + damage.length + cannot.length) > 0 && (
+            <span className="text-stone-300 font-mono text-xs">{before.length + after.length + damage.length + cannot.length}</span>
+          )}
+        </button>
+        <div className="flex-1 min-w-0">
+          {(() => { const parts = splitTaskName(task.name); return parts.length >= 1 ? <ItemsDropdown items={parts} /> : null; })()}
         </div>
         {isDone ? (
           <button onClick={onResume}
             style={{ touchAction: 'manipulation' }}
             aria-label="Reopen this task"
-            className="ml-2 h-9 px-4 rounded-full bg-stone-100 text-stone-700 text-sm font-medium active:scale-95 transition-transform">
-            Reopen task
+            className="px-4 py-2.5 rounded-xl bg-stone-100 text-stone-700 text-sm font-medium active:scale-95 transition-transform flex-shrink-0">
+            Reopen
           </button>
         ) : (
           <button onClick={onStop}
             style={{ touchAction: 'manipulation' }}
-            className="ml-2 px-4 py-2.5 rounded-full bg-stone-900 text-stone-50 text-sm font-medium flex items-center gap-1 active:scale-95 transition-transform">
-            <Pause size={14} /> Done
+            className="px-5 py-2.5 rounded-xl bg-[#C99B5C] hover:bg-[#b8894f] text-white text-sm font-semibold active:scale-95 transition-transform flex-shrink-0">
+            Done
           </button>
         )}
-      </div>
-      {/* Spacer so the Done button is well-separated from the photo grid below — prevents ghost taps on iOS */}
-      <div className="mt-2">
-        <button onClick={() => onAddPhoto(null)}
-          style={{ touchAction: 'manipulation' }}
-          className="w-full px-3 py-3 rounded-xl bg-stone-900 hover:bg-stone-800 text-stone-50 text-sm font-medium flex items-center justify-center gap-2 active:scale-95 transition-transform">
-          <Camera size={15} /> Add photo
-          {(before.length + after.length + damage.length + cannot.length) > 0 && (
-            <span className="text-stone-300 font-mono">({before.length + after.length + damage.length + cannot.length})</span>
-          )}
-        </button>
       </div>
     </div>
   );
@@ -35194,25 +35430,45 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                             // the same bedroom doesn't bleed its chip onto this
                             // card.
                             if (allDone) return null;
+                            // UNION the two lookups, don't fall back between
+                            // them. Blocks tagged with this assignment live
+                            // under a:<id>; older blocks with no assignment_id
+                            // only ever land under p:<party>. Picking one list
+                            // meant that when two cleaners were in the bedroom
+                            // on differently-tagged blocks, only one of them
+                            // showed up as "here".
                             const asgKey = firstTarget?.assignment_id ? `a:${firstTarget.assignment_id}` : null;
-                            const here = (asgKey && whosHereByParty.get(asgKey)) || whosHereByParty.get(`p:${pid}`) || [];
+                            const merged = [
+                              ...((asgKey && whosHereByParty.get(asgKey)) || []),
+                              ...(whosHereByParty.get(`p:${pid}`) || []),
+                            ];
+                            const seenBlocks = new Set();
+                            const here = merged.filter(w => {
+                              const k = w.workBlockId || `n:${w.name}`;
+                              if (seenBlocks.has(k)) return false;
+                              seenBlocks.add(k);
+                              return true;
+                            });
                             if (here.length === 0) return null;
-                            const hNames = here.map(w => w.name).filter(Boolean);
-                            const hSections = Array.from(new Set(here.map(w => w.mainSection).filter(Boolean)));
-                            const hJoin = here.find(w => w.workBlockId);
-                            const hLabel = hNames.join(', ') + ' here' + (hSections.length ? ` · ${hSections.join(', ')}` : '');
                             return (
                             <div className="mb-2 flex items-center gap-1.5 flex-wrap">
                               <span className="text-[10px] uppercase tracking-wider font-mono text-amber-900 font-bold">●</span>
-                              <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-amber-100 text-amber-900 border border-amber-300 font-bold">
-                                {hLabel}
-                              </span>
-                              {onJoinBlock && hJoin && (
-                                <button onClick={(e) => { e.stopPropagation(); onJoinBlock({ id: hJoin.workBlockId }); }}
-                                  className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-900 hover:bg-stone-800 text-stone-50 font-bold inline-flex items-center gap-1 active:scale-95">
-                                  <Plus size={9} /> Join
-                                </button>
-                              )}
+                              {/* One chip per cleaner, each with its own Join —
+                                 three people in a bedroom reads as three
+                                 chips, and you join the one you want. */}
+                              {here.map((w, i) => (
+                                <span key={w.workBlockId || i} className="inline-flex items-center gap-1">
+                                  <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-amber-100 text-amber-900 border border-amber-300 font-bold">
+                                    {w.name || 'A cleaner'} here{w.mainSection ? ` · ${w.mainSection}` : ''}
+                                  </span>
+                                  {onJoinBlock && w.workBlockId && (
+                                    <button onClick={(e) => { e.stopPropagation(); onJoinBlock({ id: w.workBlockId }); }}
+                                      className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-900 hover:bg-stone-800 text-stone-50 font-bold inline-flex items-center gap-1 active:scale-95">
+                                      <Plus size={9} /> Join
+                                    </button>
+                                  )}
+                                </span>
+                              ))}
                             </div>
                             );
                           })()}

@@ -26,7 +26,6 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 // =================================================================
 const GOOGLE_TRANSLATE_API_KEY = "AIzaSyD7ceHPryMzs45hWJOyFNBxtOzQOEmJcSA";
 
-
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // ============================================================
@@ -119,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap140";
+const BUILD_TAG = "aug6-tap141";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -5258,6 +5257,26 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     };
     const liveBlock = await ensureActiveBlockForSection(category);
     if (liveBlock?.id) ins.work_block_id = liveBlock.id;
+    // Idempotency guard. A double-tap on Start (or a slow network making the
+    // cleaner tap again) used to insert a SECOND identical task — same items,
+    // same minute — and the bedroom ended up with two "Bedroom · 24 items"
+    // entries nobody created on purpose. If this block already has an open
+    // task with the same name and category, adopt it instead of inserting.
+    if (liveBlock?.id) {
+      const { data: dupes } = await supabase.from('tasks')
+        .select('*, photos(*, taken_by_employee:employees!taken_by(name))')
+        .eq('work_block_id', liveBlock.id)
+        .eq('name', name)
+        .is('end_time', null)
+        .limit(1);
+      const dupe = (dupes || [])[0];
+      if (dupe && (dupe.category || null) === (category || null)) {
+        setTasks(prev => prev.some(t => t.id === dupe.id) ? prev : [...prev, dupe]);
+        setActiveTask(dupe.id);
+        setNewTaskName('');
+        return;
+      }
+    }
     const { data: row, error } = await supabase.from('tasks')
       .insert(ins).select('*, photos(*, taken_by_employee:employees!taken_by(name))').single();
     if (error) {
@@ -9031,8 +9050,11 @@ function OtherCleanersTasksPanel({ block }) {
 // Refreshes via realtime sync — opens/closes elsewhere propagate here
 // within a second or two.
 // =================================================================
-function OtherWorkblocksHere({ unitId, partyId, currentBlockId, currentEmployeeId, onJoin }) {
+function OtherWorkblocksHere({ unitId, partyId, currentBlockId, currentEmployeeId, onJoin, onCountChange }) {
   const [blocks, setBlocks] = useState([]);
+  // Report upward so the Active tab can badge "2 other cleaners here" without
+  // running the same query twice.
+  useEffect(() => { if (onCountChange) onCountChange(blocks.length); /* eslint-disable-next-line */ }, [blocks.length]);
   useTick(true); // tick so the elapsed-time labels update each second
   const load = async () => {
     if (!unitId || !partyId) return;
@@ -9536,6 +9558,18 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
   // 'done'   = finished workblocks at this bedroom today (yours + others)
   // Opens on Active when a task is already running, else New.
   const [blockTab, setBlockTab] = useState(() => activeTask ? 'active' : 'new');
+  // === Running vs finished ============================================
+  // A task is FINISHED when it has an end_time — full stop. It used to be
+  // split on "is this the task I'm running", which meant a teammate's
+  // still-running task in a shared workblock got filed under Done with a
+  // Done button on it. Join someone's block and all of their live work
+  // looked finished.
+  const runningHere = (tasks || []).filter(t => !t.end_time);
+  const teammatesRunning = runningHere.filter(t => t.id !== activeTask);
+  const finishedHere = (tasks || []).filter(t => !!t.end_time);
+  // Other open workblocks at this bedroom (someone cleaning a different
+  // section). Counted here so the Active badge reflects them.
+  const [otherOpenCount, setOtherOpenCount] = useState(0);
   // Auto-jump to Active the moment a task starts, and back to New the moment
   // the running task is marked Done (activeTask clears). Landing on New drops
   // the cleaner straight onto the checklist to pick their next item, instead
@@ -9711,14 +9745,17 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
         <div className="grid grid-cols-3 gap-1 p-1 bg-stone-200 rounded-2xl">
           {[
             { key: 'new', label: 'New', count: null },
-            { key: 'active', label: 'Active', count: activeTaskObj ? 1 : 0 },
-            { key: 'done', label: 'Done', count: (tasks || []).filter(t => t.id !== activeTask).length + doneBlocks.list.length },
+            // Active counts everything live at this bedroom: your running task,
+            // teammates running in this same block, and other open workblocks
+            // here. Two cleaners working the bedroom now reads as "Active 2".
+            { key: 'active', label: 'Active', count: runningHere.length + otherOpenCount },
+            { key: 'done', label: 'Done', count: finishedHere.length + doneBlocks.list.length },
           ].map(t => {
             const on = blockTab === t.key;
             return (
               <button key={t.key} onClick={() => setBlockTab(t.key)}
                 className={`py-2.5 rounded-xl text-[11px] font-mono uppercase tracking-wider flex items-center justify-center gap-1.5 transition-colors ${on ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
-                {t.key === 'active' && <span className={`w-1.5 h-1.5 rounded-full ${activeTaskObj ? 'bg-amber-600 animate-pulse' : 'bg-stone-300'}`} />}
+                {t.key === 'active' && <span className={`w-1.5 h-1.5 rounded-full ${activeTaskObj ? 'bg-amber-600 animate-pulse' : (runningHere.length + otherOpenCount) > 0 ? 'bg-amber-400' : 'bg-stone-300'}`} />}
                 {t.label}
                 {t.count > 0 && <span className={`px-1.5 py-0.5 rounded-full text-[9px] ${on ? 'bg-stone-200 text-stone-700' : 'bg-stone-300 text-stone-600'}`}>{t.count}</span>}
               </button>
@@ -9735,8 +9772,49 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
               onAddPhoto={(kind) => onAddPhoto(activeTaskObj.id, kind)} />
           ) : (
             <div className="mx-4 mt-6 text-center py-10 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
-              Nothing running right now.<br />
+              You're not running anything yet.<br />
               Tap <span className="font-mono text-stone-500">New</span> to start a task, or check <span className="font-mono text-stone-500">Done</span> to resume one.
+            </div>
+          )}
+          {/* Teammates' LIVE tasks in this same workblock. These belong to
+             whoever started them — you can add photos, but you don't get a
+             Done button on someone else's running work. */}
+          {teammatesRunning.length > 0 && (
+            <div className="mx-4 mt-4">
+              <div className="text-[10px] uppercase tracking-wider text-stone-400 font-mono mb-2">
+                Also running in this workblock
+              </div>
+              <div className="space-y-3">
+                {teammatesRunning.map(t => (
+                  <div key={t.id} className="p-4 rounded-2xl bg-white border border-amber-200">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0 flex-1">
+                        <div className="font-serif text-[17px] text-stone-900 leading-tight">
+                          {splitTaskName(t.name)[0] || t.name}
+                        </div>
+                        <div className="text-[10px] uppercase tracking-wider text-stone-400 font-mono mt-0.5">
+                          {t.category || 'task'}
+                        </div>
+                      </div>
+                      <span className="inline-flex items-center gap-1 text-[10px] font-mono px-2 py-1 rounded-full bg-amber-100 text-amber-800 flex-shrink-0">
+                        <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" /> Running
+                      </span>
+                    </div>
+                    <div className="text-[11px] text-stone-500 font-mono mt-1.5">
+                      started {fmtClock(t.start_time)} · {fmtTimeShort(Date.now() - new Date(t.start_time).getTime())}
+                    </div>
+                    {splitTaskName(t.name).length > 1 && (
+                      <div className="mt-2"><ItemsDropdown items={splitTaskName(t.name)} /></div>
+                    )}
+                    <button onClick={() => onAddPhoto(t.id, null)} disabled={busy}
+                      className="mt-3 w-full py-2.5 rounded-xl bg-stone-900 text-stone-50 text-sm font-medium flex items-center justify-center gap-1.5 active:scale-98 transition-transform disabled:opacity-50">
+                      <Camera size={15} /> Add photo
+                      {(t.photos || []).filter(p => !p.deleted_at).length > 0 &&
+                        ` (${(t.photos || []).filter(p => !p.deleted_at).length})`}
+                    </button>
+                  </div>
+                ))}
+              </div>
             </div>
           )}
           <div className="mx-4 mt-4 flex items-center gap-1.5 flex-wrap">
@@ -9757,7 +9835,7 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
             <div className="mx-4 mt-4">
               <OtherWorkblocksHere unitId={block.unit.id} partyId={block.party.id}
                 currentBlockId={block.id} currentEmployeeId={employee?.id}
-                onJoin={onJoinBlock} />
+                onJoin={onJoinBlock} onCountChange={setOtherOpenCount} />
             </div>
           )}
         </>
@@ -9840,7 +9918,8 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
          tasks in the current (open) block, plus closed workblocks (yours
          from earlier + other cleaners'). Tasks resume; blocks reopen. */}
       {blockTab === 'done' && (() => {
-        const finishedHere = (tasks || []).filter(t => t.id !== activeTask);
+        // finishedHere is computed up top from end_time — anything still
+        // running stays on Active, whoever started it.
         const nothing = finishedHere.length === 0 && doneBlocks.list.length === 0;
         return (
         <div className="mx-4 mt-4">

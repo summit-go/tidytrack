@@ -14,7 +14,6 @@ import {
 // =================================================================
 // 🔧 PASTE YOUR SUPABASE KEYS HERE
 // =================================================================
-// =================================================================
 const SUPABASE_URL = "https://bbaynvqnbkjyqhzhhypr.supabase.co/";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJiYXludnFuYmtqeXFoemhoeXByIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc0NzQ2MTMsImV4cCI6MjA5MzA1MDYxM30.ZXUoHFj_IwMe6rX8RxK8Dj4kAB9AS7X9xZAhQ84wDEk";
 
@@ -26,6 +25,7 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 // If empty, the Translate button is hidden.
 // =================================================================
 const GOOGLE_TRANSLATE_API_KEY = "AIzaSyD7ceHPryMzs45hWJOyFNBxtOzQOEmJcSA";
+
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
@@ -119,7 +119,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap145";
+const BUILD_TAG = "aug6-tap146";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -4699,6 +4699,13 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     if (!entry?.type) return;
     setActionLog(prev => persistLog([{ ...entry, at: Date.now() }, ...prev].slice(0, 5)));
   };
+  // Undo labels name the SECTION, never the item. "Clean sink" is one item
+  // inside Vanity — the cleaner started Vanity, so that's what they're taking
+  // back. Only freeform custom tasks with no category fall through to a name.
+  const sectionLabelOf = (category, subcategory, fallbackName) =>
+    taskCategoryShortLabel(category, subcategory)
+    || splitTaskName(fallbackName || '')[0]
+    || 'this task';
 
   // Fallback when the log has nothing — read the CURRENT state and work out
   // what the last step must have been. This is what makes the option show up
@@ -4716,11 +4723,11 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       return { type: 'open_block', blockId: activeBlock.id, unitId: activeBlock.unit_id, partyId: activeBlock.party_id,
         derived: true, label: `Opened the workblock at ${where}` };
     }
-    const nm = splitTaskName(newest.name)[0] || newest.name || 'task';
+    const nm = sectionLabelOf(newest.category, newest.subcategory, newest.name);
     if (newest.end_time) {
-      return { type: 'stop_task', taskId: newest.id, derived: true, label: `Marked \u201c${nm}\u201d done` };
+      return { type: 'stop_task', taskId: newest.id, derived: true, label: `Marked ${nm} done` };
     }
-    return { type: 'start_task', taskId: newest.id, targets: null, derived: true, label: `Started \u201c${nm}\u201d` };
+    return { type: 'start_task', taskId: newest.id, targets: null, derived: true, label: `Started ${nm}` };
   })();
   const lastAction = actionLog[0] || derivedLastAction;
 
@@ -4752,12 +4759,12 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     // task is cheap and reversible, so those go straight through.
     if (a.type === 'open_block') {
       const n = (tasks || []).length;
-      if (!confirm(tt(`Undo opening this workblock at ${a.label.replace(/^Opened the workblock at /, '')}?${n > 0 ? ` ${n} task${n === 1 ? '' : 's'} will be deleted.` : ''} Your items here go back to pending.`))) return;
+      if (!confirm(tt(`Undo: ${a.label}?${n > 0 ? ` ${n} task${n === 1 ? '' : 's'} will be deleted.` : ''} Your items here go back to pending.`))) return;
     }
     if (a.type === 'start_task') {
       const t = (tasks || []).find(x => x.id === a.taskId);
       const ph = (t?.photos || []).filter(p => !p.deleted_at).length;
-      if (!confirm(tt(`Undo starting this task?${ph > 0 ? ` \u26A0 ${ph} photo${ph === 1 ? '' : 's'} will be permanently deleted.` : ''} The items go back to where they were.`))) return;
+      if (!confirm(tt(`Undo: ${a.label}?${ph > 0 ? ` \u26A0 ${ph} photo${ph === 1 ? '' : 's'} will be permanently deleted.` : ''} The items go back to where they were.`))) return;
     }
     setBusy(true);
     try {
@@ -5521,7 +5528,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       type: 'start_task', taskId: row.id,
       // Remember what each item's status WAS so undo puts it back exactly.
       targets: pickedTargets.map(t => ({ id: t.id, status: t.status, started_at: t.started_at, started_by: t.started_by })),
-      label: `Started \u201c${splitTaskName(name)[0] || name}\u201d`,
+      label: `Started ${sectionLabelOf(category, null, name)}`,
     });
   };
 
@@ -5913,7 +5920,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     // fire before starting something else aren't actions the cleaner took.
     if (refetch) {
       const t = (tasks || []).find(x => x.id === taskId);
-      logAction({ type: 'stop_task', taskId, label: `Marked \u201c${splitTaskName(t?.name || 'task')[0] || 'task'}\u201d done` });
+      logAction({ type: 'stop_task', taskId, label: `Marked ${sectionLabelOf(t?.category, t?.subcategory, t?.name)} done` });
     }
   };
 
@@ -5924,7 +5931,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     setTasks(prevT => prevT.map(t => t.id === taskId ? { ...t, end_time: null } : t));
     setActiveTask(taskId);
     logAction({ type: 'resume_task', taskId, prevEnd: prev?.end_time || null,
-      label: `Reopened \u201c${splitTaskName(prev?.name || 'task')[0] || 'task'}\u201d` });
+      label: `Reopened ${sectionLabelOf(prev?.category, prev?.subcategory, prev?.name)}` });
   };
 
   const uploadPhoto = async (taskId, kind, file) => {

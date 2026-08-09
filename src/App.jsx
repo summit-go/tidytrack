@@ -99,6 +99,7 @@ const ASSIGNMENT_TYPES = [
   { value: 'move_out_check', label: 'Move out',      short: 'Move out',       color: 'bg-orange-100 text-orange-800 border-orange-300' },
   { value: 'reclean',        label: 'Reclean',        short: 'Reclean',        color: 'bg-yellow-100 text-yellow-800 border-yellow-300' },
   { value: 'trash_out',      label: 'Trash out',      short: 'Trash out',      color: 'bg-lime-100 text-lime-800 border-lime-300' },
+  { value: 'touch_up',       label: 'Touch up',       short: 'Touch up',       color: 'bg-teal-100 text-teal-800 border-teal-300' },
   { value: 'standard',       label: 'Standard clean', short: 'Standard clean', color: 'bg-emerald-100 text-emerald-800 border-emerald-300' },
 ];
 const assignmentTypeLabel = (value) =>
@@ -107,7 +108,7 @@ const assignmentTypeLabel = (value) =>
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap137";
+const BUILD_TAG = "aug6-tap139";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -5655,7 +5656,9 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     const useKind = kind || 'after';
     // Read the original capture time from the file's EXIF BEFORE compressing
     // (compression strips metadata). Null when the photo has no EXIF date.
-    const takenAt = await readPhotoTakenAt(file);
+    // Burst-camera frames carry no EXIF, so they stamp their own capture time
+    // on the File. Everything else falls back to reading EXIF.
+    const takenAt = file.__capturedAt || await readPhotoTakenAt(file);
     const compressed = await compressImage(file);
     const path = `${shift.id}/${taskId}/${useKind}_${Date.now()}.jpg`;
     const { error: upErr } = await supabase.storage.from(PHOTO_BUCKET).upload(path, compressed, { contentType: 'image/jpeg' });
@@ -9077,21 +9080,18 @@ function OtherWorkblocksHere({ unitId, partyId, currentBlockId, currentEmployeeI
                 </button>
               )}
             </div>
-            {/* Bullet list of task names — what's being / has been
-               cleaned in this workblock. Read-only: NO checkboxes,
-               NO click handlers, the viewer can't mark items off
-               since they're not in this workblock yet. */}
+            {/* Item list — collapsed into the same dropdown the cleaner's own
+               task cards use, so a 3-item and a 30-item workblock take the
+               same room on screen. Multi-item task names ("A + B + C") are
+               split back out so the count is the real number of items.
+               Read-only: no checkboxes, no handlers — the viewer isn't in
+               this workblock yet. */}
             {b.tasks && b.tasks.length > 0 && (
-              <ul className="space-y-1 text-sm text-stone-800 mb-3">
-                {b.tasks.map(t => (
-                  <li key={t.id} className="leading-snug flex items-start gap-2">
-                    <span className="text-amber-700 mt-1.5 flex-shrink-0">•</span>
-                    <span className="flex-1 min-w-0">
-                      {t.name || t.subcategory || t.category || 'Task'}
-                    </span>
-                  </li>
-                ))}
-              </ul>
+              <div className="mb-3">
+                <ItemsDropdown items={(b.tasks || []).flatMap(t =>
+                  splitTaskName(t.name || t.subcategory || t.category || 'Task')
+                )} />
+              </div>
             )}
             {/* Footer: start time + elapsed + photo count */}
             <div className="text-[11px] font-mono text-stone-500 pt-2 border-t border-amber-200">
@@ -11504,6 +11504,172 @@ function TaskCard({ task, isActive, onStop, onResume, onAddPhoto }) {
   );
 }
 
+// =================================================================
+// BURST CAMERA — take several photos without leaving the page.
+//
+// The native camera (<input capture>) hands back exactly ONE image per
+// tap; that's an iOS/Android limitation a web page can't override. So
+// when a cleaner needs ten shots in a row we run our own camera instead:
+// a live getUserMedia preview with a shutter that grabs frames straight
+// off the video into canvas. Tap, tap, tap, then upload the whole set.
+//
+// Quality is a non-issue here: every photo gets downscaled to 1280px at
+// 0.75 JPEG on upload anyway, so a 1080p+ frame grab lands identical to a
+// 12MP camera shot after compression.
+//
+// Requires HTTPS (Vercel is) and camera permission. If either is missing
+// we say so plainly and the cleaner falls back to the other two buttons.
+// =================================================================
+function BurstCamera({ onDone, onCancel }) {
+  const videoRef = useRef(null);
+  const streamRef = useRef(null);
+  const shotsRef = useRef([]);        // mirror of shots, for cleanup on unmount
+  const [ready, setReady] = useState(false);
+  const [err, setErr] = useState('');
+  const [flash, setFlash] = useState(false);
+  const [shots, setShots] = useState([]); // { id, url, file }
+
+  useEffect(() => { shotsRef.current = shots; }, [shots]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!navigator.mediaDevices?.getUserMedia) {
+        setErr("This browser won't let a web page open the camera directly. Use \u201cTake a photo\u201d or pick several from your gallery.");
+        return;
+      }
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: { ideal: 'environment' },   // rear camera on a phone
+            width: { ideal: 1920 }, height: { ideal: 1080 },
+          },
+          audio: false,
+        });
+        if (cancelled) { stream.getTracks().forEach(t => t.stop()); return; }
+        streamRef.current = stream;
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          try { await videoRef.current.play(); } catch { /* autoplay guard */ }
+        }
+        setReady(true);
+      } catch (e) {
+        const name = e?.name || '';
+        setErr(
+          name === 'NotAllowedError'
+            ? 'Camera access was blocked. Allow the camera for this site in your browser settings, then try again.'
+            : name === 'NotFoundError'
+              ? "No camera found on this device."
+              : 'Could not start the camera: ' + (e?.message || 'unknown error')
+        );
+      }
+    })();
+    return () => {
+      cancelled = true;
+      if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
+      shotsRef.current.forEach(s => { try { URL.revokeObjectURL(s.url); } catch { /* noop */ } });
+    };
+    /* eslint-disable-next-line */
+  }, []);
+
+  const shoot = () => {
+    const v = videoRef.current;
+    if (!v || !v.videoWidth) return;
+    const canvas = document.createElement('canvas');
+    canvas.width = v.videoWidth;
+    canvas.height = v.videoHeight;
+    canvas.getContext('2d').drawImage(v, 0, 0, canvas.width, canvas.height);
+    const capturedAt = new Date().toISOString();
+    canvas.toBlob((blob) => {
+      if (!blob) return;
+      const file = new File([blob], `burst_${Date.now()}.jpg`, { type: 'image/jpeg' });
+      // Frame grabs carry no EXIF, so stamp the real capture time here —
+      // uploadPhoto prefers this over reading EXIF off the file.
+      try { file.__capturedAt = capturedAt; } catch { /* frozen File, fine */ }
+      setShots(prev => [...prev, { id: `${Date.now()}_${prev.length}`, url: URL.createObjectURL(blob), file }]);
+    }, 'image/jpeg', 0.9);
+    // Shutter feedback — a flash plus a tap you can feel through a glove.
+    setFlash(true);
+    setTimeout(() => setFlash(false), 90);
+    if (navigator.vibrate) { try { navigator.vibrate(20); } catch { /* noop */ } }
+  };
+
+  const removeShot = (id) => {
+    setShots(prev => {
+      const gone = prev.find(s => s.id === id);
+      if (gone) { try { URL.revokeObjectURL(gone.url); } catch { /* noop */ } }
+      return prev.filter(s => s.id !== id);
+    });
+  };
+
+  const finish = () => {
+    if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
+    onDone(shots.map(s => s.file));
+  };
+
+  return (
+    <div className="fixed inset-0 z-[60] bg-black flex flex-col" style={{ touchAction: 'manipulation' }}>
+      {/* Top bar */}
+      <div className="flex items-center justify-between px-4 py-3 text-stone-100 flex-shrink-0"
+        style={{ paddingTop: 'max(0.75rem, env(safe-area-inset-top))' }}>
+        <button onClick={onCancel}
+          className="px-3 py-1.5 rounded-full bg-white/15 text-sm font-medium active:scale-95">
+          Cancel
+        </button>
+        <span className="text-xs font-mono uppercase tracking-wider text-stone-300">
+          {shots.length === 0 ? 'Burst mode' : `${shots.length} taken`}
+        </span>
+        <span className="w-[68px]" />
+      </div>
+
+      {/* Live preview */}
+      <div className="flex-1 relative overflow-hidden">
+        <video ref={videoRef} playsInline muted autoPlay
+          className="absolute inset-0 w-full h-full object-cover" />
+        {flash && <div className="absolute inset-0 bg-white/70" />}
+        {!ready && !err && (
+          <div className="absolute inset-0 flex items-center justify-center text-stone-300 text-sm">
+            Starting the camera…
+          </div>
+        )}
+        {err && (
+          <div className="absolute inset-0 flex items-center justify-center p-8">
+            <div className="text-center text-stone-200 text-sm leading-relaxed">{err}</div>
+          </div>
+        )}
+      </div>
+
+      {/* Thumbnail strip */}
+      {shots.length > 0 && (
+        <div className="flex gap-2 px-4 py-2 overflow-x-auto flex-shrink-0">
+          {shots.map(s => (
+            <div key={s.id} className="relative flex-shrink-0">
+              <img src={s.url} alt="" className="w-14 h-14 rounded-lg object-cover border border-white/20" />
+              <button onClick={() => removeShot(s.id)}
+                className="absolute -top-1 -right-1 w-5 h-5 rounded-full bg-stone-900 border border-white/40 text-white flex items-center justify-center active:scale-90">
+                <X size={11} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Shutter row */}
+      <div className="flex items-center justify-between gap-3 px-6 py-4 flex-shrink-0"
+        style={{ paddingBottom: 'max(1rem, env(safe-area-inset-bottom))' }}>
+        <span className="w-24" />
+        <button onClick={shoot} disabled={!ready}
+          aria-label="Take a photo"
+          className="w-[70px] h-[70px] rounded-full bg-white ring-4 ring-white/40 active:scale-90 transition-transform disabled:opacity-40" />
+        <button onClick={finish} disabled={shots.length === 0}
+          className="w-24 py-2.5 rounded-full bg-amber-600 text-white text-sm font-bold active:scale-95 disabled:opacity-30">
+          Use {shots.length || ''}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function PhotoModal({ kind, taskName, existing, onUpload, onSaveNote, onClose, employee, onDeletePhoto, onChangeKind }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -11553,30 +11719,40 @@ function PhotoModal({ kind, taskName, existing, onUpload, onSaveNote, onClose, e
     if (e) setExtraFlags(prev => ({ ...prev, [p.id]: !next })); // revert on failure
   };
 
+  // Batch progress for a multi-photo pick — 12 photos used to sit on a bare
+  // "Uploading…" spinner with no sign of movement, which looks frozen.
+  const [progress, setProgress] = useState(null); // { done, total } | null
+  const [burstOpen, setBurstOpen] = useState(false);
   const handleFile = async (e) => {
     const files = Array.from(e.target.files || []);
     // Reset the input so picking the same file(s) again still triggers.
     if (e.target) e.target.value = '';
+    await uploadFiles(files);
+  };
+  const uploadFiles = async (files) => {
     if (!files.length) return;
     setBusy(true);
     setError('');
     setNoteSaved(false);
+    setProgress({ done: 0, total: files.length });
     let last = null;
     let failed = 0;
     try {
       // Upload each selected photo in turn (gallery multi-select or one shot).
       // Uploads go into the CURRENTLY SELECTED bucket tab, so the cleaner
       // chooses before/after/damage/couldn't-clean up front (no auto-assign).
-      for (const file of files) {
+      for (let i = 0; i < files.length; i++) {
         try {
-          const uploaded = await onUpload(file, bucketTab);
+          const uploaded = await onUpload(files[i], bucketTab);
           if (uploaded && uploaded.id) last = uploaded;
         } catch (err) { failed++; console.warn('[photo] one upload failed', err); }
+        setProgress({ done: i + 1, total: files.length });
       }
       if (last) { setLastUploaded(last); setNoteDraft(''); if (last.kind) setBucketTab(last.kind); }
       if (failed) setError(`${failed} photo${failed === 1 ? '' : 's'} failed to upload. The rest went through.`);
     } finally {
       setBusy(false);
+      setProgress(null);
     }
   };
 
@@ -11781,7 +11957,18 @@ function PhotoModal({ kind, taskName, existing, onUpload, onSaveNote, onClose, e
           {busy ? (
             <div className="block w-full p-8 border-2 border-dashed border-amber-300 bg-amber-50 rounded-2xl text-center">
               <div className="w-8 h-8 mx-auto mb-3 border-2 border-amber-600 border-t-transparent rounded-full animate-spin" />
-              <div className="text-stone-700 font-medium">Uploading…</div>
+              <div className="text-stone-700 font-medium">
+                {progress && progress.total > 1
+                  ? `Uploading ${Math.min(progress.done + 1, progress.total)} of ${progress.total}…`
+                  : 'Uploading…'}
+              </div>
+              {progress && progress.total > 1 && (
+                <div className="mt-3 h-1.5 w-full rounded-full bg-amber-200 overflow-hidden">
+                  <div className="h-full bg-amber-600 transition-all"
+                    style={{ width: `${Math.round((progress.done / progress.total) * 100)}%` }} />
+                </div>
+              )}
+              <div className="text-xs text-stone-500 mt-2">Keep this open until it finishes</div>
             </div>
           ) : (
             <div className="space-y-2.5">
@@ -11792,14 +11979,23 @@ function PhotoModal({ kind, taskName, existing, onUpload, onSaveNote, onClose, e
               <label className="block w-full p-6 border-2 border-dashed rounded-2xl text-center cursor-pointer transition-colors border-stone-300 hover:border-stone-900">
                 <Camera size={28} className="mx-auto mb-2 text-stone-400" />
                 <div className="text-stone-700 font-medium">{lastUploaded ? 'Take another photo' : 'Take a photo'}</div>
-                <div className="text-xs text-stone-500">Opens the camera</div>
-                <input type="file" accept="image/*" capture="environment" onChange={handleFile} disabled={busy} className="hidden" />
+                <div className="text-xs text-stone-500">Opens the camera — one shot at a time</div>
+                <input type="file" accept="image/*" capture="environment" multiple onChange={handleFile} disabled={busy} className="hidden" />
               </label>
+              {/* Burst mode — our own in-page camera, so the cleaner can fire off
+                 as many shots as they want in one go. The native camera below
+                 only ever returns one image per tap. */}
+              <button onClick={() => setBurstOpen(true)} disabled={busy}
+                className="block w-full p-6 border-2 border-dashed rounded-2xl text-center transition-colors border-amber-400 bg-amber-50 hover:border-amber-600 disabled:opacity-50">
+                <Camera size={28} className="mx-auto mb-2 text-amber-700" />
+                <div className="text-stone-900 font-medium">Take several in a row</div>
+                <div className="text-xs text-stone-600">Camera stays open — shoot, shoot, shoot, then upload</div>
+              </button>
               {/* Upload existing photos from the gallery — several at once. */}
               <label className="block w-full p-6 border-2 border-dashed rounded-2xl text-center cursor-pointer transition-colors border-stone-300 hover:border-stone-900">
                 <ImageIcon size={28} className="mx-auto mb-2 text-stone-400" />
-                <div className="text-stone-700 font-medium">Upload from gallery</div>
-                <div className="text-xs text-stone-500">Pick one or several photos you already took</div>
+                <div className="text-stone-700 font-medium">Upload several at once</div>
+                <div className="text-xs text-stone-500">Pick as many photos from your gallery as you want</div>
                 <input type="file" accept="image/*" multiple onChange={handleFile} disabled={busy} className="hidden" />
               </label>
             </div>
@@ -11811,6 +12007,11 @@ function PhotoModal({ kind, taskName, existing, onUpload, onSaveNote, onClose, e
             Done
           </button>
         </div>
+        {burstOpen && (
+          <BurstCamera
+            onCancel={() => setBurstOpen(false)}
+            onDone={async (files) => { setBurstOpen(false); await uploadFiles(files); }} />
+        )}
       </div>
       {/* Tap any existing photo to zoom and inspect detail. The zoom
          viewer also surfaces the photo's note (when present). */}
@@ -17080,8 +17281,8 @@ function PropertyForm({ property, currentUserRole, onCancel, onSaved, onManageAs
               <p className="text-xs text-stone-500 mb-2">Pick which ways this property's PM can create assignments in their portal. Off = hidden from them.</p>
               <div className="space-y-2">
                 {[
-                  { k: 'quick', label: 'Quick assignment', desc: 'Fast builder — no cleaner picker. Lands as a draft for your approval.' },
-                  { k: 'checklist', label: 'Checklist wizard', desc: 'The structured "New assignment" with bedroom items.' },
+                  { k: 'quick', label: 'Bridges/Citifront (quick assignment)', desc: 'Fast builder — no cleaner picker. Lands as a draft for your approval.' },
+                  { k: 'checklist', label: 'Carriage Cove Uploads (checklist wizard)', desc: 'The structured upload with bedroom items.' },
                   { k: 'legacy', label: 'Legacy file upload', desc: 'Upload a file or photo as the source.' },
                 ].map(m => (
                   <button type="button" key={m.k} onClick={() => togglePmMethod(m.k)}
@@ -28845,13 +29046,13 @@ function AssignmentList({ property, employee, onBack, onNew, onNewChecklist, onN
             {onNewQuick && (
               <button onClick={onNewQuick}
                 className="p-4 rounded-2xl bg-stone-900 text-stone-50 font-medium flex items-center justify-center gap-2 active:scale-98">
-                <Building2 size={18} /> Quick assignment
+                <Building2 size={18} /> Bridges/Citifront
               </button>
             )}
             {onNewChecklist && (
               <button onClick={onNewChecklist}
                 className="p-4 rounded-2xl border-2 border-stone-300 bg-white text-stone-700 font-medium flex items-center justify-center gap-2 active:scale-98">
-                <FileText size={18} /> New checklist assignment
+                <FileText size={18} /> Carriage Cove Uploads
               </button>
             )}
             <button onClick={onNew}
@@ -29255,7 +29456,7 @@ function QuickAssignmentForm({ property, employee, portalUser = null, portalKind
         </button>
         <div>
           <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">{property.name}</div>
-          <div className="font-serif text-xl text-stone-900">Quick assignment</div>
+          <div className="font-serif text-xl text-stone-900">Bridges/Citifront</div>
         </div>
       </div>
 
@@ -31830,7 +32031,7 @@ function ChecklistAssignmentWizard({ property, employee, actorKind = null, porta
           </button>
           <div className="flex-1 min-w-0">
             <div className="text-xs uppercase tracking-wider font-mono text-stone-500">{property.name}</div>
-            <div className="font-serif text-lg text-stone-900 font-bold">New checklist assignment</div>
+            <div className="font-serif text-lg text-stone-900 font-bold">Carriage Cove Uploads</div>
           </div>
         </div>
         <ProgressBar steps={stepLabels} currentStep={step} complete={submitted}

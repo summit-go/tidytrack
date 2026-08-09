@@ -26,7 +26,6 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 // =================================================================
 const GOOGLE_TRANSLATE_API_KEY = "AIzaSyD7ceHPryMzs45hWJOyFNBxtOzQOEmJcSA";
 
-
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // ============================================================
@@ -119,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap146";
+const BUILD_TAG = "aug6-tap150";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -5093,6 +5092,166 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     } catch { return s; }
   }
 
+  // ===== "I'M DONE HERE" =========================================
+  // One button, three outcomes, decided by what's actually true at the
+  // bedroom right now:
+  //   (a) items still open, nobody else here → warn, then step out. What this
+  //       cleaner started closes out as DONE; items nobody touched stay
+  //       pending. The bedroom stays open showing exactly what's left.
+  //   (b) other cleaners here → close out only this cleaner. Their block,
+  //       their items and their photos are untouched, and the workblocks this
+  //       cleaner finished stay visible to them (and reopenable) in Done.
+  //   (c) nothing left open, nobody else here → close the bedroom out for
+  //       real; the assignment reads as finished.
+  // Scoped to the block's assignment when it has one, so a trash-out and a
+  // move-out at the same bedroom close out independently.
+  const finishHere = async () => {
+    if (!activeBlock || !employee?.id) return;
+    const nowISO = new Date().toISOString();
+    let othersHere = [], inMyBlock = 0, open = [], breakdown = [];
+    setBusy(true);
+    try {
+      const [{ data: parts }, { data: otherBlocks }] = await Promise.all([
+        supabase.from('work_block_participants')
+          .select('employee_id, employee:employees(name)')
+          .eq('work_block_id', activeBlock.id).is('left_at', null).neq('employee_id', employee.id),
+        supabase.from('work_blocks')
+          .select('id, shift:shifts!inner(employee:employees(id, name))')
+          .eq('unit_id', activeBlock.unit_id).eq('party_id', activeBlock.party_id)
+          .is('end_time', null).neq('id', activeBlock.id),
+      ]);
+      inMyBlock = (parts || []).length;
+      const names = new Set();
+      (parts || []).forEach(p => names.add(p.employee?.name || 'Another cleaner'));
+      (otherBlocks || []).forEach(b => {
+        const e = b.shift?.employee;
+        if (e?.id && e.id !== employee.id) names.add(e.name || 'Another cleaner');
+      });
+      // The person who STARTED this block has no participant row — those are
+      // only written when someone joins. So if this block isn't mine, its
+      // owner is here too, and missing them would let me close their block.
+      if (activeBlock.shift_id && shift?.id && activeBlock.shift_id !== shift.id) {
+        const { data: ownerShift } = await supabase.from('shifts')
+          .select('employee:employees(id, name)').eq('id', activeBlock.shift_id).maybeSingle();
+        const oe = ownerShift?.employee;
+        if (oe?.id && oe.id !== employee.id) names.add(oe.name || 'Another cleaner');
+      }
+      othersHere = Array.from(names);
+
+      // Pull EVERY item at this bedroom, not just the open ones, so the
+      // warning can say "Bedroom — 5 of 10 done, 5 left" instead of a bare
+      // total. template_section is what the picker groups by.
+      let q = supabase.from('assignment_targets')
+        .select('id, status, template_section, assignment:assignments!inner(customer_id, active, source, pm_status, deleted_at)')
+        .eq('unit_id', activeBlock.unit_id).eq('party_id', activeBlock.party_id);
+      if (activeBlock.assignment_id) q = q.eq('assignment_id', activeBlock.assignment_id);
+      const { data: allRows } = await q;
+      const live = (allRows || []).filter(t =>
+        t.assignment?.customer_id === shift?.customer_id &&
+        t.assignment?.active && !t.assignment?.deleted_at &&
+        (t.assignment?.source !== 'pm' || t.assignment?.pm_status === 'approved'));
+      open = live.filter(t => ['pending', 'in_progress', 'paused'].includes(t.status));
+      // Section breakdown, in the same order the picker lists them.
+      const SEC_ORDER = ['bedroom', 'bathroom', 'vanity', 'general'];
+      const SEC_LABEL = { bedroom: 'Bedroom', bathroom: 'Bathroom', vanity: 'Vanity', general: 'General' };
+      const bySec = {};
+      live.forEach(t => {
+        const sec = (t.template_section || 'other').toLowerCase();
+        if (!bySec[sec]) bySec[sec] = { total: 0, done: 0, left: 0 };
+        bySec[sec].total += 1;
+        if (t.status === 'done' || t.status === 'blocked') bySec[sec].done += 1;
+        else bySec[sec].left += 1;
+      });
+      breakdown = Object.keys(bySec)
+        .sort((a, b) => {
+          const ia = SEC_ORDER.indexOf(a), ib = SEC_ORDER.indexOf(b);
+          return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
+        })
+        .filter(sec => bySec[sec].left > 0)
+        .map(sec => `${SEC_LABEL[sec] || 'Other'} \u2014 ${bySec[sec].done} of ${bySec[sec].total} done, ${bySec[sec].left} left`);
+    } catch (e) {
+      setBusy(false);
+      alert('Could not check this bedroom: ' + (e.message || e));
+      return;
+    }
+    setBusy(false);
+
+    const n = open.length;
+    const plural = n === 1 ? 'item is' : 'items are';
+    // "Bedroom — 5 of 10 done, 5 left" per section, so the cleaner sees
+    // exactly what they'd be walking away from.
+    const list = breakdown.length > 0 ? `\n\n${breakdown.join('\n')}\n` : '\n\n';
+    let mode;
+    if (othersHere.length > 0) {
+      mode = 'others';
+      const who = othersHere.join(', ');
+      const stillMsg = n > 0 ? ` ${n} ${plural} still open here:` : '';
+      if (!confirm(tt(`${who} ${othersHere.length === 1 ? 'is' : 'are'} still working in this bedroom.${stillMsg}${n > 0 ? list : '\n\n'}You'll be closed out and sent back to your assignments. What you finished stays done and they can reopen your workblocks — everything else is left exactly as it is for them.`))) return;
+    } else if (n > 0) {
+      mode = 'partial';
+      if (!confirm(tt(`\u26A0 This bedroom isn't finished \u2014 ${n} ${plural} still left:${list}\nWhat you worked on closes out as done. Everything still left goes back on the board as pending for the next cleaner, and the bedroom stays open.\n\nFinish here anyway?`))) return;
+    } else {
+      mode = 'complete';
+      if (!confirm(tt('Everything here is done. Close out this bedroom and mark the job finished?'))) return;
+    }
+
+    setBusy(true);
+    try {
+      if (activeTask) await stopTask(activeTask, false);
+      // Always step out of the block's participant list.
+      await supabase.from('work_block_participants').update({ left_at: nowISO })
+        .eq('work_block_id', activeBlock.id).eq('employee_id', employee.id).is('left_at', null);
+
+      // Close the block unless someone else is still inside THIS one — either
+      // a joiner, or the person whose block it is.
+      const iOwnBlock = !activeBlock.shift_id || activeBlock.shift_id === shift?.id;
+      const leaveBlockOpen = inMyBlock > 0 || !iOwnBlock;
+      if (!leaveBlockOpen) {
+        await supabase.from('work_blocks').update({ end_time: nowISO }).eq('id', activeBlock.id);
+        setWorkBlocks(prev => prev.map(b => b.id === activeBlock.id ? { ...b, end_time: nowISO } : b));
+      }
+
+      if (mode === 'complete') {
+        // Nothing open — nothing to flip. Belt and braces in case a target
+        // landed between the check and the write.
+        let q2 = supabase.from('assignment_targets')
+          .update({ status: 'done', completed_at: nowISO, completed_by: employee.id })
+          .eq('unit_id', activeBlock.unit_id).eq('party_id', activeBlock.party_id)
+          .in('status', ['pending', 'in_progress', 'paused']);
+        if (activeBlock.assignment_id) q2 = q2.eq('assignment_id', activeBlock.assignment_id);
+        await q2;
+      } else {
+        // The work this cleaner actually did is FINISHED — they just tapped
+        // "I'm done here". Items they started close out as done; items nobody
+        // ever touched stay pending so the board shows exactly what's left
+        // (start Bedroom, finish it, leave → Bedroom reads done, Bathroom and
+        // Vanity read pending). Items started by someone else aren't touched.
+        let q3 = supabase.from('assignment_targets')
+          .update({ status: 'done', completed_at: nowISO, completed_by: employee.id })
+          .eq('unit_id', activeBlock.unit_id).eq('party_id', activeBlock.party_id)
+          .eq('started_by', employee.id).in('status', ['in_progress', 'paused']);
+        if (activeBlock.assignment_id) q3 = q3.eq('assignment_id', activeBlock.assignment_id);
+        await q3;
+      }
+    } catch (e) {
+      setBusy(false);
+      alert('Could not finish here: ' + (e.message || e));
+      return;
+    }
+
+    const finishedFrom = {
+      unitId: activeBlock.unit_id,
+      unitLabel: activeBlock.unit?.label,
+      partyId: activeBlock.party_id,
+      partyLabel: activeBlock.party?.label,
+      propertyId: shift.customer_id,
+    };
+    setActiveBlock(null); setTasks([]); setActiveTask(null);
+    setBusy(false);
+    setCleanerTab('home');
+    setNextUpPrompt(finishedFrom);
+  };
+
   const finishBlock = async () => {
     setBusy(true);
     if (activeTask) await stopTask(activeTask, false);
@@ -6160,7 +6319,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
 
   if (!shift) {
     return withIdleModal(
-      <div className="min-h-screen bg-stone-50 flex flex-col pb-24">
+      <div className="min-h-screen bg-stone-50 flex flex-col" style={{ minHeight: '100dvh' }}>
         <Header name={employee.name} onSignOut={signOutWithCleanup} role={employee.role} cleanerView
           employee={employee} onOpenMessages={() => setShowMessages(true)}
           onOpenWhosHere={() => setWhosWorkingOpen(true)} />
@@ -6319,6 +6478,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       onUndo={undoBlock}
       onUndoLast={undoLastAction}
       lastActionLabel={lastAction?.label || null}
+      onFinishHere={finishHere}
       onReopen={reopenBlock}
       newTaskName={newTaskName} setNewTaskName={setNewTaskName}
       onStartTask={startTask} onStartTasksFromPicker={startTasksFromPicker}
@@ -6620,8 +6780,13 @@ function CleanerBottomNav({ active, onChange }) {
       </button>
     );
   };
+  // STICKY, not fixed. iOS Safari repaints position:fixed elements out of sync
+  // with its own collapsing toolbar, which is why the bar appeared to jump into
+  // the middle of the page mid-scroll. A sticky bar stays in normal flow — it
+  // can't desync — and it needs no spacer underneath it, so it can never cover
+  // the last row of content either.
   return (
-    <div className="fixed bottom-0 left-0 right-0 z-30 bg-white border-t border-stone-200 flex"
+    <div className="sticky bottom-0 left-0 right-0 z-30 bg-white border-t border-stone-200 flex mt-auto"
       style={{ paddingBottom: 'env(safe-area-inset-bottom, 0px)' }}>
       <Item id="home"        label="Today"       useLogo />
       <Item id="assignments" label="Assignments" Icon={ClipboardList} />
@@ -8684,7 +8849,7 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
   const [whosHereOpen, setWhosHereOpen] = useState(false);
 
   return (
-    <div className="min-h-screen bg-stone-50 pb-24">
+    <div className="min-h-screen bg-stone-50 flex flex-col" style={{ minHeight: '100dvh' }}>
       <Header name={employeeName} onSignOut={onSignOut} role={employee?.role} cleanerView employee={employee}
         onOpenMessages={onOpenMessages}
         onOpenWhosHere={() => setWhosHereOpen(true)} />
@@ -9743,7 +9908,7 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
   newTaskName, setNewTaskName, onStartTask, onStartTasksFromPicker, onStartChecklistItems, onReleaseTargets, onStopTask, onResumeTask, onAddPhoto,
   photoModal, onClosePhotoModal, onUploadPhoto, onChangePhotoKind, onSavePhotoNote, onOpenMessages, onOpenBedroomHistory,
   onMoveBlock, onMoveMultiple, onLeaveBlock, onJoinBlock, onDeletePhoto, onGoToBedroom, onSwitchProperty, cleanerTab, setCleanerTab, previewMode, busy,
-  onUndoLast, lastActionLabel }) {
+  onUndoLast, lastActionLabel, onFinishHere }) {
   useTick(true);
   const blockElapsed = Date.now() - new Date(block.start_time).getTime();
   const activeTaskObj = tasks.find(t => t.id === activeTask);
@@ -9925,7 +10090,7 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
   };
 
   return (
-    <div className="min-h-screen bg-stone-50 pb-24">
+    <div className="min-h-screen bg-stone-50 flex flex-col" style={{ minHeight: '100dvh' }}>
       <ScreenId id="CL-C" />
       <Header name={employeeName} onSignOut={onSignOut} role={employee?.role} cleanerView employee={employee}
         onOpenMessages={onOpenMessages}
@@ -9951,7 +10116,9 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
         ]}
         inActiveWork={true}
         onLeaveDecision={(decision) => {
-          if (decision === 'done') return onFinish();
+          // Same three-way check as the "I'm done here" button — don't let a
+          // second entry point silently mark a half-finished bedroom complete.
+          if (decision === 'done') return (onFinishHere || onFinish)();
           if (decision === 'pause') return onPause();
         }} />
       {(others.length > 0 || block.work_notes) && (
@@ -10174,20 +10341,21 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
            → this cleaner leaves, others stay (leaveBlock warns + routes); the
            LAST one to leave closes the whole bedroom. No second confirm here —
            each handler owns its own warning. */}
-        <div className="mt-6 flex justify-center">
+        <div className="mt-6 flex flex-col items-center">
+          {/* One button. What it does depends on the bedroom: warns when work
+             is left, closes out only you when others are here, and finishes
+             the job outright when nothing's left. The handler checks live —
+             it doesn't trust what this screen last rendered. */}
           <button
-            onClick={() => {
-              if (totalActive > 1 && onLeaveBlock) return onLeaveBlock();
-              return onFinish();
-            }}
+            onClick={() => (onFinishHere || onFinish)()}
             disabled={busy}
             className="mx-auto px-6 py-2.5 rounded-full bg-amber-700 hover:bg-amber-800 text-stone-50 text-sm font-semibold flex items-center justify-center gap-2 active:scale-95 transition-transform disabled:opacity-50">
             <Check size={15} />
-            We are done here
+            I'm done here
           </button>
-          {totalActive > 1 && onLeaveBlock && (
+          {totalActive > 1 && (
             <div className="text-[11px] text-stone-500 text-center mt-1.5 font-mono">
-              {totalActive} cleaners here · the block stays open until everyone finishes
+              {totalActive} cleaners here · leaving closes out you only
             </div>
           )}
         </div>
@@ -13108,7 +13276,7 @@ function ManagerShell({ employee, onSignOut }) {
 
   return (
     <PreviewContext.Provider value={{ onPreview: () => setPreviewMode(true), isOwner: employee?.role === 'owner' }}>
-    <div className="min-h-screen bg-stone-50" style={{ minHeight: '100dvh' }}>
+    <div className="min-h-screen bg-stone-50 flex flex-col" style={{ minHeight: '100dvh' }}>
       {tab === 'daily'       && <DailyView         employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} onLogoClick={goHome} />}
       {tab === 'dashboard'   && <ManagerDashboard  employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} onLogoClick={goHome} />}
       {tab === 'team'        && <EmployeeAdmin    employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} onLogoClick={goHome} />}
@@ -13116,14 +13284,10 @@ function ManagerShell({ employee, onSignOut }) {
       {tab === 'assignments' && <AssignmentsTab   employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} onLogoClick={goHome} />}
       {showMoneyTabs && tab === 'money' && <MoneyView employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} onLogoClick={goHome} />}
 
-      {/* Spacer so the fixed nav never covers the last row of content. Height
-         comes from the live measurement above, plus the phone's home-indicator
-         inset. */}
-      <div aria-hidden className="print:hidden"
-        style={{ height: navH ? `calc(${navH}px + env(safe-area-inset-bottom, 0px))` : (isOwner ? '7rem' : '4.5rem') }} />
-
+      {/* Sticky, not fixed — see CleanerBottomNav. Staying in normal flow means
+         no spacer is needed and iOS can't paint it out of position. */}
       <div ref={navRef}
-        className="fixed bottom-0 left-0 right-0 bg-white border-t border-stone-200 px-1 pt-2 z-30 print:hidden"
+        className="sticky bottom-0 left-0 right-0 mt-auto bg-white border-t border-stone-200 px-1 pt-2 z-30 print:hidden"
         style={{ paddingBottom: 'calc(0.5rem + env(safe-area-inset-bottom, 0px))' }}>
         {isOwner ? (
           <div className="max-w-md mx-auto">

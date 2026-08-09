@@ -28,6 +28,8 @@ const GOOGLE_TRANSLATE_API_KEY = "AIzaSyD7ceHPryMzs45hWJOyFNBxtOzQOEmJcSA";
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
+const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
 // ============================================================
 // SECURE SIGN-IN — calls the server-side `secure-signin` Edge
 // Function, which verifies the PIN/code against its bcrypt hash
@@ -118,7 +120,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap144";
+const BUILD_TAG = "aug6-tap145";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -4676,12 +4678,52 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   // "Undo last action" can reverse exactly one step instead of nuking a
   // whole workblock. Session-only by design: it holds enough to fix a
   // mis-tap, not an audit trail.
-  const [actionLog, setActionLog] = useState([]); // newest first
+  // Persisted, because an in-memory log is empty exactly when you need it —
+  // deploy, refresh, or a backgrounded phone and the last thing you did is
+  // forgotten. Keyed to the employee, pruned after 12 hours.
+  const ACTION_LOG_TTL_MS = 12 * 60 * 60 * 1000;
+  const actionLogKey = employee?.id ? `tidytrack_actionlog_${employee.id}` : null;
+  const [actionLog, setActionLog] = useState(() => {
+    try {
+      if (!employee?.id) return [];
+      const raw = localStorage.getItem(`tidytrack_actionlog_${employee.id}`);
+      const arr = raw ? JSON.parse(raw) : [];
+      const cutoff = Date.now() - ACTION_LOG_TTL_MS;
+      return Array.isArray(arr) ? arr.filter(e => e && e.at > cutoff).slice(0, 5) : [];
+    } catch { return []; }
+  });
+  const persistLog = (next) => {
+    try { if (actionLogKey) localStorage.setItem(actionLogKey, JSON.stringify(next)); } catch {}
+    return next;
+  };
   const logAction = (entry) => {
     if (!entry?.type) return;
-    setActionLog(prev => [{ ...entry, at: Date.now() }, ...prev].slice(0, 5));
+    setActionLog(prev => persistLog([{ ...entry, at: Date.now() }, ...prev].slice(0, 5)));
   };
-  const lastAction = actionLog[0] || null;
+
+  // Fallback when the log has nothing — read the CURRENT state and work out
+  // what the last step must have been. This is what makes the option show up
+  // on a workblock you opened before this build, or after a refresh.
+  const derivedLastAction = (() => {
+    if (!activeBlock?.id) return null;
+    const where = `${activeBlock.unit?.label || 'this apartment'}${activeBlock.party?.label ? ` \u00b7 ${activeBlock.party.label}` : ''}`;
+    // Someone else's block that you joined — the step to take back is the join.
+    if (shift?.id && activeBlock.shift_id && activeBlock.shift_id !== shift.id) {
+      return { type: 'join_block', blockId: activeBlock.id, derived: true, label: `Joined the workblock at ${where}` };
+    }
+    const mine = (tasks || []).filter(t => !t.shift_id || t.shift_id === shift?.id);
+    const newest = mine.slice().sort((a, b) => new Date(b.start_time) - new Date(a.start_time))[0];
+    if (!newest) {
+      return { type: 'open_block', blockId: activeBlock.id, unitId: activeBlock.unit_id, partyId: activeBlock.party_id,
+        derived: true, label: `Opened the workblock at ${where}` };
+    }
+    const nm = splitTaskName(newest.name)[0] || newest.name || 'task';
+    if (newest.end_time) {
+      return { type: 'stop_task', taskId: newest.id, derived: true, label: `Marked \u201c${nm}\u201d done` };
+    }
+    return { type: 'start_task', taskId: newest.id, targets: null, derived: true, label: `Started \u201c${nm}\u201d` };
+  })();
+  const lastAction = actionLog[0] || derivedLastAction;
 
   // Is anyone ELSE inside this workblock? True when another cleaner is a
   // live participant, or when the block holds tasks created under someone
@@ -4706,7 +4748,18 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   const undoLastAction = async () => {
     if (!lastAction) return;
     const a = lastAction;
-    const drop = () => setActionLog(prev => prev.filter(x => x !== a));
+    const drop = () => setActionLog(prev => persistLog(prev.filter(x => x !== a)));
+    // Confirm the two branches that throw work away. Reopening or re-closing a
+    // task is cheap and reversible, so those go straight through.
+    if (a.type === 'open_block') {
+      const n = (tasks || []).length;
+      if (!confirm(tt(`Undo opening this workblock at ${a.label.replace(/^Opened the workblock at /, '')}?${n > 0 ? ` ${n} task${n === 1 ? '' : 's'} will be deleted.` : ''} Your items here go back to pending.`))) return;
+    }
+    if (a.type === 'start_task') {
+      const t = (tasks || []).find(x => x.id === a.taskId);
+      const ph = (t?.photos || []).filter(p => !p.deleted_at).length;
+      if (!confirm(tt(`Undo starting this task?${ph > 0 ? ` \u26A0 ${ph} photo${ph === 1 ? '' : 's'} will be permanently deleted.` : ''} The items go back to where they were.`))) return;
+    }
     setBusy(true);
     try {
       if (a.type === 'open_block' || a.type === 'join_block') {
@@ -4734,6 +4787,17 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
         await supabase.from('tasks').delete().eq('id', a.taskId);
         setTasks(prev => prev.filter(t => t.id !== a.taskId));
         if (activeTask === a.taskId) setActiveTask(null);
+        // Derived undo (no journal entry) can't know each item's previous
+        // status, so put this cleaner's in-progress items at this bedroom
+        // back to pending — the same rule "Started by mistake" uses.
+        if (!a.targets && employee?.id && activeBlock?.unit_id && activeBlock?.party_id) {
+          await supabase.from('assignment_targets')
+            .update({ status: 'pending', started_at: null, started_by: null })
+            .eq('unit_id', activeBlock.unit_id)
+            .eq('party_id', activeBlock.party_id)
+            .eq('started_by', employee.id)
+            .eq('status', 'in_progress');
+        }
         // Roll the checklist items back to exactly the status they held.
         for (const t of (a.targets || [])) {
           await supabase.from('assignment_targets')

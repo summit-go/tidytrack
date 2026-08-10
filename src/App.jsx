@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap157";
+const BUILD_TAG = "aug6-tap158";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -33931,8 +33931,8 @@ function AssignmentCard({ target, property = null, busy, onView, onStart, onPaus
     ? (dark ? 'bg-slate-900/70 opacity-90' : 'bg-stone-50 opacity-90')
     : (dark ? 'bg-slate-900' : 'bg-white');
   const ring = (t.priority && !isDone)
-    ? 'border-2 border-red-300'
-    : (dark ? 'border border-slate-600' : 'border border-stone-200');
+    ? 'border-2 border-red-400'
+    : (dark ? 'border border-slate-600' : 'border border-stone-300 shadow-sm');
   const cardTitle = unitPartyLabel(t.unit?.label, t.party?.label) || 'Whole property';
   // Small pill used by every secondary action in the footer row.
   const pillBtn = `text-[11px] font-medium px-2.5 py-1 rounded-full border inline-flex items-center gap-1 active:scale-95 transition disabled:opacity-50`;
@@ -33971,37 +33971,50 @@ function AssignmentCard({ target, property = null, busy, onView, onStart, onPaus
             ) : (
               <FileText size={10} className="flex-shrink-0" />
             )}
-            {t.assignment?.title && <span className="truncate max-w-[14rem]">{t.assignment.title}</span>}
+            {/* The assignment TITLE is deliberately not shown. It reads
+               "Move-out clean · B1-202 · Bedroom 2" — which repeats the card
+               heading and the cleaning type underneath it. Type and task
+               count carry everything that isn't already on screen. */}
             {t.assignment?.assignment_type && (
-              <span>{t.assignment?.title ? '· ' : ''}{assignmentTypeLabel(t.assignment.assignment_type)}</span>
+              <span>{assignmentTypeLabel(t.assignment.assignment_type)}</span>
             )}
+            <span>·</span>
+            <button onClick={onView}
+              className="underline decoration-stone-400 underline-offset-2 hover:text-stone-700">
+              1 task
+            </button>
             {/* No "Quick glance" link — the task count above opens the same
                peek, so it was the same door twice. */}
-            {onOpenBedroomHistory && t.unit_id && t.party_id && (
-              <>
-                <span>·</span>
-                <button onClick={() => onOpenBedroomHistory({
-                    unitId: t.unit_id, unitLabel: t.unit?.label,
-                    partyId: t.party_id, partyLabel: t.party?.label
-                  })} disabled={busy}
-                  className="underline decoration-stone-400 underline-offset-2 hover:text-stone-700 disabled:opacity-50">
-                  History
-                </button>
-              </>
-            )}
+
           </div>
         </div>
 
         {/* ONE header chip — the Priority flag — same as the Today card.
            The status pill is gone (the tab already says it) and the
            Mark-priority toggle moved down to the footer actions. */}
+        {/* Top-right: the priority toggle and History. Both belong here —
+           priority is a status you read at a glance, History is a lookup,
+           and neither is an action on the job itself. */}
         <span className="flex items-center gap-1 flex-shrink-0">
-          {/* Hidden when the footer toggle is available — otherwise the same
-             card says "Priority" twice. */}
-          {t.priority && !(onTogglePriority && canPrioritize) && (
+          {onTogglePriority && canPrioritize ? (
+            <button onClick={(e) => { e.stopPropagation(); onTogglePriority(t); }} disabled={busy}
+              title={t.priority ? 'Remove priority' : 'Mark priority'}
+              className={`text-[10px] font-mono px-2 py-0.5 rounded-full inline-flex items-center gap-1 disabled:opacity-50 ${t.priority ? 'bg-red-600 text-white' : 'bg-white border border-dashed border-stone-300 text-stone-500 hover:bg-stone-50'}`}>
+              <AlertCircle size={10} /> {t.priority ? 'Priority' : 'Mark priority'}
+            </button>
+          ) : t.priority ? (
             <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-red-100 text-red-700 font-bold flex items-center gap-1">
               <AlertCircle size={9} /> Priority
             </span>
+          ) : null}
+          {onOpenBedroomHistory && t.unit_id && t.party_id && (
+            <button onClick={(e) => { e.stopPropagation(); onOpenBedroomHistory({
+                unitId: t.unit_id, unitLabel: t.unit?.label,
+                partyId: t.party_id, partyLabel: t.party?.label
+              }); }} disabled={busy}
+              className="text-[10px] font-mono px-2 py-0.5 rounded-full border border-stone-300 text-stone-600 hover:bg-stone-50 inline-flex items-center gap-1 disabled:opacity-50">
+              <Clock size={10} /> History
+            </button>
           )}
         </span>
       </div>
@@ -34033,8 +34046,8 @@ function AssignmentCard({ target, property = null, busy, onView, onStart, onPaus
             </span>
           )}
           {isDone && t.completed_at && (
-            <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 flex items-center gap-1">
-              <Check size={9} /> {t.completer?.name ? `${t.completer.name} · ` : ''}{fmtDateWithDay(t.completed_at)} {fmtClock(t.completed_at)}
+            <span className="text-[10px] font-mono px-2 py-0.5 rounded-full border bg-emerald-100 text-emerald-800 border-emerald-200 flex items-center gap-1">
+              <Check size={9} /> {t.completer?.name ? `${t.completer.name} · ` : ''}{fmtDueDate(String(t.completed_at).slice(0, 10))}
             </span>
           )}
         </div>
@@ -34087,13 +34100,6 @@ function AssignmentCard({ target, property = null, busy, onView, onStart, onPaus
         </div>
 
         <div className="flex items-center gap-1.5 flex-wrap justify-end">
-          {onTogglePriority && canPrioritize && (
-            <button onClick={(e) => { e.stopPropagation(); onTogglePriority(t); }} disabled={busy}
-              title={t.priority ? 'Remove priority' : 'Mark priority'}
-              className={`text-[10px] font-mono px-2 py-0.5 rounded-full inline-flex items-center gap-1 disabled:opacity-50 ${t.priority ? 'bg-red-600 text-white' : 'bg-white border border-dashed border-stone-300 text-stone-500'}`}>
-              <AlertCircle size={10} /> {t.priority ? 'Priority' : 'Mark priority'}
-            </button>
-          )}
           {onPause && t.status === 'in_progress' && (
             <button onClick={onPause} disabled={busy}
               className={`${pillBtn} border-blue-200 hover:bg-blue-50 text-blue-700`}>
@@ -35859,7 +35865,7 @@ function AssignmentTabContent({ propertyId, property = null, employee, statusFil
                       // assignments at one bedroom) still gets a
                       // useful "open one of them" affordance.
                       bulkCard = (
-                        <div key={`bulk-${groupKey}`} className={`rounded-2xl bg-white p-3.5 ${anyPriority && !allDone ? 'border-2 border-red-300' : 'border border-stone-200'}`}>
+                        <div key={`bulk-${groupKey}`} className={`rounded-2xl bg-white p-3.5 ${anyPriority && !allDone ? 'border-2 border-red-400' : 'border border-stone-300 shadow-sm'}`}>
                           {/* Cleaner request banner — shows at the very
                              top of the card whenever a cleaner has
                              submitted a request at this bedroom that's
@@ -35980,15 +35986,27 @@ function AssignmentTabContent({ propertyId, property = null, employee, statusFil
                                live here; the toggle moved to the footer with
                                the other actions, and the status is already
                                said by the tab you're standing on. */}
+                            {/* Top-right: priority toggle, then History. */}
                             <span className="flex items-center gap-1 flex-shrink-0">
-                              {/* Only shown to people who CAN'T toggle priority.
-                                 Anyone who can gets the toggle in the footer —
-                                 rendering both made the word appear twice on
-                                 the same card. */}
-                              {anyPriority && !canSetPriority && (
+                              {canSetPriority ? (
+                                <button onClick={(e) => { e.stopPropagation(); bulkTogglePriority(newItems); }} disabled={busy}
+                                  title={anyPriority ? 'Remove priority' : 'Mark priority'}
+                                  className={`text-[10px] font-mono px-2 py-0.5 rounded-full inline-flex items-center gap-1 disabled:opacity-50 ${anyPriority ? 'bg-red-600 text-white' : 'bg-white border border-dashed border-stone-300 text-stone-500 hover:bg-stone-50'}`}>
+                                  <AlertCircle size={10} /> {anyPriority ? 'Priority' : 'Mark priority'}
+                                </button>
+                              ) : anyPriority ? (
                                 <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-red-100 text-red-700 font-bold flex items-center gap-1">
                                   <AlertCircle size={9} /> Priority
                                 </span>
+                              ) : null}
+                              {onOpenBedroomHistory && firstTarget?.unit_id && firstTarget?.party_id && (
+                                <button onClick={(e) => { e.stopPropagation(); onOpenBedroomHistory({
+                                    unitId: firstTarget.unit_id, unitLabel: group.unit?.label,
+                                    partyId: firstTarget.party_id, partyLabel: bedLabel,
+                                  }); }} disabled={busy}
+                                  className="text-[10px] font-mono px-2 py-0.5 rounded-full border border-stone-300 text-stone-600 hover:bg-stone-50 inline-flex items-center gap-1 disabled:opacity-50">
+                                  <Clock size={10} /> History
+                                </button>
                               )}
                             </span>
                           </div>
@@ -36017,18 +36035,6 @@ function AssignmentTabContent({ propertyId, property = null, employee, statusFil
                               {newItems.length} {newItems.length === 1 ? 'task' : 'tasks'}
                             </button>
 
-                            {onOpenBedroomHistory && firstTarget?.unit_id && firstTarget?.party_id && (
-                              <>
-                                <span>·</span>
-                                <button onClick={(e) => { e.stopPropagation(); onOpenBedroomHistory({
-                                    unitId: firstTarget.unit_id, unitLabel: group.unit?.label,
-                                    partyId: firstTarget.party_id, partyLabel: bedLabel,
-                                  }); }} disabled={busy}
-                                  className="underline decoration-stone-400 underline-offset-2 hover:text-stone-700 disabled:opacity-50">
-                                  History
-                                </button>
-                              </>
-                            )}
                             {sectionBits.length > 0 && (
                               <span className="text-stone-400">· {sectionBits.join(' · ')}</span>
                             )}
@@ -36062,14 +36068,24 @@ function AssignmentTabContent({ propertyId, property = null, employee, statusFil
                                 // past its due date. Show when it finished.
                                 const grpDone = newItems.every(t => t.status === 'done') && newItems.length > 0;
                                 const doneAtT = newItems.map(t => t.completed_at).filter(Boolean).sort().slice(-1)[0] || null;
+                                // "Ezra · Sat, Aug 8" — who finished it, then the day.
+                                // The clock time isn't useful on this screen and it
+                                // made the two card types read differently.
+                                const doneRowT = newItems
+                                  .filter(t => t.completed_at)
+                                  .sort((a, b) => String(a.completed_at).localeCompare(String(b.completed_at)))
+                                  .slice(-1)[0];
+                                const doneByT = doneAtT
+                                  ? `${doneRowT?.completer?.name ? doneRowT.completer.name + ' · ' : ''}${fmtDueDate(String(doneAtT).slice(0, 10))}`
+                                  : 'Done';
                                 if (canViewTimelineT) {
                                   return (
                                     <div className="relative inline-block">
                                       <button onClick={(e) => { e.stopPropagation(); setTimelineOpenT(timelineOpenT === asg?.id ? null : asg?.id); }}
-                                        className={`text-[10px] font-mono px-2 py-0.5 rounded-full border inline-flex items-center gap-1 ${grpDone ? 'bg-stone-900 text-white border-stone-900'
+                                        className={`text-[10px] font-mono px-2 py-0.5 rounded-full border inline-flex items-center gap-1 ${grpDone ? 'bg-emerald-100 text-emerald-800 border-emerald-200'
                                           : sd ? (sd < todayKeyT ? 'bg-red-100 text-red-700 border-red-200' : sd === todayKeyT ? 'bg-emerald-100 text-emerald-800 border-emerald-200' : 'bg-stone-100 text-stone-600 border-stone-200')
                                           : 'bg-white text-stone-500 border-dashed border-stone-300'}`}>
-                                        {grpDone ? <><Check size={9} /> {doneAtT ? `Done ${fmtDueDate(String(doneAtT).slice(0, 10))}` : 'Done'}</>
+                                        {grpDone ? <><Check size={9} /> {doneByT}</>
                                           : <><Calendar size={9} /> {sd ? fmtDueDate(sd) : 'Set due date'}</>}
                                         <ChevronRight size={10} className="rotate-90 opacity-60" />
                                       </button>
@@ -36114,21 +36130,9 @@ function AssignmentTabContent({ propertyId, property = null, employee, statusFil
                                   );
                                 }
                                 if (grpDone) {
-                                  // Same green "who finished it, and when" chip the
-                                  // single-item card shows — the two used to disagree,
-                                  // one naming a cleaner and the other just a date.
-                                  const lastRow = newItems
-                                    .filter(t => t.completed_at)
-                                    .sort((a, b) => String(a.completed_at).localeCompare(String(b.completed_at)))
-                                    .slice(-1)[0];
-                                  const who = lastRow?.completer?.name;
                                   return (
-                                    <span className="text-[11px] font-mono px-2 py-0.5 rounded-full border bg-emerald-100 text-emerald-800 border-emerald-200 inline-flex items-center gap-1">
-                                      <Check size={9} />
-                                      {who ? `${who} · ` : ''}
-                                      {lastRow?.completed_at
-                                        ? `${fmtDateWithDay(lastRow.completed_at)} ${fmtClock(lastRow.completed_at)}`
-                                        : 'Done'}
+                                    <span className="text-[10px] font-mono px-2 py-0.5 rounded-full border bg-emerald-100 text-emerald-800 border-emerald-200 inline-flex items-center gap-1">
+                                      <Check size={9} /> {doneByT}
                                     </span>
                                   );
                                 }
@@ -36163,13 +36167,6 @@ function AssignmentTabContent({ propertyId, property = null, employee, statusFil
                               })()}
                             </div>
                             <div className="flex items-center gap-1.5 flex-wrap justify-end">
-                            {canSetPriority && (
-                              <button onClick={(e) => { e.stopPropagation(); bulkTogglePriority(newItems); }} disabled={busy}
-                                title={anyPriority ? 'Remove priority' : 'Mark priority'}
-                                className={`text-[10px] font-mono px-2 py-0.5 rounded-full inline-flex items-center gap-1 disabled:opacity-50 ${anyPriority ? 'bg-red-600 text-white' : 'bg-white border border-dashed border-stone-300 text-stone-500'}`}>
-                                <AlertCircle size={10} /> {anyPriority ? 'Priority' : 'Mark priority'}
-                              </button>
-                            )}
                             {allDone && can(employee, 'mark_assignments_done') && (
                               <button onClick={() => { if (confirm(`Reopen ${bedLabel}? It goes back to Pending so it can be worked again.`)) bulkUpdateStatus(newItems, 'pending'); }} disabled={busy}
                                 className="px-2.5 py-1 rounded-full border border-amber-300 hover:bg-amber-50 text-amber-800 text-[11px] font-medium flex items-center gap-1 disabled:opacity-50">

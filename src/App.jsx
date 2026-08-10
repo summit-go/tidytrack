@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap158";
+const BUILD_TAG = "aug6-tap159";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -8246,6 +8246,7 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
   const [peekJob, setPeekJob] = useState(null); // read-only quick glance
   const [collapsedDates, setCollapsedDates] = useState(new Set()); // date-group keys that are collapsed
   const [buildingFilter, setBuildingFilter] = useState(null); // 'B1' | null = all buildings
+  const [priorityCollapsed, setPriorityCollapsed] = useState(false);
   const saveDue = async (j, date) => {
     setEditDueId(null); setBusyId(j.id);
     const { data, error } = await supabase.from('assignments')
@@ -8475,7 +8476,7 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
     const here = j.customerId === currentPropertyId;
     const mine = isMine(j);
             return (
-              <div key={j.id} className={`p-3.5 rounded-2xl bg-white border ${j.priority ? 'border-2 border-red-300' : 'border border-stone-200'}`}>
+              <div key={j.id} className={`p-3.5 rounded-2xl bg-white border ${j.priority ? 'border-2 border-red-400' : 'border border-stone-400 shadow-sm'}`}>
                 <div className="flex items-start gap-2">
                 <div className="flex-1 min-w-0">
                   {/* Only the text is the tap target — not the empty width
@@ -8747,14 +8748,20 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
         <div className="pb-4">
           {priorityJobs.length > 0 && (
             <div className="mb-5">
-              <div className="flex items-center gap-2 mb-2 px-3 py-1.5 rounded-lg border-l-4 border-red-500 bg-red-50">
+              {/* Collapsible, like the date sections. Sixteen priority jobs
+                 pushed everything else off the screen. */}
+              <button onClick={() => setPriorityCollapsed(c => !c)}
+                className="w-full flex items-center gap-2 mb-2 px-3 py-1.5 rounded-lg border-l-4 border-red-500 bg-red-50 hover:bg-red-100 active:scale-[0.99] transition">
+                <ChevronRight size={13} className={`text-red-600 transition-transform ${priorityCollapsed ? '' : 'rotate-90'}`} />
                 <AlertCircle size={13} className="text-red-600" />
                 <span className="text-xs uppercase tracking-wider font-mono font-bold text-red-700">Priority — do these first</span>
                 <span className="text-[10px] font-mono text-red-500 ml-auto">{priorityJobs.length}</span>
-              </div>
-              <div className="space-y-2">
-                {priorityJobs.map(j => renderJobCard(j))}
-              </div>
+              </button>
+              {!priorityCollapsed && (
+                <div className="space-y-2">
+                  {priorityJobs.map(j => renderJobCard(j))}
+                </div>
+              )}
             </div>
           )}
           {dateSections.map(sec => {
@@ -33932,7 +33939,7 @@ function AssignmentCard({ target, property = null, busy, onView, onStart, onPaus
     : (dark ? 'bg-slate-900' : 'bg-white');
   const ring = (t.priority && !isDone)
     ? 'border-2 border-red-400'
-    : (dark ? 'border border-slate-600' : 'border border-stone-300 shadow-sm');
+    : (dark ? 'border border-slate-600' : 'border border-stone-400 shadow-sm');
   const cardTitle = unitPartyLabel(t.unit?.label, t.party?.label) || 'Whole property';
   // Small pill used by every secondary action in the footer row.
   const pillBtn = `text-[11px] font-medium px-2.5 py-1 rounded-full border inline-flex items-center gap-1 active:scale-95 transition disabled:opacity-50`;
@@ -34170,85 +34177,14 @@ function AssignmentsPanel({ propertyId, property = null, employee, refreshKey, o
   }, [tab]);
   const [counts, setCounts] = useState({ pending: 0, paused: 0, in_progress: 0, done: 0, blocked: 0, mine: 0 });
 
-  const loadCounts = async () => {
-    const PAGE = 1000;
-    let data = [];
-    for (let from = 0; ; from += PAGE) {
-      const { data: page, error: pErr } = await supabase
-        .from('assignment_targets')
-        .select('status, completed_by, completed_at, unit_id, party_id, assignment_id, recheck_passed_at, assignment:assignments!inner(customer_id, active, source, pm_status, deleted_at)')
-        .eq('assignment.customer_id', propertyId)
-        .eq('assignment.active', true)
-          .is('assignment.deleted_at', null)
-        .order('id', { ascending: true })
-        .range(from, from + PAGE - 1);
-      if (pErr) break;
-      data = data.concat(page || []);
-      if (!page || page.length < PAGE) break;
-      if (from > 200000) break;
-    }
-    // The list can only ever show the last 3 months, so the Done tab must not
-    // advertise a number the list can't reach. Finished work older than that
-    // window is left out of the count as well.
-    const countCutoff = (() => {
-      const d = new Date(); d.setMonth(d.getMonth() - 3);
-      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-    })();
-    const filtered = (data || []).filter(t =>
-      !t.assignment?.deleted_at &&
-      (t.assignment?.source !== 'pm' || t.assignment?.pm_status === 'approved') &&
-      !(t.status === 'done' && t.completed_at && String(t.completed_at).slice(0, 10) < countCutoff)
-    );
-    // Count UNIQUE assignments per status. Each assignment gets bucketed
-    // ONCE based on its DOMINANT status (in_progress > paused > blocked
-    // > pending > done). This is the counterpart to the dominant-status
-    // logic in load() — both key by assignment_id so a cleaning-check
-    // and a move-out check at the same bedroom count as two separate
-    // jobs. They must agree or the badge says "1 pending" while the
-    // tab shows something else.
-    const asgnKey = (t) => t.assignment_id || `${t.unit_id || ''}::${t.party_id || ''}`;
-    const statusesByAsgn = new Map();
-    filtered.forEach(t => {
-      const k = asgnKey(t);
-      if (!statusesByAsgn.has(k)) statusesByAsgn.set(k, new Set());
-      statusesByAsgn.get(k).add(t.status);
-    });
-    const dominantOrder = ['in_progress', 'paused', 'blocked', 'pending', 'done'];
-    const sets = { pending: new Set(), paused: new Set(), in_progress: new Set(), done: new Set(), blocked: new Set(), mine: new Set(), recheck_passed: new Set() };
-    statusesByAsgn.forEach((statusSet, k) => {
-      let dom = dominantOrder.find(s => statusSet.has(s)) || 'pending';
-      // Match the list's routing exactly, or the In progress tab shows a
-      // count that doesn't equal what's inside it.
-      if (!SHOW_PAUSED_TAB && dom === 'paused') dom = 'in_progress';
-      if (sets[dom]) sets[dom].add(k);
-    });
-    // "Mine" still depends on which items the viewing cleaner finished
-    // today — it's a derived view, so we walk the items separately.
-    const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
-    filtered.forEach(t => {
-      if (t.recheck_passed_at) sets.recheck_passed.add(asgnKey(t));
-      if (t.completed_by && employee?.id && t.completed_by === employee.id && t.completed_at) {
-        const ca = new Date(t.completed_at);
-        if (ca >= todayStart) sets.mine.add(asgnKey(t));
-      }
-    });
-    setCounts({
-      pending: sets.pending.size,
-      paused: sets.paused.size,
-      in_progress: sets.in_progress.size,
-      done: sets.done.size,
-      blocked: sets.blocked.size,
-      mine: sets.mine.size,
-      recheck_passed: sets.recheck_passed.size,
-    });
-  };
-  useEffect(() => { loadCounts(); }, [propertyId, refreshKey]);
-  // Tab badges need to refresh on every DB change too, not just on
-  // propertyId / refreshKey. Without this hook the counts went stale
-  // the moment a cleaner started a workblock — the card itself moved
-  // to In progress (because load() re-ran on the same sync) but the
-  // badges still read the old numbers until you tabbed away and back.
-  useAssignmentSync(loadCounts, 'asgn-panel-counts');
+  // Counting moved into AssignmentTabContent, which already holds every row
+  // for this property — one source of truth means the tab number and the list
+  // underneath it can't disagree, and it saves a second full-table scan.
+  // Kept as a no-op so the existing onUpdate/refresh wiring still resolves.
+  const loadCounts = () => {};
+  // The badges stay live because AssignmentTabContent re-reports them whenever
+  // its rows change — including on realtime sync — so no separate refresh hook
+  // is needed here any more.
 
   return (
     <div className="px-2 sm:px-4 mt-4">
@@ -34302,7 +34238,8 @@ function AssignmentsPanel({ propertyId, property = null, employee, refreshKey, o
         )}
       </div>
       <AssignmentTabContent propertyId={propertyId} property={property} employee={employee} statusFilter={tab}
-        onUpdate={loadCounts} onGoToBedroom={onGoToBedroom} onOpenBedroomHistory={onOpenBedroomHistory}
+        onUpdate={loadCounts} onCounts={setCounts}
+        onGoToBedroom={onGoToBedroom} onOpenBedroomHistory={onOpenBedroomHistory}
         onJoinBlock={onJoinBlock} />
     </div>
   );
@@ -34885,7 +34822,7 @@ function SuggestedTabContent({ propertyId, employee, onGoToBedroom, onOpenBedroo
   );
 }
 
-function AssignmentTabContent({ propertyId, property = null, employee, statusFilter, onUpdate, onGoToBedroom, onOpenBedroomHistory, onJoinBlock }) {
+function AssignmentTabContent({ propertyId, property = null, employee, statusFilter, onUpdate, onCounts, onGoToBedroom, onOpenBedroomHistory, onJoinBlock }) {
   const [allTargets, setAllTargets] = useState([]); // every row at this property
   // Optimistic local edits write through to the raw set; the tab view is
   // derived from it, so a status change moves the card to the right tab
@@ -35219,6 +35156,51 @@ function AssignmentTabContent({ propertyId, property = null, employee, statusFil
     }
     return filtered;
   }, [allTargets, statusFilter, employee?.id]);
+
+  // Tab counts, computed from the same raw rows and the same dominant-status
+  // rule the list uses — and counted the same way the list counts (unique
+  // assignment/bedroom, not raw item rows). The panel used to run its own
+  // second query with its own counting, which is why the tab said 422 while
+  // the list underneath said 427.
+  const tabCounts = React.useMemo(() => {
+    const dominantOrder = ['in_progress', 'paused', 'blocked', 'pending', 'done'];
+    const key = (t) => t.assignment_id || `${t.unit_id || ''}::${t.party_id || ''}`;
+    const statusesByAsgn = new Map();
+    allTargets.forEach(t => {
+      const k = key(t);
+      if (!statusesByAsgn.has(k)) statusesByAsgn.set(k, new Set());
+      statusesByAsgn.get(k).add(t.status);
+    });
+    const out = { pending: 0, paused: 0, in_progress: 0, done: 0, blocked: 0, mine: 0, recheck_passed: 0 };
+    const doneKeys = new Set(), blockedKeys = new Set();
+    allTargets.forEach(t => {
+      if (t.status === 'done') {
+        // Same 3-month floor the Done list applies.
+        const cd = t.completed_at ? String(t.completed_at).slice(0, 10) : null;
+        if (!cd || cd >= minHistoryDay) doneKeys.add(key(t));
+      }
+      if (t.status === 'blocked') blockedKeys.add(key(t));
+    });
+    statusesByAsgn.forEach((set, k) => {
+      let dom = dominantOrder.find(x => set.has(x)) || 'pending';
+      if (!SHOW_PAUSED_TAB && dom === 'paused') dom = 'in_progress';
+      if (dom === 'done' || dom === 'blocked') return; // counted below
+      if (out[dom] !== undefined) out[dom] += 1;
+    });
+    out.done = doneKeys.size;
+    out.blocked = blockedKeys.size;
+    const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
+    const mineKeys = new Set(), recheckKeys = new Set();
+    allTargets.forEach(t => {
+      if (t.recheck_passed_at) recheckKeys.add(key(t));
+      if (t.completed_by && employee?.id && t.completed_by === employee.id && t.completed_at
+          && new Date(t.completed_at) >= todayStart) mineKeys.add(key(t));
+    });
+    out.mine = mineKeys.size;
+    out.recheck_passed = recheckKeys.size;
+    return out;
+  }, [allTargets, employee?.id, minHistoryDay]);
+  useEffect(() => { if (onCounts) onCounts(tabCounts); }, [tabCounts]);
   // Load ONCE per property. The query has no status condition in it — every
   // tab is computed from the same rows client-side — so refetching on each
   // tab switch was pulling the property's entire target list (paged in 1000s)
@@ -35865,7 +35847,7 @@ function AssignmentTabContent({ propertyId, property = null, employee, statusFil
                       // assignments at one bedroom) still gets a
                       // useful "open one of them" affordance.
                       bulkCard = (
-                        <div key={`bulk-${groupKey}`} className={`rounded-2xl bg-white p-3.5 ${anyPriority && !allDone ? 'border-2 border-red-400' : 'border border-stone-300 shadow-sm'}`}>
+                        <div key={`bulk-${groupKey}`} className={`rounded-2xl bg-white p-3.5 ${anyPriority && !allDone ? 'border-2 border-red-400' : 'border border-stone-400 shadow-sm'}`}>
                           {/* Cleaner request banner — shows at the very
                              top of the card whenever a cleaner has
                              submitted a request at this bedroom that's

@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap155";
+const BUILD_TAG = "aug6-tap156";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -33983,22 +33983,15 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
           </div>
         </div>
 
-        {/* Right-hand chips: status, then priority. */}
-        <span className="flex items-center gap-1 flex-shrink-0 flex-wrap justify-end">
-          <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full border ${s.color}`}>{s.label}</span>
-          {!isDone && onTogglePriority && canPrioritize ? (
-            <button onClick={(e) => { e.stopPropagation(); onTogglePriority(t); }} disabled={busy}
-              title={t.priority ? 'Remove priority' : 'Mark priority'}
-              className={`text-[10px] font-mono px-2 py-0.5 rounded-full inline-flex items-center gap-1 transition-colors disabled:opacity-50 ${t.priority
-                ? 'bg-red-100 text-red-700 font-bold hover:bg-red-200'
-                : 'bg-white border border-dashed border-stone-300 text-stone-500 hover:bg-stone-100'}`}>
-              <AlertCircle size={9} /> {t.priority ? 'Priority' : 'Mark priority'}
-            </button>
-          ) : t.priority && !isDone ? (
+        {/* ONE header chip — the Priority flag — same as the Today card.
+           The status pill is gone (the tab already says it) and the
+           Mark-priority toggle moved down to the footer actions. */}
+        <span className="flex items-center gap-1 flex-shrink-0">
+          {t.priority && (
             <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-red-100 text-red-700 font-bold flex items-center gap-1">
               <AlertCircle size={9} /> Priority
             </span>
-          ) : null}
+          )}
         </span>
       </div>
 
@@ -34083,6 +34076,13 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
         </div>
 
         <div className="flex items-center gap-1.5 flex-wrap justify-end">
+          {onTogglePriority && canPrioritize && (
+            <button onClick={(e) => { e.stopPropagation(); onTogglePriority(t); }} disabled={busy}
+              title={t.priority ? 'Remove priority' : 'Mark priority'}
+              className={`text-[10px] font-mono px-2 py-0.5 rounded-full inline-flex items-center gap-1 disabled:opacity-50 ${t.priority ? 'bg-red-600 text-white' : 'bg-white border border-dashed border-stone-300 text-stone-500'}`}>
+              <AlertCircle size={10} /> {t.priority ? 'Priority' : 'Mark priority'}
+            </button>
+          )}
           {onPause && t.status === 'in_progress' && (
             <button onClick={onPause} disabled={busy}
               className={`${pillBtn} border-blue-200 hover:bg-blue-50 text-blue-700`}>
@@ -34861,7 +34861,12 @@ function SuggestedTabContent({ propertyId, employee, onGoToBedroom, onOpenBedroo
 }
 
 function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, onGoToBedroom, onOpenBedroomHistory, onJoinBlock }) {
-  const [targets, setTargets] = useState([]);
+  const [allTargets, setAllTargets] = useState([]); // every row at this property
+  // Optimistic local edits write through to the raw set; the tab view is
+  // derived from it, so a status change moves the card to the right tab
+  // immediately without a refetch.
+  const setTargets = (updater) => setAllTargets(prev =>
+    typeof updater === 'function' ? updater(prev) : updater);
   const [loaded, setLoaded] = useState(false);
   const [opened, setOpened] = useState(null);
   const [statusModal, setStatusModal] = useState(null);
@@ -35073,6 +35078,19 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
       !t.assignment?.deleted_at &&
       (t.assignment?.source !== 'pm' || t.assignment?.pm_status === 'approved')
     );
+    // Store the RAW rows. Splitting them into tabs is a pure function of
+    // (rows, statusFilter) and happens in the memo below — load() used to do
+    // both, which is why pinning it to [propertyId] for speed left every tab
+    // showing whichever tab's slice happened to load first.
+    setAllTargets(allRelevant);
+    setLoaded(true);
+  };
+
+  // Derive the current tab's rows from the raw set. No network, no refetch.
+  const targets = React.useMemo(() => {
+    const allRelevant = allTargets;
+    const isMineOrRecheck = statusFilter === 'mine' || statusFilter === 'recheck_passed';
+    const isDoneTab = statusFilter === 'done' || isMineOrRecheck;
 
     // Compute dominant status per ASSIGNMENT (not per bedroom). Each
     // assignment is an independent job with its own lifecycle — a
@@ -35174,9 +35192,8 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
           || naturalCompare(a.party?.label || '', b.party?.label || '');
       });
     }
-    setTargets(filtered);
-    setLoaded(true);
-  };
+    return filtered;
+  }, [allTargets, statusFilter, employee?.id]);
   // Load ONCE per property. The query has no status condition in it — every
   // tab is computed from the same rows client-side — so refetching on each
   // tab switch was pulling the property's entire target list (paged in 1000s)
@@ -35936,25 +35953,19 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                                 </div>
                               )}
                             </div>
-                            <div className="flex flex-col items-end gap-1 flex-shrink-0">
-                              <div className="flex items-center gap-1.5 flex-wrap justify-end">
-                                {(can(employee, 'mark_assignments_done') || can(employee, 'upload_assignments')) ? (
-                                  <button onClick={(e) => { e.stopPropagation(); bulkTogglePriority(newItems); }} disabled={busy}
-                                    className={`text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full border inline-flex items-center gap-1 transition-colors disabled:opacity-50 ${anyPriority
-                                        ? 'bg-red-100 text-red-800 border-red-300 font-bold hover:bg-red-200'
-                                        : 'bg-stone-100 text-stone-500 border-stone-200 hover:bg-stone-200'}`}>
-                                    <AlertCircle size={10} /> {anyPriority ? 'Priority' : 'Mark priority'}
-                                  </button>
-                                ) : anyPriority ? (
-                                  <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full border bg-red-100 text-red-800 border-red-300 font-bold inline-flex items-center gap-1">
-                                    <AlertCircle size={10} /> Priority
-                                  </span>
-                                ) : null}
-                                <span className={`text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full border ${statusPill.color}`}>
-                                  {statusPill.label}
+                            {/* Header carries ONE chip — the Priority flag —
+                               exactly like the Today-tab card. The uppercase
+                               status pill and the Mark-priority button used to
+                               live here; the toggle moved to the footer with
+                               the other actions, and the status is already
+                               said by the tab you're standing on. */}
+                            <span className="flex items-center gap-1 flex-shrink-0">
+                              {anyPriority && (
+                                <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-red-100 text-red-700 font-bold flex items-center gap-1">
+                                  <AlertCircle size={9} /> Priority
                                 </span>
-                              </div>
-                            </div>
+                              )}
+                            </span>
                           </div>
                           {/* === META LINE — same as the Today-tab card: type, task count,
                              and the peek links, all in one mono line. */}
@@ -36079,7 +36090,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                                     .slice(-1)[0];
                                   const who = lastRow?.completer?.name;
                                   return (
-                                    <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 inline-flex items-center gap-1">
+                                    <span className="text-[11px] font-mono px-2 py-0.5 rounded-full border bg-emerald-100 text-emerald-800 border-emerald-200 inline-flex items-center gap-1">
                                       <Check size={9} />
                                       {who ? `${who} · ` : ''}
                                       {lastRow?.completed_at
@@ -36119,6 +36130,13 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                               })()}
                             </div>
                             <div className="flex items-center gap-1.5 flex-wrap justify-end">
+                            {(can(employee, 'mark_assignments_done') || can(employee, 'upload_assignments')) && (
+                              <button onClick={(e) => { e.stopPropagation(); bulkTogglePriority(newItems); }} disabled={busy}
+                                title={anyPriority ? 'Remove priority' : 'Mark priority'}
+                                className={`text-[10px] font-mono px-2 py-0.5 rounded-full inline-flex items-center gap-1 disabled:opacity-50 ${anyPriority ? 'bg-red-600 text-white' : 'bg-white border border-dashed border-stone-300 text-stone-500'}`}>
+                                <AlertCircle size={10} /> {anyPriority ? 'Priority' : 'Mark priority'}
+                              </button>
+                            )}
                             {allDone && can(employee, 'mark_assignments_done') && (
                               <button onClick={() => { if (confirm(`Reopen ${bedLabel}? It goes back to Pending so it can be worked again.`)) bulkUpdateStatus(newItems, 'pending'); }} disabled={busy}
                                 className="px-2.5 py-1 rounded-full border border-amber-300 hover:bg-amber-50 text-amber-800 text-[11px] font-medium flex items-center gap-1 disabled:opacity-50">

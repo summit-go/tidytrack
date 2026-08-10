@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap160";
+const BUILD_TAG = "aug6-tap161";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -2537,7 +2537,7 @@ const PICKER_ES = {
   'bedroom:entire': 'Dormitorio completo',
   'bathroom:entire': 'Baño completo',
   'vanity:entire': 'Tocador completo',
-  'general:entire': 'Apartamento completo',
+  'general:entire': 'Todas las áreas generales',
   // Sections
   '__section_bedroom':  'Dormitorio',
   '__section_bathroom': 'Baño',
@@ -2666,7 +2666,7 @@ const PICKER_EN = {
   'bedroom:entire': 'Entire bedroom',
   'bathroom:entire': 'Entire bathroom',
   'vanity:entire': 'Entire vanity',
-  'general:entire': 'Entire apartment',
+  'general:entire': 'All general areas',
   'general:sink_short': 'Sink',
   'general:faucet_short': 'Faucet',
   'general:under_sink': 'Under sink',
@@ -3034,8 +3034,15 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
       // neither and still fall through to the old flow.
       (!!t.assignment?.template_set_id || !!t.template_section)
     );
-    setChecklistTargets(usable.filter(t => t.status !== 'done' && t.status !== 'blocked'));
-    setChecklistDone(usable.filter(t => t.status === 'done' || t.status === 'blocked'));
+    // Drop the leftover section-less row when the same assignment also has
+    // section items — it's the old single-row target a quick upload created
+    // before the four "Entire" items existed, and counting it would show a
+    // phantom extra task.
+    const sectioned = new Set();
+    usable.forEach(t => { if (t.template_section && t.assignment?.id) sectioned.add(t.assignment.id); });
+    const live = usable.filter(t => t.template_section || !sectioned.has(t.assignment?.id));
+    setChecklistTargets(live.filter(t => t.status !== 'done' && t.status !== 'blocked'));
+    setChecklistDone(live.filter(t => t.status === 'done' || t.status === 'blocked'));
   };
   useEffect(() => {
     loadChecklistTargets();
@@ -33473,10 +33480,22 @@ function AssignmentBanner({ propertyId, property = null, unitId, partyId, employ
   // as individual cards because each IS the unit of work.
   // Returns: { groups: [{ assignment, items: [...], legacy: bool }] }
   const buildGroups = (list) => {
+    // Any assignment that has at least ONE section-tagged item is item-level
+    // work, so ALL of its rows fold into a single card — including the
+    // section-less legacy row a pre-tap152 quick upload left behind. Without
+    // this, B402 rendered its old row plus each new section item as separate
+    // identical cards.
+    const sectionedAssignments = new Set();
+    list.forEach(t => { if (t.template_section && t.assignment?.id) sectionedAssignments.add(t.assignment.id); });
     const byAssignmentId = new Map();
     list.forEach(t => {
       const aid = t.assignment?.id;
-      const isChecklist = !!t.assignment?.template_set_id;
+      // A target belongs to a grouped card when it's item-level work: either
+      // a real template sheet (Carriage Cove) or the four section items a
+      // quick upload creates (Bridges / Citifront). Only genuinely legacy
+      // single-row targets get a card each — grouping on template_set_id
+      // alone gave B402 five identical "1 task" cards.
+      const isChecklist = !!t.assignment?.template_set_id || sectionedAssignments.has(aid);
       const key = isChecklist ? `cl:${aid}` : `lg:${t.id}`;
       if (!byAssignmentId.has(key)) {
         byAssignmentId.set(key, {

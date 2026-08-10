@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap159";
+const BUILD_TAG = "aug6-tap160";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -8811,6 +8811,114 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
 
 // Cleaner "Properties" tab — every property with its open count. Tap the
 // one you're in to work it; tap another to switch (clock out + pick).
+// =================================================================
+// PropertySwitcher — the property name in the black header IS the
+// control. Tap it, pick another property, and the shift moves there.
+// Replaces the two-step "More tab → Browse properties" detour.
+//
+// Open work counts come along for the ride so the cleaner can see
+// where there's actually something to do before they commit to a
+// clock-out / clock-in.
+// =================================================================
+function PropertySwitcher({ currentPropertyId, currentName, employee, onSwitch, disabled = false }) {
+  const [open, setOpen] = useState(false);
+  const [props, setProps] = useState([]);
+  const [counts, setCounts] = useState({});
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    if (!open || loaded) return;
+    let cancelled = false;
+    (async () => {
+      // Paginated — this counts open work across EVERY property, so a plain
+      // call stops at PostgREST's 1000-row cap and undercounts silently.
+      const fetchAllTargets = async () => {
+        let rows = []; const PAGE = 1000;
+        for (let from = 0; ; from += PAGE) {
+          const { data, error } = await supabase.from('assignment_targets')
+            .select('unit_id, party_id, status, assignment:assignments!inner(customer_id, active, deleted_at)')
+            .not('status', 'in', '(done,blocked)')
+            .range(from, from + PAGE - 1);
+          if (error || !data) break;
+          rows = rows.concat(data);
+          if (data.length < PAGE) break;
+          if (from > 100000) break;
+        }
+        return rows;
+      };
+      const [pRes, allTargets] = await Promise.all([
+        supabase.from('customers').select('id, name, address, property_type, active').eq('active', true).order('name'),
+        fetchAllTargets(),
+      ]);
+      if (cancelled) return;
+      const c = {}; const seen = new Set();
+      (allTargets || []).forEach(t => {
+        const a = t.assignment; if (!a || a.active === false || a.deleted_at) return;
+        const cid = a.customer_id; if (!cid) return;
+        const k = `${cid}:${t.unit_id || ''}:${t.party_id || ''}`;
+        if (seen.has(k)) return;
+        seen.add(k);
+        c[cid] = (c[cid] || 0) + 1;
+      });
+      setCounts(c);
+      setProps(visibleProps(pRes.data || [], employee));
+      setLoaded(true);
+    })();
+    return () => { cancelled = true; };
+    /* eslint-disable-next-line */
+  }, [open]);
+
+  return (
+    <div className="relative min-w-0">
+      <button onClick={() => setOpen(o => !o)} disabled={disabled}
+        title="Switch property"
+        className="min-w-0 flex items-center gap-2 text-left rounded-lg -m-1 p-1 hover:bg-white/10 active:scale-[0.99] transition disabled:opacity-50">
+        <Building2 size={22} className="text-amber-400 shrink-0" />
+        <span className="font-serif text-2xl text-stone-50 leading-tight truncate">{currentName}</span>
+        <ChevronRight size={18} className={`text-stone-400 shrink-0 transition-transform ${open ? 'rotate-90' : 'rotate-90'}`} />
+      </button>
+      {open && (
+        <>
+          <div className="fixed inset-0 z-30" onClick={() => setOpen(false)} />
+          <div className="absolute left-0 top-full mt-2 z-40 w-72 max-w-[85vw] rounded-2xl bg-white border border-stone-300 shadow-xl overflow-hidden">
+            <div className="px-3 pt-2.5 pb-1 text-[10px] uppercase tracking-wider font-mono text-stone-400">
+              Switch property
+            </div>
+            {!loaded ? (
+              <div className="px-3 py-4 text-xs font-mono text-stone-400">Loading…</div>
+            ) : props.length === 0 ? (
+              <div className="px-3 py-4 text-xs font-mono text-stone-400">No other properties.</div>
+            ) : (
+              <div className="max-h-72 overflow-y-auto">
+                {props.map(p => {
+                  const isCurrent = p.id === currentPropertyId;
+                  const n = counts[p.id] || 0;
+                  return (
+                    <button key={p.id} disabled={isCurrent}
+                      onClick={() => { setOpen(false); if (!isCurrent && onSwitch) onSwitch(p); }}
+                      className={`w-full text-left px-3 py-2.5 flex items-center gap-2 border-t border-stone-100 ${isCurrent ? 'bg-stone-50' : 'hover:bg-stone-50 active:scale-[0.99] transition'}`}>
+                      <Building2 size={14} className={isCurrent ? 'text-amber-600' : 'text-stone-400'} />
+                      <span className="flex-1 min-w-0">
+                        <span className="block text-sm text-stone-900 truncate">{p.name}</span>
+                        <span className="block text-[10px] font-mono text-stone-500">
+                          {n > 0 ? `${n} open` : 'nothing open'}
+                        </span>
+                      </span>
+                      {isCurrent
+                        ? <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-amber-100 text-amber-800">Here</span>
+                        : <ChevronRight size={14} className="text-stone-300" />}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function CleanerPropertiesList({ currentPropertyId, employee, onOpenCurrent, onSwitch }) {
   const [props, setProps] = useState([]);
   const [counts, setCounts] = useState({});
@@ -8879,7 +8987,6 @@ function CleanerPropertiesList({ currentPropertyId, employee, onOpenCurrent, onS
 function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onClockOut, onSwitchProperty, onSwitchToJob, onStartNew, onReopen, onEndBlock, onGoToBedroom, onOpenMessages, onOpenChangePin, onOpenBedroomHistory, onJoinBlock, onUndoBlock, onMoveBlock, cleanerTab: cleanerTabProp, setCleanerTab: setCleanerTabProp, busy }) {
   const [showMenu, setShowMenu] = useState(false);
   const [showAssignmentForm, setShowAssignmentForm] = useState(false);
-  const [showProps, setShowProps] = useState(false); // Properties browser in More
   // Bottom nav tab — Home / Assignments / More. Parent (AuthedShift)
   // controls this when provided so the tab persists across BlockView
   // navigation. Falls back to local state for standalone use.
@@ -8981,10 +9088,12 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
       <div className="bg-stone-900 text-stone-50 px-5 py-5 sticky top-0 z-10 shadow-md">
         <div className="flex items-start justify-between mb-3 gap-2">
           <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-2">
-              <Building2 size={22} className="text-amber-400 shrink-0" />
-              <div className="font-serif text-2xl text-stone-50 leading-tight">{shift.customer?.name}</div>
-            </div>
+            <PropertySwitcher
+              currentPropertyId={shift.customer_id}
+              currentName={shift.customer?.name}
+              employee={employee}
+              disabled={busy}
+              onSwitch={(p) => onSwitchProperty && onSwitchProperty(p)} />
           </div>
           <div className="flex flex-col gap-1.5 items-end shrink-0">
             <button onClick={onClockOut} disabled={busy}
@@ -9168,24 +9277,9 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
       {/* === MORE TAB === */}
       {cleanerTab === 'more' && (
         <div className="px-4 pt-4 space-y-2">
-          <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2">Properties</div>
-          <button onClick={() => setShowProps(s => !s)}
-            className="w-full px-4 py-3.5 rounded-2xl bg-white border border-stone-200 hover:border-stone-400 text-left flex items-center gap-3 active:scale-98">
-            <Building2 size={18} className="text-stone-700" />
-            <div className="flex-1">
-              <div className="text-sm font-medium text-stone-900">Browse properties</div>
-              <div className="text-xs text-stone-500">See every property and its open work</div>
-            </div>
-            <ChevronRight size={16} className={`text-stone-400 transition-transform ${showProps ? 'rotate-90' : ''}`} />
-          </button>
-          {showProps && (
-            <div className="-mx-4">
-              <CleanerPropertiesList currentPropertyId={shift.customer_id} employee={employee}
-                onOpenCurrent={() => setCleanerTab('home')}
-                onSwitch={(p) => onSwitchProperty && onSwitchProperty(p)} />
-            </div>
-          )}
-
+          {/* "Browse properties" removed — the property name at the top of the
+             screen is the switcher now, so this was the long way round to the
+             same thing. */}
           <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 pt-3">Account &amp; settings</div>
           <CleanerMoreExtras employee={employee}
             onOpenMessages={onOpenMessages}
@@ -35176,8 +35270,10 @@ function AssignmentTabContent({ propertyId, property = null, employee, statusFil
     allTargets.forEach(t => {
       if (t.status === 'done') {
         // Same 3-month floor the Done list applies.
-        const cd = t.completed_at ? String(t.completed_at).slice(0, 10) : null;
-        if (!cd || cd >= minHistoryDay) doneKeys.add(key(t));
+        const cd = t.completed_at
+          ? String(t.completed_at).slice(0, 10)
+          : (t.assignment?.scheduled_date || null);
+        if (cd && cd >= minHistoryDay) doneKeys.add(key(t));
       }
       if (t.status === 'blocked') blockedKeys.add(key(t));
     });
@@ -35445,15 +35541,18 @@ function AssignmentTabContent({ propertyId, property = null, employee, statusFil
       // filters on the day it's DUE — same control, the date that matters
       // for what you're looking at.
       const cd = isDoneTab
-        ? (t.completed_at ? new Date(t.completed_at).toISOString().slice(0, 10) : null)
+        ? (t.completed_at ? new Date(t.completed_at).toISOString().slice(0, 10) : (t.assignment?.scheduled_date || null))
         : (t.assignment?.scheduled_date || null);
       if (!cd) return false;
       if (dateFrom && cd < dateFrom) return false;
       if (dateTo && cd > dateTo) return false;
     } else {
       // No explicit range — everything inside the rolling history window.
+      // Older finished work is out of the window. Rows with no completed_at
+      // (legacy closes) fall back to the scheduled date rather than slipping
+      // through the date filter untested.
       const cd = isDoneTab
-        ? (t.completed_at ? new Date(t.completed_at).toISOString().slice(0, 10) : null)
+        ? (t.completed_at ? new Date(t.completed_at).toISOString().slice(0, 10) : (t.assignment?.scheduled_date || null))
         : (t.assignment?.scheduled_date || null);
       if (isDoneTab && (!cd || cd < minHistoryDay)) return false;
     }

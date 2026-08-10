@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap151";
+const BUILD_TAG = "aug6-tap155";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -1477,9 +1477,15 @@ function ProgressBar({ steps, currentStep, complete = false, onStepClick }) {
 // we open `LeaveWorkblockModal` first to ask: Mark done, Stay here,
 // or Pause. The cleaner's choice dictates the next action.
 // =================================================================
+// Hidden for now at Allan's request — flip SHOW_CLEANER_PROGRESS_BAR back to
+// true to bring it back everywhere at once. The leave-warning modal it hosts
+// is NOT lost: the same three-way check now lives on "I'm done here".
+const SHOW_CLEANER_PROGRESS_BAR = false;
 function CleanerProgressBar({ segments, inActiveWork = false, onLeaveDecision }) {
   const [pendingNavigation, setPendingNavigation] = useState(null);
 
+  // Guard sits AFTER the hook so the hook order never changes.
+  if (!SHOW_CLEANER_PROGRESS_BAR) return null;
   if (!segments || segments.length === 0) return null;
 
   const handleClick = (segment) => {
@@ -2527,6 +2533,11 @@ function BedBathPicker({ bedrooms, bathrooms, onChange }) {
 //   override(property, key, locale) > dictionary(key) > English
 // =================================================================
 const PICKER_ES = {
+  // Quick-upload (Bridges / Citifront) whole-section items.
+  'bedroom:entire': 'Dormitorio completo',
+  'bathroom:entire': 'Baño completo',
+  'vanity:entire': 'Tocador completo',
+  'general:entire': 'Apartamento completo',
   // Sections
   '__section_bedroom':  'Dormitorio',
   '__section_bathroom': 'Baño',
@@ -2651,6 +2662,11 @@ function useItemLabelOverrides(propertyId, locale, employee) {
 // a humanized key ('Bw sweep'). Falls through to humanize for any key
 // not listed here.
 const PICKER_EN = {
+  // Quick-upload (Bridges / Citifront) whole-section items.
+  'bedroom:entire': 'Entire bedroom',
+  'bathroom:entire': 'Entire bathroom',
+  'vanity:entire': 'Entire vanity',
+  'general:entire': 'Entire apartment',
   'general:sink_short': 'Sink',
   'general:faucet_short': 'Faucet',
   'general:under_sink': 'Under sink',
@@ -3012,9 +3028,11 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
       t.assignment?.active &&
       !t.assignment?.deleted_at &&
       (t.assignment?.source !== 'pm' || t.assignment?.pm_status === 'approved') &&
-      // Only template-based checklist targets — legacy single-row
-      // assignments don't have item-level granularity to pick from.
-      !!t.assignment?.template_set_id
+      // Item-level granularity comes from either a real template set
+      // (Carriage Cove) or the four auto "Entire" items a quick upload
+      // creates (Bridges / Citifront). Legacy single-row targets carry
+      // neither and still fall through to the old flow.
+      (!!t.assignment?.template_set_id || !!t.template_section)
     );
     setChecklistTargets(usable.filter(t => t.status !== 'done' && t.status !== 'blocked'));
     setChecklistDone(usable.filter(t => t.status === 'done' || t.status === 'blocked'));
@@ -6192,6 +6210,16 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   // damage photo flow so cleaners can describe what's broken. Optional —
   // an empty note is fine and we no-op out of the DB write to keep
   // request volume down.
+  // Patch one photo in local state after an out-of-band update (the "extra"
+  // flag). Without this the parent re-renders with the pre-toggle copy and
+  // the modal's effect resets the flag from stale data.
+  const patchPhoto = (photoId, patch) => {
+    setTasks(prev => prev.map(t => ({
+      ...t,
+      photos: (t.photos || []).map(p => p.id === photoId ? { ...p, ...patch } : p),
+    })));
+  };
+
   const savePhotoNote = async (photoId, noteText, kind = null) => {
     if (!photoId) return;
     const trimmed = (noteText || '').trim();
@@ -6382,6 +6410,10 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       <div className="min-h-screen bg-stone-50 flex flex-col" style={{ minHeight: '100dvh' }}>
         <Header name={employee.name} onSignOut={signOutWithCleanup} role={employee.role} cleanerView
           employee={employee} onOpenMessages={() => setShowMessages(true)}
+          onNotificationNavigate={(n) => {
+            if (n?.link_kind === 'conversation') { setShowMessages(true); return; }
+            setCleanerTab('assignments');
+          }}
           onOpenWhosHere={() => setWhosWorkingOpen(true)} />
         {whosWorkingOpen && (
           <WhosWorkingNowModal employee={employee} onClose={() => setWhosWorkingOpen(false)} />
@@ -6551,6 +6583,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     onChangePhotoKind={changePhotoKind}
       onChangePhotoKind={changePhotoKind}
       onSavePhotoNote={savePhotoNote}
+      onPhotoUpdated={patchPhoto}
       onOpenMessages={() => setShowMessages(true)}
       onOpenBedroomHistory={setBedroomHistory}
       onMoveBlock={moveActiveBlockTo}
@@ -6578,6 +6611,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     photoModal={photoModal} onClosePhotoModal={() => setPhotoModal(null)}
     onUploadPhoto={uploadPhoto}
     onSavePhotoNote={savePhotoNote}
+    onPhotoUpdated={patchPhoto}
     onDeletePhoto={deletePhoto}
     onOpenMessages={() => setShowMessages(true)}
     onOpenChangePin={() => setShowChangePin(true)} busy={busy} />);
@@ -8912,6 +8946,13 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
     <div className="min-h-screen bg-stone-50 flex flex-col" style={{ minHeight: '100dvh' }}>
       <Header name={employeeName} onSignOut={onSignOut} role={employee?.role} cleanerView employee={employee}
         onOpenMessages={onOpenMessages}
+        onNotificationNavigate={(n) => {
+          // Cleaner-side bell: a message opens the thread, anything job-shaped
+          // drops them on their assignments board. Without a handler at all
+          // the bell rendered every item as dead text — tapping did nothing.
+          if (n?.link_kind === 'conversation') { if (onOpenMessages) onOpenMessages(); return; }
+          if (setCleanerTab) setCleanerTab('assignments');
+        }}
         onOpenWhosHere={() => setWhosHereOpen(true)} />
       {whosHereOpen && (
         <WhosHerePopup
@@ -9768,7 +9809,13 @@ function PreparingBlockView({ shift, pendingStart, employeeName, employee,
     <div className="min-h-screen bg-stone-50 pb-24">
       <ScreenId id="CL-D" />
       <Header name={employeeName} onSignOut={onSignOut} role={employee?.role} cleanerView employee={employee}
-        onOpenMessages={onOpenMessages} onLogoClick={handleLogoClick} />
+        onOpenMessages={onOpenMessages} onLogoClick={handleLogoClick}
+        onNotificationNavigate={(n) => {
+          // No tab control on the prep screen — backing out of it lands the
+          // cleaner on their assignments, which is the same destination.
+          if (n?.link_kind === 'conversation') { if (onOpenMessages) onOpenMessages(); return; }
+          if (onExit) onExit();
+        }} />
       {/* Cleaner has navigated to a specific bedroom. They've chosen the
          property + assignment. They're about to claim items / start
          working. Tapping Property or Assignment goes back. */}
@@ -9966,7 +10013,7 @@ function UndoMoveMenu({ disabled, canUndo, canMove, onUndo, onMoveBedroom, onMov
 
 function BlockView({ shift, block, tasks, activeTask, employeeName, employee, onSignOut, onFinish, onExit, onPause, onUndo, onReopen,
   newTaskName, setNewTaskName, onStartTask, onStartTasksFromPicker, onStartChecklistItems, onReleaseTargets, onStopTask, onResumeTask, onAddPhoto,
-  photoModal, onClosePhotoModal, onUploadPhoto, onChangePhotoKind, onSavePhotoNote, onOpenMessages, onOpenBedroomHistory,
+  photoModal, onClosePhotoModal, onUploadPhoto, onChangePhotoKind, onSavePhotoNote, onPhotoUpdated, onOpenMessages, onOpenBedroomHistory,
   onMoveBlock, onMoveMultiple, onLeaveBlock, onJoinBlock, onDeletePhoto, onGoToBedroom, onSwitchProperty, cleanerTab, setCleanerTab, previewMode, busy,
   onUndoLast, lastActionLabel, onFinishHere }) {
   useTick(true);
@@ -10154,6 +10201,13 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
       <ScreenId id="CL-C" />
       <Header name={employeeName} onSignOut={onSignOut} role={employee?.role} cleanerView employee={employee}
         onOpenMessages={onOpenMessages}
+        onNotificationNavigate={(n) => {
+          // Cleaner-side bell: a message opens the thread, anything job-shaped
+          // drops them on their assignments board. Without a handler at all
+          // the bell rendered every item as dead text — tapping did nothing.
+          if (n?.link_kind === 'conversation') { if (onOpenMessages) onOpenMessages(); return; }
+          if (setCleanerTab) setCleanerTab('assignments');
+        }}
         onOpenWhosHere={() => setWhosHereOpen(true)}
         onLogoClick={handleLogoClick} />
       {whosHereOpen && (
@@ -10586,6 +10640,7 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
           onUpload={(file, chosenKind) => onUploadPhoto(photoModal.taskId, chosenKind || photoModal.kind, file)}
           onChangeKind={onChangePhotoKind ? (photoId, newKind) => onChangePhotoKind(photoId, photoModal.taskId, newKind) : null}
           onSaveNote={onSavePhotoNote}
+          onPhotoUpdated={onPhotoUpdated}
           onClose={onClosePhotoModal} />
       )}
       {moveModalOpen && (
@@ -10880,7 +10935,7 @@ function MoveBlockModalInline({ block, propertyId, shiftId, currentEmployeeId, m
 // =================================================================
 function SimpleShiftView({ shift, tasks, activeTask, employeeName, employee, onSignOut, onClockOut, onSwitchProperty, onAttachProperty,
   newTaskName, setNewTaskName, onStartTask, onStartTasksFromPicker, onStartChecklistItems, onReleaseTargets, onStopTask, onResumeTask, onAddPhoto,
-  photoModal, onClosePhotoModal, onUploadPhoto, onChangePhotoKind, onSavePhotoNote, onDeletePhoto, onOpenMessages, onOpenChangePin, busy }) {
+  photoModal, onClosePhotoModal, onUploadPhoto, onChangePhotoKind, onSavePhotoNote, onPhotoUpdated, onDeletePhoto, onOpenMessages, onOpenChangePin, busy }) {
   const [showMenu, setShowMenu] = useState(false);
   const [taskInputMode, setTaskInputMode] = useState('picker'); // 'picker' | 'custom'
   useTick(true);
@@ -10889,7 +10944,8 @@ function SimpleShiftView({ shift, tasks, activeTask, employeeName, employee, onS
 
   return (
     <div className="min-h-screen bg-stone-50 pb-24">
-      <Header name={employeeName} onSignOut={onSignOut} role={employee?.role} cleanerView employee={employee} onOpenMessages={onOpenMessages} />
+      <Header name={employeeName} onSignOut={onSignOut} role={employee?.role} cleanerView employee={employee} onOpenMessages={onOpenMessages}
+        onNotificationNavigate={(n) => { if (n?.link_kind === 'conversation' && onOpenMessages) onOpenMessages(); }} />
       <div className="bg-stone-900 text-stone-50 px-5 py-5 sticky top-0 z-10 shadow-md">
         <div className="flex items-start justify-between mb-3 gap-2">
           <div>
@@ -11024,6 +11080,7 @@ function SimpleShiftView({ shift, tasks, activeTask, employeeName, employee, onS
           onUpload={(file, chosenKind) => onUploadPhoto(photoModal.taskId, chosenKind || photoModal.kind, file)}
           onChangeKind={onChangePhotoKind ? (photoId, newKind) => onChangePhotoKind(photoId, photoModal.taskId, newKind) : null}
           onSaveNote={onSavePhotoNote}
+          onPhotoUpdated={onPhotoUpdated}
           onClose={onClosePhotoModal} />
       )}
       {showMenu && (
@@ -12294,7 +12351,7 @@ function BurstCamera({ onDone, onCancel }) {
   );
 }
 
-function PhotoModal({ kind, taskName, existing, onUpload, onSaveNote, onClose, employee, onDeletePhoto, onChangeKind }) {
+function PhotoModal({ kind, taskName, existing, onUpload, onSaveNote, onClose, employee, onDeletePhoto, onChangeKind, onPhotoUpdated }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   // Track the most recently uploaded photo so we can attach an
@@ -12339,8 +12396,21 @@ function PhotoModal({ kind, taskName, existing, onUpload, onSaveNote, onClose, e
   const toggleExtra = async (p) => {
     const next = !extraFlags[p.id];
     setExtraFlags(prev => ({ ...prev, [p.id]: next }));
-    const { error: e } = await supabase.from('photos').update({ took_extra: next }).eq('id', p.id);
-    if (e) setExtraFlags(prev => ({ ...prev, [p.id]: !next })); // revert on failure
+    const { data, error: e } = await supabase.from('photos')
+      .update({ took_extra: next }).eq('id', p.id).select('id, took_extra');
+    if (e || !data || data.length === 0) {
+      // This used to revert in silence, so the flag lit up and vanished with
+      // no explanation. Say what happened — a missing column or an RLS block
+      // both land here and both need a fix in Supabase, not another tap.
+      setExtraFlags(prev => ({ ...prev, [p.id]: !next }));
+      setError(e
+        ? `Couldn't save the extra flag: ${e.message}`
+        : "Couldn't save the extra flag — the photo didn't update. This is usually a permissions rule on the photos table.");
+      return;
+    }
+    setError('');
+    // Keep the parent's copy in step so a re-render doesn't wipe the flag.
+    if (onPhotoUpdated) onPhotoUpdated(p.id, { took_extra: next });
   };
 
   // Batch progress for a multi-photo pick — 12 photos used to sit on a bare
@@ -12722,6 +12792,7 @@ function compressImage(file) {
 }
 
 // Status helpers for assignment_targets
+const SHOW_PAUSED_TAB = false; // Assignments panel — see the tab bar below.
 const ASSIGNMENT_STATUSES = {
   pending:      { label: 'Pending',     color: 'bg-stone-100 text-stone-700 border-stone-300' },
   in_progress:  { label: 'In progress', color: 'bg-amber-100 text-amber-800 border-amber-300' },
@@ -30031,11 +30102,23 @@ function QuickAssignmentForm({ property, employee, portalUser = null, portalKind
         ...(isPM ? { source: 'pm', pm_status: 'pending' } : {}),
       }).select().single();
       if (ae) throw ae;
-      const { error: te } = await supabase.from('assignment_targets').insert({
-        assignment_id: asg.id, unit_id: unit.id, party_id: party.id,
-        status: 'pending', priority: isPM ? false : !!priority,
-        assigned_to: isPM ? null : (assignedTo || null),
-      });
+      // FOUR auto items, one per section, each called "Entire".
+      // Bridges and Citifront are billed flat by apartment, so these uploads
+      // carry no checklist — which left the cleaner with nothing to pick and
+      // no way to open a workblock at all. Giving each section a single
+      // "Entire" item means they can start Bedroom, Bathroom, Vanity or
+      // General exactly like a Carriage Cove job, and each one closes out
+      // as its own workblock.
+      const QUICK_SECTIONS = ['bedroom', 'bathroom', 'vanity', 'general'];
+      const { error: te } = await supabase.from('assignment_targets').insert(
+        QUICK_SECTIONS.map(sec => ({
+          assignment_id: asg.id, unit_id: unit.id, party_id: party.id,
+          status: 'pending', priority: isPM ? false : !!priority,
+          assigned_to: isPM ? null : (assignedTo || null),
+          template_section: sec,
+          template_item_key: `${sec}:entire`,
+        }))
+      );
       if (te) throw te;
       // Notify owners for approval when a PM created this (the fuller
       // PortalAssignmentForm already does this; the Quick form must too, or
@@ -33373,7 +33456,7 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
         };
         const renderCard = (t) => (
           <AssignmentCard key={t.id} target={t} busy={busy} propertyId={propertyId}
-            onView={() => setOpened(t)}
+            onView={() => openTarget(t)}
             onStart={() => updateStatus(t, 'in_progress')}
             onPause={() => updateStatus(t, 'paused')}
             onMoveToPending={() => updateStatus(t, 'pending')}
@@ -34014,8 +34097,8 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
           )}
           {(isDone || t.status === 'blocked') && (
             <button onClick={onReopen} disabled={busy}
-              className={`${pillBtn} ${D.outlineBtn}`}>
-              <Play size={11} /> Reopen
+              className={`${pillBtn} border-amber-300 hover:bg-amber-50 text-amber-800`}>
+              <RotateCcw size={11} /> Reopen
             </button>
           )}
           {ownerView && (t.status === 'pending' || t.status === 'in_progress' || t.status === 'paused') && (
@@ -34026,12 +34109,7 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
               </button>
             </OwnerOnly>
           )}
-          {onReassign && (t.unit_id || t.party_id) && (
-            <button onClick={onReassign} disabled={busy}
-              className={`${pillBtn} ${D.outlineBtn}`}>
-              <Edit2 size={11} /> Reassign
-            </button>
-          )}
+          {/* Reassign removed — not part of the flow any more. */}
           {canMarkDoneAlways && !isDone && (
             <button onClick={() => { if (confirm('Mark this whole assignment complete? It closes out this assignment and moves it to Done.')) { onDone(); if (onExit) onExit(); } }} disabled={busy}
               title="Mark this assignment complete → Done"
@@ -34069,6 +34147,10 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
 // Tabs: Pending | Paused | In Progress | Done
 function AssignmentsPanel({ propertyId, employee, refreshKey, onGoToBedroom, onOpenBedroomHistory, onJoinBlock }) {
   const [tab, setTab] = useState('pending');
+  // Guard against a stale 'paused' selection now that the tab is hidden.
+  useEffect(() => {
+    if (!SHOW_PAUSED_TAB && tab === 'paused') setTab('in_progress');
+  }, [tab]);
   const [counts, setCounts] = useState({ pending: 0, paused: 0, in_progress: 0, done: 0, blocked: 0, mine: 0 });
 
   const loadCounts = async () => {
@@ -34109,7 +34191,10 @@ function AssignmentsPanel({ propertyId, employee, refreshKey, onGoToBedroom, onO
     const dominantOrder = ['in_progress', 'paused', 'blocked', 'pending', 'done'];
     const sets = { pending: new Set(), paused: new Set(), in_progress: new Set(), done: new Set(), blocked: new Set(), mine: new Set(), recheck_passed: new Set() };
     statusesByAsgn.forEach((statusSet, k) => {
-      const dom = dominantOrder.find(s => statusSet.has(s)) || 'pending';
+      let dom = dominantOrder.find(s => statusSet.has(s)) || 'pending';
+      // Match the list's routing exactly, or the In progress tab shows a
+      // count that doesn't equal what's inside it.
+      if (!SHOW_PAUSED_TAB && dom === 'paused') dom = 'in_progress';
       if (sets[dom]) sets[dom].add(k);
     });
     // "Mine" still depends on which items the viewing cleaner finished
@@ -34151,10 +34236,15 @@ function AssignmentsPanel({ propertyId, employee, refreshKey, onGoToBedroom, onO
           className={`flex-1 min-w-fit py-2 px-2 rounded-lg text-xs font-medium transition-colors whitespace-nowrap ${tab === 'pending' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
           Pending{counts.pending > 0 && ` (${counts.pending})`}
         </button>
-        <button onClick={() => setTab('paused')}
-          className={`flex-1 min-w-fit py-2 px-2 rounded-lg text-xs font-medium transition-colors whitespace-nowrap ${tab === 'paused' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
-          Paused{counts.paused > 0 && ` (${counts.paused})`}
-        </button>
+        {/* Paused tab hidden — paused bedrooms are still work in flight and
+           read better under In progress. Flip SHOW_PAUSED_TAB to bring the
+           tab back; nothing else about paused handling changed. */}
+        {SHOW_PAUSED_TAB && (
+          <button onClick={() => setTab('paused')}
+            className={`flex-1 min-w-fit py-2 px-2 rounded-lg text-xs font-medium transition-colors whitespace-nowrap ${tab === 'paused' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+            Paused{counts.paused > 0 && ` (${counts.paused})`}
+          </button>
+        )}
         <button onClick={() => setTab('in_progress')}
           className={`flex-1 min-w-fit py-2 px-2 rounded-lg text-xs font-medium transition-colors whitespace-nowrap ${tab === 'in_progress' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
           In progress{counts.in_progress > 0 && ` (${counts.in_progress})`}
@@ -34648,10 +34738,7 @@ function SuggestedTabContent({ propertyId, employee, onGoToBedroom, onOpenBedroo
                 <AlertCircle size={12} /> Block
               </button>
               </OwnerOnly>
-              <button onClick={() => setReassignTarget(rep)} disabled={busy}
-                className="h-9 px-3 rounded-lg border border-stone-300 hover:bg-stone-50 text-stone-700 text-xs font-medium flex items-center gap-1 disabled:opacity-50">
-                <User size={12} /> Reassign
-              </button>
+              {/* Reassign removed — not part of the flow any more. */}
             </>
           )}
           {/* Owner-only delete for an assignment uploaded by mistake. */}
@@ -34799,13 +34886,39 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
   // Done view defaults to the last 2 days — that's what you're almost
   // always looking for, and scrolling through weeks of finished work to
   // find today's was the complaint. 'all' widens it.
-  const [doneWindow, setDoneWindow] = useState('recent'); // 'recent' | 'all'
-  const recentCutoff = (() => {
-    // "Last 2 days" = today and yesterday. -1 gives a 2-calendar-day span.
-    const d = new Date(); d.setDate(d.getDate() - 1);
-    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
-  })();
+  const setDoneWindow = () => {}; // retired — the date range is the only window now
+  const [dateOpen, setDateOpen] = useState(false); // the range popover
   const [filterCategories, setFilterCategories] = useState(new Set()); // task categories like 'bedroom'
+  // --- Date-range control -------------------------------------------------
+  const dayKeyBack = (n) => {
+    const d = new Date(); d.setDate(d.getDate() - n);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  };
+  // History is capped at three months. Anything older is archive territory —
+  // it makes the pickers unwieldy and the queries heavy for no real use.
+  const HISTORY_MONTHS = 3;
+  const minHistoryDay = (() => {
+    const d = new Date(); d.setMonth(d.getMonth() - HISTORY_MONTHS);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  })();
+  const todayDayKey = dayKeyBack(0);
+  // Two ways to choose: the Today shortcut, or pick the dates yourself.
+  const applyDatePreset = (k) => {
+    if (k === 'today') { setDateFrom(todayDayKey); setDateTo(todayDayKey); setDoneWindow('all'); }
+  };
+  const activePreset = (dateFrom === todayDayKey && dateTo === todayDayKey) ? 'today' : null;
+  const fmtRangeDay = (d) => {
+    if (!d) return '';
+    const [y, m, day] = d.split('-').map(Number);
+    return new Date(y, m - 1, day).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  };
+  const dateRangeLabel = (() => {
+    if (dateFrom === todayDayKey && dateTo === todayDayKey) return 'Today';
+    if (dateFrom && dateTo) return dateFrom === dateTo ? fmtRangeDay(dateFrom) : `${fmtRangeDay(dateFrom)} – ${fmtRangeDay(dateTo)}`;
+    if (dateFrom) return `${fmtRangeDay(dateFrom)} onward`;
+    if (dateTo) return `Up to ${fmtRangeDay(dateTo)}`;
+    return `Last ${HISTORY_MONTHS} months`;
+  })();
   const [editDueId, setEditDueId] = useState(null);
   const canEditDatesT = can(employee, 'edit_due_dates');
   const todayKeyT = localTodayKey();
@@ -34829,6 +34942,21 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
   const [bundleOpen, setBundleOpen] = useState({}); // { unitId: boolean }
 
   const [loadError, setLoadError] = useState(null);
+
+  // Open the quick-glance modal straight away, then top the row up with the
+  // OCR text the list query deliberately skips.
+  const openTarget = async (t) => {
+    setOpened(t);
+    const aId = t?.assignment?.id;
+    if (!aId || t.assignment.extracted_text !== undefined) return;
+    const { data } = await supabase.from('assignments')
+      .select('id, extracted_text, spanish_translation, translation_status')
+      .eq('id', aId).maybeSingle();
+    if (!data) return;
+    setOpened(o => (o && o.assignment?.id === data.id)
+      ? { ...o, assignment: { ...o.assignment, ...data } }
+      : o);
+  };
 
   // Open workblocks across this property — keyed by party_id so the
   // bedroom card can show a "[Name] · section is here" chip with a
@@ -34914,7 +35042,11 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
     for (let from = 0; ; from += PAGE) {
       const { data: page, error: pErr } = await supabase
         .from('assignment_targets')
-        .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, approved_at, deleted_at, extracted_text, spanish_translation, translation_status, assignment_type, scheduled_date, sheet_type, template_set_id, bathroom_variant, general_variant, created_at), unit:units(id, label), party:parties(id, label), starter:employees!started_by(id, name), completer:employees!completed_by(id, name), assignedTo:employees!assigned_to(id, name)')
+        // extracted_text / spanish_translation are full OCR dumps repeated on
+        // every target row of an assignment — megabytes across a busy
+        // property, for something only the peek modal ever reads. Fetched on
+        // demand in openTarget() instead.
+        .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, approved_at, deleted_at, translation_status, assignment_type, scheduled_date, sheet_type, template_set_id, bathroom_variant, general_variant, created_at), unit:units(id, label), party:parties(id, label), starter:employees!started_by(id, name), completer:employees!completed_by(id, name), assignedTo:employees!assigned_to(id, name)')
         .eq('assignment.customer_id', propertyId)
         .eq('assignment.active', true)
           .is('assignment.deleted_at', null)
@@ -34960,7 +35092,12 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
     });
     const dominantByAsgn = new Map();
     statusesByAsgn.forEach((statusSet, k) => {
-      const winner = dominantOrder.find(s => statusSet.has(s)) || 'pending';
+      let winner = dominantOrder.find(s => statusSet.has(s)) || 'pending';
+      // With the Paused tab hidden, a paused-dominant assignment would match
+      // NO visible tab and vanish from the board entirely. Fold it into
+      // In progress — it's still work in flight, just not being touched
+      // this second.
+      if (!SHOW_PAUSED_TAB && winner === 'paused') winner = 'in_progress';
       dominantByAsgn.set(k, winner);
     });
 
@@ -35040,7 +35177,12 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
     setTargets(filtered);
     setLoaded(true);
   };
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [propertyId, statusFilter]);
+  // Load ONCE per property. The query has no status condition in it — every
+  // tab is computed from the same rows client-side — so refetching on each
+  // tab switch was pulling the property's entire target list (paged in 1000s)
+  // to rebuild a view we could already render. That was the multi-second
+  // stall between Pending / In progress / Done.
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, [propertyId]);
   useAssignmentSync(load, 'asgn-tab');
 
   // Map of "<unit_id>:<party_id>" → Set of task categories ever worked
@@ -35275,15 +35417,21 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
     // actually completed. Items without a completed date drop out when
     // any bound is set (they live under Pending anyway).
     if (dateFrom || dateTo) {
-      const cd = t.completed_at ? new Date(t.completed_at).toISOString().slice(0, 10) : null;
+      // Done tabs filter on the day the work was FINISHED. Every other tab
+      // filters on the day it's DUE — same control, the date that matters
+      // for what you're looking at.
+      const cd = isDoneTab
+        ? (t.completed_at ? new Date(t.completed_at).toISOString().slice(0, 10) : null)
+        : (t.assignment?.scheduled_date || null);
       if (!cd) return false;
       if (dateFrom && cd < dateFrom) return false;
       if (dateTo && cd > dateTo) return false;
-    } else if (isDoneTab && doneWindow === 'recent') {
-      // Default Done view: last 2 days only. A manual range above
-      // overrides this — pick dates and you see everything you asked for.
-      const cd = t.completed_at ? new Date(t.completed_at).toISOString().slice(0, 10) : null;
-      if (!cd || cd < recentCutoff) return false;
+    } else {
+      // No explicit range — everything inside the rolling history window.
+      const cd = isDoneTab
+        ? (t.completed_at ? new Date(t.completed_at).toISOString().slice(0, 10) : null)
+        : (t.assignment?.scheduled_date || null);
+      if (isDoneTab && (!cd || cd < minHistoryDay)) return false;
     }
     // Category filter — checks if any task at this bedroom matches
     if (filterCategories.size > 0) {
@@ -35320,11 +35468,12 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
     // Only show categories that actually exist in the data
     return TASK_CATEGORIES.filter(c => cats.has(c.id));
   })();
+  // Three filters, same three on every tab: cleaning type, date range,
+  // apartment search. (Search lives above the panel, so it isn't counted
+  // here — you can always see whether it's set.)
   const activeFilterCount =
     (filterTypes.size > 0 ? 1 : 0) +
-    (filterCleaners.size > 0 ? 1 : 0) +
-    ((dateFrom || dateTo) ? 1 : 0) +
-    (filterCategories.size > 0 ? 1 : 0);
+    ((dateFrom || dateTo) ? 1 : 0);
 
   // Toggle helpers — add/remove a value from a Set state
   const toggleSetValue = (setter) => (value) => setter(prev => {
@@ -35479,7 +35628,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
             const t = group.items[0];
             return (
               <AssignmentCard key={t.id} target={t} busy={busy} propertyId={propertyId}
-                onView={() => setOpened(t)}
+                onView={() => openTarget(t)}
                 onStart={() => startAndGo(t)}
                 onPause={() => updateStatus(t, 'paused')}
               onMoveToPending={() => updateStatus(t, 'pending')}
@@ -35496,6 +35645,12 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                 onGoToBedroom={onGoToBedroom ? () => startAndGo(t) : null}
                 canEditDates={can(employee, 'edit_due_dates')}
                 onSetDueDate={async (aid, date) => { if (aid) { await supabase.from('assignments').update({ scheduled_date: date }).eq('id', aid); load(); } }}
+                onDelete={can(employee, 'upload_assignments') && t.assignment?.id ? async () => {
+                  if (!confirm('Delete this assignment? Use this only if it was uploaded by mistake — it removes it for everyone.')) return;
+                  const { error } = await supabase.from('assignments').update({ deleted_at: new Date().toISOString(), deleted_by: employee?.id || null }).eq('id', t.assignment.id);
+                  if (error) { alert('Could not delete: ' + error.message); return; }
+                  load(); if (onUpdate) onUpdate();
+                } : null}
                 onOpenBedroomHistory={onOpenBedroomHistory} />
             );
           }
@@ -35809,12 +35964,12 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                               <span>{assignmentTypeLabel(firstTarget.assignment.assignment_type)}</span>
                             )}
                             <span>·</span>
-                            <button onClick={(e) => { e.stopPropagation(); setOpened(firstTarget); }}
+                            <button onClick={(e) => { e.stopPropagation(); openTarget(firstTarget); }}
                               className="underline decoration-stone-400 underline-offset-2 hover:text-stone-700">
                               {newItems.length} {newItems.length === 1 ? 'task' : 'tasks'}
                             </button>
                             <span>·</span>
-                            <button onClick={(e) => { e.stopPropagation(); setOpened(firstTarget); }}
+                            <button onClick={(e) => { e.stopPropagation(); openTarget(firstTarget); }}
                               className="underline decoration-stone-400 underline-offset-2 hover:text-stone-700">
                               Quick glance
                             </button>
@@ -35915,11 +36070,21 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                                   );
                                 }
                                 if (grpDone) {
-                                  const last = newItems
-                                    .map(t => t.completed_at).filter(Boolean).sort().slice(-1)[0];
+                                  // Same green "who finished it, and when" chip the
+                                  // single-item card shows — the two used to disagree,
+                                  // one naming a cleaner and the other just a date.
+                                  const lastRow = newItems
+                                    .filter(t => t.completed_at)
+                                    .sort((a, b) => String(a.completed_at).localeCompare(String(b.completed_at)))
+                                    .slice(-1)[0];
+                                  const who = lastRow?.completer?.name;
                                   return (
-                                    <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-stone-900 text-white inline-flex items-center gap-1">
-                                      <Check size={9} /> {last ? `Done ${fmtDueDate(String(last).slice(0,10))}` : 'Done'}
+                                    <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 inline-flex items-center gap-1">
+                                      <Check size={9} />
+                                      {who ? `${who} · ` : ''}
+                                      {lastRow?.completed_at
+                                        ? `${fmtDateWithDay(lastRow.completed_at)} ${fmtClock(lastRow.completed_at)}`
+                                        : 'Done'}
                                     </span>
                                   );
                                 }
@@ -36034,12 +36199,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                               </button>
                               </OwnerOnly>
                             )}
-                            {!allDone && (
-                              <button onClick={() => setReassignTarget(firstTarget)} disabled={busy}
-                                className="px-2.5 py-1 rounded-full border border-stone-300 hover:bg-stone-50 text-stone-700 text-[11px] font-medium flex items-center gap-1 disabled:opacity-50">
-                                <User size={12} /> Reassign
-                              </button>
-                            )}
+                            {/* Reassign removed — not part of the flow any more. */}
                             {/* Owner-only: delete an assignment uploaded by mistake. */}
                             {can(employee, 'upload_assignments') && firstTarget?.assignment?.id && (
                               <button onClick={async () => {
@@ -36074,7 +36234,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                            are used to. */}
                         {legacyItems.map(t => (
                           <AssignmentCard key={t.id} target={t} busy={busy} propertyId={propertyId}
-                            onView={() => setOpened(t)}
+                            onView={() => openTarget(t)}
                             onStart={() => startAndGo(t)}
                             onPause={() => updateStatus(t, 'paused')}
                             onMoveToPending={() => updateStatus(t, 'pending')}
@@ -36091,6 +36251,12 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                             onGoToBedroom={onGoToBedroom ? () => startAndGo(t) : null}
                             canEditDates={can(employee, 'edit_due_dates')}
                             onSetDueDate={async (aid, date) => { if (aid) { await supabase.from('assignments').update({ scheduled_date: date }).eq('id', aid); load(); } }}
+                            onDelete={can(employee, 'upload_assignments') && t.assignment?.id ? async () => {
+                              if (!confirm('Delete this assignment? Use this only if it was uploaded by mistake — it removes it for everyone.')) return;
+                              const { error } = await supabase.from('assignments').update({ deleted_at: new Date().toISOString(), deleted_by: employee?.id || null }).eq('id', t.assignment.id);
+                              if (error) { alert('Could not delete: ' + error.message); return; }
+                              load(); if (onUpdate) onUpdate();
+                            } : null}
                             onOpenBedroomHistory={onOpenBedroomHistory} />
                         ))}
                         {/* NEW items at this bedroom: ONE bedroom-level
@@ -36166,10 +36332,10 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
         </div>
       );
     }
-    // On the "Last 2 days" view, split Today / Yesterday so the day you
-    // almost always want is visually first. All time / a manual range
-    // renders as one flat list — sub-day headers there would be noise.
-    if (doneWindow === 'recent' && !dateFrom && !dateTo) {
+    // With no explicit range, split Today / Yesterday so the day you almost
+    // always want is visually first. A picked range renders as one flat list
+    // — sub-day headers there would be noise.
+    if (!dateFrom && !dateTo) {
       const { dayOf, last3 } = bucketByAge(items);
       const yesterday = last3; // within the 2-day window this is just yesterday
       return (
@@ -36194,9 +36360,10 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
 
   return (
     <div>
-      {/* Apartment search — Done view only. Type an apartment/bedroom
-         number to jump to it. */}
-      {isDoneView && targets.length > 0 && (
+      {/* Apartment search — on EVERY tab now. Kept out of the collapsed
+         Filters panel on purpose: it's the one control people reach for
+         without thinking, and burying it behind a toggle costs two taps. */}
+      {targets.length > 0 && (
         <div className="mb-3 relative">
           <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-stone-400" />
           <input type="text" value={aptSearch} onChange={(e) => setAptSearch(e.target.value)}
@@ -36212,7 +36379,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
       )}
       {/* Filters bar: toggle to expand, pills inside. Counts active filters
          on the button so the user knows when filters are narrowing things. */}
-      {targets.length > 0 && (availableTypes.length > 1 || availableCleaners.length > 0 || availableCategories.length > 0 || isDoneView) && (
+      {targets.length > 0 && (
         <div className="mb-3">
           <button onClick={() => setFiltersOpen(o => !o)}
             className={`w-full flex items-center justify-between px-3 py-2 rounded-xl border transition-colors ${activeFilterCount > 0 ? 'bg-amber-50 border-amber-300 text-amber-900' : 'bg-white border-stone-200 text-stone-600 hover:border-stone-400'}`}>
@@ -36230,7 +36397,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
           {filtersOpen && (
             <div className="p-3 rounded-xl bg-stone-50 border border-stone-200 mt-1 space-y-3">
               {/* Type — multi-select chips. Click to add/remove from filter. */}
-              {availableTypes.length > 1 && (
+              {availableTypes.length > 0 && (
                 <div>
                   <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1">Cleaning type</div>
                   <div className="flex gap-1.5 flex-wrap">
@@ -36247,43 +36414,60 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                   </div>
                 </div>
               )}
-              {/* Cleaner and Task-category filters removed per request —
-                 the Done tab keeps only Cleaning type + a date range. */}
-              {/* Completed-date RANGE — pick a start and end day. Leave a
-                 side blank for an open-ended range. Only shown on the
-                 Done-family tabs where completed dates exist. */}
-              {isDoneView && (
-                <div>
-                  <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1">Specific range</div>
-                  <div className="flex gap-2 flex-wrap items-center">
-                    <label className="flex items-center gap-1 text-xs font-mono text-stone-600">
-                      <span className="text-stone-400">From</span>
-                      <input type="date" value={dateFrom} max={dateTo || undefined}
-                        onChange={(e) => setDateFrom(e.target.value)}
-                        className="px-2 py-1 rounded-lg border border-stone-300 bg-white text-stone-700" />
-                    </label>
-                    <label className="flex items-center gap-1 text-xs font-mono text-stone-600">
-                      <span className="text-stone-400">To</span>
-                      <input type="date" value={dateTo} min={dateFrom || undefined}
-                        onChange={(e) => setDateTo(e.target.value)}
-                        className="px-2 py-1 rounded-lg border border-stone-300 bg-white text-stone-700" />
-                    </label>
-                    {(dateFrom || dateTo) && (
-                      <button onClick={() => { setDateFrom(''); setDateTo(''); }}
-                        className="px-2.5 py-1 rounded-full text-xs font-mono bg-stone-200 text-stone-600 hover:bg-stone-300">
-                        Clear dates
-                      </button>
-                    )}
-                  </div>
-                  <div className="text-[10px] font-mono text-stone-400 mt-1">
-                    Leave blank to show all. Pick the same day twice for one day, or a span for a range.
-                  </div>
+              {/* DATE RANGE — one button, both ends inside. On the Done tabs
+                 it reads the completed date, everywhere else the due date.
+                 The old "Last 2 days / All time" toggle folded in here as a
+                 preset so this is a single control instead of two. */}
+              <div>
+                <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1">
+                  {isDoneView ? 'Completed' : 'Due'}
                 </div>
-              )}
+                <button onClick={() => setDateOpen(o => !o)}
+                  className={`w-full flex items-center justify-between px-3 py-2 rounded-xl border text-left transition-colors ${(dateFrom || dateTo) ? 'bg-amber-50 border-amber-300 text-amber-900' : 'bg-white border-stone-300 text-stone-700 hover:border-stone-400'}`}>
+                  <span className="flex items-center gap-2 text-xs font-mono">
+                    <Calendar size={13} />
+                    {dateRangeLabel}
+                  </span>
+                  <ChevronRight size={13} className={`transition-transform ${dateOpen ? 'rotate-90' : ''}`} />
+                </button>
+                {dateOpen && (
+                  <div className="mt-1 p-3 rounded-xl bg-white border border-stone-200 space-y-2">
+                    <div className="flex gap-1.5 flex-wrap items-center">
+                      <button onClick={() => applyDatePreset('today')}
+                        className={`px-2.5 py-1 rounded-full text-[11px] font-mono transition-colors ${activePreset === 'today' ? 'bg-stone-900 text-stone-50' : 'bg-stone-100 text-stone-600 hover:bg-stone-200'}`}>
+                        Today
+                      </button>
+                      {(dateFrom || dateTo) && (
+                        <button onClick={() => { setDateFrom(''); setDateTo(''); }}
+                          className="px-2.5 py-1 rounded-full text-[11px] font-mono bg-stone-100 text-stone-600 hover:bg-stone-200">
+                          Clear
+                        </button>
+                      )}
+                    </div>
+                    <div className="flex gap-2 flex-wrap items-center pt-1 border-t border-stone-100">
+                      <label className="flex items-center gap-1 text-xs font-mono text-stone-600">
+                        <span className="text-stone-400">From</span>
+                        <input type="date" value={dateFrom} min={minHistoryDay} max={dateTo || todayDayKey}
+                          onChange={(e) => { setDateFrom(e.target.value); setDoneWindow('all'); }}
+                          className="px-2 py-1 rounded-lg border border-stone-300 bg-white text-stone-700" />
+                      </label>
+                      <label className="flex items-center gap-1 text-xs font-mono text-stone-600">
+                        <span className="text-stone-400">To</span>
+                        <input type="date" value={dateTo} min={dateFrom || minHistoryDay} max={todayDayKey}
+                          onChange={(e) => { setDateTo(e.target.value); setDoneWindow('all'); }}
+                          className="px-2 py-1 rounded-lg border border-stone-300 bg-white text-stone-700" />
+                      </label>
+                    </div>
+                    <div className="text-[10px] font-mono text-stone-400">
+                      History goes back {HISTORY_MONTHS} months. Leave both blank for everything in that window.
+                    </div>
+                  </div>
+                )}
+              </div>
               {activeFilterCount > 0 && (
                 <button onClick={() => {
-                  setFilterTypes(new Set()); setFilterCleaners(new Set());
-                  setDateFrom(''); setDateTo(''); setFilterCategories(new Set());
+                  setFilterTypes(new Set()); setDateFrom(''); setDateTo('');
+                  setDoneWindow(isDoneView ? 'recent' : 'all'); setAptSearch('');
                 }}
                   className="text-[10px] uppercase tracking-wider font-mono text-amber-700 hover:text-amber-900">
                   Clear all filters
@@ -36314,22 +36498,6 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
         </div>
       )}
 
-      {/* Last 2 days / All time — placed here, below the building pills
-         and directly above the results, where it's actually in view when
-         scanning the list. (It also lives inside Filters, but only power
-         users open that.) Only meaningful on the Done family of tabs. */}
-      {isDoneView && !dateFrom && !dateTo && (
-        <div className="flex p-0.5 bg-stone-100 rounded-lg mb-3 max-w-xs">
-          <button onClick={() => setDoneWindow('recent')}
-            className={`flex-1 py-1.5 rounded-md text-[11px] font-mono ${doneWindow === 'recent' ? 'bg-white shadow-sm text-stone-900 font-medium' : 'text-stone-500'}`}>
-            Last 2 days
-          </button>
-          <button onClick={() => setDoneWindow('all')}
-            className={`flex-1 py-1.5 rounded-md text-[11px] font-mono ${doneWindow === 'all' ? 'bg-white shadow-sm text-stone-900 font-medium' : 'text-stone-500'}`}>
-            All time
-          </button>
-        </div>
-      )}
 
       <div className="space-y-4">
         {/* Global priority section — shows all priority items across
@@ -36494,6 +36662,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
 // apartment so the cleaner can walk over and help.
 function NextUpModal({ from, employeeId, onPick, onClose, onSeeAssignments }) {
   const [data, setData] = useState({ loading: true, sameApt: [], sameFloor: [], sameBuilding: [], otherBuilding: [], otherCleaners: [] });
+  const [pickIdx, setPickIdx] = useState(0); // which of the ranked bedrooms is on offer
 
   // Pull a parsing helper for building/floor out of a label like B3-205
   // (B<building>-<floor><unit>). We use the existing floorFromLabel
@@ -36630,85 +36799,78 @@ function NextUpModal({ from, employeeId, onPick, onClose, onSeeAssignments }) {
     })();
   }, [from?.propertyId, from?.unitId, from?.partyId, employeeId]);
 
-  const Bucket = ({ title, items, limit = 5 }) => {
-    if (!items || items.length === 0) return null;
-    const shown = items.slice(0, limit);
-    return (
-      <div>
-        <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1 px-1">
-          {title} <span className="text-stone-400">· {items.length}</span>
-        </div>
-        <div className="space-y-1.5">
-          {shown.map(c => (
-            <button key={c.partyId} onClick={() => onPick(c)}
-              className="w-full p-3 rounded-xl bg-white border border-stone-200 hover:border-stone-900 text-left active:scale-98 transition-all">
-              <div className="flex items-center justify-between gap-2">
-                <div className="flex items-center gap-2 min-w-0">
-                  <span className="font-serif text-sm text-stone-900 font-bold">{c.unitLabel}</span>
-                  {partyDisplay(c.partyLabel) && (
-                    <>
-                      <span className="text-stone-400">·</span>
-                      <span className="italic text-stone-700">{partyDisplay(c.partyLabel)}</span>
-                    </>
-                  )}
-                </div>
-                <div className="flex items-center gap-2 flex-shrink-0">
-                  <span className={`text-[11px] font-mono ${c.dueDate ? 'text-stone-500' : 'text-stone-300'}`}>{c.dueDate ? fmtDueDate(c.dueDate) : 'No date'}</span>
-                  <ChevronRight size={14} className="text-stone-400" />
-                </div>
-              </div>
-            </button>
-          ))}
-          {items.length > limit && (
-            <div className="text-[10px] font-mono text-stone-500 italic px-1">
-              + {items.length - limit} more
-            </div>
-          )}
-        </div>
-      </div>
-    );
-  };
+  // Everything the buckets used to show, flattened into one ranked list:
+  // same apartment first, then same floor, same building, other buildings.
+  // The modal offers the TOP one — a cleaner leaving a bedroom wants to be
+  // told where to go, not handed four lists to read.
+  const ranked = [...data.sameApt, ...data.sameFloor, ...data.sameBuilding, ...data.otherBuilding];
+  const pick = ranked[pickIdx] || null;
+  const whyHere = pick
+    ? (data.sameApt.includes(pick) ? 'Same apartment'
+      : data.sameFloor.includes(pick) ? 'Same floor'
+      : data.sameBuilding.includes(pick) ? `Building ${pick.building}`
+      : `Building ${pick.building}`)
+    : '';
+
 
   return (
     <div className="fixed inset-0 bg-stone-900/80 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
       <div className="bg-stone-50 w-full sm:max-w-md sm:rounded-3xl rounded-t-3xl flex flex-col max-h-[90vh]">
         <div className="p-5 border-b border-stone-200">
-          <div className="font-serif text-xl text-stone-900 mb-1">Nice work in {from.partyLabel}</div>
+          <div className="font-serif text-xl text-stone-900 mb-1">Nice work in {partyDisplay(from.partyLabel) || from.partyLabel}</div>
           <div className="text-sm text-stone-600">
-            What's next? Closer suggestions are at the top.
+            {data.loading ? 'Finding your next job…' : pick ? 'Here\u2019s your next job.' : 'Nothing left nearby.'}
           </div>
         </div>
-        <div className="flex-1 overflow-y-auto p-5 space-y-4">
+        <div className="flex-1 overflow-y-auto p-5 space-y-3">
           {data.loading ? (
-            <div className="text-center py-8 text-stone-400 text-sm">Finding next bedrooms…</div>
+            <div className="text-center py-8 text-stone-400 text-sm">Finding your next job…</div>
+          ) : !pick ? (
+            <div className="text-center py-8 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
+              Looks like all the bedrooms are taken care of. Nice job!
+            </div>
           ) : (
             <>
-              {/* Who else is at this apartment — comes first per user's request */}
+              {/* ONE job, front and centre. */}
+              <button onClick={() => onPick(pick)}
+                className="w-full p-5 rounded-2xl bg-white border-2 border-stone-900 text-left active:scale-98 transition-all">
+                <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1.5">
+                  {whyHere}
+                </div>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="font-serif text-2xl text-stone-900">{pick.unitLabel}</span>
+                  {partyDisplay(pick.partyLabel) && (
+                    <>
+                      <span className="text-stone-300 text-xl">·</span>
+                      <span className="font-serif text-2xl italic text-stone-700">{partyDisplay(pick.partyLabel)}</span>
+                    </>
+                  )}
+                </div>
+                <div className="text-[11px] font-mono text-stone-500 mt-1.5 flex items-center gap-1">
+                  <Calendar size={10} /> {pick.dueDate ? fmtDueDate(pick.dueDate) : 'No date set'}
+                </div>
+                <div className="mt-4 w-full py-3 rounded-xl bg-amber-600 text-white text-sm font-bold flex items-center justify-center gap-1.5">
+                  Go to this bedroom <ChevronRight size={15} />
+                </div>
+              </button>
+              {ranked.length > 1 && (
+                <button onClick={() => setPickIdx(i => (i + 1) % ranked.length)}
+                  className="w-full py-2 text-[11px] font-mono text-stone-500 hover:text-stone-800 underline decoration-stone-300 underline-offset-2">
+                  Show me a different one ({pickIdx + 1} of {ranked.length})
+                </button>
+              )}
+              {/* Someone already at this apartment — worth knowing before you walk. */}
               {data.otherCleaners.length > 0 && (
                 <div className="p-3 rounded-xl bg-amber-50 border border-amber-200">
                   <div className="text-[10px] uppercase tracking-wider font-mono text-amber-900 font-bold mb-1">
-                    Who's at {from.unitLabel}
+                    Still at {from.unitLabel}
                   </div>
-                  <div className="space-y-0.5">
-                    {data.otherCleaners.map((c, i) => (
-                      <div key={i} className="text-sm text-stone-800">
-                        <span className="font-bold">{c.name}</span>
-                        {partyDisplay(c.partyLabel) && <span className="text-stone-600"> · {partyDisplay(c.partyLabel)}</span>}
-                      </div>
-                    ))}
-                  </div>
-                  <div className="text-[11px] text-amber-800 mt-1.5 italic">
-                    You could walk over and ask if they need help.
-                  </div>
-                </div>
-              )}
-              <Bucket title={`Same apartment (${from.unitLabel})`} items={data.sameApt} />
-              <Bucket title={`Same floor`} items={data.sameFloor} />
-              <Bucket title={`Same building`} items={data.sameBuilding} />
-              <Bucket title={`Other buildings — starting on floor 3`} items={data.otherBuilding} />
-              {data.sameApt.length + data.sameFloor.length + data.sameBuilding.length + data.otherBuilding.length === 0 && (
-                <div className="text-center py-8 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
-                  Looks like all the bedrooms are taken care of. Nice job!
+                  {data.otherCleaners.map((c, i) => (
+                    <div key={i} className="text-sm text-stone-800">
+                      <span className="font-bold">{c.name}</span>
+                      {partyDisplay(c.partyLabel) && <span className="text-stone-600"> · {partyDisplay(c.partyLabel)}</span>}
+                    </div>
+                  ))}
                 </div>
               )}
             </>

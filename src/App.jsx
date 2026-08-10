@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap156";
+const BUILD_TAG = "aug6-tap157";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -9146,7 +9146,7 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
       {cleanerTab === 'assignments' && (
         <>
           <ScreenId id="CL-B" />
-          <AssignmentsPanel propertyId={shift.customer_id} employee={employee} onGoToBedroom={onGoToBedroom} onOpenBedroomHistory={onOpenBedroomHistory} onJoinBlock={onJoinBlock} />
+          <AssignmentsPanel propertyId={shift.customer_id} property={shift.customer} employee={employee} onGoToBedroom={onGoToBedroom} onOpenBedroomHistory={onOpenBedroomHistory} onJoinBlock={onJoinBlock} />
           {can(employee, 'upload_assignments') && (
             <div className="px-4 pt-3">
               <button onClick={() => setShowAssignmentForm(true)} disabled={busy}
@@ -33108,7 +33108,7 @@ function AssignmentDetail({ property, assignment: assignmentInit, employee, onBa
 //   employee — current user
 //   showDone — if true, includes done assignments
 //   onUpdate — called after any status change so parent can refresh
-function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = false, onUpdate, onOpenBedroomHistory, dark = false, undoSlot = null, propertyName = null, elapsedMs = null, workScreen = false, onStartCleaning = null, onExit = null }) {
+function AssignmentBanner({ propertyId, property = null, unitId, partyId, employee, showDone = false, onUpdate, onOpenBedroomHistory, dark = false, undoSlot = null, propertyName = null, elapsedMs = null, workScreen = false, onStartCleaning = null, onExit = null }) {
   const [targets, setTargets] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [opened, setOpened] = useState(null);
@@ -33455,7 +33455,7 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
           return renderChecklistGroupCard(g);
         };
         const renderCard = (t) => (
-          <AssignmentCard key={t.id} target={t} busy={busy} propertyId={propertyId}
+          <AssignmentCard key={t.id} target={t} property={property} busy={busy} propertyId={propertyId}
             onView={() => openTarget(t)}
             onStart={() => updateStatus(t, 'in_progress')}
             onPause={() => updateStatus(t, 'paused')}
@@ -33873,7 +33873,7 @@ function AssignmentBanner({ propertyId, unitId, partyId, employee, showDone = fa
 }
 
 // Reusable card for one assignment target, used in banner + panel
-function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPending, onDone, onReopen, onBlocked, onReassign, onDelete, onGoToBedroom, onOpenBedroomHistory, onTogglePriority, canPrioritize = false, canMarkDone = true, canMarkDoneAlways = false, currentEmployeeId, propertyId, canEditDates = false, onSetDueDate, dark = false, workScreen = false, onStartCleaning = null, onExit = null, ownerView = false }) {
+function AssignmentCard({ target, property = null, busy, onView, onStart, onPause, onMoveToPending, onDone, onReopen, onBlocked, onReassign, onDelete, onGoToBedroom, onOpenBedroomHistory, onTogglePriority, canPrioritize = false, canMarkDone = true, canMarkDoneAlways = false, currentEmployeeId, propertyId, canEditDates = false, onSetDueDate, dark = false, workScreen = false, onStartCleaning = null, onExit = null, ownerView = false }) {
   const t = target;
   // Dark variant — used when this card is folded into the cleaner's black
   // "Working on" header. Only the neutral surfaces flip; colored status /
@@ -33958,16 +33958,25 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
              1 task" on the Today tab. Here it carries the assignment title,
              the cleaning type, and the two peek links. */}
           <div className={`text-[11px] ${D.muted} font-mono mt-0.5 flex items-center gap-1 flex-wrap`}>
-            <FileText size={10} className="flex-shrink-0" />
+            {property?.name ? (
+              <>
+                <Building2 size={10} className="flex-shrink-0" />
+                {property.address ? (
+                  <AddressLink address={property.address} icon="none" label={property.name} className="text-blue-600 font-medium" />
+                ) : (
+                  <span>{property.name}</span>
+                )}
+                <span>·</span>
+              </>
+            ) : (
+              <FileText size={10} className="flex-shrink-0" />
+            )}
             {t.assignment?.title && <span className="truncate max-w-[14rem]">{t.assignment.title}</span>}
             {t.assignment?.assignment_type && (
               <span>{t.assignment?.title ? '· ' : ''}{assignmentTypeLabel(t.assignment.assignment_type)}</span>
             )}
-            {(t.assignment?.title || t.assignment?.assignment_type) && <span>·</span>}
-            <button onClick={onView}
-              className="underline decoration-stone-400 underline-offset-2 hover:text-stone-700">
-              Quick glance
-            </button>
+            {/* No "Quick glance" link — the task count above opens the same
+               peek, so it was the same door twice. */}
             {onOpenBedroomHistory && t.unit_id && t.party_id && (
               <>
                 <span>·</span>
@@ -33987,7 +33996,9 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
            The status pill is gone (the tab already says it) and the
            Mark-priority toggle moved down to the footer actions. */}
         <span className="flex items-center gap-1 flex-shrink-0">
-          {t.priority && (
+          {/* Hidden when the footer toggle is available — otherwise the same
+             card says "Priority" twice. */}
+          {t.priority && !(onTogglePriority && canPrioritize) && (
             <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-red-100 text-red-700 font-bold flex items-center gap-1">
               <AlertCircle size={9} /> Priority
             </span>
@@ -34145,7 +34156,7 @@ function AssignmentCard({ target, busy, onView, onStart, onPause, onMoveToPendin
 
 // AssignmentsPanel — full tabbed view for the property hub.
 // Tabs: Pending | Paused | In Progress | Done
-function AssignmentsPanel({ propertyId, employee, refreshKey, onGoToBedroom, onOpenBedroomHistory, onJoinBlock }) {
+function AssignmentsPanel({ propertyId, property = null, employee, refreshKey, onGoToBedroom, onOpenBedroomHistory, onJoinBlock }) {
   const [tab, setTab] = useState('pending');
   // Guard against a stale 'paused' selection now that the tab is hidden.
   useEffect(() => {
@@ -34170,9 +34181,17 @@ function AssignmentsPanel({ propertyId, employee, refreshKey, onGoToBedroom, onO
       if (!page || page.length < PAGE) break;
       if (from > 200000) break;
     }
+    // The list can only ever show the last 3 months, so the Done tab must not
+    // advertise a number the list can't reach. Finished work older than that
+    // window is left out of the count as well.
+    const countCutoff = (() => {
+      const d = new Date(); d.setMonth(d.getMonth() - 3);
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    })();
     const filtered = (data || []).filter(t =>
       !t.assignment?.deleted_at &&
-      (t.assignment?.source !== 'pm' || t.assignment?.pm_status === 'approved')
+      (t.assignment?.source !== 'pm' || t.assignment?.pm_status === 'approved') &&
+      !(t.status === 'done' && t.completed_at && String(t.completed_at).slice(0, 10) < countCutoff)
     );
     // Count UNIQUE assignments per status. Each assignment gets bucketed
     // ONCE based on its DOMINANT status (in_progress > paused > blocked
@@ -34276,7 +34295,7 @@ function AssignmentsPanel({ propertyId, employee, refreshKey, onGoToBedroom, onO
           </button>
         )}
       </div>
-      <AssignmentTabContent propertyId={propertyId} employee={employee} statusFilter={tab}
+      <AssignmentTabContent propertyId={propertyId} property={property} employee={employee} statusFilter={tab}
         onUpdate={loadCounts} onGoToBedroom={onGoToBedroom} onOpenBedroomHistory={onOpenBedroomHistory}
         onJoinBlock={onJoinBlock} />
     </div>
@@ -34860,7 +34879,7 @@ function SuggestedTabContent({ propertyId, employee, onGoToBedroom, onOpenBedroo
   );
 }
 
-function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, onGoToBedroom, onOpenBedroomHistory, onJoinBlock }) {
+function AssignmentTabContent({ propertyId, property = null, employee, statusFilter, onUpdate, onGoToBedroom, onOpenBedroomHistory, onJoinBlock }) {
   const [allTargets, setAllTargets] = useState([]); // every row at this property
   // Optimistic local edits write through to the raw set; the tab view is
   // derived from it, so a status change moves the card to the right tab
@@ -35644,7 +35663,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
           if (group.items.length === 1) {
             const t = group.items[0];
             return (
-              <AssignmentCard key={t.id} target={t} busy={busy} propertyId={propertyId}
+              <AssignmentCard key={t.id} target={t} property={property} busy={busy} propertyId={propertyId}
                 onView={() => openTarget(t)}
                 onStart={() => startAndGo(t)}
                 onPause={() => updateStatus(t, 'paused')}
@@ -35830,6 +35849,8 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                       const statusPill = ASSIGNMENT_STATUSES[dominantStatus] || ASSIGNMENT_STATUSES.pending;
                       const allDone = newItems.every(t => t.status === 'done');
                       const canBulkComplete = !allDone && can(employee, 'mark_assignments_done');
+                      // Cleaners never set priority — that's an owner call.
+                      const canSetPriority = can(employee, 'mark_assignments_done') || can(employee, 'upload_assignments');
                       // For View Doc and Reassign we pick the first
                       // target's assignment as the representative.
                       // Bedroom-level uploads are 1 assignment per
@@ -35960,7 +35981,11 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                                the other actions, and the status is already
                                said by the tab you're standing on. */}
                             <span className="flex items-center gap-1 flex-shrink-0">
-                              {anyPriority && (
+                              {/* Only shown to people who CAN'T toggle priority.
+                                 Anyone who can gets the toggle in the footer —
+                                 rendering both made the word appear twice on
+                                 the same card. */}
+                              {anyPriority && !canSetPriority && (
                                 <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-red-100 text-red-700 font-bold flex items-center gap-1">
                                   <AlertCircle size={9} /> Priority
                                 </span>
@@ -35970,7 +35995,19 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                           {/* === META LINE — same as the Today-tab card: type, task count,
                              and the peek links, all in one mono line. */}
                           <div className="text-[11px] font-mono text-stone-500 mb-2 flex items-center gap-1 flex-wrap">
-                            <FileText size={10} className="flex-shrink-0" />
+                            {/* Property name, linked to its address — same as
+                               the Today-tab card. Tapping it opens maps. */}
+                            {property?.name && (
+                              <>
+                                <Building2 size={10} className="flex-shrink-0" />
+                                {property.address ? (
+                                  <AddressLink address={property.address} icon="none" label={property.name} className="text-blue-600 font-medium" />
+                                ) : (
+                                  <span>{property.name}</span>
+                                )}
+                                <span>·</span>
+                              </>
+                            )}
                             {firstTarget?.assignment?.assignment_type && (
                               <span>{assignmentTypeLabel(firstTarget.assignment.assignment_type)}</span>
                             )}
@@ -35979,11 +36016,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                               className="underline decoration-stone-400 underline-offset-2 hover:text-stone-700">
                               {newItems.length} {newItems.length === 1 ? 'task' : 'tasks'}
                             </button>
-                            <span>·</span>
-                            <button onClick={(e) => { e.stopPropagation(); openTarget(firstTarget); }}
-                              className="underline decoration-stone-400 underline-offset-2 hover:text-stone-700">
-                              Quick glance
-                            </button>
+
                             {onOpenBedroomHistory && firstTarget?.unit_id && firstTarget?.party_id && (
                               <>
                                 <span>·</span>
@@ -36130,7 +36163,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                               })()}
                             </div>
                             <div className="flex items-center gap-1.5 flex-wrap justify-end">
-                            {(can(employee, 'mark_assignments_done') || can(employee, 'upload_assignments')) && (
+                            {canSetPriority && (
                               <button onClick={(e) => { e.stopPropagation(); bulkTogglePriority(newItems); }} disabled={busy}
                                 title={anyPriority ? 'Remove priority' : 'Mark priority'}
                                 className={`text-[10px] font-mono px-2 py-0.5 rounded-full inline-flex items-center gap-1 disabled:opacity-50 ${anyPriority ? 'bg-red-600 text-white' : 'bg-white border border-dashed border-stone-300 text-stone-500'}`}>
@@ -36173,7 +36206,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                                 <Play size={12} /> Resume
                               </button>
                             )}
-                            {canBulkComplete && (
+                            {false && canBulkComplete && (
                               <button onClick={async () => {
                                 if (!confirm(`Mark all ${newItems.length} items at ${bedLabel} complete?`)) return;
                                 await bulkUpdateStatus(newItems, 'done');
@@ -36251,7 +36284,7 @@ function AssignmentTabContent({ propertyId, employee, statusFilter, onUpdate, on
                            assignments stay exactly as the cleaners
                            are used to. */}
                         {legacyItems.map(t => (
-                          <AssignmentCard key={t.id} target={t} busy={busy} propertyId={propertyId}
+                          <AssignmentCard key={t.id} target={t} property={property} busy={busy} propertyId={propertyId}
                             onView={() => openTarget(t)}
                             onStart={() => startAndGo(t)}
                             onPause={() => updateStatus(t, 'paused')}

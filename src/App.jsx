@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap164";
+const BUILD_TAG = "aug6-tap165";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -25064,6 +25064,8 @@ function PortalDashboard({ property, portalKind, portalUser, properties, onSwitc
   // These two live up here for the same reason homeTab does: PortalHome
   // unmounts while a unit-day is open, so state held inside it resets and
   // Back lands the PM on the default view instead of the one they left.
+  const [homeDamageSubTab, setHomeDamageSubTab] = useState('active');
+  const [homeDamageExpanded, setHomeDamageExpanded] = useState(false);
   const [homeCleanSub, setHomeCleanSub] = useState('done');
   const [homeAsgApproval, setHomeAsgApproval] = useState('waiting');
   // Where the page was scrolled when they drilled in, so Back restores the
@@ -25094,6 +25096,8 @@ function PortalDashboard({ property, portalKind, portalUser, properties, onSwitc
     filter={homeFilter} setFilter={setHomeFilter}
     schedRecentOpen={schedRecentOpen} setSchedRecentOpen={setSchedRecentOpen}
     cleanSub={homeCleanSub} setCleanSub={setHomeCleanSub}
+    damageSubTab={homeDamageSubTab} setDamageSubTab={setHomeDamageSubTab}
+    damageExpanded={homeDamageExpanded} setDamageExpanded={setHomeDamageExpanded}
     asgApproval={homeAsgApproval} setAsgApproval={setHomeAsgApproval}
     onOpenUnitDay={(unitId, date) => {
       setHomeScrollY(window.scrollY || 0);
@@ -25131,6 +25135,8 @@ function PortalLangToggle({ portalUser }) {
 function PortalHome({ property, portalKind, portalUser, properties, onSwitchProperty, hasMultipleProperties, onBackToPicker, onSignOut, onRefreshProperty, onOpenUnitDay,
   tab: tabProp, setTab: setTabProp, asgSub: asgSubProp, setAsgSub: setAsgSubProp,
   cleanSub: cleanSubProp, setCleanSub: setCleanSubProp,
+  damageSubTab: damageSubTabProp, setDamageSubTab: setDamageSubTabProp,
+  damageExpanded: damageExpandedProp, setDamageExpanded: setDamageExpandedProp,
   asgApproval: asgApprovalProp, setAsgApproval: setAsgApprovalProp,
   filter: filterProp, setFilter: setFilterProp,
   schedRecentOpen, setSchedRecentOpen }) {
@@ -25239,7 +25245,7 @@ function PortalHome({ property, portalKind, portalUser, properties, onSwitchProp
       };
       const [{ data: blocks }, doneTargets] = await Promise.all([
         supabase.from('work_blocks')
-          .select('id, start_time, end_time, unit_id, party_id, unit:units(id, label), shift:shifts!inner(customer_id), tasks(id, photos(kind, resolved_at, deleted_at))')
+          .select('id, start_time, end_time, unit_id, party_id, unit:units(id, label), party:parties(label), shift:shifts!inner(customer_id), tasks(id, photos(kind, resolved_at, deleted_at))')
           .gte('start_time', since)
           .order('start_time', { ascending: false }),
         fetchDoneTargets(),
@@ -25466,7 +25472,9 @@ function PortalHome({ property, portalKind, portalUser, properties, onSwitchProp
           </div>
           {cleanSub === 'done'
             ? <PortalHistoryTab property={property} groups={groups} loaded={loaded}
-                filter={filter} setFilter={setFilter} onOpenUnitDay={onOpenUnitDay} />
+                filter={filter} setFilter={setFilter} onOpenUnitDay={onOpenUnitDay}
+                damageSubTab={damageSubTabProp} setDamageSubTab={setDamageSubTabProp}
+                damageExpanded={damageExpandedProp} setDamageExpanded={setDamageExpandedProp} />
             : <PortalScheduleTab property={property} onOpenUnitDay={onOpenUnitDay}
                 recentOpen={schedRecentOpen} setRecentOpen={setSchedRecentOpen} />}
         </div>
@@ -25622,7 +25630,9 @@ function PortalInvoicesTab({ property }) {
   );
 }
 
-function PortalHistoryTab({ property, groups, loaded, filter, setFilter, onOpenUnitDay }) {
+function PortalHistoryTab({ property, groups, loaded, filter, setFilter, onOpenUnitDay,
+  damageSubTab: damageSubTabProp, setDamageSubTab: setDamageSubTabProp,
+  damageExpanded: damageExpandedProp, setDamageExpanded: setDamageExpandedProp }) {
   // Filters — PM-appropriate. Date, building, and apartment. We
   // intentionally don't expose category/cleaner filters here because PMs
   // shouldn't be slicing by who did the work or by task type.
@@ -25694,8 +25704,18 @@ function PortalHistoryTab({ property, groups, loaded, filter, setFilter, onOpenU
     if (u.hasDamage) damageEntries.push({ date: g.date, unitId: u.unitId, label: u.label });
     if (u.hasResolvedDamage) resolvedDamageEntries.push({ date: g.date, unitId: u.unitId, label: u.label });
   }));
-  const [damageExpanded, setDamageExpanded] = useState(false);
-  const [damageSubTab, setDamageSubTab] = useState('active'); // 'active' | 'resolved'
+  // Also owned upstream — a collapsed panel on return is the same bug as a
+  // reset sub-tab, just more obvious.
+  const [ownDamageExpanded, setOwnDamageExpanded] = useState(false);
+  const damageExpanded = damageExpandedProp !== undefined ? damageExpandedProp : ownDamageExpanded;
+  const setDamageExpanded = setDamageExpandedProp || setOwnDamageExpanded;
+  // Owned by PortalDashboard when passed down. This tab unmounts while a
+  // unit-day is open, so held locally it reset every time — which is why
+  // Back out of a damage photo dropped the PM on the plain history list
+  // instead of the damage list they came from.
+  const [ownDamageSubTab, setOwnDamageSubTab] = useState('active'); // 'active' | 'resolved'
+  const damageSubTab = damageSubTabProp !== undefined ? damageSubTabProp : ownDamageSubTab;
+  const setDamageSubTab = setDamageSubTabProp || setOwnDamageSubTab;
 
   return (
     <div className="px-5 pt-6">
@@ -26051,7 +26071,9 @@ function PortalUnitDay({ property, unitId, date, portalUser, onBack }) {
   // makes it impossible to tell which photo belongs to which bedroom.
   // Default '' = "All bedrooms" (merged view, kept as an option but
   // not the default once we know there are multiple bedrooms).
-  const [bedroomTab, setBedroomTab] = useState('');
+  // null = nothing chosen yet (auto-picks the first bedroom below)
+  // ''   = the PM explicitly chose All bedrooms
+  const [bedroomTab, setBedroomTab] = useState(null);
 
   const toggleSelectOne = (photoId) => {
     setSelectedIds(prev => {
@@ -26118,11 +26140,32 @@ function PortalUnitDay({ property, unitId, date, portalUser, onBack }) {
     const labels = [...new Set(blocks.map(b => b.party?.label).filter(Boolean))];
     return labels.sort(naturalCompare);
   })();
-  // Opening an apartment shows EVERY bedroom cleaned that day. This used to
-  // auto-select the first bedroom, which silently hid the rest — a PM opening
-  // a 3-bedroom apartment saw one bedroom's photos and reasonably concluded
-  // the others were missing. Filtering is still one tap away; it's just no
-  // longer the default nobody asked for.
+  // Open on the FIRST bedroom rather than everything merged, so a PM lands on
+  // one room's photos instead of a wall of them. The tabs below carry a photo
+  // count and a damage ring, so the other bedrooms read as "more to see"
+  // rather than as missing.
+  useEffect(() => {
+    if (partyLabels.length > 1 && bedroomTab === null) setBedroomTab(partyLabels[0]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [blocks]);
+
+  // Per-bedroom counts for the tab strip: how many photos, and whether
+  // anything there is still flagged.
+  const bedroomMeta = (() => {
+    const m = {};
+    blocks.forEach(b => {
+      const k = b.party?.label;
+      if (!k) return;
+      if (!m[k]) m[k] = { photos: 0, damage: 0, cannot: 0 };
+      (b.tasks || []).forEach(t => (t.photos || []).forEach(p => {
+        if (p.deleted_at) return;
+        m[k].photos += 1;
+        if (p.kind === 'damage' && !p.resolved_at) m[k].damage += 1;
+        if (p.kind === KIND_CANNOT && !p.resolved_at) m[k].cannot += 1;
+      }));
+    });
+    return m;
+  })();
 
   if (!loaded) return <Splash text="Loading…" />;
 
@@ -26293,10 +26336,35 @@ function PortalUnitDay({ property, unitId, date, portalUser, onBack }) {
             <div className="flex gap-1.5 overflow-x-auto pb-1 -mx-3 px-3">
               {partyLabels.map(label => {
                 const active = bedroomTab === label || (partyLabels.length === 1 && !bedroomTab);
+                const meta = bedroomMeta[label] || { photos: 0, damage: 0, cannot: 0 };
+                // A bedroom with unresolved damage gets a red edge whether or
+                // not it's the one you're looking at — that's the whole point
+                // of the strip: you shouldn't have to open each tab to find
+                // out where the problem is.
+                const flagged = meta.damage > 0;
+                const warn = !flagged && meta.cannot > 0;
+                const edge = active
+                  ? (flagged ? 'bg-stone-900 text-stone-50 border-2 border-red-500 ring-2 ring-red-300 shadow-sm'
+                    : warn ? 'bg-stone-900 text-stone-50 border-2 border-yellow-500 ring-2 ring-yellow-300 shadow-sm'
+                    : 'bg-stone-900 text-stone-50 border-2 border-stone-900 shadow-sm')
+                  : (flagged ? 'bg-white text-stone-900 border-2 border-red-400 ring-2 ring-red-200'
+                    : warn ? 'bg-white text-stone-900 border-2 border-yellow-400 ring-2 ring-yellow-200'
+                    : 'bg-white text-stone-700 border-2 border-stone-200 hover:border-stone-400');
                 return (
                   <button key={label} onClick={() => setBedroomTab(label)}
-                    className={`px-4 py-2.5 rounded-xl text-sm font-medium whitespace-nowrap flex-shrink-0 transition-colors ${active ? 'bg-stone-900 text-stone-50 border-2 border-stone-900 shadow-sm' : 'bg-white text-stone-700 border-2 border-stone-200 hover:border-stone-400'}`}>
+                    className={`px-4 py-2.5 rounded-xl text-sm font-medium whitespace-nowrap flex-shrink-0 transition-colors inline-flex items-center gap-1.5 ${edge}`}>
+                    {(flagged || warn) && (
+                      <AlertCircle size={12} className={flagged
+                        ? (active ? 'text-red-300' : 'text-red-600')
+                        : (active ? 'text-yellow-300' : 'text-yellow-600')} />
+                    )}
                     {label}
+                    {/* The count is what stops the other tabs reading as empty. */}
+                    {meta.photos > 0 && (
+                      <span className={`text-[10px] font-mono ${active ? 'text-stone-400' : 'text-stone-500'}`}>
+                        {meta.photos}
+                      </span>
+                    )}
                   </button>
                 );
               })}

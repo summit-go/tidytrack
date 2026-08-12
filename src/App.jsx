@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap161";
+const BUILD_TAG = "aug6-tap164";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -4252,8 +4252,11 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     /* eslint-disable-next-line */
   }, [shift, pendingJob]);
 
-  const onPickProperty = async (property) => {
-    if (property === null) { await doClockIn({ customerId: null }); return; }
+  const onPickProperty = async (property, noPropertyKind = 'cleaning') => {
+    // No property picked. 'other' means non-cleaning work — clock in and open
+    // a task straight away so the camera is one tap from the screen they land
+    // on, instead of asking them to name a cleaning task first.
+    if (property === null) { await doClockIn({ customerId: null, noPropertyKind }); return; }
     if (property.property_type === 'multi_unit') {
       await doClockIn({ customerId: property.id, propertyType: 'multi_unit' });
     } else {
@@ -4265,7 +4268,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     }
   };
 
-  const doClockIn = async ({ customerId, billRate, propertyType }) => {
+  const doClockIn = async ({ customerId, billRate, propertyType, noPropertyKind = null }) => {
     setBusy(true);
     const { data, error } = await supabase
       .from('shifts')
@@ -4277,9 +4280,20 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
         is_preview: previewMode,
       })
       .select('*, customer:customers(*)').single();
+    if (error) { setBusy(false); alert('Could not clock in: ' + error.message); return; }
+    // "Something else" — open a task immediately so the shift lands on a
+    // screen with the camera on it. Without this the cleaner arrives at an
+    // empty task list and has to invent a task name before they can take the
+    // photo they clocked in to take.
+    let firstTasks = [];
+    if (!customerId && noPropertyKind === 'other') {
+      const { data: task } = await supabase.from('tasks')
+        .insert({ shift_id: data.id, name: 'Other work', is_preview: previewMode })
+        .select('*, photos(*, taken_by_employee:employees!taken_by(name))').single();
+      if (task) { firstTasks = [task]; setActiveTask(task.id); }
+    }
     setBusy(false);
-    if (error) { alert('Could not clock in: ' + error.message); return; }
-    setShift(data); setWorkBlocks([]); setTasks([]); setClockInFlow(null);
+    setShift(data); setWorkBlocks([]); setTasks(firstTasks); setClockInFlow(null);
   };
 
   // View-only: cleaner browses messages, properties, assignments
@@ -11217,6 +11231,7 @@ function PropertyPicker({ onPick, onCancel, busy, title, subtitle, viewOnly = fa
   const [loaded, setLoaded] = useState(false);
   const [showAllOthers, setShowAllOthers] = useState(false);
   const [search, setSearch] = useState('');
+  const [skipOpen, setSkipOpen] = useState(false); // "clock in without a property" choice
 
   useEffect(() => { (async () => {
     // Load active properties AND open assignment counts in parallel.
@@ -11410,10 +11425,45 @@ function PropertyPicker({ onPick, onCancel, busy, title, subtitle, viewOnly = fa
               </>
             )}
             {!viewOnly && (
-              <button onClick={() => onPick(null)} disabled={busy}
-                className="w-full p-4 rounded-2xl border-2 border-dashed border-stone-300 text-stone-600 text-sm hover:border-stone-500 disabled:opacity-50">
-                Skip — clock in without a property
-              </button>
+              <>
+                {/* Two different things hide behind "no property": cleaning
+                   somewhere that isn't set up yet, and non-cleaning work like
+                   a supply run or a maintenance trip. Asking here means the
+                   second kind gets a shift built for photos instead of a
+                   cleaning screen with nothing to clean. */}
+                {!skipOpen ? (
+                  <button onClick={() => setSkipOpen(true)} disabled={busy}
+                    className="w-full p-4 rounded-2xl border-2 border-dashed border-stone-300 text-stone-600 text-sm hover:border-stone-500 disabled:opacity-50">
+                    Skip — clock in without a property
+                  </button>
+                ) : (
+                  <div className="rounded-2xl border-2 border-stone-300 bg-white p-4 space-y-2">
+                    <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-1">
+                      What are you doing?
+                    </div>
+                    <button onClick={() => onPick(null, 'cleaning')} disabled={busy}
+                      className="w-full text-left p-3 rounded-xl border border-stone-300 hover:border-stone-900 hover:bg-stone-50 flex items-center gap-3 disabled:opacity-50">
+                      <Building2 size={18} className="text-stone-700 flex-shrink-0" />
+                      <span className="min-w-0">
+                        <span className="block text-sm font-medium text-stone-900">Cleaning</span>
+                        <span className="block text-xs text-stone-500">A clean somewhere not set up as a property yet</span>
+                      </span>
+                    </button>
+                    <button onClick={() => onPick(null, 'other')} disabled={busy}
+                      className="w-full text-left p-3 rounded-xl border border-stone-300 hover:border-stone-900 hover:bg-stone-50 flex items-center gap-3 disabled:opacity-50">
+                      <Camera size={18} className="text-stone-700 flex-shrink-0" />
+                      <span className="min-w-0">
+                        <span className="block text-sm font-medium text-stone-900">Something else</span>
+                        <span className="block text-xs text-stone-500">Supply run, repair, errand — clock in and take photos</span>
+                      </span>
+                    </button>
+                    <button onClick={() => setSkipOpen(false)} disabled={busy}
+                      className="w-full py-2 text-xs font-mono text-stone-500 hover:text-stone-800">
+                      Back
+                    </button>
+                  </div>
+                )}
+              </>
             )}
           </>
         )}
@@ -13646,7 +13696,7 @@ function ManagerDashboard({ employee, onSignOut, onOpenMessages, onLogoClick }) 
       let q = supabase
         .from('shifts')
         .select('*, employee:employees(id,name,pay_rate_hourly), customer:customers(id,name,property_type,bill_rate_hourly,bill_mode), work_blocks(id, end_time, start_time, bill_rate_at_work, assignment_id, unit_id, assignment:assignments(assignment_type), unit:units(label, bedrooms, bathrooms), party:parties(label))')
-        .eq('is_preview', false)
+        .or('is_preview.is.null,is_preview.eq.false')
         .order('start_time', { ascending: false })
         .range(from, from + PAGE - 1);
       if (dateFrom) {
@@ -16274,8 +16324,18 @@ function PhotoZoomViewer({ photos, initialUrl, onClose, onResolveCurrent, employ
         className="absolute top-4 right-4 p-2 rounded-full bg-stone-800 text-stone-50 z-10">
         <X size={20} />
       </button>
-      <div className="absolute top-4 left-4 px-3 py-1.5 rounded-full bg-stone-800 text-stone-50 text-xs font-mono z-10">
-        {idx + 1} / {photos.length}
+      <div className="absolute top-4 left-4 flex items-center gap-2 z-10 max-w-[70%]">
+        <span className="px-3 py-1.5 rounded-full bg-stone-800 text-stone-50 text-xs font-mono flex-shrink-0">
+          {idx + 1} / {photos.length}
+        </span>
+        {/* WHERE this photo was taken. Without it a PM opening a damage photo
+           from the all-bedrooms view had no way to tell which bedroom it was
+           in except by backing out and filtering bedroom by bedroom. */}
+        {(photo.partyLabel || photo.taskName) && (
+          <span className="px-3 py-1.5 rounded-full bg-amber-600 text-white text-xs font-mono truncate">
+            {photo.partyLabel || photo.taskName}
+          </span>
+        )}
       </div>
       <img loading="lazy" src={photo.public_url} alt="" className="max-w-full max-h-[80vh] rounded-xl" />
       {/* Photo attribution + capture time. Resolves from the joined
@@ -21119,6 +21179,20 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
         !builtKeys.has(`${sl.unit_id || ''}:${sl.party_id || ''}`));
       if (missing.length) {
         const rebuilt = missing.map(sl => {
+          if (sl.service_type === '__custom__') {
+            return {
+              key: `saved:${sl.id}`, custom: true,
+              unitId: null, partyId: null,
+              label: sl.label || '', serviceType: null,
+              tookLonger: false, cleanedDays: [], description: sl.description || '',
+              subsections: [],
+              amountOverride: sl.amount != null ? String(sl.amount) : '',
+              comboKey: null, fromMemory: false,
+              extraOn: false, extraMode: 'fixed', extraAmount: '', extraMinutes: '', extraRate: '', extraNote: '',
+              nonBillable: !!sl.non_billable,
+              sourceTargetIds: [],
+            };
+          }
           const savedSubs = Array.isArray(sl.subsections) ? sl.subsections : [];
           const subs = savedSubs.length
             ? savedSubs.map(s => ({ key: s.key, label: s.label, mode: s.mode || 'fixed', amount: s.amount != null ? s.amount : '', rate: s.rate || 0, minutes: s.minutes || '', included: true, fromBook: false }))
@@ -21214,6 +21288,30 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
   }));
   const removeLine = (key) => setLines(ls => ls.filter(l => l.key !== key));
 
+  // A line the invoice can't derive from cleaning records — a supply run, a
+  // callback, a negotiated adjustment. It carries no unit/party, so nothing
+  // gets stamped as invoiced and no price-book memory is written for it; it's
+  // purely a figure you type with a description beside it.
+  const addCustomLine = () => {
+    const key = `custom:${Date.now()}`;
+    setLines(ls => [...ls, {
+      key,
+      custom: true,
+      unitId: null, partyId: null,
+      label: '', serviceType: null,
+      description: '',
+      cleanedDays: [],
+      subsections: [],
+      // The whole amount lives in the override, so baseAmount() returns it
+      // with no subsections to sum.
+      amountOverride: '',
+      comboKey: null, fromMemory: false,
+      extraOn: false, extraMode: 'fixed', extraAmount: '', extraMinutes: '', extraRate: '', extraNote: '',
+      sourceTargetIds: [],
+    }]);
+    setExpanded(prev => new Set(prev).add(key));
+  };
+
   const grandTotal = lines.reduce((s, l) => s + lineAmount(l), 0);
 
   const save = async (status) => {
@@ -21237,7 +21335,11 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
     }).eq('id', property.id).then(() => {}, () => {});
     const lineRows = lines.map((l, i) => ({
       invoice_id: inv.id, unit_id: l.unitId || null, party_id: l.partyId || null,
-      label: l.label, service_type: l.serviceType || null, description: l.description || null,
+      label: l.label,
+      // Marker so reopening this invoice rebuilds the line as a custom one
+      // rather than as a derived cleaning line with a phantom item.
+      service_type: l.custom ? '__custom__' : (l.serviceType || null),
+      description: l.description || null,
       subsections: l.subsections.filter(s => s.included).map(s => ({ key: s.key, label: s.label, mode: s.mode, amount: subAmount(s), minutes: s.minutes, rate: s.rate })),
       amount: lineAmount(l), amount_overridden: l.amountOverride !== '' && l.amountOverride != null,
       base_amount: baseAmount(l),
@@ -21326,7 +21428,8 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
     // this mapper used to drop them — so an extra charge was invisible in
     // the preview and only appeared once the invoice was saved.
     const previewLines = lines.map(l => ({
-      id: l.key, label: l.label, service_type: l.serviceType,
+      id: l.key, label: l.label,
+      service_type: l.custom ? '__custom__' : (l.serviceType || null),
       description: l.description, qty: 1, amount: lineAmount(l),
       base_amount: baseAmount(l),
       extra_amount: extraAmount(l),
@@ -21626,9 +21729,9 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
                 <div key={l.key} className={`rounded-2xl overflow-hidden bg-white shadow-sm ${
                   open ? 'border-2 border-amber-400 shadow-md' : 'border-2 border-stone-300'}`}>
                   <div className={`flex items-center gap-2 px-4 py-3 ${open ? 'bg-amber-50 border-b-2 border-amber-200' : ''}`}>
-                    <button onClick={() => toggleExpand(l.key)} className="flex-1 flex items-center gap-2 text-left">
+                    <button onClick={() => toggleExpand(l.key)} className={`flex items-center gap-2 text-left ${l.custom ? '' : 'flex-1'}`}>
                       <ChevronRight size={15} className={`text-stone-400 transition-transform ${open ? 'rotate-90' : ''}`} />
-                      <span className="font-mono text-sm font-medium text-stone-900">{l.label}</span>
+                      {!l.custom && <span className="font-mono text-sm font-medium text-stone-900">{l.label}</span>}
                       {l.serviceType && <span className="text-[10px] px-2 py-0.5 rounded-full bg-stone-100 text-stone-600">{assignmentTypeLabel ? assignmentTypeLabel(l.serviceType) : l.serviceType}</span>}
                       {/* Two ways a line becomes "extra": the cleaner flagged
                          it in the field (tookLonger), or you priced one here.
@@ -21642,6 +21745,14 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
                         </span>
                       )}
                     </button>
+                    {/* Custom lines name themselves. The input lives outside the
+                       expand button so typing in it doesn't collapse the row. */}
+                    {l.custom && (
+                      <input value={l.label} autoFocus
+                        onChange={(e) => updateLine(l.key, { label: e.target.value })}
+                        placeholder="What is this for?"
+                        className="flex-1 min-w-0 px-2 py-1 rounded-lg border border-stone-300 bg-white font-mono text-sm text-stone-900 focus:outline-none focus:border-stone-900" />
+                    )}
                     {/* When this bedroom was actually cleaned. The invoice
                        only bills finished work, so every line has a date —
                        and you shouldn't have to trust the range blindly. */}
@@ -21687,6 +21798,30 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
                           </div>
                         </div>
                       </label>
+                      {/* A custom line has no cleaning behind it to itemize —
+                         one amount and a description is the whole thing. The
+                         three-stage machinery below is for derived lines. */}
+                      {l.custom ? (
+                        <div className="space-y-3">
+                          <div>
+                            <label className="text-[10px] uppercase tracking-wider font-mono text-stone-500 block mb-1">Amount</label>
+                            <div className="flex items-center gap-2">
+                              <span className="font-mono text-stone-500">$</span>
+                              <input type="number" step="0.01" value={l.amountOverride}
+                                onChange={(e) => updateLine(l.key, { amountOverride: e.target.value })}
+                                placeholder="0.00"
+                                className="w-32 px-3 py-2 rounded-lg border border-stone-300 bg-white text-right font-mono text-sm focus:outline-none focus:border-stone-900" />
+                            </div>
+                          </div>
+                          <div>
+                            <label className="text-[10px] uppercase tracking-wider font-mono text-stone-500 block mb-1">Description <span className="text-stone-400 normal-case">(prints under the line)</span></label>
+                            <input value={l.description}
+                              onChange={(e) => updateLine(l.key, { description: e.target.value })}
+                              placeholder="Optional — e.g. replacement blinds, second trip"
+                              className="w-full px-3 py-2 rounded-lg border border-stone-300 bg-white text-sm focus:outline-none focus:border-stone-900" />
+                          </div>
+                        </div>
+                      ) : (<>
                       {/* Three stages, in the order they apply:
                          1. STANDARD — the priced items
                          2. EXTRA    — added on top
@@ -21876,12 +22011,19 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
                           </div>
                         )}
                       </div>
+                      </>)}
 
                     </div>
                   )}
                 </div>
               );
             })}
+            {/* Anything the cleaning records can't produce on their own —
+               supplies, a callback, a one-off adjustment. */}
+            <button onClick={addCustomLine}
+              className="w-full py-3 rounded-2xl border-2 border-dashed border-stone-300 text-stone-600 text-sm font-medium hover:border-stone-500 hover:bg-stone-50 flex items-center justify-center gap-2 active:scale-[0.99] transition">
+              <Plus size={15} /> Add a custom line
+            </button>
           </div>
         )}
 
@@ -22080,8 +22222,12 @@ function InvoiceDocument({ invoiceId, data, preview, onBack, onChanged, onEditDr
                   <div className="flex-1 flex" style={{ gap: 9 }}>
                     <div style={{ color: '#2563eb', fontWeight: 600, fontSize: 13, lineHeight: 1.35, minWidth: 12, WebkitPrintColorAdjust: 'exact', printColorAdjust: 'exact' }}>{n}</div>
                     <div>
-                      <div className="font-semibold text-stone-800">{INVOICE_TYPE_LABEL[l.service_type] || 'Cleaning'}</div>
-                      <div className="text-stone-700">{l.label}</div>
+                      {l.service_type === '__custom__' ? (
+                        <div className="font-semibold text-stone-800">{l.label || 'Additional charge'}</div>
+                      ) : (<>
+                        <div className="font-semibold text-stone-800">{INVOICE_TYPE_LABEL[l.service_type] || 'Cleaning'}</div>
+                        <div className="text-stone-700">{l.label}</div>
+                      </>)}
                       {l.description && <div className="text-stone-500">{l.description}</div>}
                       {/* Show the PM what they're paying for rather than one
                          lump sum they have to take on faith. */}
@@ -23373,7 +23519,7 @@ function InvoiceView({ employee, onSignOut, onOpenMessages, onLogoClick, topTogg
       .select('*, shift:shifts!inner(employee:employees(name), customer_id), unit:units(label), party:parties(*)')
       .gte('start_time', start + 'T00:00:00')
       .lte('start_time', end + 'T23:59:59')
-      .eq('is_preview', false)  // Never bill for preview-mode work
+      .or('is_preview.is.null,is_preview.eq.false')  // Never bill for preview-mode work
       .not('end_time', 'is', null);
     const propBlocks = (blocks || []).filter(b => b.shift?.customer_id === selectedId);
     const blocksByParty = {};
@@ -23660,7 +23806,7 @@ function ExportView({ employee, onSignOut, onOpenMessages, onLogoClick, topToggl
     const { data } = await supabase
       .from('shifts')
       .select('*, employee:employees(id,name,pay_rate_hourly), customer:customers(id,name,property_type,bill_rate_hourly), work_blocks(id, end_time, start_time, bill_rate_at_work, unit:units(label), party:parties(label))')
-      .eq('is_preview', false)
+      .or('is_preview.is.null,is_preview.eq.false')
       .gte('start_time', startIso).lte('start_time', endIso)
       .order('start_time', { ascending: false });
     setFullShifts(data || []);
@@ -23674,7 +23820,7 @@ function ExportView({ employee, onSignOut, onOpenMessages, onLogoClick, topToggl
       .select('start_time, end_time, bill_rate_at_work, idle_seconds, manual_adjustment_seconds, auto_clocked_out, adjustment_notes, employee:employees(name), customer:customers(name, property_type, bill_rate_hourly), work_blocks(start_time, end_time, bill_rate_at_work)')
       .gte('start_time', startIso)
       .lte('start_time', endIso)
-      .eq('is_preview', false)  // Never include preview shifts in payroll
+      .or('is_preview.is.null,is_preview.eq.false')  // Never include preview shifts in payroll
       .not('end_time', 'is', null)
       .order('start_time');
     const rows = (data || []).map(s => {
@@ -24912,14 +25058,30 @@ function PortalDashboard({ property, portalKind, portalUser, properties, onSwitc
   // Back would drop them on the default History tab instead of the tab they
   // actually left from (the Schedule → Recently done bug).
   const [homeTab, setHomeTab] = useState('history');
+  // 'schedule' is retired — it lives under Cleanings now. Anything persisted
+  // from an older session falls back to the requests list.
   const [homeAsgSub, setHomeAsgSub] = useState('requests');
+  // These two live up here for the same reason homeTab does: PortalHome
+  // unmounts while a unit-day is open, so state held inside it resets and
+  // Back lands the PM on the default view instead of the one they left.
+  const [homeCleanSub, setHomeCleanSub] = useState('done');
+  const [homeAsgApproval, setHomeAsgApproval] = useState('waiting');
+  // Where the page was scrolled when they drilled in, so Back restores the
+  // spot in the list rather than the top of it.
+  const [homeScrollY, setHomeScrollY] = useState(0);
   const [schedRecentOpen, setSchedRecentOpen] = useState(false);
   const [homeFilter, setHomeFilter] = useState('7d'); // History range: 7d / 30d / 1y
 
   if (view.kind === 'unit-day') {
     return <PortalUnitDay property={property} unitId={view.unitId} date={view.date}
       portalUser={portalUser}
-      onBack={() => setView({ kind: 'home' })} />;
+      onBack={() => {
+        setView({ kind: 'home' });
+        // Restore the scroll position after the home screen has painted.
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          window.scrollTo(0, homeScrollY);
+        }));
+      }} />;
   }
 
   return <PortalHome property={property} portalKind={portalKind} portalUser={portalUser}
@@ -24931,7 +25093,13 @@ function PortalDashboard({ property, portalKind, portalUser, properties, onSwitc
     asgSub={homeAsgSub} setAsgSub={setHomeAsgSub}
     filter={homeFilter} setFilter={setHomeFilter}
     schedRecentOpen={schedRecentOpen} setSchedRecentOpen={setSchedRecentOpen}
-    onOpenUnitDay={(unitId, date) => setView({ kind: 'unit-day', unitId, date })} />;
+    cleanSub={homeCleanSub} setCleanSub={setHomeCleanSub}
+    asgApproval={homeAsgApproval} setAsgApproval={setHomeAsgApproval}
+    onOpenUnitDay={(unitId, date) => {
+      setHomeScrollY(window.scrollY || 0);
+      setView({ kind: 'unit-day', unitId, date });
+      window.scrollTo(0, 0);
+    }} />;
 }
 
 // Language toggle for the PM portal header. The portal already lives
@@ -24962,16 +25130,32 @@ function PortalLangToggle({ portalUser }) {
 
 function PortalHome({ property, portalKind, portalUser, properties, onSwitchProperty, hasMultipleProperties, onBackToPicker, onSignOut, onRefreshProperty, onOpenUnitDay,
   tab: tabProp, setTab: setTabProp, asgSub: asgSubProp, setAsgSub: setAsgSubProp,
+  cleanSub: cleanSubProp, setCleanSub: setCleanSubProp,
+  asgApproval: asgApprovalProp, setAsgApproval: setAsgApprovalProp,
   filter: filterProp, setFilter: setFilterProp,
   schedRecentOpen, setSchedRecentOpen }) {
   // Tab state is owned by PortalDashboard when it passes it down, so a trip
   // into a unit-day and back returns the PM to where they were. The local
   // fallbacks keep this component standalone if it's ever mounted directly.
-  const [ownTab, setOwnTab] = useState('history');        // 'history' | 'assignments'
-  const [ownAsgSub, setOwnAsgSub] = useState('requests'); // 'requests' | 'schedule' | 'concerns'
+  const [ownTab, setOwnTab] = useState('history');        // 'history' (Cleanings) | 'assignments' | 'invoices'
+  const [ownAsgSub, setOwnAsgSub] = useState('requests'); // 'requests' | 'concerns'
+  // Cleanings splits into what's finished (the old History tab) and what's
+  // still coming (the old Schedule tab, which used to sit oddly under
+  // Assignments even though it lists cleanings, not requests).
+  const [ownCleanSub, setOwnCleanSub] = useState('done');       // 'done' | 'pending'
+  // Assignments splits by approval state instead of showing every bucket
+  // stacked on one page.
+  const [ownAsgApproval, setOwnAsgApproval] = useState('waiting'); // 'waiting' | 'approved'
+  // Owned by PortalDashboard when passed down, so a trip into a unit-day and
+  // back returns to the same sub-view.
+  const cleanSub = cleanSubProp !== undefined ? cleanSubProp : ownCleanSub;
+  const setCleanSub = setCleanSubProp || setOwnCleanSub;
+  const asgApproval = asgApprovalProp !== undefined ? asgApprovalProp : ownAsgApproval;
+  const setAsgApproval = setAsgApprovalProp || setOwnAsgApproval;
   const tab = tabProp !== undefined ? tabProp : ownTab;
   const setTab = setTabProp || setOwnTab;
-  const asgSub = asgSubProp !== undefined ? asgSubProp : ownAsgSub;
+  const asgSubRaw = asgSubProp !== undefined ? asgSubProp : ownAsgSub;
+  const asgSub = asgSubRaw === 'schedule' ? 'requests' : asgSubRaw;
   const setAsgSub = setAsgSubProp || setOwnAsgSub;
   // Per-PM invoice access. Owners/managers viewing the portal (preview) and
   // anyone with the can_view_invoices flag get the Invoices tab. A previewing
@@ -25055,7 +25239,7 @@ function PortalHome({ property, portalKind, portalUser, properties, onSwitchProp
       };
       const [{ data: blocks }, doneTargets] = await Promise.all([
         supabase.from('work_blocks')
-          .select('id, start_time, end_time, unit_id, party_id, unit:units(id, label), shift:shifts!inner(customer_id), tasks(id, photos(kind, resolved_at))')
+          .select('id, start_time, end_time, unit_id, party_id, unit:units(id, label), shift:shifts!inner(customer_id), tasks(id, photos(kind, resolved_at, deleted_at))')
           .gte('start_time', since)
           .order('start_time', { ascending: false }),
         fetchDoneTargets(),
@@ -25094,8 +25278,14 @@ function PortalHome({ property, portalKind, portalUser, properties, onSwitchProp
         const date = new Date(b.start_time).toISOString().split('T')[0];
         if (!byDate[date]) byDate[date] = {};
         const u = b.unit;
-        if (!byDate[date][u.id]) byDate[date][u.id] = { unitId: u.id, label: u.label, photoCount: 0, hasDamage: false, hasResolvedDamage: false, hasCannot: false, hasResolvedCannot: false };
+        if (!byDate[date][u.id]) byDate[date][u.id] = { unitId: u.id, label: u.label, photoCount: 0, beds: new Set(), hasDamage: false, hasResolvedDamage: false, hasCannot: false, hasResolvedCannot: false };
+        // Which bedrooms were cleaned in this apartment on this day. The same
+        // apartment legitimately appears on two dates for two different
+        // bedrooms; without naming them the list looks like a duplicate.
+        if (b.party?.label) byDate[date][u.id].beds.add(b.party.label);
         (b.tasks || []).forEach(t => (t.photos || []).forEach(p => {
+          // Deleted photos shouldn't inflate the day's count.
+          if (p.deleted_at) return;
           // Track active and resolved damage separately. Active damage drives
           // the red badge; resolved damage powers the "past damage" sub-view.
           if (p.kind === 'damage') {
@@ -25122,9 +25312,9 @@ function PortalHome({ property, portalKind, portalUser, properties, onSwitchProp
       // this property qualifies.
       const [{ data: shifts }, { data: doneTargets }] = await Promise.all([
         supabase.from('shifts')
-          .select('id, start_time, end_time, tasks(id, photos(kind, resolved_at))')
+          .select('id, start_time, end_time, tasks(id, photos(kind, resolved_at, deleted_at))')
           .eq('customer_id', property.id)
-          .eq('is_preview', false)
+          .or('is_preview.is.null,is_preview.eq.false')
           .gte('start_time', since)
           .order('start_time', { ascending: false }),
         supabase.from('assignment_targets')
@@ -25240,7 +25430,7 @@ function PortalHome({ property, portalKind, portalUser, properties, onSwitchProp
         <div className="flex gap-1 bg-stone-100 p-1 rounded-xl">
           <button onClick={() => setTab('history')}
             className={`flex-1 py-2 px-2 rounded-lg text-xs font-medium ${tab === 'history' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
-            History
+            Cleanings
           </button>
           <button onClick={() => setTab('assignments')}
             className={`flex-1 py-2 px-2 rounded-lg text-xs font-medium ${tab === 'assignments' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
@@ -25256,20 +25446,45 @@ function PortalHome({ property, portalKind, portalUser, properties, onSwitchProp
       </div>
 
       {tab === 'history' && (
-        <PortalHistoryTab property={property} groups={groups} loaded={loaded}
-          filter={filter} setFilter={setFilter} onOpenUnitDay={onOpenUnitDay} />
+        <div>
+          <div className="px-5 pt-3">
+            <div className="flex gap-1 bg-stone-100 p-1 rounded-xl">
+              <button onClick={() => setCleanSub('done')}
+                className={`flex-1 py-2 px-2 rounded-lg text-xs font-medium ${cleanSub === 'done' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+                Cleanings done
+              </button>
+              <button onClick={() => setCleanSub('pending')}
+                className={`flex-1 py-2 px-2 rounded-lg text-xs font-medium ${cleanSub === 'pending' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+                Cleanings pending
+              </button>
+            </div>
+            <p className="text-[11px] text-stone-400 font-mono mt-2 px-1">
+              {cleanSub === 'done'
+                ? 'Finished cleanings, with the photos from each one.'
+                : "What's still scheduled or in progress for your property."}
+            </p>
+          </div>
+          {cleanSub === 'done'
+            ? <PortalHistoryTab property={property} groups={groups} loaded={loaded}
+                filter={filter} setFilter={setFilter} onOpenUnitDay={onOpenUnitDay} />
+            : <PortalScheduleTab property={property} onOpenUnitDay={onOpenUnitDay}
+                recentOpen={schedRecentOpen} setRecentOpen={setSchedRecentOpen} />}
+        </div>
       )}
       {tab === 'assignments' && (
         <div>
           <div className="px-5 pt-3">
             <div className="flex gap-1 bg-stone-100 p-1 rounded-xl">
-              <button onClick={() => setAsgSub('requests')}
-                className={`flex-1 py-2 px-2 rounded-lg text-xs font-medium ${asgSub === 'requests' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
-                Assignments
+              {/* Waiting / Approved split the assignment list by where it is in
+                 approval. Schedule moved out to Cleanings — it lists cleanings,
+                 not requests, so it never belonged here. */}
+              <button onClick={() => { setAsgSub('requests'); setAsgApproval('waiting'); }}
+                className={`flex-1 py-2 px-2 rounded-lg text-xs font-medium ${asgSub === 'requests' && asgApproval === 'waiting' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+                Waiting approval
               </button>
-              <button onClick={() => setAsgSub('schedule')}
-                className={`flex-1 py-2 px-2 rounded-lg text-xs font-medium ${asgSub === 'schedule' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
-                Schedule
+              <button onClick={() => { setAsgSub('requests'); setAsgApproval('approved'); }}
+                className={`flex-1 py-2 px-2 rounded-lg text-xs font-medium ${asgSub === 'requests' && asgApproval === 'approved' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+                Approved
               </button>
               <button onClick={() => setAsgSub('concerns')}
                 className={`flex-1 py-2 px-2 rounded-lg text-xs font-medium ${asgSub === 'concerns' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
@@ -25277,18 +25492,16 @@ function PortalHome({ property, portalKind, portalUser, properties, onSwitchProp
               </button>
             </div>
             <p className="text-[11px] text-stone-400 font-mono mt-2 px-1">
-              {asgSub === 'requests'
-                ? 'Request a cleaning for the team.'
-                : asgSub === 'schedule'
-                ? "What's coming up for your property, and what was done recently."
-                : 'Send us photos or a message — e.g. a resident complaint or something that needs attention.'}
+              {asgSub === 'concerns'
+                ? 'Send us photos or a message — e.g. a resident complaint or something that needs attention.'
+                : asgApproval === 'waiting'
+                ? 'Requests you\u2019ve sent that the owner hasn\u2019t approved yet, plus any drafts.'
+                : 'Approved and visible to the cleaning team.'}
             </p>
           </div>
           {asgSub === 'requests'
-            ? <PortalAssignmentsTab property={property} portalKind={portalKind} portalUser={portalUser} />
-            : asgSub === 'schedule'
-            ? <PortalScheduleTab property={property} onOpenUnitDay={onOpenUnitDay}
-                recentOpen={schedRecentOpen} setRecentOpen={setSchedRecentOpen} />
+            ? <PortalAssignmentsTab property={property} portalKind={portalKind} portalUser={portalUser}
+                approvalView={asgApproval} />
             : <PortalPhotoUploadTab property={property} portalKind={portalKind} />}
         </div>
       )}
@@ -25800,6 +26013,10 @@ function PortalHistoryTab({ property, groups, loaded, filter, setFilter, onOpenU
                           )}
                         </div>
                         <div className={`text-xs font-mono mt-1 ${u.hasDamage ? 'text-red-700' : u.hasCannot ? 'text-yellow-800' : 'text-stone-500'}`}>
+                          {u.beds && u.beds.size > 0 && (
+                            <span className="text-stone-700">
+                              {Array.from(u.beds).sort(naturalCompare).join(', ')} · </span>
+                          )}
                           {u.photoCount} {u.photoCount === 1 ? 'photo' : 'photos'}{(u.hasDamage || u.hasCannot) ? ' · tap to resolve' : ''}
                         </div>
                       </div>
@@ -25867,7 +26084,7 @@ function PortalUnitDay({ property, unitId, date, portalUser, onBack }) {
         .from('work_blocks')
         .select('*, party:parties(label,full_name), shift:shifts!inner(customer_id), tasks(*, photos(*, taken_by_employee:employees!taken_by(name)))')
         .eq('unit_id', unitId)
-        .eq('is_preview', false)
+        .or('is_preview.is.null,is_preview.eq.false')
         .gte('start_time', dayStart).lte('start_time', dayEnd)
         .order('start_time');
       const filtered = (bs || []).filter(b => b.shift?.customer_id === property.id);
@@ -25878,7 +26095,7 @@ function PortalUnitDay({ property, unitId, date, portalUser, onBack }) {
         .from('shifts')
         .select('*, tasks(*, photos(*, taken_by_employee:employees!taken_by(name)))')
         .eq('customer_id', property.id)
-        .eq('is_preview', false)
+        .or('is_preview.is.null,is_preview.eq.false')
         .gte('start_time', dayStart).lte('start_time', dayEnd)
         .order('start_time');
       // Wrap each shift as a "block" for uniform display
@@ -25901,14 +26118,11 @@ function PortalUnitDay({ property, unitId, date, portalUser, onBack }) {
     const labels = [...new Set(blocks.map(b => b.party?.label).filter(Boolean))];
     return labels.sort(naturalCompare);
   })();
-  // Auto-pick the first bedroom on initial load if there are multiple.
-  // Doesn't override a user's choice — only sets when bedroomTab is empty.
-  useEffect(() => {
-    if (partyLabels.length > 1 && !bedroomTab) {
-      setBedroomTab(partyLabels[0]);
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [blocks]);
+  // Opening an apartment shows EVERY bedroom cleaned that day. This used to
+  // auto-select the first bedroom, which silently hid the rest — a PM opening
+  // a 3-bedroom apartment saw one bedroom's photos and reasonably concluded
+  // the others were missing. Filtering is still one tap away; it's just no
+  // longer the default nobody asked for.
 
   if (!loaded) return <Splash text="Loading…" />;
 
@@ -25927,6 +26141,9 @@ function PortalUnitDay({ property, unitId, date, portalUser, onBack }) {
   const allCannotActive = [];   // unresolved "couldn't clean" — yellow banner
   const allCannotResolved = []; // resolved "couldn't clean" — collapsed below
   visibleBlocks.forEach(b => (b.tasks || []).forEach(t => (t.photos || []).forEach(p => {
+    // A photo the cleaner deleted shouldn't reappear on the PM's side. The
+    // cleaner views filter this; this one never did.
+    if (p.deleted_at) return;
     const enriched = {
       ...p,
       taskName: t.name,
@@ -25935,7 +26152,6 @@ function PortalUnitDay({ property, unitId, date, portalUser, onBack }) {
       partyLabel: b.party?.label,
     };
     if (p.kind === 'before') allBefore.push(enriched);
-    else if (p.kind === 'after') allAfter.push(enriched);
     else if (p.kind === 'damage') {
       if (p.resolved_at) allDamageResolved.push(enriched);
       else allDamageActive.push(enriched);
@@ -25944,6 +26160,12 @@ function PortalUnitDay({ property, unitId, date, portalUser, onBack }) {
       if (p.resolved_at) allCannotResolved.push(enriched);
       else allCannotActive.push(enriched);
     }
+    // 'after' AND anything else. This used to be `else if (kind === 'after')`
+    // with no final else, so a photo carrying a null or legacy kind matched
+    // no branch and vanished — uploaded fine, invisible to the PM forever.
+    // Upload already defaults a missing kind to 'after', so that's where an
+    // unrecognised one belongs.
+    else allAfter.push(enriched);
   })));
 
   // Build a flat lookup so the toolbar can find selected photos and
@@ -26412,6 +26634,13 @@ function ResolvedDamageHistory({ photos, onReopen, title = 'Resolved damage', bl
 }
 
 function PortalPhotoSection({ label, photos, highlight, description, onResolve, selectMode, selectedIds, onToggleSelect, compact }) {
+  // Which bedrooms these photos are in. Shown as chips under the heading so
+  // "Active damage · 1" also answers "where?" without a tap.
+  const bedroomBreakdown = (() => {
+    const m = new Map();
+    (photos || []).forEach(p => { if (p.partyLabel) m.set(p.partyLabel, (m.get(p.partyLabel) || 0) + 1); });
+    return Array.from(m.entries()).sort((a, b) => naturalCompare(a[0], b[0]));
+  })();
   const [zoom, setZoom] = useState(null);
   const isDamage = highlight === 'red';
   const isCannot = highlight === 'yellow';
@@ -26472,6 +26701,20 @@ function PortalPhotoSection({ label, photos, highlight, description, onResolve, 
         <span className="text-[10px] font-mono text-stone-500">{photos.length}</span>
       </div>
       {description && <p className="text-xs text-stone-600 mb-2">{description}</p>}
+      {/* Which bedrooms these are in — the answer a PM wants first when
+         something is flagged. */}
+      {bedroomBreakdown.length > 0 && (
+        <div className="flex flex-wrap gap-1.5 mb-2.5">
+          {bedroomBreakdown.map(([bed, n]) => (
+            <span key={bed}
+              className={`text-[10px] font-mono px-2 py-0.5 rounded-full border ${flagged
+                ? (highlight === 'red' ? 'bg-red-100 text-red-800 border-red-200' : 'bg-yellow-100 text-yellow-800 border-yellow-300')
+                : 'bg-stone-100 text-stone-600 border-stone-200'}`}>
+              {bed}{n > 1 ? ` · ${n}` : ''}
+            </span>
+          ))}
+        </div>
+      )}
       <div className={innerGridClass}>
         {photos.map(p => {
           const isSelected = selectMode && selectedIds && selectedIds.has(p.id);
@@ -27443,7 +27686,7 @@ function ActivityTimelineView({ employee, onClose }) {
         supabase.from('shifts')
           .select('id, start_time, end_time, employee:employees(id, name), customer:customers(id, name)')
           .gte('start_time', startISO).lte('start_time', endISO)
-          .eq('is_preview', false),
+          .or('is_preview.is.null,is_preview.eq.false'),
         supabase.from('work_blocks')
           .select('id, start_time, end_time, unit:units(label), party:parties(label), shift:shifts(employee:employees(id, name), customer:customers(id, name))')
           .gte('start_time', startISO).lte('start_time', endISO),
@@ -27834,7 +28077,7 @@ function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenAssi
         .select('id, start_time, customer_id')
         .gte('start_time', start)
         .lt('start_time', end)
-        .eq('is_preview', false);  // Don't mark calendar days for preview-only activity
+        .or('is_preview.is.null,is_preview.eq.false');  // Don't mark calendar days for preview-only activity
       if (sErr) { console.error('[DailyCalendar] shifts error:', sErr); }
       if (cancelled) return;
 
@@ -28209,7 +28452,7 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit }) {
       .select('id, start_time, end_time, customer_id, idle_seconds, employee:employees(id,name), customer:customers(id,name,property_type,bill_rate_hourly), work_blocks(id, start_time, end_time, bill_rate_at_work, unit:units(id, label), party:parties(id, label, full_name), tasks(*, photos(*, taken_by_employee:employees!taken_by(name))))')
       .gte('start_time', dayStart)
       .lte('start_time', dayEnd)
-      .eq('is_preview', false)
+      .or('is_preview.is.null,is_preview.eq.false')
       .order('start_time');
 
     // Group by property → unit
@@ -34032,7 +34275,7 @@ function AssignmentCard({ target, property = null, busy, onView, onStart, onPaus
         .from('work_blocks')
         .select('id, end_time, shift:shifts!inner(employee:employees(id, name), customer_id)')
         .eq('unit_id', t.unit_id).eq('party_id', t.party_id)
-        .eq('is_preview', false)
+        .or('is_preview.is.null,is_preview.eq.false')
         .gte('start_time', todayStart.toISOString())
         .is('end_time', null);
       const cleaners = (data || [])
@@ -38427,7 +38670,7 @@ function LiveCleanersSheet({ viewer, onClose, onOpenShift }) {
       .from('shifts')
       .select('*, employee:employees(id, name), customer:customers(id, name), work_blocks(id, start_time, end_time, unit:units(label), party:parties(label))')
       .is('end_time', null)
-      .eq('is_preview', false)  // Don't show preview shifts as on-the-clock
+      .or('is_preview.is.null,is_preview.eq.false')  // Don't show preview shifts as on-the-clock
       .order('start_time', { ascending: true });
     setShifts(data || []);
     setLoaded(true);
@@ -39095,13 +39338,19 @@ function PortalScheduleTab({ property, onOpenUnitDay, recentOpen, setRecentOpen 
   const overdue = [];
   // Upcoming: assignments with a due date today-or-later, still open.
   const upcomingByDate = {};
+  // Open work with NO date on it. This used to be dropped on the floor — the
+  // tab was called "Schedule" so undated jobs arguably had no place on it,
+  // but it's "Cleanings pending" now and a PM with twenty undated jobs was
+  // being shown none of them.
+  const undated = [];
   (rows || []).forEach(a => {
-    if (!a.scheduled_date) return;
-    const k = String(a.scheduled_date).slice(0, 10);
     if (!stillOpen(a)) return;
+    if (!a.scheduled_date) { undated.push(a); return; }
+    const k = String(a.scheduled_date).slice(0, 10);
     if (k < todayKey) { overdue.push(a); return; }
     (upcomingByDate[k] = upcomingByDate[k] || []).push(a);
   });
+  undated.sort((a, b) => String(a.title || '').localeCompare(String(b.title || ''), undefined, { numeric: true }));
   const upcomingDates = Object.keys(upcomingByDate).sort();
   overdue.sort((a, b) => String(a.scheduled_date).localeCompare(String(b.scheduled_date)));
   const daysLate = (key) => {
@@ -39196,8 +39445,8 @@ function PortalScheduleTab({ property, onOpenUnitDay, recentOpen, setRecentOpen 
     <div className="px-5 pt-5 pb-24 space-y-5">
       <ScreenId id="PM-SCHED" />
       <div>
-        <h2 className="font-serif text-2xl text-stone-900 mb-1">Upcoming</h2>
-        <p className="text-sm text-stone-600">Scheduled work for {property.name}.</p>
+        <h2 className="font-serif text-2xl text-stone-900 mb-1">Cleanings pending</h2>
+        <p className="text-sm text-stone-600">Everything still open for {property.name}, dated or not.</p>
       </div>
 
       {overdue.length > 0 && (
@@ -39217,11 +39466,11 @@ function PortalScheduleTab({ property, onOpenUnitDay, recentOpen, setRecentOpen 
         </div>
       )}
 
-      {upcomingDates.length === 0 ? (
+      {upcomingDates.length === 0 && undated.length === 0 ? (
         <div className="text-center py-10 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
-          Nothing scheduled ahead right now.
+          Nothing pending right now.
         </div>
-      ) : (
+      ) : upcomingDates.length === 0 ? null : (
         <div className="space-y-4">
           {upcomingDates.map(dk => (
             <div key={dk}>
@@ -39236,6 +39485,26 @@ function PortalScheduleTab({ property, onOpenUnitDay, recentOpen, setRecentOpen 
               </div>
             </div>
           ))}
+        </div>
+      )}
+
+      {/* Pending, but nobody has put a date on it yet. Still real work the
+         property is owed, so it gets its own section rather than being
+         invisible until someone schedules it. */}
+      {undated.length > 0 && (
+        <div>
+          <div className="flex items-center gap-2 mb-2.5">
+            <span className="w-1 h-5 rounded-full flex-shrink-0 bg-stone-300" />
+            <span className="text-base font-bold uppercase tracking-wide font-mono text-stone-800">
+              No date set · {undated.length}
+            </span>
+          </div>
+          <p className="text-xs text-stone-600 mb-2.5">
+            Pending work that hasn't been scheduled for a specific day.
+          </p>
+          <div className="space-y-2">
+            {undated.map(a => renderJobCard(a))}
+          </div>
         </div>
       )}
 
@@ -39305,7 +39574,7 @@ function PortalScheduleTab({ property, onOpenUnitDay, recentOpen, setRecentOpen 
   );
 }
 
-function PortalAssignmentsTab({ property, portalKind, portalUser }) {
+function PortalAssignmentsTab({ property, portalKind, portalUser, approvalView = null }) {
   const [assignments, setAssignments] = useState([]);
   const [loaded, setLoaded] = useState(false);
   // Added 'wizard' kind so the PM can open the new ChecklistAssignmentWizard.
@@ -39457,14 +39726,33 @@ function PortalAssignmentsTab({ property, portalKind, portalUser }) {
         </div>
       ) : (
         <>
-          <PortalAssignmentSection title="Drafts" subtitle="You can still edit these" items={groups.draft}
-            color="stone" onOpen={(a) => setView({ kind: 'detail', assignment: a })} />
-          <PortalAssignmentSection title="Pending review" subtitle="Waiting for the owner to approve" items={groups.pending}
-            color="amber" onOpen={(a) => setView({ kind: 'detail', assignment: a })} />
-          <PortalAssignmentSection title="Needs changes" subtitle="Owner asked for changes — edit and resubmit" items={groups.rejected}
-            color="red" onOpen={(a) => setView({ kind: 'detail', assignment: a })} />
-          <PortalAssignmentSection title="Approved" subtitle="Active — visible to the cleaning team" items={groups.approved}
-            color="emerald" onOpen={(a) => setView({ kind: 'detail', assignment: a })} />
+          {/* approvalView comes from the Waiting / Approved sub-tabs. Drafts and
+             "needs changes" belong with Waiting — they're all things that
+             aren't live yet — so nothing is orphaned by the split. Rendering
+             everything (approvalView null) keeps this component usable
+             standalone. */}
+          {approvalView !== 'approved' && (<>
+            <PortalAssignmentSection title="Drafts" subtitle="You can still edit these" items={groups.draft}
+              color="stone" onOpen={(a) => setView({ kind: 'detail', assignment: a })} />
+            <PortalAssignmentSection title="Pending review" subtitle="Waiting for the owner to approve" items={groups.pending}
+              color="amber" onOpen={(a) => setView({ kind: 'detail', assignment: a })} />
+            <PortalAssignmentSection title="Needs changes" subtitle="Owner asked for changes — edit and resubmit" items={groups.rejected}
+              color="red" onOpen={(a) => setView({ kind: 'detail', assignment: a })} />
+          </>)}
+          {approvalView !== 'waiting' && (
+            <PortalAssignmentSection title="Approved" subtitle="Active — visible to the cleaning team" items={groups.approved}
+              color="emerald" onOpen={(a) => setView({ kind: 'detail', assignment: a })} />
+          )}
+          {approvalView === 'waiting' && groups.draft.length + groups.pending.length + groups.rejected.length === 0 && (
+            <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
+              Nothing waiting on approval.
+            </div>
+          )}
+          {approvalView === 'approved' && groups.approved.length === 0 && (
+            <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
+              No approved assignments yet.
+            </div>
+          )}
         </>
       )}
     </div>

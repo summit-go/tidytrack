@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap173";
+const BUILD_TAG = "aug6-tap174";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -25931,7 +25931,7 @@ function PortalHome({ property, portalKind, portalUser, properties, onSwitchProp
                 damageSubTab={damageSubTabProp} setDamageSubTab={setDamageSubTabProp}
                 damageExpanded={damageExpandedProp} setDamageExpanded={setDamageExpandedProp} />
             : <PortalScheduleTab property={property} onOpenUnitDay={onOpenUnitDay}
-                recentOpen={schedRecentOpen} setRecentOpen={setSchedRecentOpen} />}
+                />}
         </div>
       )}
       {tab === 'assignments' && (
@@ -39935,15 +39935,16 @@ function PortalPhotoUploadTab({ property, portalKind }) {
 // PM SCHEDULE — what's coming up for this property (upcoming assignments
 // by due date), with a toggle to peek at what was done the last 3 days.
 // =================================================================
-function PortalScheduleTab({ property, onOpenUnitDay, recentOpen, setRecentOpen }) {
-  const [staleOpen, setStaleOpen] = useState(false);
+function PortalScheduleTab({ property, onOpenUnitDay }) {
+  const [aptQuery, setAptQuery] = useState('');
+  const [buildingFilter, setBuildingFilter] = useState(null);
   const [rows, setRows] = useState(null);
   // Whether "Recently done" is expanded is owned by PortalDashboard when
   // provided, so opening a job from that list and pressing Back reopens the
   // list instead of collapsing it.
-  const [ownRecent, setOwnRecent] = useState(false);
-  const showRecent = recentOpen !== undefined ? recentOpen : ownRecent;
-  const toggleRecent = () => (setRecentOpen ? setRecentOpen(!showRecent) : setOwnRecent(v => !v));
+  // "Recently done" removed from this tab — finished work belongs under
+  // Cleanings done, and having it here meant the pending list ended on a
+  // block of things that weren't pending.
   const [attach, setAttach] = useState(null); // { url, kind, title } being viewed
   const todayKey = localTodayKey();
 
@@ -39990,66 +39991,76 @@ function PortalScheduleTab({ property, onOpenUnitDay, recentOpen, setRecentOpen 
     return ts.length === 0 || ts.some(t => t.status !== 'done');
   };
 
-  // Overdue: open work whose date has already passed. Without this, a job
-  // scheduled for today silently disappeared the moment the date rolled
-  // over — too old for Upcoming, not finished so not in Recently done.
-  const overdue = [];
-  // Upcoming: assignments with a due date today-or-later, still open.
-  const upcomingByDate = {};
-  // Open work with NO date on it. This used to be dropped on the floor — the
-  // tab was called "Schedule" so undated jobs arguably had no place on it,
-  // but it's "Cleanings pending" now and a PM with twenty undated jobs was
-  // being shown none of them.
-  const undated = [];
-  (rows || []).forEach(a => {
-    if (!stillOpen(a)) return;
-    if (!a.scheduled_date) { undated.push(a); return; }
-    const k = String(a.scheduled_date).slice(0, 10);
-    if (k < todayKey) { overdue.push(a); return; }
-    (upcomingByDate[k] = upcomingByDate[k] || []).push(a);
-  });
-  // Undated work splits by age. Something raised in the last month is real
-  // upcoming work; a cleaning check sitting undated since June is a leftover
-  // nobody is going to do, and burying the live items under 41 of those makes
-  // the tab useless. Old ones stay reachable, just collapsed.
-  const STALE_DAYS = 45;
-  const staleCut = Date.now() - STALE_DAYS * 86400000;
-  const dateOf = (a) => new Date(a.approved_at || a.created_at || 0).getTime();
-  const undatedRecent = undated.filter(a => dateOf(a) >= staleCut);
-  const undatedStale = undated.filter(a => dateOf(a) < staleCut);
-  const byNewest = (a, b) => dateOf(b) - dateOf(a);
-  undatedRecent.sort(byNewest);
-  undatedStale.sort(byNewest);
-  const upcomingDates = Object.keys(upcomingByDate).sort();
-  overdue.sort((a, b) => String(a.scheduled_date).localeCompare(String(b.scheduled_date)));
+  // ---- One flat list of open work, grouped by BUILDING -----------------
+  // The old shape (Overdue / Upcoming / No date / Older unscheduled /
+  // Recently done) split one short list five ways and led with what was
+  // late — which reads to a property manager as a list of our failures.
+  // A PM wants one question answered: what is still owed on my property,
+  // and where. So: every open job, in building order, with its date (or
+  // lack of one) stated on the card.
+  const openJobs = (rows || []).filter(stillOpen);
+
+  const buildingOf = (a) => {
+    const lbl = (a.targets || [])[0]?.unit?.label || '';
+    const m = String(lbl).trim().match(/^B\s*(\d+)\s*-/i);
+    return m ? `B${Number(m[1])}` : null;
+  };
+  const unitLabelOf = (a) => (a.targets || [])[0]?.unit?.label || '';
+
   const daysLate = (key) => {
     const [y, m, d] = String(key).slice(0, 10).split('-').map(Number);
     const [ty, tm, td] = todayKey.split('-').map(Number);
     return Math.round((new Date(ty, tm - 1, td) - new Date(y, m - 1, d)) / 86400000);
   };
 
-  // Recently done: bedrooms fully finished in the last 3 days (one per job).
-  const cutoff = new Date(); cutoff.setDate(cutoff.getDate() - 3);
-  const recent = [];
-  (rows || []).forEach(a => {
-    const ts = a.targets || [];
-    if (ts.length === 0 || !ts.every(t => t.status === 'done')) return;
-    const times = ts.map(t => t.completed_at).filter(Boolean).map(x => new Date(x));
-    if (!times.length) return;
-    const last = new Date(Math.max(...times));
-    if (last < cutoff) return;
-    recent.push({
-      id: a.id,
-      title: label(ts[0]?.unit, ts[0]?.party) || a.title || 'Job',
-      size: unitSizeLabel(ts[0]?.unit),
-      type: a.assignment_type,
-      when: last,
-      items: ts.length,
-      unitId: ts[0]?.unit_id || null,
-      dayKey: localDayKey(last),
-    });
+  // Apartment search + building pills, the same controls as Cleanings done.
+  const aq = aptQuery.trim().toLowerCase();
+  const searched = openJobs.filter(a => {
+    if (!aq) return true;
+    const hay = `${unitLabelOf(a)} ${(a.targets || [])[0]?.party?.label || ''} ${a.title || ''}`.toLowerCase();
+    return hay.includes(aq);
   });
-  recent.sort((x, y) => y.when - x.when);
+  const buildingCounts = (() => {
+    const m = new Map();
+    searched.forEach(a => {
+      const b = buildingOf(a);
+      if (!b) return;
+      m.set(b, (m.get(b) || 0) + 1);
+    });
+    return Array.from(m.entries()).sort((x, y) => naturalCompare(x[0], y[0]));
+  })();
+  const visible = buildingFilter
+    ? searched.filter(a => buildingOf(a) === buildingFilter)
+    : searched;
+
+  // Group into buildings; dated work first inside each, soonest at the top,
+  // then the undated ones.
+  const buildingGroups = (() => {
+    const m = new Map();
+    visible.forEach(a => {
+      const b = buildingOf(a) || '__none__';
+      if (!m.has(b)) m.set(b, []);
+      m.get(b).push(a);
+    });
+    return Array.from(m.entries())
+      .sort((x, y) => {
+        if (x[0] === '__none__') return 1;
+        if (y[0] === '__none__') return -1;
+        return naturalCompare(x[0], y[0]);
+      })
+      .map(([building, jobs]) => ({
+        building,
+        jobs: jobs.sort((p, q) => {
+          const pd = p.scheduled_date || '';
+          const qd = q.scheduled_date || '';
+          if (pd && qd) return pd.localeCompare(qd) || naturalCompare(unitLabelOf(p), unitLabelOf(q));
+          if (pd) return -1;
+          if (qd) return 1;
+          return naturalCompare(unitLabelOf(p), unitLabelOf(q));
+        }),
+      }));
+  })();
+
 
   // One upcoming/overdue job card. Shared by both lists so the overdue
   // section can't drift from Upcoming.
@@ -40078,9 +40089,16 @@ function PortalScheduleTab({ property, onOpenUnitDay, recentOpen, setRecentOpen 
             </div>
           </div>
           <span className="flex flex-col items-end gap-1 flex-shrink-0">
-          {late > 0 && (
-            <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-amber-200 text-amber-900 font-bold">
-              {late} day{late === 1 ? '' : 's'} late
+          {/* Scheduled or not, said plainly. "8 days late" as the only date
+             information made every list read like an apology; the date itself
+             is the useful part, with lateness as a quiet suffix. */}
+          {a.scheduled_date ? (
+            <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full border inline-flex items-center gap-1 ${late > 0 ? 'bg-amber-100 text-amber-900 border-amber-300' : 'bg-stone-100 text-stone-700 border-stone-200'}`}>
+              <Calendar size={9} /> {fmtDay(a.scheduled_date)}{late > 0 ? ` · ${late}d late` : ''}
+            </span>
+          ) : (
+            <span className="text-[10px] font-mono px-2 py-0.5 rounded-full border border-dashed border-stone-300 text-stone-500">
+              No date set
             </span>
           )}
           {a.assignment_type && <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-orange-100 text-orange-800">{assignmentTypeLabel(a.assignment_type)}</span>}
@@ -40115,133 +40133,62 @@ function PortalScheduleTab({ property, onOpenUnitDay, recentOpen, setRecentOpen 
       <ScreenId id="PM-SCHED" />
       <div>
         <h2 className="font-serif text-2xl text-stone-900 mb-1">Cleanings pending</h2>
-        <p className="text-sm text-stone-600">Everything still open for {property.name}, dated or not.</p>
+        <p className="text-sm text-stone-600">
+          Everything still open for {property.name}, by building.
+        </p>
       </div>
 
-      {overdue.length > 0 && (
-        <div>
-          <div className="flex items-center gap-2 mb-2.5">
-            <AlertCircle size={16} className="text-amber-700 flex-shrink-0" />
-            <span className="text-base font-bold text-amber-900">
-              Overdue · {overdue.length}
-            </span>
-          </div>
-          <p className="text-xs text-stone-600 mb-2.5">
-            Past its date and not finished yet.
-          </p>
-          <div className="space-y-2">
-            {overdue.map(a => renderJobCard(a, daysLate(a.scheduled_date)))}
-          </div>
+      {/* Apartment search — top level, not behind a toggle. */}
+      {openJobs.length > 0 && (
+        <div className="relative">
+          <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-stone-400" />
+          <input type="text" value={aptQuery} onChange={(e) => setAptQuery(e.target.value)}
+            placeholder="Search apartment number…"
+            className="w-full pl-9 pr-9 py-3 rounded-xl border-2 border-stone-300 bg-white text-sm focus:outline-none focus:border-stone-900" />
+          {aptQuery && (
+            <button onClick={() => setAptQuery('')}
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-stone-400 hover:text-stone-700">
+              <X size={15} />
+            </button>
+          )}
         </div>
       )}
 
-      {upcomingDates.length === 0 && undated.length === 0 ? (
-        <div className="text-center py-10 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
-          Nothing pending right now.
-        </div>
-      ) : upcomingDates.length === 0 ? null : (
-        <div className="space-y-4">
-          {upcomingDates.map(dk => (
-            <div key={dk}>
-              <div className="flex items-center gap-2 mb-2.5">
-                <span className={`w-1 h-5 rounded-full flex-shrink-0 ${dk === todayKey ? 'bg-emerald-600' : 'bg-stone-300'}`} />
-                <span className={`text-base font-bold uppercase tracking-wide font-mono ${dk === todayKey ? 'text-emerald-700' : 'text-stone-800'}`}>
-                  {dk === todayKey ? 'Today · ' : ''}{fmtDay(dk)}
-                </span>
-              </div>
-              <div className="space-y-2">
-                {upcomingByDate[dk].map(a => renderJobCard(a))}
-              </div>
-            </div>
+      {/* Building pills, same as Cleanings done. */}
+      {buildingCounts.length > 1 && (
+        <div className="flex gap-1.5 overflow-x-auto pb-1 -mx-1 px-1">
+          <button onClick={() => setBuildingFilter(null)}
+            className={`text-[11px] font-mono px-2.5 py-1 rounded-full whitespace-nowrap flex-shrink-0 transition-colors ${!buildingFilter ? 'bg-stone-900 text-stone-50' : 'bg-stone-100 text-stone-600 hover:bg-stone-200'}`}>
+            All ({searched.length})
+          </button>
+          {buildingCounts.map(([b, n]) => (
+            <button key={b} onClick={() => setBuildingFilter(buildingFilter === b ? null : b)}
+              className={`text-[11px] font-mono px-2.5 py-1 rounded-full whitespace-nowrap flex-shrink-0 transition-colors ${buildingFilter === b ? 'bg-stone-900 text-stone-50' : 'bg-stone-100 text-stone-600 hover:bg-stone-200'}`}>
+              {b} ({n})
+            </button>
           ))}
         </div>
       )}
 
-      {/* Pending, but nobody has put a date on it yet. Still real work the
-         property is owed, so it gets its own section rather than being
-         invisible until someone schedules it. */}
-      {undatedRecent.length > 0 && (
-        <div>
-          <div className="flex items-center gap-2 mb-2.5">
-            <span className="w-1 h-5 rounded-full flex-shrink-0 bg-stone-300" />
-            <span className="text-base font-bold uppercase tracking-wide font-mono text-stone-800">
-              No date set · {undatedRecent.length}
-            </span>
-          </div>
-          <p className="text-xs text-stone-600 mb-2.5">
-            Pending work that hasn't been scheduled for a specific day.
-          </p>
-          <div className="space-y-2">
-            {undatedRecent.map(a => renderJobCard(a))}
-          </div>
+      {visible.length === 0 ? (
+        <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
+          {aq || buildingFilter ? 'Nothing open matches that.' : 'Nothing pending right now.'}
         </div>
-      )}
-
-      {undatedStale.length > 0 && (
-        <div>
-          <button onClick={() => setStaleOpen(o => !o)}
-            className="w-full flex items-center gap-2 mb-2 text-left">
-            <ChevronRight size={14} className={`text-stone-400 transition-transform ${staleOpen ? 'rotate-90' : ''}`} />
-            <span className="text-sm font-bold uppercase tracking-wide font-mono text-stone-500">
-              Older, still unscheduled · {undatedStale.length}
-            </span>
-          </button>
-          {!staleOpen && (
-            <p className="text-xs text-stone-500 mb-2.5 pl-6">
-              Raised more than {STALE_DAYS} days ago and never scheduled. Worth a look — these may no longer be needed.
-            </p>
-          )}
-          {staleOpen && (
-            <div className="space-y-2">
-              {undatedStale.map(a => renderJobCard(a))}
+      ) : (
+        buildingGroups.map(bg => (
+          <div key={bg.building}>
+            <div className="text-sm font-mono text-stone-500 mb-2 uppercase tracking-wider flex items-center gap-2">
+              <Building2 size={13} />
+              {bg.building === '__none__' ? 'Other' : `Building ${bg.building.replace(/^B/i, '')}`}
+              <span className="text-stone-400">· {bg.jobs.length}</span>
             </div>
-          )}
-        </div>
+            <div className="space-y-2">
+              {bg.jobs.map(a => renderJobCard(a, a.scheduled_date ? Math.max(0, daysLate(a.scheduled_date)) : 0))}
+            </div>
+          </div>
+        ))
       )}
 
-      {/* Recently done — collapsed by default so it doesn't compete with History. */}
-      <button onClick={toggleRecent}
-        className="w-full flex items-center justify-between px-4 py-3 rounded-2xl bg-stone-100 text-stone-700 text-sm font-medium">
-        <span>Recently done · last 3 days{recent.length ? ` (${recent.length})` : ''}</span>
-        <ChevronRight size={16} className={`transition-transform ${showRecent ? 'rotate-90' : ''}`} />
-      </button>
-      {showRecent && (
-        recent.length === 0 ? (
-          <div className="text-center py-6 text-stone-400 text-xs">Nothing completed in the last 3 days.</div>
-        ) : (
-          <div className="space-y-2">
-            {recent.map(r => {
-              const canOpen = !!(onOpenUnitDay && r.unitId);
-              return (
-                <button key={r.id} onClick={() => canOpen && onOpenUnitDay(r.unitId, r.dayKey)}
-                  disabled={!canOpen}
-                  className={`w-full text-left rounded-xl bg-white border border-stone-200 px-4 py-3 flex items-center justify-between gap-2 ${canOpen ? 'hover:border-stone-400 active:scale-[0.99] transition' : ''}`}>
-                  <span className="min-w-0">
-                    <span className="flex items-center gap-2 flex-wrap">
-                      <span className="font-serif text-sm text-stone-900 truncate">{r.title}</span>
-                      {r.size && (
-                        <span className="text-[10px] font-mono px-1.5 py-0.5 rounded-md bg-stone-100 text-stone-700 border border-stone-200 flex-shrink-0">
-                          {r.size}
-                        </span>
-                      )}
-                    </span>
-                    <span className="block text-[11px] font-mono text-stone-500 mt-0.5">
-                      {r.type ? assignmentTypeLabel(r.type) : 'Clean'} · {r.items} item{r.items === 1 ? '' : 's'}
-                      {canOpen && <span className="text-stone-400"> · tap for photos & details</span>}
-                    </span>
-                  </span>
-                  <span className="flex items-center gap-1.5 flex-shrink-0">
-                    <span className="text-[11px] font-mono text-emerald-700 flex items-center gap-1">
-                      <Check size={11} /> {r.when.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
-                    </span>
-                    {canOpen && <ChevronRight size={14} className="text-stone-400" />}
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-        )
-      )}
       {/* Attachment viewer — the file tied to an upcoming assignment. */}
       {attach && (
         <div className="fixed inset-0 z-[60] bg-black/70 flex items-center justify-center p-3" onClick={() => setAttach(null)}>

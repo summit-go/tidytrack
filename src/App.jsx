@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap169";
+const BUILD_TAG = "aug6-tap173";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -8271,7 +8271,7 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
   // Scope: the property you're clocked into, or everything. Clocked in at
   // Carriage Cove and seeing Bridges jobs mixed in is noise — you can't work
   // them without switching properties first.
-  const [ownPropScope, setOwnPropScope] = useState('current'); // 'current' | 'all'
+  const [ownPropScope, setOwnPropScope] = useState(currentPropertyId ? 'current' : 'all');
   const propScope = propScopeProp !== undefined ? propScopeProp : ownPropScope;
   const setPropScope = setPropScopeProp || setOwnPropScope;
   const [priorityCollapsed, setPriorityCollapsed] = useState(false);
@@ -8459,12 +8459,29 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
     const t = new Date(); t.setDate(t.getDate() + 1);
     return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`;
   })();
-  const scopedJobs = (propScope === 'current' && currentPropertyId)
-    ? jobs.filter(j => j.customerId === currentPropertyId)
-    : jobs;
+  // propScope is 'current' | 'all' | a specific customerId. Not clocked in
+  // there is no "current", so the row lists the properties themselves and
+  // defaults to all of them.
+  const scopedJobs = (() => {
+    if (propScope === 'all') return jobs;
+    if (propScope === 'current') {
+      return currentPropertyId ? jobs.filter(j => j.customerId === currentPropertyId) : jobs;
+    }
+    return jobs.filter(j => j.customerId === propScope);
+  })();
   const otherPropCount = currentPropertyId
     ? jobs.filter(j => j.customerId !== currentPropertyId).length
     : 0;
+  // Properties that actually have open work, for the not-clocked-in picker.
+  const propsWithJobs = (() => {
+    const m = new Map();
+    jobs.forEach(j => {
+      if (!j.customerId) return;
+      if (!m.has(j.customerId)) m.set(j.customerId, { id: j.customerId, name: j.propName || 'Property', n: 0 });
+      m.get(j.customerId).n += 1;
+    });
+    return Array.from(m.values()).sort((a, b) => naturalCompare(a.name, b.name));
+  })();
   const baseList = (sub === 'mine' ? scopedJobs.filter(j => isMine(j)) : scopedJobs)
     .slice()
     .sort((a, b) =>
@@ -8751,8 +8768,24 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
         <button onClick={() => setSub('mine')} className={`flex-1 py-2 rounded-lg text-xs font-medium ${sub === 'mine' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>Assigned to me</button>
         <button onClick={() => setSub('all')} className={`flex-1 py-2 rounded-lg text-xs font-medium ${sub === 'all' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>All pending</button>
       </div>
-      {/* Property scope. Only offered when other properties actually have
-         work — no point showing a toggle that changes nothing. */}
+      {/* Not clocked in: no "current" property to compare against, so the row
+         is the property list itself, defaulting to everything. */}
+      {!currentPropertyId && propsWithJobs.length > 1 && (
+        <div className="flex gap-1.5 overflow-x-auto pb-2 mb-2 -mx-1 px-1">
+          <button onClick={() => setPropScope('all')}
+            className={`text-[11px] font-mono px-2.5 py-1 rounded-full whitespace-nowrap flex-shrink-0 transition-colors ${propScope !== 'all' && propScope !== 'current' ? 'bg-stone-100 text-stone-600 hover:bg-stone-200' : 'bg-stone-900 text-stone-50'}`}>
+            All properties ({jobs.length})
+          </button>
+          {propsWithJobs.map(p => (
+            <button key={p.id} onClick={() => setPropScope(propScope === p.id ? 'all' : p.id)}
+              className={`text-[11px] font-mono px-2.5 py-1 rounded-full whitespace-nowrap flex-shrink-0 transition-colors ${propScope === p.id ? 'bg-stone-900 text-stone-50' : 'bg-stone-100 text-stone-600 hover:bg-stone-200'}`}>
+              {p.name} ({p.n})
+            </button>
+          ))}
+        </div>
+      )}
+      {/* Clocked in: the choice is "here" vs "everywhere". Only offered when
+         other properties actually have work. */}
       {currentPropertyId && otherPropCount > 0 && (
         <div className="flex items-center gap-1.5 mb-2 flex-wrap">
           <button onClick={() => setPropScope('current')}
@@ -8928,7 +8961,19 @@ function PropertySwitcher({ currentPropertyId, currentName, employee, onSwitch, 
         title="Switch property"
         className="min-w-0 flex items-center gap-2 text-left rounded-lg -m-1 p-1 hover:bg-white/10 active:scale-[0.99] transition disabled:opacity-50">
         <Building2 size={22} className="text-amber-400 shrink-0" />
-        <span className="font-serif text-2xl text-stone-50 leading-tight truncate">{currentName}</span>
+        {/* The title states what the list below is showing. On "All
+           properties" it said "Carriage Cove" while listing Bridges and
+           Citifront jobs, which is the opposite of helpful. */}
+        <span className="min-w-0">
+          <span className="block font-serif text-2xl text-stone-50 leading-tight truncate">
+            {showingAll ? 'All properties' : currentName}
+          </span>
+          {showingAll && (
+            <span className="block text-[11px] font-mono text-amber-300 truncate">
+              clocked in at {currentName}
+            </span>
+          )}
+        </span>
         <ChevronRight size={18} className={`text-stone-400 shrink-0 transition-transform ${open ? 'rotate-90' : 'rotate-90'}`} />
       </button>
       {open && (
@@ -13108,6 +13153,77 @@ async function createNotification({ to, kind, title, body = null, linkKind = nul
   } catch (e) { console.warn('[notify] insert failed', e); }
 }
 
+// =================================================================
+// STALE WORK SWEEP
+// Assignments someone started on an earlier day and never closed out.
+// Nobody is coming back to these on their own, so the owner gets one
+// notification a day naming how many there are, and a matching
+// "Unfinished" tab on the assignments board to actually deal with them.
+//
+// Runs client-side when an owner opens the app — there's no scheduler
+// here — and writes at most one notification per owner per day.
+// =================================================================
+// The nightly job lives in Postgres (pg_cron -> notify_unfinished_work),
+// so it fires whether or not anyone has the app open. This client-side pass
+// is a safety net for installs that haven't run that SQL yet, and for the
+// gap between midnight and whenever the cron runs.
+//
+// Both write the SAME row shape — kind 'stale_work', scope 'owner' — and both
+// check the day's row before inserting, so they can't double-notify each
+// other.
+async function sweepUnfinishedWork(employee) {
+  if (!employee?.id) return;
+  if (!(employee.role === 'owner' || employee.role === 'manager')) return;
+  try {
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
+
+    // Already notified today, by cron or by another tab? Then stop. This is
+    // checked against the database rather than localStorage so it holds
+    // across devices and across the two code paths.
+    const { data: already } = await supabase.from('notifications')
+      .select('id')
+      .eq('kind', 'stale_work')
+      .gte('created_at', startOfToday.toISOString())
+      .limit(1);
+    if ((already || []).length > 0) return;
+
+    // Started before today and still open. started_at is what makes this
+    // "someone actually began it", as opposed to a job simply sitting
+    // pending — those aren't stale, they just haven't started.
+    const { data, error } = await supabase.from('assignment_targets')
+      .select('assignment_id, unit_id, party_id, status, started_at, assignment:assignments!inner(active, deleted_at, source, pm_status, customer:customers(name))')
+      .in('status', ['in_progress', 'paused'])
+      .lt('started_at', startOfToday.toISOString())
+      .limit(1000);
+    if (error || !data) return;
+    const live = data.filter(t => {
+      const a = t.assignment;
+      return a && a.active !== false && !a.deleted_at &&
+        (a.source !== 'pm' || a.pm_status === 'approved');
+    });
+    if (live.length === 0) return;
+
+    // Count bedrooms, not item rows — one bedroom with 40 open items is one
+    // job to chase, not forty.
+    const bedrooms = new Set(live.map(t => t.assignment_id || `${t.unit_id}:${t.party_id}`));
+    const props = [...new Set(live.map(t => t.assignment?.customer?.name).filter(Boolean))];
+    const n = bedrooms.size;
+    await createNotification({
+      to: { scope: 'owner' },
+      kind: 'stale_work',
+      title: `${n} ${n === 1 ? 'job was' : 'jobs were'} started but never finished`,
+      body: props.length
+        ? `${props.join(', ')} \u00b7 open the Unfinished tab to close them out or bump them.`
+        : 'Open the Unfinished tab to close them out or bump them.',
+      linkKind: 'assignment',
+      createdBy: employee.id,
+    });
+  } catch (e) {
+    console.warn('[stale sweep] failed', e);
+  }
+}
+
 // Remove any "priority job available" broadcast for an assignment — called
 // when someone claims it (requests/gets assigned/starts) or it's no longer
 // priority, so the notification stops showing for every cleaner at once.
@@ -13497,6 +13613,10 @@ function ManagerShell({ employee, onSignOut }) {
   const [previewMode, setPreviewMode] = usePagePersistence(`manager_preview_cleaner_${employee.id}`, false);
   const showMoneyTabs = canSeeMoney(employee); // owner only
   const isOwner = employee?.role === 'owner';
+  // Nightly-ish sweep for work that was started and abandoned. No scheduler
+  // here, so it runs when the owner opens the app and self-limits to one
+  // notification a day.
+  useEffect(() => { sweepUnfinishedWork(employee); /* eslint-disable-next-line */ }, [employee?.id]);
   // Owner "hats": Operations (cleaning side) vs Business (management).
   // Reshapes the bottom nav so each mode only shows its own tabs.
   // Managers keep the flat nav.
@@ -13741,6 +13861,7 @@ function ManagerDashboard({ employee, onSignOut, onOpenMessages, onLogoClick }) 
   const [filterProperties, setFilterProperties] = useState(new Set());
   const [filterStatuses, setFilterStatuses] = useState(new Set()); // open|in_progress|completed
   const [filtersOpen, setFiltersOpen] = useState(false);
+  const [addShiftOpen, setAddShiftOpen] = useState(false);
 
   const load = useCallback(async () => {
     // Paginated load so "all time" returns every shift, not just the
@@ -13954,7 +14075,13 @@ function ManagerDashboard({ employee, onSignOut, onOpenMessages, onLogoClick }) 
       </div>
 
       {/* Sub-view toggle */}
-      <div className="px-5 mb-4 mt-2 flex gap-2 border-b border-stone-200 pb-3 overflow-x-auto">
+      <div className="px-5 mb-4 mt-2 flex gap-2 border-b border-stone-200 pb-3 overflow-x-auto items-center">
+        {/* Back-fill a shift someone forgot to clock in for. */}
+        <button onClick={() => setAddShiftOpen(true)}
+          className="px-3 py-1.5 rounded-full text-xs font-mono uppercase tracking-wider whitespace-nowrap bg-stone-900 text-stone-50 hover:bg-stone-800 flex items-center gap-1.5 flex-shrink-0">
+          <Plus size={12} /> Add shift
+        </button>
+        <span className="w-px h-5 bg-stone-200 flex-shrink-0" />
         <button onClick={() => { setSubView('cleaner'); }}
           className={`px-3 py-1.5 rounded-full text-xs font-mono uppercase tracking-wider whitespace-nowrap transition-colors ${subView === 'cleaner' ? 'bg-stone-200 text-stone-900' : 'text-stone-500'}`}>
           By cleaner
@@ -13989,6 +14116,12 @@ function ManagerDashboard({ employee, onSignOut, onOpenMessages, onLogoClick }) 
           viewer={employee}
           onClose={() => setLiveSheetOpen(false)}
           onOpenShift={(s) => { setLiveSheetOpen(false); setSelectedShift(s); setView('detail'); }} />
+      )}
+      {addShiftOpen && (
+        <AddShiftModal
+          currentEmployee={employee}
+          onClose={() => setAddShiftOpen(false)}
+          onSaved={() => load()} />
       )}
     </div>
   );
@@ -14084,6 +14217,215 @@ const localDayKey = (ts) => {
   // June — which broke flat pay (saved to the wrong month) and day matching.
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 };
+
+// =================================================================
+// ADD A SHIFT BY HAND
+// For work that never went through the app: someone forgot to clock
+// in, worked off-site, or you're back-filling a day. Writes a normal
+// shift row so it flows into payroll, the P&L and the Shifts page
+// like any other — no special-case record.
+//
+// Pay: leave it blank and the shift is priced the usual way (hours x
+// the employee's rate). Enter an amount and it's stored as that day's
+// flat pay for that property, which is exactly what the Set pay
+// control on the shift card writes.
+// =================================================================
+function AddShiftModal({ onClose, onSaved, currentEmployee }) {
+  const [employees, setEmployees] = useState([]);
+  const [properties, setProperties] = useState([]);
+  const [empId, setEmpId] = useState('');
+  const [custId, setCustId] = useState('');           // '' = no property
+  const todayStr = (() => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  })();
+  const [date, setDate] = useState(todayStr);
+  const [startTime, setStartTime] = useState('09:00');
+  const [endTime, setEndTime] = useState('17:00');
+  const [flatPay, setFlatPay] = useState('');
+  const [note, setNote] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+
+  useEffect(() => {
+    (async () => {
+      const [e, c] = await Promise.all([
+        supabase.from('employees').select('id, name, pay_rate_hourly, active').eq('active', true).order('name'),
+        supabase.from('customers').select('id, name, active').eq('active', true).order('name'),
+      ]);
+      setEmployees(e.data || []);
+      setProperties(c.data || []);
+    })();
+  }, []);
+
+  const emp = employees.find(x => x.id === empId);
+  // Local wall-clock times, so 9:00 means 9:00 where the work happened.
+  const startISO = (date && startTime) ? new Date(`${date}T${startTime}:00`) : null;
+  const endISO = (date && endTime) ? new Date(`${date}T${endTime}:00`) : null;
+  // An overnight shift ends "before" it starts on the clock — roll the end
+  // to the next day rather than rejecting it.
+  const endAdjusted = (startISO && endISO && endISO <= startISO)
+    ? new Date(endISO.getTime() + 24 * 3600 * 1000)
+    : endISO;
+  const hours = (startISO && endAdjusted) ? (endAdjusted - startISO) / 3600000 : 0;
+  const computedPay = flatPay !== ''
+    ? Number(flatPay)
+    : hours * (Number(emp?.pay_rate_hourly) || 0);
+
+  const save = async () => {
+    setErr('');
+    if (!empId) { setErr('Pick who worked.'); return; }
+    if (!startISO || !endAdjusted) { setErr('Enter a start and end time.'); return; }
+    if (hours <= 0 || hours > 24) { setErr('That start/end pair gives an impossible length.'); return; }
+    setBusy(true);
+    try {
+      const { data: shift, error } = await supabase.from('shifts').insert({
+        employee_id: empId,
+        customer_id: custId || null,
+        start_time: startISO.toISOString(),
+        end_time: endAdjusted.toISOString(),
+        is_preview: false,
+        // The shifts table calls this adjustment_notes — it's the same field
+        // the Adjust hours flow writes, so a hand-added shift explains itself
+        // wherever a shift's notes are shown.
+        adjustment_notes: note || null,
+      }).select('id').single();
+      if (error) throw error;
+
+      // A typed amount becomes the day's flat pay — the same row the Set pay
+      // control writes, so the shift card shows it and payroll picks it up.
+      if (flatPay !== '' && !isNaN(Number(flatPay))) {
+        const payload = {
+          employee_id: empId,
+          work_date: date,
+          customer_id: custId || null,
+          assignment_id: null,
+          unit_id: null,
+          flat_amount: Number(flatPay),
+          created_by: currentEmployee?.id || null,
+        };
+        let q = supabase.from('employee_pay_days').select('id')
+          .eq('employee_id', empId).eq('work_date', date);
+        q = custId ? q.eq('customer_id', custId) : q.is('customer_id', null);
+        const { data: found } = await q.is('assignment_id', null).is('unit_id', null).maybeSingle();
+        if (found?.id) {
+          await supabase.from('employee_pay_days').update({ flat_amount: Number(flatPay) }).eq('id', found.id);
+        } else {
+          const { error: pe } = await supabase.from('employee_pay_days').insert(payload);
+          // Don't lose the shift over a pay-row failure — it's still editable
+          // from the shift card afterwards.
+          if (pe) console.warn('[add shift] pay row failed', pe);
+        }
+      }
+      setBusy(false);
+      if (onSaved) onSaved(shift?.id);
+      onClose();
+    } catch (e) {
+      setBusy(false);
+      setErr('Could not save: ' + (e.message || e));
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-stone-900/60 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
+      <div className="bg-stone-50 w-full sm:max-w-md sm:rounded-3xl rounded-t-3xl max-h-[92vh] overflow-y-auto">
+        <div className="p-5 border-b border-stone-200 flex items-center justify-between">
+          <div>
+            <div className="font-serif text-xl text-stone-900">Add a shift</div>
+            <div className="text-xs text-stone-500 mt-0.5">For work that never got clocked in.</div>
+          </div>
+          <button onClick={onClose} className="p-2 rounded-full hover:bg-stone-200"><X size={18} /></button>
+        </div>
+
+        <div className="p-5 space-y-4">
+          <div>
+            <label className="text-[10px] uppercase tracking-wider font-mono text-stone-500 block mb-1">Who worked</label>
+            <select value={empId} onChange={(e) => setEmpId(e.target.value)}
+              className="w-full px-3 py-2.5 rounded-xl border border-stone-300 bg-white text-sm">
+              <option value="">Pick a cleaner…</option>
+              {employees.map(e => (
+                <option key={e.id} value={e.id}>
+                  {e.name}{e.pay_rate_hourly ? ` — $${Number(e.pay_rate_hourly).toFixed(2)}/hr` : ' — no rate set'}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label className="text-[10px] uppercase tracking-wider font-mono text-stone-500 block mb-1">Property</label>
+            <select value={custId} onChange={(e) => setCustId(e.target.value)}
+              className="w-full px-3 py-2.5 rounded-xl border border-stone-300 bg-white text-sm">
+              <option value="">No property (other work)</option>
+              {properties.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+          </div>
+
+          <div>
+            <label className="text-[10px] uppercase tracking-wider font-mono text-stone-500 block mb-1">Date</label>
+            <input type="date" value={date} max={todayStr} onChange={(e) => setDate(e.target.value)}
+              className="w-full px-3 py-2.5 rounded-xl border border-stone-300 bg-white text-sm" />
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="text-[10px] uppercase tracking-wider font-mono text-stone-500 block mb-1">Start</label>
+              <input type="time" value={startTime} onChange={(e) => setStartTime(e.target.value)}
+                className="w-full px-3 py-2.5 rounded-xl border border-stone-300 bg-white text-sm" />
+            </div>
+            <div>
+              <label className="text-[10px] uppercase tracking-wider font-mono text-stone-500 block mb-1">End</label>
+              <input type="time" value={endTime} onChange={(e) => setEndTime(e.target.value)}
+                className="w-full px-3 py-2.5 rounded-xl border border-stone-300 bg-white text-sm" />
+            </div>
+          </div>
+
+          {hours > 0 && (
+            <div className="px-3 py-2 rounded-xl bg-stone-100 text-xs font-mono text-stone-600 flex items-center justify-between">
+              <span>{fmtTimeShort(hours * 3600000)}{endAdjusted && endISO && endAdjusted > endISO ? ' · overnight' : ''}</span>
+              <span className={computedPay > 0 ? 'text-stone-900 font-bold' : 'text-stone-400'}>
+                {computedPay > 0 ? fmtMoney(computedPay) : 'no rate set'}
+              </span>
+            </div>
+          )}
+
+          <div>
+            <label className="text-[10px] uppercase tracking-wider font-mono text-stone-500 block mb-1">
+              Pay <span className="text-stone-400 normal-case">(optional — overrides hours × rate)</span>
+            </label>
+            <div className="flex items-center gap-2">
+              <span className="font-mono text-stone-500">$</span>
+              <input type="number" step="0.01" value={flatPay} onChange={(e) => setFlatPay(e.target.value)}
+                placeholder={hours > 0 && emp?.pay_rate_hourly ? (hours * Number(emp.pay_rate_hourly)).toFixed(2) : '0.00'}
+                className="flex-1 px-3 py-2.5 rounded-xl border border-stone-300 bg-white text-sm font-mono" />
+            </div>
+          </div>
+
+          <div>
+            <label className="text-[10px] uppercase tracking-wider font-mono text-stone-500 block mb-1">
+              Note <span className="text-stone-400 normal-case">(why this was added by hand)</span>
+            </label>
+            <input value={note} onChange={(e) => setNote(e.target.value)}
+              placeholder="e.g. forgot to clock in, off-site errand"
+              className="w-full px-3 py-2.5 rounded-xl border border-stone-300 bg-white text-sm" />
+          </div>
+
+          {err && <div className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-xl px-3 py-2">{err}</div>}
+        </div>
+
+        <div className="p-5 border-t border-stone-200 flex gap-2">
+          <button onClick={onClose} disabled={busy}
+            className="flex-1 py-3 rounded-2xl border border-stone-300 text-stone-700 text-sm font-medium disabled:opacity-50">
+            Cancel
+          </button>
+          <button onClick={save} disabled={busy || !empId}
+            className="flex-1 py-3 rounded-2xl bg-stone-900 text-stone-50 text-sm font-medium disabled:opacity-50">
+            {busy ? 'Saving…' : 'Add shift'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 // Shifts grouped BY CLEANER. Level 1 = one card per cleaner (no matter how
 // many shifts they logged). Drill in = that cleaner's work grouped BY DAY
@@ -25757,12 +26099,62 @@ function PortalHistoryTab({ property, groups, loaded, filter, setFilter, onOpenU
   // Build the set of available buildings and dates from the loaded
   // groups so the filter UI only offers options that actually have
   // cleanings. Empty Set = show all.
+  // Per-building progress: how many of the building's assignments are
+  // finished vs how many exist. "groups" only knows about work that's DONE,
+  // so the open side has to be counted separately. One assignment per
+  // bedroom, which is how they're created.
+  const [buildingProgress, setBuildingProgress] = useState({});
+  useEffect(() => {
+    if (!property?.id) return;
+    let cancelled = false;
+    (async () => {
+      const PAGE = 1000;
+      let rows = [];
+      for (let from = 0; ; from += PAGE) {
+        const { data, error } = await supabase.from('assignment_targets')
+          .select('assignment_id, unit_id, party_id, status, unit:units(label), assignment:assignments!inner(customer_id, active, deleted_at, source, pm_status)')
+          .eq('assignment.customer_id', property.id)
+          .range(from, from + PAGE - 1);
+        if (error || !data) break;
+        rows = rows.concat(data);
+        if (data.length < PAGE) break;
+        if (from > 100000) break;
+      }
+      if (cancelled) return;
+      const perBuilding = {};
+      const seen = new Map(); // assignment/bedroom -> done?
+      rows.forEach(t => {
+        const a = t.assignment;
+        if (!a || a.active === false || a.deleted_at) return;
+        if (a.source === 'pm' && a.pm_status !== 'approved') return;
+        const b = buildingFromLabel(t.unit?.label || '');
+        if (!b) return;
+        const key = t.assignment_id || `${t.unit_id}:${t.party_id}`;
+        // A bedroom counts as done only when every item in it is done.
+        const isDone = t.status === 'done' || t.status === 'blocked';
+        if (!seen.has(key)) seen.set(key, { b, allDone: isDone });
+        else if (!isDone) seen.get(key).allDone = false;
+      });
+      seen.forEach(v => {
+        if (!perBuilding[v.b]) perBuilding[v.b] = { done: 0, total: 0 };
+        perBuilding[v.b].total += 1;
+        if (v.allDone) perBuilding[v.b].done += 1;
+      });
+      setBuildingProgress(perBuilding);
+    })();
+    return () => { cancelled = true; };
+  }, [property?.id]);
+
   const availableBuildings = (() => {
     const set = new Set();
     groups.forEach(g => g.units.forEach(u => {
       const b = buildingFromLabel(u.label);
       if (b) set.add(b);
     }));
+    // Include buildings that have only OPEN work — otherwise a building
+    // with nothing finished yet is missing from the row entirely, which is
+    // exactly the building a PM most wants to see.
+    Object.keys(buildingProgress).forEach(b => set.add(b));
     return [...set].sort(naturalCompare);
   })();
   const availableDates = (() => {
@@ -25806,6 +26198,29 @@ function PortalHistoryTab({ property, groups, loaded, filter, setFilter, onOpenU
   // on screen — otherwise the PM sees "12 cleanings" while only 3 rows
   // are visible after filtering.
   const totalPhotos = filteredGroups.reduce((sum, g) => sum + g.units.reduce((s, u) => s + u.photoCount, 0), 0);
+
+  // Flatten day-groups into building-groups. Buildings in natural order,
+  // apartments within a building in natural order, and the most recent
+  // cleaning first when the same apartment appears on several days.
+  const buildingGroups = (() => {
+    const m = new Map();
+    filteredGroups.forEach(g => g.units.forEach(u => {
+      const b = buildingFromLabel(u.label) || '__none__';
+      if (!m.has(b)) m.set(b, []);
+      m.get(b).push({ g, u });
+    }));
+    return Array.from(m.entries())
+      .sort((a, b) => {
+        if (a[0] === '__none__') return 1;
+        if (b[0] === '__none__') return -1;
+        return naturalCompare(a[0], b[0]);
+      })
+      .map(([building, rows]) => ({
+        building,
+        rows: rows.sort((x, y) =>
+          naturalCompare(x.u.label, y.u.label) || String(y.g.date).localeCompare(String(x.g.date))),
+      }));
+  })();
   const damageCount = filteredGroups.reduce((sum, g) => sum + g.units.filter(u => u.hasDamage).length, 0);
   const resolvedDamageCount = filteredGroups.reduce((sum, g) => sum + g.units.filter(u => u.hasResolvedDamage).length, 0);
   const totalCleanings = filteredGroups.reduce((sum, g) => sum + g.units.length, 0);
@@ -25984,11 +26399,25 @@ function PortalHistoryTab({ property, groups, loaded, filter, setFilter, onOpenU
         ))}
       </div>
 
-      {/* Filters panel — PM-appropriate: date / building / apartment.
-         The date list only shows dates where cleanings were actually
-         done (the "signify which dates have work" affordance), with
-         counts so the PM knows how many units to expect. Building and
-         apartment filters narrow the list further. */}
+      {/* Apartment search sits above the panel, not inside it — it's the
+         control a PM reaches for first and it shouldn't cost two taps. */}
+      {groups.length > 0 && (
+        <div className="mb-3 relative">
+          <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-stone-400" />
+          <input type="text" value={apartmentSearch}
+            onChange={(e) => setApartmentSearch(e.target.value)}
+            placeholder="Search apartment number…"
+            className="w-full pl-9 pr-9 py-3 rounded-xl border-2 border-stone-300 bg-white text-sm focus:outline-none focus:border-stone-900" />
+          {apartmentSearch && (
+            <button onClick={() => setApartmentSearch('')}
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-stone-400 hover:text-stone-700">
+              <X size={15} />
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* Filters panel — building progress lives here now. */}
       {groups.length > 0 && (
         <div className="mb-4">
           <button onClick={() => setFiltersOpen(o => !o)}
@@ -26006,65 +26435,38 @@ function PortalHistoryTab({ property, groups, loaded, filter, setFilter, onOpenU
           </button>
           {filtersOpen && (
             <div className="p-3 rounded-xl bg-stone-50 border border-stone-200 mt-1 space-y-3">
-              {/* Date filter — list of dates with cleanings, count each.
-                 Single-select: tap a date to drill down, tap again to clear. */}
-              {availableDates.length > 0 && (
-                <div>
-                  <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1.5">
-                    Dates with cleanings ({availableDates.length})
-                  </div>
-                  <div className="grid grid-cols-2 gap-1.5">
-                    {availableDates.map(date => {
-                      const dateGroup = groups.find(g => g.date === date);
-                      const count = dateGroup?.units.length || 0;
-                      const isActive = filterDate === date;
-                      return (
-                        <button key={date}
-                          onClick={() => setFilterDate(isActive ? '' : date)}
-                          className={`px-2.5 py-2 rounded-lg text-left text-xs transition-colors ${isActive ? 'bg-stone-900 text-stone-50' : 'bg-white border border-stone-200 text-stone-700 hover:border-stone-400'}`}>
-                          <div className="flex items-center justify-between gap-1">
-                            <span className="font-mono truncate">
-                              {new Date(date + 'T12:00:00').toLocaleDateString('en-US', { month:'short', day:'numeric', weekday:'short' })}
-                            </span>
-                            <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded-full flex-shrink-0 ${isActive ? 'bg-stone-700 text-stone-100' : 'bg-emerald-100 text-emerald-800'}`}>
-                              {count}
-                            </span>
-                          </div>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-
+              {/* Date chips removed — the range is driven by the 7d/30d/1y
+                 buttons above, and a second date control here just split
+                 the same decision across two places. */}
               {/* Building filter — chips, multi-select. Only shown when
                  there's more than one building in the data. */}
               {availableBuildings.length > 1 && (
                 <div>
-                  <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1.5">Building</div>
+                  <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1.5">
+                    Building <span className="text-stone-400 normal-case">· done / total assignments</span>
+                  </div>
                   <div className="flex gap-1.5 flex-wrap">
                     {availableBuildings.map(b => {
                       const active = filterBuildings.has(b);
+                      const prog = buildingProgress[b];
+                      const complete = prog && prog.total > 0 && prog.done === prog.total;
                       return (
                         <button key={b} onClick={() => toggleBuilding(b)}
-                          className={`px-2.5 py-1 rounded-full text-xs font-mono flex items-center gap-1 transition-colors ${active ? 'bg-stone-900 text-stone-50' : 'bg-white border border-stone-300 text-stone-600 hover:border-stone-500'}`}>
+                          className={`px-2.5 py-1 rounded-full text-xs font-mono flex items-center gap-1.5 transition-colors ${active ? 'bg-stone-900 text-stone-50' : complete ? 'bg-emerald-50 border border-emerald-300 text-emerald-800' : 'bg-white border border-stone-300 text-stone-600 hover:border-stone-500'}`}>
                           {active && <Check size={10} />}
                           {b}
+                          {prog && prog.total > 0 && (
+                            <span className={`text-[10px] ${active ? 'text-stone-400' : complete ? 'text-emerald-700' : 'text-stone-500'}`}>
+                              {prog.done}/{prog.total}
+                            </span>
+                          )}
+                          {complete && !active && <Check size={10} className="text-emerald-600" />}
                         </button>
                       );
                     })}
                   </div>
                 </div>
               )}
-
-              {/* Apartment search — fast text filter on unit label. */}
-              <div>
-                <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1.5">Apartment</div>
-                <input type="text" value={apartmentSearch}
-                  onChange={(e) => setApartmentSearch(e.target.value)}
-                  placeholder="e.g. 305"
-                  className="w-full px-3 py-2 rounded-lg border border-stone-300 bg-white text-sm focus:outline-none focus:border-stone-900" />
-              </div>
 
               {activeFilterCount > 0 && (
                 <button onClick={clearFilters}
@@ -26093,13 +26495,18 @@ function PortalHistoryTab({ property, groups, loaded, filter, setFilter, onOpenU
         </div>
       ) : (
         <div className="space-y-6">
-          {filteredGroups.map(g => (
-            <div key={g.date}>
-              <div className="text-sm font-mono text-stone-500 mb-2 uppercase tracking-wider">
-                {new Date(g.date + 'T12:00:00').toLocaleDateString('en-US', { weekday:'long', month:'long', day:'numeric', year:'numeric' })}
+          {buildingGroups.map(bg => (
+            <div key={bg.building}>
+              {/* Grouped by BUILDING, not by day — a PM walking a property
+                 thinks in buildings. The date moved onto each card so nothing
+                 is lost by dropping the date headers. */}
+              <div className="text-sm font-mono text-stone-500 mb-2 uppercase tracking-wider flex items-center gap-2">
+                <Building2 size={13} />
+                {bg.building === '__none__' ? 'Other' : `Building ${bg.building.replace(/^B/i, '')}`}
+                <span className="text-stone-400">· {bg.rows.length}</span>
               </div>
               <div className="space-y-2">
-                {g.units.map(u => (
+                {bg.rows.map(({ g, u }) => (
                   <button key={`${g.date}-${u.unitId || 'simple'}`}
                     onClick={() => onOpenUnitDay(u.unitId, g.date)}
                     className={`w-full text-left p-4 rounded-2xl border transition-colors relative overflow-hidden ${
@@ -26146,6 +26553,14 @@ function PortalHistoryTab({ property, groups, loaded, filter, setFilter, onOpenU
                           )}
                         </div>
                         <div className={`text-xs font-mono mt-1 ${u.hasDamage ? 'text-red-700' : u.hasCannot ? 'text-yellow-800' : 'text-stone-500'}`}>
+                          {/* The day this was cleaned. It used to be a header
+                             above a block of cards; on a building-ordered list
+                             it has to live on the card itself. */}
+                          <span className="inline-flex items-center gap-1 text-stone-600">
+                            <Calendar size={10} />
+                            {new Date(g.date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}
+                          </span>
+                          <span> · </span>
                           {u.beds && u.beds.size > 0 && (
                             <span className="text-stone-700">
                               {Array.from(u.beds).sort(naturalCompare).join(', ')} · </span>
@@ -34712,7 +35127,7 @@ function AssignmentsPanel({ propertyId, property = null, employee, refreshKey, o
   useEffect(() => {
     if (!SHOW_PAUSED_TAB && tab === 'paused') setTab('in_progress');
   }, [tab]);
-  const [counts, setCounts] = useState({ pending: 0, paused: 0, in_progress: 0, done: 0, blocked: 0, mine: 0 });
+  const [counts, setCounts] = useState({ pending: 0, paused: 0, in_progress: 0, done: 0, blocked: 0, mine: 0, unfinished: 0 });
 
   // Counting moved into AssignmentTabContent, which already holds every row
   // for this property — one source of truth means the tab number and the list
@@ -34747,6 +35162,16 @@ function AssignmentsPanel({ propertyId, property = null, employee, refreshKey, o
           className={`flex-1 min-w-fit py-2 px-2 rounded-lg text-xs font-medium transition-colors whitespace-nowrap ${tab === 'in_progress' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
           In progress{counts.in_progress > 0 && ` (${counts.in_progress})`}
         </button>
+        {/* Unfinished — started on an earlier day and never closed out.
+           These are a subset of In progress, pulled out because nobody comes
+           back to them on their own. Amber so they read as needing a decision
+           rather than as normal live work. */}
+        {counts.unfinished > 0 && (
+          <button onClick={() => setTab('unfinished')}
+            className={`flex-1 min-w-fit py-2 px-2 rounded-lg text-xs font-medium transition-colors whitespace-nowrap flex items-center justify-center gap-1 ${tab === 'unfinished' ? 'bg-white shadow-sm text-amber-900' : 'text-amber-700'}`}>
+            <AlertCircle size={11} /> Unfinished ({counts.unfinished})
+          </button>
+        )}
         <button onClick={() => setTab('done')}
           className={`flex-1 min-w-fit py-2 px-2 rounded-lg text-xs font-medium transition-colors whitespace-nowrap ${tab === 'done' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
           Done{counts.done > 0 && ` (${counts.done})`}
@@ -35384,7 +35809,12 @@ function AssignmentTabContent({ propertyId, property = null, employee, statusFil
   const [filterCleaners, setFilterCleaners] = useState(new Set());  // employee ids
   // Completed-date RANGE filter (Done view). Empty string = no bound on
   // that side. Replaces the old day-of / last-3 / older quick tabs.
-  const [dateFrom, setDateFrom] = useState(''); // YYYY-MM-DD inclusive start
+  // Opens on the last 3 weeks. Empty means the full 3-month window, which is
+  // still one tap away in the range popover.
+  const [dateFrom, setDateFrom] = useState(() => {
+    const d = new Date(); d.setDate(d.getDate() - 20);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  });
   const [dateTo, setDateTo] = useState('');     // YYYY-MM-DD inclusive end
   const [aptSearch, setAptSearch] = useState(''); // apartment-number search (Done tab)
   // Done view defaults to the last 2 days — that's what you're almost
@@ -35406,11 +35836,21 @@ function AssignmentTabContent({ propertyId, property = null, employee, statusFil
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   })();
   const todayDayKey = dayKeyBack(0);
-  // Two ways to choose: the Today shortcut, or pick the dates yourself.
+  // Default view is the last 3 weeks — recent enough to be the answer most of
+  // the time, with 3 months a tap away. The 3-month cap still bounds the
+  // furthest anyone can look back.
+  const threeWeeksDay = dayKeyBack(20);
   const applyDatePreset = (k) => {
-    if (k === 'today') { setDateFrom(todayDayKey); setDateTo(todayDayKey); setDoneWindow('all'); }
+    if (k === 'today') { setDateFrom(todayDayKey); setDateTo(todayDayKey); }
+    else if (k === '3w') { setDateFrom(threeWeeksDay); setDateTo(''); }
+    else if (k === '3m') { setDateFrom(''); setDateTo(''); }
   };
-  const activePreset = (dateFrom === todayDayKey && dateTo === todayDayKey) ? 'today' : null;
+  const activePreset = (() => {
+    if (dateFrom === todayDayKey && dateTo === todayDayKey) return 'today';
+    if (dateFrom === threeWeeksDay && !dateTo) return '3w';
+    if (!dateFrom && !dateTo) return '3m';
+    return null;
+  })();
   const fmtRangeDay = (d) => {
     if (!d) return '';
     const [y, m, day] = d.split('-').map(Number);
@@ -35418,6 +35858,7 @@ function AssignmentTabContent({ propertyId, property = null, employee, statusFil
   };
   const dateRangeLabel = (() => {
     if (dateFrom === todayDayKey && dateTo === todayDayKey) return 'Today';
+    if (dateFrom === threeWeeksDay && !dateTo) return 'Last 3 weeks';
     if (dateFrom && dateTo) return dateFrom === dateTo ? fmtRangeDay(dateFrom) : `${fmtRangeDay(dateFrom)} – ${fmtRangeDay(dateTo)}`;
     if (dateFrom) return `${fmtRangeDay(dateFrom)} onward`;
     if (dateTo) return `Up to ${fmtRangeDay(dateTo)}`;
@@ -35622,9 +36063,20 @@ function AssignmentTabContent({ propertyId, property = null, employee, statusFil
     // tab. For "mine" / "recheck_passed" / Done we still keep everything
     // status=done since those are derived views — extra clientside
     // narrowing happens below.
+    // "Unfinished" = started on an earlier day and still open. It's a slice of
+    // In progress rather than its own status, so it's computed from
+    // started_at instead of the dominant-status map.
+    const startOfToday = new Date(); startOfToday.setHours(0, 0, 0, 0);
+    const isStale = (t) =>
+      (t.status === 'in_progress' || t.status === 'paused') &&
+      t.started_at && new Date(t.started_at) < startOfToday;
+    const staleKeys = new Set(allRelevant.filter(isStale).map(t => asgnKey(t)));
+
     let filtered;
     if (isDoneTab) {
       filtered = allRelevant.filter(t => t.status === 'done' || t.status === 'blocked');
+    } else if (statusFilter === 'unfinished') {
+      filtered = allRelevant.filter(t => staleKeys.has(asgnKey(t)) && t.status !== 'done' && t.status !== 'blocked');
     } else {
       filtered = allRelevant.filter(t => dominantByAsgn.get(asgnKey(t)) === statusFilter);
     }
@@ -35708,7 +36160,7 @@ function AssignmentTabContent({ propertyId, property = null, employee, statusFil
       if (!statusesByAsgn.has(k)) statusesByAsgn.set(k, new Set());
       statusesByAsgn.get(k).add(t.status);
     });
-    const out = { pending: 0, paused: 0, in_progress: 0, done: 0, blocked: 0, mine: 0, recheck_passed: 0 };
+    const out = { pending: 0, paused: 0, in_progress: 0, done: 0, blocked: 0, mine: 0, recheck_passed: 0, unfinished: 0 };
     const doneKeys = new Set(), blockedKeys = new Set();
     allTargets.forEach(t => {
       if (t.status === 'done') {
@@ -35726,6 +36178,15 @@ function AssignmentTabContent({ propertyId, property = null, employee, statusFil
       if (dom === 'done' || dom === 'blocked') return; // counted below
       if (out[dom] !== undefined) out[dom] += 1;
     });
+    // Unfinished overlaps In progress on purpose — it's a flag on the same
+    // work, not a separate bucket, so the two counts are allowed to overlap.
+    const startOfTodayC = new Date(); startOfTodayC.setHours(0, 0, 0, 0);
+    const staleSet = new Set();
+    allTargets.forEach(t => {
+      if ((t.status === 'in_progress' || t.status === 'paused') &&
+          t.started_at && new Date(t.started_at) < startOfTodayC) staleSet.add(key(t));
+    });
+    out.unfinished = staleSet.size;
     out.done = doneKeys.size;
     out.blocked = blockedKeys.size;
     const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
@@ -36908,8 +37369,7 @@ function AssignmentTabContent({ propertyId, property = null, employee, statusFil
     // always want is visually first. A picked range renders as one flat list
     // — sub-day headers there would be noise.
     if (!dateFrom && !dateTo) {
-      const { dayOf, last3 } = bucketByAge(items);
-      const yesterday = last3; // within the 2-day window this is just yesterday
+      const { dayOf, last3, older } = bucketByAge(items);
       return (
         <div className="space-y-3">
           {dayOf.length > 0 && (
@@ -36918,10 +37378,20 @@ function AssignmentTabContent({ propertyId, property = null, employee, statusFil
               {renderAssignmentList(dayOf)}
             </div>
           )}
-          {yesterday.length > 0 && (
+          {last3.length > 0 && (
             <div>
-              <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1.5 px-1">Yesterday ({countBedrooms(yesterday)})</div>
-              {renderAssignmentList(yesterday)}
+              <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1.5 px-1">Last few days ({countBedrooms(last3)})</div>
+              {renderAssignmentList(last3)}
+            </div>
+          )}
+          {/* Everything else in the window. This section didn't exist, so with
+             no date range set the list rendered only today and yesterday —
+             searching for an apartment cleaned last week returned nothing
+             until you happened to set a range that reached it. */}
+          {older.length > 0 && (
+            <div>
+              <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1.5 px-1">Earlier ({countBedrooms(older)})</div>
+              {renderAssignmentList(older)}
             </div>
           )}
         </div>
@@ -37005,10 +37475,16 @@ function AssignmentTabContent({ propertyId, property = null, employee, statusFil
                 {dateOpen && (
                   <div className="mt-1 p-3 rounded-xl bg-white border border-stone-200 space-y-2">
                     <div className="flex gap-1.5 flex-wrap items-center">
-                      <button onClick={() => applyDatePreset('today')}
-                        className={`px-2.5 py-1 rounded-full text-[11px] font-mono transition-colors ${activePreset === 'today' ? 'bg-stone-900 text-stone-50' : 'bg-stone-100 text-stone-600 hover:bg-stone-200'}`}>
-                        Today
-                      </button>
+                      {[
+                        { k: 'today', label: 'Today' },
+                        { k: '3w', label: 'Last 3 weeks' },
+                        { k: '3m', label: `Last ${HISTORY_MONTHS} months` },
+                      ].map(p => (
+                        <button key={p.k} onClick={() => applyDatePreset(p.k)}
+                          className={`px-2.5 py-1 rounded-full text-[11px] font-mono transition-colors ${activePreset === p.k ? 'bg-stone-900 text-stone-50' : 'bg-stone-100 text-stone-600 hover:bg-stone-200'}`}>
+                          {p.label}
+                        </button>
+                      ))}
                       {(dateFrom || dateTo) && (
                         <button onClick={() => { setDateFrom(''); setDateTo(''); }}
                           className="px-2.5 py-1 rounded-full text-[11px] font-mono bg-stone-100 text-stone-600 hover:bg-stone-200">
@@ -39460,6 +39936,7 @@ function PortalPhotoUploadTab({ property, portalKind }) {
 // by due date), with a toggle to peek at what was done the last 3 days.
 // =================================================================
 function PortalScheduleTab({ property, onOpenUnitDay, recentOpen, setRecentOpen }) {
+  const [staleOpen, setStaleOpen] = useState(false);
   const [rows, setRows] = useState(null);
   // Whether "Recently done" is expanded is owned by PortalDashboard when
   // provided, so opening a job from that list and pressing Back reopens the
@@ -39531,7 +40008,18 @@ function PortalScheduleTab({ property, onOpenUnitDay, recentOpen, setRecentOpen 
     if (k < todayKey) { overdue.push(a); return; }
     (upcomingByDate[k] = upcomingByDate[k] || []).push(a);
   });
-  undated.sort((a, b) => String(a.title || '').localeCompare(String(b.title || ''), undefined, { numeric: true }));
+  // Undated work splits by age. Something raised in the last month is real
+  // upcoming work; a cleaning check sitting undated since June is a leftover
+  // nobody is going to do, and burying the live items under 41 of those makes
+  // the tab useless. Old ones stay reachable, just collapsed.
+  const STALE_DAYS = 45;
+  const staleCut = Date.now() - STALE_DAYS * 86400000;
+  const dateOf = (a) => new Date(a.approved_at || a.created_at || 0).getTime();
+  const undatedRecent = undated.filter(a => dateOf(a) >= staleCut);
+  const undatedStale = undated.filter(a => dateOf(a) < staleCut);
+  const byNewest = (a, b) => dateOf(b) - dateOf(a);
+  undatedRecent.sort(byNewest);
+  undatedStale.sort(byNewest);
   const upcomingDates = Object.keys(upcomingByDate).sort();
   overdue.sort((a, b) => String(a.scheduled_date).localeCompare(String(b.scheduled_date)));
   const daysLate = (key) => {
@@ -39672,20 +40160,42 @@ function PortalScheduleTab({ property, onOpenUnitDay, recentOpen, setRecentOpen 
       {/* Pending, but nobody has put a date on it yet. Still real work the
          property is owed, so it gets its own section rather than being
          invisible until someone schedules it. */}
-      {undated.length > 0 && (
+      {undatedRecent.length > 0 && (
         <div>
           <div className="flex items-center gap-2 mb-2.5">
             <span className="w-1 h-5 rounded-full flex-shrink-0 bg-stone-300" />
             <span className="text-base font-bold uppercase tracking-wide font-mono text-stone-800">
-              No date set · {undated.length}
+              No date set · {undatedRecent.length}
             </span>
           </div>
           <p className="text-xs text-stone-600 mb-2.5">
             Pending work that hasn't been scheduled for a specific day.
           </p>
           <div className="space-y-2">
-            {undated.map(a => renderJobCard(a))}
+            {undatedRecent.map(a => renderJobCard(a))}
           </div>
+        </div>
+      )}
+
+      {undatedStale.length > 0 && (
+        <div>
+          <button onClick={() => setStaleOpen(o => !o)}
+            className="w-full flex items-center gap-2 mb-2 text-left">
+            <ChevronRight size={14} className={`text-stone-400 transition-transform ${staleOpen ? 'rotate-90' : ''}`} />
+            <span className="text-sm font-bold uppercase tracking-wide font-mono text-stone-500">
+              Older, still unscheduled · {undatedStale.length}
+            </span>
+          </button>
+          {!staleOpen && (
+            <p className="text-xs text-stone-500 mb-2.5 pl-6">
+              Raised more than {STALE_DAYS} days ago and never scheduled. Worth a look — these may no longer be needed.
+            </p>
+          )}
+          {staleOpen && (
+            <div className="space-y-2">
+              {undatedStale.map(a => renderJobCard(a))}
+            </div>
+          )}
         </div>
       )}
 

@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap174";
+const BUILD_TAG = "aug6-tap176";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -13191,16 +13191,25 @@ async function sweepUnfinishedWork(employee) {
     // Started before today and still open. started_at is what makes this
     // "someone actually began it", as opposed to a job simply sitting
     // pending — those aren't stale, they just haven't started.
+    // Everything still open, then narrowed below. Three things count as
+    // unfinished: started on an earlier day and never closed out, past its
+    // date, or undated and sitting for two weeks.
     const { data, error } = await supabase.from('assignment_targets')
-      .select('assignment_id, unit_id, party_id, status, started_at, assignment:assignments!inner(active, deleted_at, source, pm_status, customer:customers(name))')
-      .in('status', ['in_progress', 'paused'])
-      .lt('started_at', startOfToday.toISOString())
-      .limit(1000);
+      .select('assignment_id, unit_id, party_id, status, started_at, assignment:assignments!inner(active, deleted_at, source, pm_status, scheduled_date, approved_at, created_at, customer:customers(name))')
+      .not('status', 'in', '(done,blocked)')
+      .limit(5000);
     if (error || !data) return;
+    const todayKeyS = `${startOfToday.getFullYear()}-${String(startOfToday.getMonth() + 1).padStart(2, '0')}-${String(startOfToday.getDate()).padStart(2, '0')}`;
+    const undatedCutS = Date.now() - 14 * 86400000;
     const live = data.filter(t => {
       const a = t.assignment;
-      return a && a.active !== false && !a.deleted_at &&
-        (a.source !== 'pm' || a.pm_status === 'approved');
+      if (!a || a.active === false || a.deleted_at) return false;
+      if (a.source === 'pm' && a.pm_status !== 'approved') return false;
+      if (t.started_at && new Date(t.started_at) < startOfToday) return true;
+      const due = a.scheduled_date ? String(a.scheduled_date).slice(0, 10) : null;
+      if (due) return due < todayKeyS;
+      const born = new Date(a.approved_at || a.created_at || 0).getTime();
+      return born > 0 && born < undatedCutS;
     });
     if (live.length === 0) return;
 
@@ -34832,7 +34841,8 @@ function AssignmentBanner({ propertyId, property = null, unitId, partyId, employ
 }
 
 // Reusable card for one assignment target, used in banner + panel
-function AssignmentCard({ target, property = null, busy, onView, onStart, onPause, onMoveToPending, onDone, onReopen, onBlocked, onReassign, onDelete, onGoToBedroom, onOpenBedroomHistory, onTogglePriority, canPrioritize = false, canMarkDone = true, canMarkDoneAlways = false, currentEmployeeId, propertyId, canEditDates = false, onSetDueDate, dark = false, workScreen = false, onStartCleaning = null, onExit = null, ownerView = false }) {
+function AssignmentCard({ target, property = null, busy, onView, onStart, onPause,
+  assignees = null, teamList = null, assignOpen = false, assignBusy = false, onToggleAssign = null, onSaveAssign = null, onMoveToPending, onDone, onReopen, onBlocked, onReassign, onDelete, onGoToBedroom, onOpenBedroomHistory, onTogglePriority, canPrioritize = false, canMarkDone = true, canMarkDoneAlways = false, currentEmployeeId, propertyId, canEditDates = false, onSetDueDate, dark = false, workScreen = false, onStartCleaning = null, onExit = null, ownerView = false }) {
   const t = target;
   // Dark variant — used when this card is folded into the cleaner's black
   // "Working on" header. Only the neutral surfaces flip; colored status /
@@ -35008,6 +35018,34 @@ function AssignmentCard({ target, property = null, busy, onView, onStart, onPaus
             <span className="text-[10px] font-mono px-2 py-0.5 rounded-full border bg-emerald-100 text-emerald-800 border-emerald-200 flex items-center gap-1">
               <Check size={9} /> {t.completer?.name ? `${t.completer.name} · ` : ''}{fmtDueDate(String(t.completed_at).slice(0, 10))}
             </span>
+          )}
+        </div>
+      )}
+
+      {/* WHO'S ON IT — assignee chips plus the picker. Same control the PM
+         portal uses; a two-week-old undated job usually just needs a name
+         against it, and that shouldn't mean leaving this screen. */}
+      {onToggleAssign && (
+        <div className="mt-2">
+          <div className="flex items-center gap-1.5 flex-wrap text-[10px] font-mono">
+            {(assignees || []).map(a => (
+              <span key={a.id}
+                className={`px-2 py-0.5 rounded-full inline-flex items-center gap-1 ${a.requested ? 'bg-amber-100 text-amber-800 border border-amber-300' : 'bg-indigo-100 text-indigo-700'}`}>
+                <User size={9} /> {a.name}{a.requested ? ' · asked' : ''}
+              </span>
+            ))}
+            <button onClick={(e) => { e.stopPropagation(); onToggleAssign(); }} disabled={busy}
+              className="px-2 py-0.5 rounded-full border border-dashed border-stone-300 text-stone-500 inline-flex items-center gap-1 hover:bg-stone-50 disabled:opacity-50">
+              <Plus size={9} /> {(assignees || []).length > 0 ? 'Change' : 'Assign'}
+            </button>
+          </div>
+          {assignOpen && (
+            <div onClick={(e) => e.stopPropagation()}>
+              <AssignPicker team={teamList || []} busy={assignBusy}
+                currentIds={(assignees || []).map(a => a.id)}
+                onCancel={() => onToggleAssign()}
+                onSave={(ids) => onSaveAssign(ids)} />
+            </div>
           )}
         </div>
       )}
@@ -35795,6 +35833,44 @@ function AssignmentTabContent({ propertyId, property = null, employee, statusFil
   const [opened, setOpened] = useState(null);
   const [statusModal, setStatusModal] = useState(null);
   const [reassignTarget, setReassignTarget] = useState(null);
+  // Assigning from the board. The roster and the current assignees load once
+  // per property rather than per card, so a long list doesn't fire a query
+  // per row.
+  const [teamList, setTeamList] = useState([]);
+  const [assigneeMap, setAssigneeMap] = useState({}); // assignment_id -> [{id,name,requested}]
+  const [assignFor, setAssignFor] = useState(null);   // assignment_id being edited
+  const [assignBusy, setAssignBusy] = useState(null);
+  useEffect(() => {
+    (async () => {
+      const { data } = await supabase.from('employees').select('id, name, role').eq('active', true).order('name');
+      setTeamList((data || []).filter(e => e.role !== 'owner'));
+    })();
+  }, []);
+  const loadAssignees = async (ids) => {
+    if (!ids || ids.length === 0) { setAssigneeMap({}); return; }
+    const { data } = await supabase.from('assignment_assignees')
+      .select('assignment_id, employee_id, status, employee:employees(id, name)')
+      .in('assignment_id', ids.slice(0, 1000));
+    const m = {};
+    (data || []).forEach(r => {
+      (m[r.assignment_id] = m[r.assignment_id] || []).push({
+        id: r.employee_id, name: r.employee?.name || '', requested: r.status === 'requested',
+      });
+    });
+    setAssigneeMap(m);
+  };
+  const refreshAssignees = () => loadAssignees(
+    Array.from(new Set((allTargets || []).map(t => t.assignment?.id).filter(Boolean)))
+  );
+  const commitAssign = async (asgId, ids) => {
+    setAssignBusy(asgId);
+    const current = (assigneeMap[asgId] || []).map(a => a.id);
+    const error = await saveAssignees(asgId, current, ids, employee?.id);
+    setAssignBusy(null);
+    if (error) { alert('Could not update who\u2019s assigned: ' + error.message); return; }
+    setAssignFor(null);
+    refreshAssignees();
+  };
   const [busy, setBusy] = useState(false);
   const [filterBuildings, setFilterBuildings] = useState(new Set()); // multi-select building keys; empty = all
   const [collapsedBuildings, setCollapsedBuildings] = useState({}); // { B3: true } = collapsed
@@ -36067,9 +36143,27 @@ function AssignmentTabContent({ propertyId, property = null, employee, statusFil
     // In progress rather than its own status, so it's computed from
     // started_at instead of the dominant-status map.
     const startOfToday = new Date(); startOfToday.setHours(0, 0, 0, 0);
-    const isStale = (t) =>
-      (t.status === 'in_progress' || t.status === 'paused') &&
-      t.started_at && new Date(t.started_at) < startOfToday;
+    // "Unfinished" is work that isn't moving, which is three different
+    // situations — the first definition only caught the first one, so jobs
+    // that were never started stayed invisible on this side even though PMs
+    // could see them sitting on their pending list.
+    //   1. someone began it on an earlier day and never closed it out
+    //   2. it has a date and that date has passed
+    //   3. it has no date at all and has been sitting for two weeks
+    const STALE_UNDATED_DAYS = 14;
+    const undatedCut = Date.now() - STALE_UNDATED_DAYS * 86400000;
+    const todayKeyStale = (() => {
+      const d = new Date();
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    })();
+    const isStale = (t) => {
+      if (t.status === 'done' || t.status === 'blocked') return false;
+      if (t.started_at && new Date(t.started_at) < startOfToday) return true;
+      const due = t.assignment?.scheduled_date ? String(t.assignment.scheduled_date).slice(0, 10) : null;
+      if (due) return due < todayKeyStale;
+      const born = new Date(t.assignment?.approved_at || t.assignment?.created_at || 0).getTime();
+      return born > 0 && born < undatedCut;
+    };
     const staleKeys = new Set(allRelevant.filter(isStale).map(t => asgnKey(t)));
 
     let filtered;
@@ -36181,10 +36275,22 @@ function AssignmentTabContent({ propertyId, property = null, employee, statusFil
     // Unfinished overlaps In progress on purpose — it's a flag on the same
     // work, not a separate bucket, so the two counts are allowed to overlap.
     const startOfTodayC = new Date(); startOfTodayC.setHours(0, 0, 0, 0);
+    const todayKeyC = `${startOfTodayC.getFullYear()}-${String(startOfTodayC.getMonth() + 1).padStart(2, '0')}-${String(startOfTodayC.getDate()).padStart(2, '0')}`;
+    const undatedCutC = Date.now() - 14 * 86400000;
     const staleSet = new Set();
     allTargets.forEach(t => {
-      if ((t.status === 'in_progress' || t.status === 'paused') &&
-          t.started_at && new Date(t.started_at) < startOfTodayC) staleSet.add(key(t));
+      if (t.status === 'done' || t.status === 'blocked') return;
+      let stale = false;
+      if (t.started_at && new Date(t.started_at) < startOfTodayC) stale = true;
+      else {
+        const due = t.assignment?.scheduled_date ? String(t.assignment.scheduled_date).slice(0, 10) : null;
+        if (due) stale = due < todayKeyC;
+        else {
+          const born = new Date(t.assignment?.approved_at || t.assignment?.created_at || 0).getTime();
+          stale = born > 0 && born < undatedCutC;
+        }
+      }
+      if (stale) staleSet.add(key(t));
     });
     out.unfinished = staleSet.size;
     out.done = doneKeys.size;
@@ -36201,6 +36307,7 @@ function AssignmentTabContent({ propertyId, property = null, employee, statusFil
     return out;
   }, [allTargets, employee?.id, minHistoryDay]);
   useEffect(() => { if (onCounts) onCounts(tabCounts); }, [tabCounts]);
+  useEffect(() => { refreshAssignees(); /* eslint-disable-next-line */ }, [allTargets.length]);
   // Load ONCE per property. The query has no status condition in it — every
   // tab is computed from the same rows client-side — so refetching on each
   // tab switch was pulling the property's entire target list (paged in 1000s)
@@ -36655,6 +36762,10 @@ function AssignmentTabContent({ propertyId, property = null, employee, statusFil
             const t = group.items[0];
             return (
               <AssignmentCard key={t.id} target={t} property={property} busy={busy} propertyId={propertyId}
+                assignees={assigneeMap[t.assignment?.id] || []} teamList={teamList}
+                assignOpen={assignFor === t.assignment?.id} assignBusy={assignBusy === t.assignment?.id}
+                onToggleAssign={t.assignment?.id ? () => setAssignFor(assignFor === t.assignment.id ? null : t.assignment.id) : null}
+                onSaveAssign={(ids) => commitAssign(t.assignment.id, ids)}
                 onView={() => openTarget(t)}
                 onStart={() => startAndGo(t)}
                 onPause={() => updateStatus(t, 'paused')}
@@ -37041,6 +37152,15 @@ function AssignmentTabContent({ propertyId, property = null, employee, statusFil
                                         sequentially would be ugly; keeping it on
                                         one. Most apt cases have 1 assignment per
                                         bedroom in the new model anyway. */}
+                          {assignFor && firstTarget?.assignment?.id === assignFor && (
+                            <div onClick={(e) => e.stopPropagation()} className="mb-2">
+                              <AssignPicker team={teamList} busy={assignBusy === firstTarget.assignment.id}
+                                currentIds={(assigneeMap[firstTarget.assignment.id] || []).map(a => a.id)}
+                                onCancel={() => setAssignFor(null)}
+                                onSave={(ids) => commitAssign(firstTarget.assignment.id, ids)} />
+                            </div>
+                          )}
+
                           {/* === FOOTER — due date left, actions right, amber primary. */}
                           <div className="flex items-center justify-between gap-2 flex-wrap">
                             <div className="flex items-center gap-1.5">
@@ -37232,7 +37352,19 @@ function AssignmentTabContent({ propertyId, property = null, employee, statusFil
                               </button>
                               </OwnerOnly>
                             )}
-                            {/* Reassign removed — not part of the flow any more. */}
+                            {/* Assign — a bedroom card covers one assignment, so
+                               this is the same control the single-item card
+                               gets, just placed with the other footer actions. */}
+                            {firstTarget?.assignment?.id && (
+                              <button onClick={(e) => { e.stopPropagation(); setAssignFor(assignFor === firstTarget.assignment.id ? null : firstTarget.assignment.id); }}
+                                disabled={busy}
+                                className="text-[10px] font-mono px-2 py-0.5 rounded-full border border-dashed border-stone-300 text-stone-500 inline-flex items-center gap-1 hover:bg-stone-50 disabled:opacity-50">
+                                <Plus size={10} />
+                                {(assigneeMap[firstTarget.assignment.id] || []).length > 0
+                                  ? (assigneeMap[firstTarget.assignment.id] || []).map(a => a.name).join(', ')
+                                  : 'Assign'}
+                              </button>
+                            )}
                             {/* Owner-only: delete an assignment uploaded by mistake. */}
                             {can(employee, 'upload_assignments') && firstTarget?.assignment?.id && (
                               <button onClick={async () => {
@@ -37267,6 +37399,10 @@ function AssignmentTabContent({ propertyId, property = null, employee, statusFil
                            are used to. */}
                         {legacyItems.map(t => (
                           <AssignmentCard key={t.id} target={t} property={property} busy={busy} propertyId={propertyId}
+                            assignees={assigneeMap[t.assignment?.id] || []} teamList={teamList}
+                            assignOpen={assignFor === t.assignment?.id} assignBusy={assignBusy === t.assignment?.id}
+                            onToggleAssign={t.assignment?.id ? () => setAssignFor(assignFor === t.assignment.id ? null : t.assignment.id) : null}
+                            onSaveAssign={(ids) => commitAssign(t.assignment.id, ids)}
                             onView={() => openTarget(t)}
                             onStart={() => startAndGo(t)}
                             onPause={() => updateStatus(t, 'paused')}

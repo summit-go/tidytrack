@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap176";
+const BUILD_TAG = "aug6-tap177";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -40082,7 +40082,6 @@ function PortalScheduleTab({ property, onOpenUnitDay }) {
   // Cleanings done, and having it here meant the pending list ended on a
   // block of things that weren't pending.
   const [attach, setAttach] = useState(null); // { url, kind, title } being viewed
-  const todayKey = localTodayKey();
 
   const load = async () => {
     // This query used to have no ORDER BY, no .range() and no .limit(),
@@ -40143,12 +40142,6 @@ function PortalScheduleTab({ property, onOpenUnitDay }) {
   };
   const unitLabelOf = (a) => (a.targets || [])[0]?.unit?.label || '';
 
-  const daysLate = (key) => {
-    const [y, m, d] = String(key).slice(0, 10).split('-').map(Number);
-    const [ty, tm, td] = todayKey.split('-').map(Number);
-    return Math.round((new Date(ty, tm - 1, td) - new Date(y, m - 1, d)) / 86400000);
-  };
-
   // Apartment search + building pills, the same controls as Cleanings done.
   const aq = aptQuery.trim().toLowerCase();
   const searched = openJobs.filter(a => {
@@ -40200,7 +40193,7 @@ function PortalScheduleTab({ property, onOpenUnitDay }) {
 
   // One upcoming/overdue job card. Shared by both lists so the overdue
   // section can't drift from Upcoming.
-  const renderJobCard = (a, late = 0) => {
+  const renderJobCard = (a) => {
     const ts = a.targets || [];
     const title = label(ts[0]?.unit, ts[0]?.party) || a.title || 'Job';
     const size = unitSizeLabel(ts[0]?.unit);
@@ -40209,7 +40202,7 @@ function PortalScheduleTab({ property, onOpenUnitDay }) {
     ts.forEach(t => { const l = secLabel[t.template_section] || (t.template_section ? t.template_section.charAt(0).toUpperCase() + t.template_section.slice(1) : 'Other'); byCat[l] = (byCat[l] || 0) + 1; });
     const cats = Object.entries(byCat);
     return (
-      <div key={a.id} className={`rounded-2xl p-4 border ${late > 0 ? 'bg-amber-50 border-amber-300' : 'bg-white border-stone-200'}`}>
+      <div key={a.id} className="rounded-2xl p-4 border bg-white border-stone-200">
         <div className="flex items-start justify-between gap-2">
           <div className="min-w-0">
             <div className="flex items-center gap-2 flex-wrap">
@@ -40229,8 +40222,8 @@ function PortalScheduleTab({ property, onOpenUnitDay }) {
              information made every list read like an apology; the date itself
              is the useful part, with lateness as a quiet suffix. */}
           {a.scheduled_date ? (
-            <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full border inline-flex items-center gap-1 ${late > 0 ? 'bg-amber-100 text-amber-900 border-amber-300' : 'bg-stone-100 text-stone-700 border-stone-200'}`}>
-              <Calendar size={9} /> {fmtDay(a.scheduled_date)}{late > 0 ? ` · ${late}d late` : ''}
+            <span className="text-[10px] font-mono px-2 py-0.5 rounded-full border bg-stone-100 text-stone-700 border-stone-200 inline-flex items-center gap-1">
+              <Calendar size={9} /> {fmtDay(a.scheduled_date)}
             </span>
           ) : (
             <span className="text-[10px] font-mono px-2 py-0.5 rounded-full border border-dashed border-stone-300 text-stone-500">
@@ -40319,7 +40312,10 @@ function PortalScheduleTab({ property, onOpenUnitDay }) {
               <span className="text-stone-400">· {bg.jobs.length}</span>
             </div>
             <div className="space-y-2">
-              {bg.jobs.map(a => renderJobCard(a, a.scheduled_date ? Math.max(0, daysLate(a.scheduled_date)) : 0))}
+              {/* No lateness passed in on purpose. Whether we're behind is our
+                 problem to manage, not something to flag at the property
+                 manager on every card. The date itself is what they need. */}
+              {bg.jobs.map(a => renderJobCard(a))}
             </div>
           </div>
         ))

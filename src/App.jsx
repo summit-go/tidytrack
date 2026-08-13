@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap177";
+const BUILD_TAG = "aug6-tap178";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -13050,6 +13050,22 @@ function compressImage(file) {
 }
 
 // Status helpers for assignment_targets
+// "Unfinished" — work that isn't moving. Three situations, one definition,
+// shared by the owner assignments screen, the property board's Unfinished tab
+// and the nightly notification so all three can't drift apart.
+const STALE_UNDATED_DAYS = 14;
+function isTargetStale(t, a) {
+  if (!t || !a) return false;
+  if (t.status === 'done' || t.status === 'blocked') return false;
+  const startOfToday = new Date(); startOfToday.setHours(0, 0, 0, 0);
+  if (t.started_at && new Date(t.started_at) < startOfToday) return true;
+  const todayKey = `${startOfToday.getFullYear()}-${String(startOfToday.getMonth() + 1).padStart(2, '0')}-${String(startOfToday.getDate()).padStart(2, '0')}`;
+  const due = a.scheduled_date ? String(a.scheduled_date).slice(0, 10) : null;
+  if (due) return due < todayKey;
+  const born = new Date(a.approved_at || a.created_at || 0).getTime();
+  return born > 0 && born < Date.now() - STALE_UNDATED_DAYS * 86400000;
+}
+
 const SHOW_PAUSED_TAB = false; // Assignments panel — see the tab bar below.
 const ASSIGNMENT_STATUSES = {
   pending:      { label: 'Pending',     color: 'bg-stone-100 text-stone-700 border-stone-300' },
@@ -13630,6 +13646,8 @@ function ManagerShell({ employee, onSignOut }) {
   // Reshapes the bottom nav so each mode only shows its own tabs.
   // Managers keep the flat nav.
   const [mode, setMode] = usePagePersistence(`manager_mode_${employee.id}`, 'ops'); // 'ops' | 'business'
+  // Set when a notification wants Assignments opened on a specific tab.
+  const [assignmentsMode, setAssignmentsMode] = useState(null);
   const [pmPreview, setPmPreview] = usePagePersistence(`manager_preview_pm_${employee.id}`, false);
   // Cleaner-preview and PM-preview are mutually exclusive. If a stale
   // localStorage from an interrupted session ever had both set, let
@@ -13750,11 +13768,13 @@ function ManagerShell({ employee, onSignOut }) {
   return (
     <PreviewContext.Provider value={{ onPreview: () => setPreviewMode(true), isOwner: employee?.role === 'owner' }}>
     <div className="min-h-screen bg-stone-50 flex flex-col" style={{ minHeight: '100dvh' }}>
-      {tab === 'daily'       && <DailyView         employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} onLogoClick={goHome} />}
+      {tab === 'daily'       && <DailyView         employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} onLogoClick={goHome}
+        onOpenUnfinishedTab={() => { setTab('assignments'); setAssignmentsMode('unfinished'); }} />}
       {tab === 'dashboard'   && <ManagerDashboard  employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} onLogoClick={goHome} />}
       {tab === 'team'        && <EmployeeAdmin    employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} onLogoClick={goHome} />}
       {tab === 'props'       && <PropertyAdmin    employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} onLogoClick={goHome} />}
-      {tab === 'assignments' && <AssignmentsTab   employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} onLogoClick={goHome} />}
+      {tab === 'assignments' && <AssignmentsTab   employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} onLogoClick={goHome}
+        initialMode={assignmentsMode} onModeConsumed={() => setAssignmentsMode(null)} />}
       {showMoneyTabs && tab === 'money' && <MoneyView employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} onLogoClick={goHome} />}
 
       {/* Sticky, not fixed — see CleanerBottomNav. Staying in normal flow means
@@ -19848,11 +19868,19 @@ function CompletedAssignmentsView({ employee, propById }) {
   );
 }
 
-function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
+function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick, initialMode = null, onModeConsumed = null }) {
   const [properties, setProperties] = useState([]);
   const [assignmentCounts, setAssignmentCounts] = useState({}); // { customer_id: open_count }
   const [jobs, setJobs] = useState([]); // one entry per open assignment
-  const [scheduleMode, setScheduleMode] = useState('schedule'); // 'schedule' | 'property'
+  const [scheduleMode, setScheduleMode] = useState(initialMode || 'schedule'); // 'schedule' | 'property' | 'completed' | 'unfinished'
+  // A notification can ask for a specific tab. Consumed once so it doesn't
+  // keep yanking the view back on every re-render.
+  useEffect(() => {
+    if (!initialMode) return;
+    setScheduleMode(initialMode);
+    if (onModeConsumed) onModeConsumed();
+    /* eslint-disable-next-line */
+  }, [initialMode]);
   const [adding, setAdding] = useState(false); // property picker for adding
   const [expanded, setExpanded] = useState(() => new Set()); // expanded card keys
   const [actioning, setActioning] = useState(null); // job id being marked done / deleted
@@ -19874,7 +19902,7 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
       let rows = []; const PAGE = 1000;
       for (let from = 0; ; from += PAGE) {
         const { data, error } = await supabase.from('assignment_targets')
-          .select('id, status, priority, unit_id, party_id, template_section, unit:units(label, bedrooms, bathrooms), party:parties(label), assignment:assignments!inner(id, title, customer_id, active, deleted_at, scheduled_date, assignment_type, took_longer)')
+          .select('id, status, priority, started_at, unit_id, party_id, template_section, unit:units(label, bedrooms, bathrooms), party:parties(label), assignment:assignments!inner(id, title, customer_id, active, deleted_at, scheduled_date, assignment_type, took_longer, approved_at, created_at)')
           .not('status', 'in', '(done,blocked)')
           .range(from, from + PAGE - 1);
         if (error || !data) break;
@@ -19899,9 +19927,13 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
       const key = `${cid}::${t.unit_id || ''}::${t.party_id || ''}`;
       if (!seenBedrooms.has(key)) { seenBedrooms.add(key); counts[cid] = (counts[cid] || 0) + 1; }
       if (!jobsByAsg[a.id]) {
-        jobsByAsg[a.id] = { id: a.id, customerId: cid, title: a.title || '', scheduledDate: a.scheduled_date || null, type: a.assignment_type || '', unitLabel: t.unit?.label || '', partyLabel: t.party?.label || '', unitId: t.unit_id, partyId: t.party_id, bedrooms: t.unit?.bedrooms, bathrooms: t.unit?.bathrooms, tookLonger: !!a.took_longer, priority: false, targetIds: [], assignees: [], hereNow: [], count: 0, sections: { bedroom: 0, vanity: 0, bathroom: 0, general: 0, other: 0 } };
+        jobsByAsg[a.id] = { id: a.id, customerId: cid, title: a.title || '', scheduledDate: a.scheduled_date || null, type: a.assignment_type || '', unitLabel: t.unit?.label || '', partyLabel: t.party?.label || '', unitId: t.unit_id, partyId: t.party_id, bedrooms: t.unit?.bedrooms, bathrooms: t.unit?.bathrooms, tookLonger: !!a.took_longer, priority: false, stale: false, targetIds: [], assignees: [], hereNow: [], count: 0, sections: { bedroom: 0, vanity: 0, bathroom: 0, general: 0, other: 0 } };
       }
       if (t.priority) jobsByAsg[a.id].priority = true;
+      // Unfinished: began on an earlier day and never closed out, past its
+      // date, or undated and sitting for two weeks. Same three rules the
+      // nightly notification and the property board use.
+      if (isTargetStale(t, a)) jobsByAsg[a.id].stale = true;
       jobsByAsg[a.id].targetIds.push(t.id);
       jobsByAsg[a.id].count++;
       const sec = (t.template_section || '').toLowerCase();
@@ -20255,6 +20287,15 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
   };
 
   // Group jobs by property (for By-property) and by date→property (Schedule).
+  // Jobs that aren't moving, grouped by property for the Unfinished tab.
+  const staleJobs = (jobs || []).filter(j => j.stale);
+  const staleByProp = (() => {
+    const m = {};
+    staleJobs.forEach(j => { (m[j.customerId] = m[j.customerId] || []).push(j); });
+    return Object.entries(m).sort((a, b) =>
+      naturalCompare(propById[a[0]]?.name || '', propById[b[0]]?.name || ''));
+  })();
+
   const jobsByProp = {};
   jobs.forEach(j => { (jobsByProp[j.customerId] = jobsByProp[j.customerId] || []).push(j); });
   // Within each property, order by building/unit label (B4-216, B5-218…) so
@@ -20323,9 +20364,31 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick }) {
                 className={`flex-1 py-2 rounded-lg text-sm font-medium ${scheduleMode === 'property' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>By property</button>
               <button onClick={() => setScheduleMode('completed')}
                 className={`flex-1 py-2 rounded-lg text-sm font-medium ${scheduleMode === 'completed' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>Completed</button>
+              {/* Unfinished — where the nightly notification lands. Hidden
+                 when there's nothing stuck, so it isn't a permanent scold. */}
+              {staleJobs.length > 0 && (
+                <button onClick={() => setScheduleMode('unfinished')}
+                  className={`flex-1 py-2 rounded-lg text-sm font-medium flex items-center justify-center gap-1 ${scheduleMode === 'unfinished' ? 'bg-white shadow-sm text-amber-900' : 'text-amber-700'}`}>
+                  <AlertCircle size={12} /> Unfinished ({staleJobs.length})
+                </button>
+              )}
             </div>
 
-            {scheduleMode === 'completed' ? (
+            {scheduleMode === 'unfinished' ? (
+              staleJobs.length === 0 ? (
+                <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
+                  Nothing unfinished. Everything started has been closed out.
+                </div>
+              ) : (
+                <div className="space-y-6">
+                  {/* Same PropertyCard the other tabs use, so these cards
+                     carry the assign / date / priority controls already. */}
+                  {staleByProp.map(([cid, list]) => (
+                    <PropertyCard key={cid} property={propById[cid]} cardJobs={list} keyId={`stale::${cid}`} />
+                  ))}
+                </div>
+              )
+            ) : scheduleMode === 'completed' ? (
               <CompletedAssignmentsView employee={employee} propById={propById} />
             ) : !loaded ? <Splash text="Loading…" /> : jobs.length === 0 ? (
               <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
@@ -27369,7 +27432,7 @@ function PortalPhotoSection({ label, photos, highlight, description, onResolve, 
 // DAILY VIEW — calendar-first drill-down
 // Calendar month → pick a date → see units cleaned that day → pick a unit → full detail
 // =================================================================
-function DailyView({ employee, onSignOut, onOpenMessages, onLogoClick }) {
+function DailyView({ employee, onSignOut, onOpenMessages, onLogoClick, onOpenUnfinishedTab }) {
   const [view, setView] = useState({ kind: 'calendar' });
   const showMoney = canSeeMoney(employee);
   // Persistent state for the Assigned vs Cleaned audit so its filters
@@ -27427,6 +27490,7 @@ function DailyView({ employee, onSignOut, onOpenMessages, onLogoClick }) {
   return <DailyCalendar employee={employee} onSignOut={onSignOut}
     onPickDay={(date) => setView({ kind: 'day', date })}
     onOpenInbox={() => setView({ kind: 'inbox' })}
+    onOpenUnfinished={() => onOpenUnfinishedTab && onOpenUnfinishedTab()}
     onOpenAssignedVsCleaned={() => setView({ kind: 'assigned-vs-cleaned' })}
     onOpenMessages={onOpenMessages}
     onLogoClick={onLogoClick} />;
@@ -28628,7 +28692,7 @@ function TranslationOverridesModal({ employee, onClose }) {
   );
 }
 
-function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenAssignedVsCleaned, onOpenMessages, onLogoClick }) {
+function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenUnfinished, onOpenAssignedVsCleaned, onOpenMessages, onLogoClick }) {
   const today = new Date();
   const [viewMonth, setViewMonth] = useState(new Date(today.getFullYear(), today.getMonth(), 1));
   const [activity, setActivity] = useState({});
@@ -28765,6 +28829,11 @@ function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenAssi
       <Header name={employee.name} onSignOut={onSignOut} role={employee.role} employee={employee} onOpenMessages={onOpenMessages} onLogoClick={onLogoClick}
         onOpenWhosHere={() => setWhosWhereOpen(true)}
         onNotificationNavigate={(n) => {
+          // The stale-work notification is about YOUR jobs, not a PM request,
+          // so it goes to Assignments → Unfinished. It carries link_kind
+          // 'assignment' too, which is why it was landing in the review inbox
+          // and showing an empty list.
+          if (n?.kind === 'stale_work') { onOpenUnfinished && onOpenUnfinished(); return; }
           // PM assignment / recheck notifications open the review screen where
           // the owner approves or denies. Other kinds just dismiss.
           if (n?.kind === 'pm_assignment' || n?.kind === 'recheck' || n?.link_kind === 'assignment') {

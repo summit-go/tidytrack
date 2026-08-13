@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap165";
+const BUILD_TAG = "aug6-tap169";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -8241,7 +8241,8 @@ function AssignmentWorkHistory({ propertyId, unitId, partyId, employee, defaultO
 // across EVERY property, so they see their whole day. Same-property
 // jobs start the clean directly; other-property jobs offer to switch.
 // =================================================================
-function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchProperty, onSwitchToJob, onStartJob }) {
+function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchProperty, onSwitchToJob, onStartJob,
+  propScope: propScopeProp, setPropScope: setPropScopeProp }) {
   const [sub, setSub] = useState('mine'); // 'mine' | 'all'
   const [jobs, setJobs] = useState([]);
   const [team, setTeam] = useState([]);
@@ -8267,6 +8268,12 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
   const [peekJob, setPeekJob] = useState(null); // read-only quick glance
   const [collapsedDates, setCollapsedDates] = useState(new Set()); // date-group keys that are collapsed
   const [buildingFilter, setBuildingFilter] = useState(null); // 'B1' | null = all buildings
+  // Scope: the property you're clocked into, or everything. Clocked in at
+  // Carriage Cove and seeing Bridges jobs mixed in is noise — you can't work
+  // them without switching properties first.
+  const [ownPropScope, setOwnPropScope] = useState('current'); // 'current' | 'all'
+  const propScope = propScopeProp !== undefined ? propScopeProp : ownPropScope;
+  const setPropScope = setPropScopeProp || setOwnPropScope;
   const [priorityCollapsed, setPriorityCollapsed] = useState(false);
   const saveDue = async (j, date) => {
     setEditDueId(null); setBusyId(j.id);
@@ -8452,7 +8459,13 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
     const t = new Date(); t.setDate(t.getDate() + 1);
     return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`;
   })();
-  const baseList = (sub === 'mine' ? jobs.filter(j => isMine(j)) : jobs)
+  const scopedJobs = (propScope === 'current' && currentPropertyId)
+    ? jobs.filter(j => j.customerId === currentPropertyId)
+    : jobs;
+  const otherPropCount = currentPropertyId
+    ? jobs.filter(j => j.customerId !== currentPropertyId).length
+    : 0;
+  const baseList = (sub === 'mine' ? scopedJobs.filter(j => isMine(j)) : scopedJobs)
     .slice()
     .sort((a, b) =>
       dueRank(a.scheduledDate) - dueRank(b.scheduledDate)
@@ -8738,6 +8751,25 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
         <button onClick={() => setSub('mine')} className={`flex-1 py-2 rounded-lg text-xs font-medium ${sub === 'mine' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>Assigned to me</button>
         <button onClick={() => setSub('all')} className={`flex-1 py-2 rounded-lg text-xs font-medium ${sub === 'all' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>All pending</button>
       </div>
+      {/* Property scope. Only offered when other properties actually have
+         work — no point showing a toggle that changes nothing. */}
+      {currentPropertyId && otherPropCount > 0 && (
+        <div className="flex items-center gap-1.5 mb-2 flex-wrap">
+          <button onClick={() => setPropScope('current')}
+            className={`text-[11px] font-mono px-2.5 py-1 rounded-full transition-colors ${propScope === 'current' ? 'bg-stone-900 text-stone-50' : 'bg-stone-100 text-stone-600 hover:bg-stone-200'}`}>
+            This property
+          </button>
+          <button onClick={() => setPropScope('all')}
+            className={`text-[11px] font-mono px-2.5 py-1 rounded-full transition-colors ${propScope === 'all' ? 'bg-stone-900 text-stone-50' : 'bg-stone-100 text-stone-600 hover:bg-stone-200'}`}>
+            All properties ({jobs.length})
+          </button>
+          {propScope === 'current' && (
+            <span className="text-[11px] font-mono text-stone-400">
+              +{otherPropCount} elsewhere
+            </span>
+          )}
+        </div>
+      )}
       {/* Building pills — same idea as the Assignments board. Only appears for
          properties whose units carry a building prefix (B1-202). Properties
          that don't use buildings, like Bridges, never show a pill and their
@@ -8841,7 +8873,8 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
 // where there's actually something to do before they commit to a
 // clock-out / clock-in.
 // =================================================================
-function PropertySwitcher({ currentPropertyId, currentName, employee, onSwitch, disabled = false }) {
+function PropertySwitcher({ currentPropertyId, currentName, employee, onSwitch, disabled = false,
+  onShowAllProperties = null, showingAll = false }) {
   const [open, setOpen] = useState(false);
   const [props, setProps] = useState([]);
   const [counts, setCounts] = useState({});
@@ -8905,6 +8938,22 @@ function PropertySwitcher({ currentPropertyId, currentName, employee, onSwitch, 
             <div className="px-3 pt-2.5 pb-1 text-[10px] uppercase tracking-wider font-mono text-stone-400">
               Switch property
             </div>
+            {/* Widens the assignments list to every property WITHOUT moving
+               the shift — you stay clocked in where you are. Switching for
+               real still means picking a property below. */}
+            {onShowAllProperties && (
+              <button onClick={() => { setOpen(false); onShowAllProperties(); }}
+                className={`w-full text-left px-3 py-2.5 flex items-center gap-2 border-t border-stone-100 ${showingAll ? 'bg-stone-50' : 'hover:bg-stone-50 active:scale-[0.99] transition'}`}>
+                <Building2 size={14} className={showingAll ? 'text-amber-600' : 'text-stone-400'} />
+                <span className="flex-1 min-w-0">
+                  <span className="block text-sm text-stone-900">All properties</span>
+                  <span className="block text-[10px] font-mono text-stone-500">
+                    See every property's jobs — stays clocked in here
+                  </span>
+                </span>
+                {showingAll && <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-amber-100 text-amber-800">On</span>}
+              </button>
+            )}
             {!loaded ? (
               <div className="px-3 py-4 text-xs font-mono text-stone-400">Loading…</div>
             ) : props.length === 0 ? (
@@ -9008,6 +9057,9 @@ function CleanerPropertiesList({ currentPropertyId, employee, onOpenCurrent, onS
 function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onClockOut, onSwitchProperty, onSwitchToJob, onStartNew, onReopen, onEndBlock, onGoToBedroom, onOpenMessages, onOpenChangePin, onOpenBedroomHistory, onJoinBlock, onUndoBlock, onMoveBlock, cleanerTab: cleanerTabProp, setCleanerTab: setCleanerTabProp, busy }) {
   const [showMenu, setShowMenu] = useState(false);
   const [showAssignmentForm, setShowAssignmentForm] = useState(false);
+  // Which properties the assignments list covers. Lives here so the header
+  // dropdown and the list stay in step.
+  const [propScope, setPropScope] = useState('current'); // 'current' | 'all'
   // Bottom nav tab — Home / Assignments / More. Parent (AuthedShift)
   // controls this when provided so the tab persists across BlockView
   // navigation. Falls back to local state for standalone use.
@@ -9114,6 +9166,8 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
               currentName={shift.customer?.name}
               employee={employee}
               disabled={busy}
+              showingAll={propScope === 'all'}
+              onShowAllProperties={() => { setPropScope(propScope === 'all' ? 'current' : 'all'); setCleanerTab('assignments'); }}
               onSwitch={(p) => onSwitchProperty && onSwitchProperty(p)} />
           </div>
           <div className="flex flex-col gap-1.5 items-end shrink-0">
@@ -9164,6 +9218,7 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
           )}
 
           <CleanerWorkList employee={employee} currentPropertyId={shift.customer_id}
+            propScope={propScope} setPropScope={setPropScope}
             onGoToBedroom={onGoToBedroom} onSwitchProperty={onSwitchProperty} onSwitchToJob={onSwitchToJob} />
           {false && (<>
           {homeView === 'today' && (
@@ -14004,6 +14059,11 @@ function ShiftList({ shifts, showMoney, onOpen }) {
 }
 
 // Per-shift billable helper shared by the cleaner views.
+// Revenue on the Shifts page is hidden for now. Hours, apartments and times
+// all stay — this only suppresses "what the complex is charged", which sat
+// confusingly next to what the cleaner is owed. Flip to true to bring it back;
+// the P&L and invoicing are untouched either way.
+const SHOW_BILLED_ON_SHIFTS = false;
 function shiftBillableAmount(s, showMoney) {
   if (!showMoney || !s.end_time) return 0;
   if (s.customer?.property_type === 'multi_unit') {
@@ -14068,10 +14128,9 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
     if (!empId) { alert('No cleaner id — could not save pay.'); return; }
     const key = payKey(empId, dateKey, custId, assignmentId, unitId);
     const existing = payDays[key];
-    // Pre-split day rows (custId null) are still fully editable — they're
-    // updated by row id, so they never need a property. Only creating a
-    // brand-new row requires one.
-    if (!custId && !existing?.id) { alert('No property on these shifts — could not save pay.'); return; }
+    // custId null is a real case now — a shift clocked in without a property.
+    // Its pay row is the day+employee row with customer_id null, which is the
+    // same shape the old pre-split rows use, so both paths work unchanged.
     const val = (amount === '' || amount == null) ? null : Number(amount);
     if (val != null && (isNaN(val) || val < 0)) { setSettingPay(null); return; }
     setPayBusy(key);
@@ -14153,8 +14212,16 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
   // strips underneath said was already paid. Both now read from this.
   const dayPayBreakdown = (empId, dateKey, dayShifts) => {
     const out = { legacy: null, strips: [], dayOwed: 0, dayPaid: 0 };
-    // A day recorded before per-property pay keeps its single bundled row.
-    const legacyRow = payDays[payKey(empId, dateKey, null)];
+    const noPropShifts = (dayShifts || []).filter(s => !(s.customer?.id || s.customer_id));
+    // A day recorded before per-property pay keeps its single bundled row,
+    // which also has customer_id null — the same shape a no-property shift's
+    // row uses. They're told apart by the shifts themselves: a genuine legacy
+    // day is all property work. Without this check, paying a no-property
+    // shift would create a null-customer row and the day would collapse into
+    // one bundled figure, marking that day's property work paid too.
+    const legacyRow = noPropShifts.length === 0
+      ? payDays[payKey(empId, dateKey, null)]
+      : null;
     if (legacyRow) {
       const hasFlat = legacyRow.flat_amount != null;
       const owed = hasFlat ? Number(legacyRow.flat_amount) : payOwed(dayShifts);
@@ -14162,6 +14229,28 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
       out.legacy = { row: legacyRow, key: payKey(empId, dateKey, null), hasFlat, owed, paid, stale: isUnpaidStale(dateKey, paid) };
       if (paid) out.dayPaid += owed; else out.dayOwed += owed;
       return out;
+    }
+    // Shifts with NO property attached — clocked in without picking one, or
+    // non-cleaning work. groupByProperty drops these (it keys on customer_id),
+    // so the day produced no strips at all and the card read "pay can't be
+    // split" with $0.00 owed, even though the hours were right there. They're
+    // paid the same way an hourly property is: hours x the employee's rate.
+    if (noPropShifts.length > 0) {
+      const key = payKey(empId, dateKey, null);
+      const row = payDays[key];
+      const hasFlat = row?.flat_amount != null;
+      const owed = hasFlat ? Number(row.flat_amount) : payOwed(noPropShifts);
+      const paid = !!row?.paid_at;
+      if (paid) out.dayPaid += owed; else out.dayOwed += owed;
+      const pMs = noPropShifts.filter(x => x.end_time).reduce((sum, x) => sum + shiftBillableMs(x), 0);
+      const pBlocks = noPropShifts.reduce((n, x) => n + (x.work_blocks?.length || 0), 0);
+      out.strips.push({
+        pg: { id: null, name: 'No property', shifts: noPropShifts },
+        assignmentId: null, unitId: null,
+        title: 'No property', sub: 'Clocked in without a property',
+        key, row, hasFlat, owed, paid,
+        pMs, pBlocks, aptCount: 0, hourly: true, stale: isUnpaidStale(dateKey, paid),
+      });
     }
     groupByProperty(dayShifts).forEach(pg => {
       const sample = pg.shifts[0];
@@ -14251,7 +14340,6 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
   const togglePaid = async (empId, dateKey, custId, amount, assignmentId = null, unitId = null) => {
     const key = payKey(empId, dateKey, custId, assignmentId, unitId);
     const existing = payDays[key];
-    if (!custId && !existing?.id) { alert('No property on these shifts — could not save pay.'); return; }
     setPayBusy(key);
     let error;
     if (existing?.paid_at) {
@@ -14484,9 +14572,32 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
                     </div>
                   );
                 })()}
-                <div className="flex items-center justify-between text-xs text-stone-500 font-mono">
+                <div className="flex items-center justify-between text-xs text-stone-500 font-mono gap-2">
                   <span>{d.shifts.length} {d.shifts.length === 1 ? 'shift' : 'shifts'} · {blocks} {blocks === 1 ? 'block' : 'blocks'} · {fmtTimeShort(totalMs)}</span>
-                  {showMoney && billable > 0 && <span className="text-emerald-700 font-medium">{fmtMoney(billable)}</span>}
+                  {/* This is REVENUE — what the property gets billed for the
+                     work blocks — sitting on the same card as what the cleaner
+                     is owed. Unlabelled it read like a second, contradictory
+                     pay figure, so it says what it is and flags the days where
+                     you're paying out more than you're billing. */}
+                  {SHOW_BILLED_ON_SHIFTS && showMoney && billable > 0 && (() => {
+                    const dayPay = dayPayBreakdown(empId, d.key, d.shifts);
+                    const owedPlusPaid = dayPay.dayOwed + dayPay.dayPaid;
+                    const underwater = owedPlusPaid > 0 && owedPlusPaid > billable;
+                    return (
+                      <span className="flex items-center gap-1.5 flex-shrink-0">
+                        <span className="text-stone-400 uppercase tracking-wider text-[10px]">Billed</span>
+                        <span className={underwater ? 'text-red-700 font-medium' : 'text-emerald-700 font-medium'}>
+                          {fmtMoney(billable)}
+                        </span>
+                        {underwater && (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-red-100 text-red-700"
+                            title={`Paying ${fmtMoney(owedPlusPaid)} against ${fmtMoney(billable)} billed`}>
+                            −{fmtMoney(owedPlusPaid - billable)}
+                          </span>
+                        )}
+                      </span>
+                    );
+                  })()}
                 </div>
               </button>
               {showMoney && (() => {
@@ -14581,9 +14692,11 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
                 // the Owe / Paid on the cleaner header can never disagree.
                 const { strips, dayOwed, dayPaid } = bd;
                 if (strips.length === 0) {
+                  // Reachable only when the day has no shifts at all to price.
+                  // No-property shifts now get their own strip above.
                   return (
                     <div className="px-4 py-2.5 border-t border-stone-100 text-[11px] font-mono text-stone-400">
-                      No property on these shifts — pay can't be split.
+                      Nothing to price on this day.
                     </div>
                   );
                 }
@@ -14699,7 +14812,7 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
                           {fmtClock(s.start_time)} {s.end_time ? `— ${fmtClock(s.end_time)}` : '— active'} · {fmtTimeShort(dur)}
                         </button>
                         <span className="flex items-center gap-2 flex-shrink-0">
-                          {showMoney && sb > 0 && <span className="text-emerald-700">{fmtMoney(sb)}</span>}
+                          {SHOW_BILLED_ON_SHIFTS && showMoney && sb > 0 && <span className="text-emerald-700">{fmtMoney(sb)}</span>}
                           <button onClick={() => onOpenShift(s)} title="Open shift"><ChevronRight size={13} className="text-stone-400" /></button>
                           {(currentEmployee?.role === 'owner' || currentEmployee?.role === 'manager') && (
                             <button

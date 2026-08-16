@@ -26,6 +26,7 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 // =================================================================
 const GOOGLE_TRANSLATE_API_KEY = "AIzaSyD7ceHPryMzs45hWJOyFNBxtOzQOEmJcSA";
 
+
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // ============================================================
@@ -118,7 +119,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap178";
+const BUILD_TAG = "aug6-tap179";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -21374,6 +21375,11 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
   // Done work in this window that an earlier invoice already claimed.
   const [billedElsewhere, setBilledElsewhere] = useState({ bedrooms: 0, invoices: [] });
   const [rebillWarning, setRebillWarning] = useState(false);
+  // Which cleaning types this invoice covers. Empty = all of them, so the
+  // default behaviour is unchanged. Touch ups are priced differently and get
+  // billed on their own invoice, which is what this is for.
+  const [typeFilter, setTypeFilter] = useState(new Set());
+  const [typesInRange, setTypesInRange] = useState([]);
   const [verifyOpen, setVerifyOpen] = useState(false);
   const [defaultRate, setDefaultRate] = useState(0);
   const [previewing, setPreviewing] = useState(false);
@@ -21560,7 +21566,11 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
       (mcs || []).forEach(m => { if (Number(m.amount) > 0) manualByUnit[m.unit_id] = Number(m.amount); });
     }
     const SEC_LABEL = { bathroom: 'Bathroom', vanity: 'Vanity', general: 'General / kitchen', bedroom: 'Bedroom' };
-    const built = Array.from(byAssign.values()).map(g => {
+    // Every type present in this range, so the chips only offer real choices.
+    setTypesInRange([...new Set(Array.from(byAssign.values()).map(g => g.type).filter(Boolean))]);
+    const built = Array.from(byAssign.values())
+      .filter(g => typeFilter.size === 0 || typeFilter.has(g.type || ''))
+      .map(g => {
       const unitLabel = unitLabelById[g.unit_id] || '';
       const apt = String(unitLabel).replace(/^B\d+-/i, '').trim();
       const brm = (g.partyLabel.match(/(\d+)\s*$/) || [])[1] || '';
@@ -21804,7 +21814,9 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
       address: seedInvoice?.bill_to_address || property.billing_address || property.address || '',
     });
     setLoading(false);
-  })(); /* eslint-disable-next-line */ }, []);
+  // Rebuilds when the cleaning-type filter changes, so the chips actually
+  // reshape the draft rather than only affecting the next one.
+  })(); /* eslint-disable-next-line */ }, [typeFilter]);
 
   const toggleExpand = (k) => setExpanded(prev => { const n = new Set(prev); n.has(k) ? n.delete(k) : n.add(k); return n; });
   const updateLine = (key, patch) => setLines(ls => ls.map(l => l.key === key ? { ...l, ...patch } : l));
@@ -22052,6 +22064,49 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
            finished bedroom in this window; this draft drops the ones an
            earlier invoice already claimed. Without this line the two
            screens disagree for no visible reason. */}
+        {/* Cleaning-type filter. Touch ups price differently and get billed on
+           their own invoice, so this keeps them off a move-out invoice
+           without hand-deleting lines. Only offered when the range actually
+           holds more than one type. */}
+        {typesInRange.length > 1 && (
+          <div className="mb-3 p-3 rounded-2xl bg-white border border-stone-200">
+            <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-2 flex items-center gap-2">
+              Include on this invoice
+              {typeFilter.size > 0 && (
+                <button onClick={() => setTypeFilter(new Set())}
+                  className="normal-case text-amber-700 hover:text-amber-900">
+                  Reset
+                </button>
+              )}
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              <button onClick={() => setTypeFilter(new Set())}
+                className={`px-2.5 py-1 rounded-full text-xs font-mono transition-colors ${typeFilter.size === 0 ? 'bg-stone-900 text-stone-50' : 'bg-stone-100 text-stone-600 hover:bg-stone-200'}`}>
+                All types
+              </button>
+              {typesInRange.map(t => {
+                const on = typeFilter.has(t);
+                return (
+                  <button key={t} onClick={() => setTypeFilter(prev => {
+                      const next = new Set(prev);
+                      if (next.has(t)) next.delete(t); else next.add(t);
+                      return next;
+                    })}
+                    className={`px-2.5 py-1 rounded-full text-xs font-mono inline-flex items-center gap-1 transition-colors ${on ? 'bg-stone-900 text-stone-50' : 'bg-stone-100 text-stone-600 hover:bg-stone-200'}`}>
+                    {on && <Check size={10} />}
+                    {assignmentTypeLabel(t) || t}
+                  </button>
+                );
+              })}
+            </div>
+            {typeFilter.size > 0 && (
+              <div className="text-[11px] text-stone-500 mt-2">
+                Work of the other types stays uninvoiced and will show up on the next draft.
+              </div>
+            )}
+          </div>
+        )}
+
         {rebillWarning && (
           <div className="mb-3 p-3 rounded-2xl bg-red-50 border-2 border-red-300">
             <div className="text-xs text-red-900 font-bold flex items-center gap-1.5">
@@ -22937,6 +22992,22 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
   const savedRange = (() => {
     try { return JSON.parse(localStorage.getItem(SAVED_RANGE_KEY) || 'null'); } catch { return null; }
   })();
+  // Which properties the report covers. Empty = all of them, which is the
+  // old behaviour, so an untouched filter changes nothing.
+  const [allProps, setAllProps] = useState([]);
+  const [propFilter, setPropFilter] = useState(new Set());
+  useEffect(() => {
+    (async () => {
+      const { data } = await supabase.from('customers').select('id, name').eq('active', true).order('name');
+      setAllProps(data || []);
+    })();
+  }, []);
+  const toggleProp = (id) => setPropFilter(prev => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+
   const [start, setStart] = useState(savedRange?.start || iso(new Date(Date.now() - 29 * 86400000)));
   const [end, setEnd] = useState(savedRange?.end || iso(new Date()));
   const [loading, setLoading] = useState(false);
@@ -22961,9 +23032,12 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
       // 1. Invoices whose covered period overlaps the range. Older
       //    invoices predate period_start/period_end, so fall back to
       //    invoice_date for those.
-      const { data: invs, error: invErr } = await supabase.from('invoices')
+      let invQ = supabase.from('invoices')
         .select('id, customer_id, invoice_date, period_start, period_end, invoice_number, status, customer:customers(id, name)')
         .or(`and(period_start.lte.${end},period_end.gte.${start}),and(period_start.is.null,invoice_date.gte.${start},invoice_date.lte.${end})`);
+      // Narrow to the chosen properties. Empty selection means all.
+      if (propFilter.size > 0) invQ = invQ.in('customer_id', Array.from(propFilter));
+      const { data: invs, error: invErr } = await invQ;
       if (invErr) throw invErr;
       const invoices = invs || [];
 
@@ -22983,7 +23057,8 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
           if (data.length < PAGE) break;
           if (from > 100000) break;
         }
-        return out.filter(b => b.shift && !b.shift.is_preview && b.unit_id);
+        return out.filter(b => b.shift && !b.shift.is_preview && b.unit_id
+          && (propFilter.size === 0 || propFilter.has(b.shift.customer_id)));
       };
       const blockPay = (b) => {
         const hrs = (new Date(b.end_time) - new Date(b.start_time)) / 3600000;
@@ -23407,6 +23482,40 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
             <DateRangePicker start={start} end={end} onChange={(s, e) => { setStart(s); setEnd(e); }} />
             <p className="text-[11px] text-stone-400 mt-1.5">Matches the work an invoice covers, not the date it was written.</p>
           </div>
+
+          {/* Property filter — pick any combination, or leave it alone for
+             everything. Applies to BOTH sides of the report: the invoices
+             charged and the labor paid, so profit can't be computed from one
+             property's revenue against another's wages. */}
+          {allProps.length > 1 && (
+            <div>
+              <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 flex items-center gap-2">
+                Properties
+                {propFilter.size > 0 && (
+                  <button onClick={() => setPropFilter(new Set())}
+                    className="text-[10px] normal-case text-amber-700 hover:text-amber-900">
+                    Clear ({propFilter.size})
+                  </button>
+                )}
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                <button onClick={() => setPropFilter(new Set())}
+                  className={`px-3 py-1.5 rounded-full text-xs font-mono transition-colors ${propFilter.size === 0 ? 'bg-stone-900 text-stone-50' : 'bg-white border border-stone-300 text-stone-600 hover:border-stone-500'}`}>
+                  All properties
+                </button>
+                {allProps.map(p => {
+                  const on = propFilter.has(p.id);
+                  return (
+                    <button key={p.id} onClick={() => toggleProp(p.id)}
+                      className={`px-3 py-1.5 rounded-full text-xs font-mono inline-flex items-center gap-1 transition-colors ${on ? 'bg-stone-900 text-stone-50' : 'bg-white border border-stone-300 text-stone-600 hover:border-stone-500'}`}>
+                      {on && <Check size={11} />}
+                      {p.name}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
 
           <button onClick={run} disabled={loading || !start || !end}
             className="w-full py-4 rounded-2xl bg-stone-900 text-stone-50 font-medium disabled:opacity-50">

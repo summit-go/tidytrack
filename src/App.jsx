@@ -26,7 +26,6 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 // =================================================================
 const GOOGLE_TRANSLATE_API_KEY = "AIzaSyD7ceHPryMzs45hWJOyFNBxtOzQOEmJcSA";
 
-
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // ============================================================
@@ -119,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap179";
+const BUILD_TAG = "aug6-tap181";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -14263,7 +14262,9 @@ const localDayKey = (ts) => {
 function AddShiftModal({ onClose, onSaved, currentEmployee }) {
   const [employees, setEmployees] = useState([]);
   const [properties, setProperties] = useState([]);
-  const [empId, setEmpId] = useState('');
+  const [empId, setEmpId] = useState('');           // '' | uuid | '__new__'
+  const [newName, setNewName] = useState('');      // used when empId === '__new__'
+  const [newRate, setNewRate] = useState('');      // their hourly rate, optional
   const [custId, setCustId] = useState('');           // '' = no property
   const todayStr = (() => {
     const d = new Date();
@@ -14288,7 +14289,10 @@ function AddShiftModal({ onClose, onSaved, currentEmployee }) {
     })();
   }, []);
 
-  const emp = employees.find(x => x.id === empId);
+  const addingPerson = empId === '__new__';
+  const emp = addingPerson
+    ? { name: newName.trim(), pay_rate_hourly: newRate.trim() ? parseFloat(newRate) : null }
+    : employees.find(x => x.id === empId);
   // Local wall-clock times, so 9:00 means 9:00 where the work happened.
   const startISO = (date && startTime) ? new Date(`${date}T${startTime}:00`) : null;
   const endISO = (date && endTime) ? new Date(`${date}T${endTime}:00`) : null;
@@ -14305,12 +14309,29 @@ function AddShiftModal({ onClose, onSaved, currentEmployee }) {
   const save = async () => {
     setErr('');
     if (!empId) { setErr('Pick who worked.'); return; }
+    if (addingPerson && !newName.trim()) { setErr('Enter their name.'); return; }
     if (!startISO || !endAdjusted) { setErr('Enter a start and end time.'); return; }
     if (hours <= 0 || hours > 24) { setErr('That start/end pair gives an impossible length.'); return; }
     setBusy(true);
     try {
+      // Someone new, added on the spot. They get a real employee row so the
+      // shift, the pay and every report behave normally — but NO pin, so they
+      // can't sign in and nothing has to be handed out. Give them a PIN later
+      // in Team if they end up sticking around.
+      let useEmpId = empId;
+      if (addingPerson) {
+        const { data: created, error: ce } = await supabase.from('employees').insert({
+          name: newName.trim(),
+          role: 'cleaner',
+          active: true,
+          pay_rate_hourly: newRate.trim() ? parseFloat(newRate) : null,
+        }).select('id').single();
+        if (ce) throw ce;
+        useEmpId = created?.id;
+        if (!useEmpId) throw new Error('Could not create that person.');
+      }
       const { data: shift, error } = await supabase.from('shifts').insert({
-        employee_id: empId,
+        employee_id: useEmpId,
         customer_id: custId || null,
         start_time: startISO.toISOString(),
         end_time: endAdjusted.toISOString(),
@@ -14326,7 +14347,7 @@ function AddShiftModal({ onClose, onSaved, currentEmployee }) {
       // control writes, so the shift card shows it and payroll picks it up.
       if (flatPay !== '' && !isNaN(Number(flatPay))) {
         const payload = {
-          employee_id: empId,
+          employee_id: useEmpId,
           work_date: date,
           customer_id: custId || null,
           assignment_id: null,
@@ -14335,7 +14356,7 @@ function AddShiftModal({ onClose, onSaved, currentEmployee }) {
           created_by: currentEmployee?.id || null,
         };
         let q = supabase.from('employee_pay_days').select('id')
-          .eq('employee_id', empId).eq('work_date', date);
+          .eq('employee_id', useEmpId).eq('work_date', date);
         q = custId ? q.eq('customer_id', custId) : q.is('customer_id', null);
         const { data: found } = await q.is('assignment_id', null).is('unit_id', null).maybeSingle();
         if (found?.id) {
@@ -14378,7 +14399,37 @@ function AddShiftModal({ onClose, onSaved, currentEmployee }) {
                   {e.name}{e.pay_rate_hourly ? ` — $${Number(e.pay_rate_hourly).toFixed(2)}/hr` : ' — no rate set'}
                 </option>
               ))}
+              <option value="__new__">+ Someone not on the list…</option>
             </select>
+            {/* Adding a person here creates them with a name and a rate and
+               nothing else — no PIN, no sign-in. Enough to record the shift
+               and pay them; you can promote them to a full account in Team
+               later if they stay on. */}
+            {addingPerson && (
+              <div className="mt-2 p-3 rounded-xl bg-stone-100 border border-stone-200 space-y-2">
+                <div>
+                  <label className="text-[10px] uppercase tracking-wider font-mono text-stone-500 block mb-1">Their name</label>
+                  <input value={newName} autoFocus onChange={(e) => setNewName(e.target.value)}
+                    placeholder="e.g. Marco"
+                    className="w-full px-3 py-2.5 rounded-lg border border-stone-300 bg-white text-sm" />
+                </div>
+                <div>
+                  <label className="text-[10px] uppercase tracking-wider font-mono text-stone-500 block mb-1">
+                    Hourly rate <span className="text-stone-400 normal-case">(optional)</span>
+                  </label>
+                  <div className="flex items-center gap-2">
+                    <span className="font-mono text-stone-500">$</span>
+                    <input type="number" step="0.01" value={newRate} onChange={(e) => setNewRate(e.target.value)}
+                      placeholder="0.00"
+                      className="w-28 px-3 py-2.5 rounded-lg border border-stone-300 bg-white text-sm font-mono" />
+                    <span className="text-[11px] font-mono text-stone-500">/hr</span>
+                  </div>
+                </div>
+                <div className="text-[11px] text-stone-500">
+                  Saved as a cleaner with no PIN — they can't sign in until you set one in Team.
+                </div>
+              </div>
+            )}
           </div>
 
           <div>
@@ -14447,7 +14498,7 @@ function AddShiftModal({ onClose, onSaved, currentEmployee }) {
             className="flex-1 py-3 rounded-2xl border border-stone-300 text-stone-700 text-sm font-medium disabled:opacity-50">
             Cancel
           </button>
-          <button onClick={save} disabled={busy || !empId}
+          <button onClick={save} disabled={busy || !empId || (addingPerson && !newName.trim())}
             className="flex-1 py-3 rounded-2xl bg-stone-900 text-stone-50 text-sm font-medium disabled:opacity-50">
             {busy ? 'Saving…' : 'Add shift'}
           </button>
@@ -23445,12 +23496,13 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
 
   // Copy as TSV. Pastes straight into Excel or Sheets as real columns.
   const copyForExcel = async () => {
-    const head = ['Property', 'Apartment', 'Type', 'Cleaned', 'Cleaners', 'Hours', 'Paid', 'Charged', 'Profit', 'Note'];
+    const head = ['Property', 'Apartment', 'Type', 'Charged', 'Profit', 'Paid', 'Hours', 'Cleaned', 'Cleaners', 'Note'];
     const body = allRows.map(r => [
       r.propertyName, r.label, r.serviceType || '',
+      r.charge.toFixed(2), (r.charge - r.paid).toFixed(2),
+      r.paid.toFixed(2), r.hours.toFixed(2),
       r.cleanedDays.join(' '), r.cleaners.map(c => c.name).join(', '),
-      r.hours.toFixed(2), r.paid.toFixed(2), r.charge.toFixed(2),
-      (r.charge - r.paid).toFixed(2), (r.note || '').replace(/\t|\n/g, ' '),
+      (r.note || '').replace(/\t|\n/g, ' '),
     ]);
     const tsv = [head, ...body].map(row => row.join('\t')).join('\n');
     try {
@@ -23475,6 +23527,11 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
             <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">Report</div>
             <h1 className="font-serif text-3xl text-stone-900">Profit / loss</h1>
             <p className="text-sm text-stone-500 mt-1">Every invoiced apartment: what you charged, who cleaned it, what they cost.</p>
+            <p className="text-[11px] text-stone-400 mt-1">
+              <span className="font-medium text-stone-500">Charged</span> is the amount on the invoice line.
+              <span className="font-medium text-stone-500"> Paid</span> is hours × each cleaner's rate.
+              Profit is the difference — hours never set the charge.
+            </p>
           </div>
 
           <div>
@@ -23610,13 +23667,18 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
                   <table className="w-full text-xs" style={{ minWidth: 860 }}>
                     <thead>
                       <tr className="bg-stone-100 text-stone-500 font-mono text-[10px] uppercase tracking-wider">
+                        {/* Charged / Profit sit right after Apartment. They were
+                           last in an 860px-wide table, so on anything narrower
+                           the two columns the report exists for were scrolled
+                           off screen — leaving Hours and Paid looking like the
+                           whole story. */}
                         <th className="text-left px-3 py-2 font-medium">Apartment</th>
-                        <th className="text-left px-3 py-2 font-medium">Cleaned</th>
-                        <th className="text-left px-3 py-2 font-medium">Cleaner(s)</th>
-                        <th className="text-right px-3 py-2 font-medium">Hours</th>
-                        <th className="text-right px-3 py-2 font-medium">Paid</th>
                         <th className="text-right px-3 py-2 font-medium">Charged</th>
                         <th className="text-right px-3 py-2 font-medium">Profit</th>
+                        <th className="text-right px-3 py-2 font-medium">Paid</th>
+                        <th className="text-right px-3 py-2 font-medium">Hours</th>
+                        <th className="text-left px-3 py-2 font-medium">Cleaned</th>
+                        <th className="text-left px-3 py-2 font-medium">Cleaner(s)</th>
                         <th className="px-2 py-2" />
                       </tr>
                     </thead>
@@ -23664,6 +23726,14 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
                                 {r.serviceType && <div className="text-[10px] text-stone-400 ml-4">{assignmentTypeLabel ? assignmentTypeLabel(r.serviceType) : r.serviceType}</div>}
                                 {r.note && <div className="text-[10px] text-stone-500 italic mt-0.5 ml-4">{r.note}</div>}
                               </td>
+                              {/* Charged is the INVOICE LINE amount, not anything
+                                 derived from hours. Profit = this minus Paid. */}
+                              <td className="px-1 py-2">{editCell('charge', r.charge.toFixed(2), r.editedCharge)}</td>
+                              <td className={`px-3 py-2 text-right font-mono font-medium whitespace-nowrap ${p >= 0 ? 'text-emerald-700' : 'text-red-600'}`}>
+                                {p >= 0 ? '+' : ''}{p.toFixed(2)}
+                              </td>
+                              <td className="px-1 py-2">{r.isManual ? <span className="font-mono text-stone-500 block text-right pr-1">{r.paid.toFixed(2)}</span> : editCell('paid', r.paid.toFixed(2), r.editedPaid)}</td>
+                              <td className="px-1 py-2">{r.isManual ? <span className="font-mono text-stone-500 block text-right pr-1">{r.hours.toFixed(2)}</span> : editCell('hours', r.hours.toFixed(2), r.editedHours)}</td>
                               <td className="px-3 py-2 font-mono text-stone-600 whitespace-nowrap">
                                 {r.cleanedDays.length === 0 ? <span className="text-stone-400">—</span>
                                   : r.cleanedDays.length === 1 ? fmtDueDate(r.cleanedDays[0])
@@ -23674,12 +23744,6 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
                                   : r.cleaners.map(c => (
                                       <div key={c.name} className="font-mono text-stone-700 whitespace-nowrap">{c.name}</div>
                                     ))}
-                              </td>
-                              <td className="px-1 py-2">{r.isManual ? <span className="font-mono text-stone-500 block text-right pr-1">{r.hours.toFixed(2)}</span> : editCell('hours', r.hours.toFixed(2), r.editedHours)}</td>
-                              <td className="px-1 py-2">{r.isManual ? <span className="font-mono text-stone-500 block text-right pr-1">{r.paid.toFixed(2)}</span> : editCell('paid', r.paid.toFixed(2), r.editedPaid)}</td>
-                              <td className="px-1 py-2">{editCell('charge', r.charge.toFixed(2), r.editedCharge)}</td>
-                              <td className={`px-3 py-2 text-right font-mono font-medium whitespace-nowrap ${p >= 0 ? 'text-emerald-700' : 'text-red-600'}`}>
-                                {p >= 0 ? '+' : ''}{p.toFixed(2)}
                               </td>
                               <td className="px-2 py-2 text-right">
                                 {r.edited && (

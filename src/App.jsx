@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap181";
+const BUILD_TAG = "aug6-tap182";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -946,18 +946,31 @@ const greetingForTime = () => {
 // Compute billable milliseconds for a shift:
 //   raw clocked-in time − idle_seconds + manual_adjustment_seconds
 // Falls back to raw duration for shifts without these fields.
+// Longest a single shift can plausibly be. Past this it isn't a long day,
+// it's a clock-out nobody pressed.
+const MAX_SHIFT_HOURS = 14;
 const shiftBillableMs = (shift) => {
   if (!shift?.start_time) return 0;
   const start = new Date(shift.start_time);
-  const actualEnd = shift.end_time ? new Date(shift.end_time) : new Date();
+  const running = !shift.end_time;
+  const actualEnd = running ? new Date() : new Date(shift.end_time);
   let end = actualEnd;
-  // We never work past 10pm, so anything beyond 10pm of the start day is a
-  // forgotten clock-out — cap it there. Only applies when the shift STARTED
-  // before 10pm, so a genuine late shift (e.g. 10:10pm–10:39pm) is untouched.
-  // Catches both still-running shifts AND completed ones with a bad end time
-  // (like a clock-out at 12:11am the next day showing 33 hours).
-  const cap10pm = new Date(start.getFullYear(), start.getMonth(), start.getDate(), 22, 0, 0, 0);
-  if (start < cap10pm && actualEnd > cap10pm) end = cap10pm;
+
+  // Forgotten clock-outs used to be caught by capping every shift at 10pm on
+  // the start day. That quietly underpaid every real evening shift: a clean
+  // finishing at 10:41pm was paid to 10:00pm and nobody could see the 41
+  // minutes go missing — roughly $15 a shift.
+  //
+  // A recorded clock-out is now trusted. Only two things get capped:
+  //   • a shift still running (nobody has clocked out yet), and
+  //   • a completed shift longer than MAX_SHIFT_HOURS, which is a mistake
+  //     rather than a workday.
+  const hoursRaw = (actualEnd - start) / 3600000;
+  if (running || hoursRaw > MAX_SHIFT_HOURS) {
+    const cap10pm = new Date(start.getFullYear(), start.getMonth(), start.getDate(), 22, 0, 0, 0);
+    if (start < cap10pm && actualEnd > cap10pm) end = cap10pm;
+  }
+
   const rawMs = end - start;
   const idleSec = shift.idle_seconds || 0;
   const adjSec = shift.manual_adjustment_seconds || 0;

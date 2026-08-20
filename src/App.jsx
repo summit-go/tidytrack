@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap182";
+const BUILD_TAG = "aug6-tap184";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -21651,7 +21651,16 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
       const label = (brm ? `${apt} - ${brm}` : `${apt}${brBa}`);
       const subs = [];
       const seen = new Set();
-      g.items.forEach(it => {
+      // Bridges / Citifront quick uploads carry four auto items —
+      // bedroom:entire, bathroom:entire, vanity:entire, general:entire —
+      // that stand for "the whole apartment", not four separately priced
+      // jobs. Itemizing them produced four unpriced $0 subsections and, worse,
+      // meant the line was no longer "nothing itemized", so the per-size flat
+      // price (__apt__:3x2) was never consulted and the invoice came out at
+      // zero. Treat them as no itemization at all.
+      const isWholeSectionItem = (it) => String(it.fullKey || '').endsWith(':entire');
+      const itemsToPrice = g.items.filter(it => !isWholeSectionItem(it));
+      itemsToPrice.forEach(it => {
         if (seen.has(it.fullKey)) return;
         seen.add(it.fullKey);
         const b = book[it.fullKey];
@@ -22346,13 +22355,21 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
                 <div>Priced items in price book: <span className="text-stone-800">{diag.pricedKeys}</span></div>
                 {diag.err && <div className="text-red-600 break-words">Query error: {diag.err}</div>}
                 <div className="pt-2 text-stone-400">
-                  {diag.units === 0 ? 'This property has no units — generation needs unit/bedroom data.'
+                  {diag.units === 0 ? 'This property has no units — an invoice built from cleanings needs unit/bedroom data. You can still bill it by hand below.'
                     : diag.doneItems === 0 ? 'No items were marked done with a completion date in this range. Try widening the dates, or check that these cleans were completed (not just started).'
                     : diag.pricedKeys === 0 ? 'Items were cleaned, but nothing is priced yet — set prices in the price book.'
                     : 'Items were cleaned but none matched a priced subsection key. Tell me a cleaned item and I can check the key mapping.'}
                 </div>
               </div>
             )}
+            {/* An empty draft used to be a dead end. A property with no units,
+               or work that never went through the app, still needs billing —
+               so the custom line is available here too and the invoice can be
+               written entirely by hand. */}
+            <button onClick={addCustomLine}
+              className="mt-4 w-full py-3 rounded-2xl border-2 border-dashed border-stone-300 text-stone-600 text-sm font-medium hover:border-stone-500 hover:bg-stone-50 flex items-center justify-center gap-2 active:scale-[0.99] transition">
+              <Plus size={15} /> Add a line by hand
+            </button>
           </div>
         ) : (
           <div className="space-y-4">
@@ -24217,8 +24234,13 @@ function InvoiceView({ employee, onSignOut, onOpenMessages, onLogoClick, topTogg
   const [viewingInvoiceId, setViewingInvoiceId] = useState(null);
   const [mode, setMode] = useState('new'); // 'new' | 'saved'
   useEffect(() => { (async () => {
+    // Every active property, not just multi-unit ones. The type filter meant a
+    // property added with minimal details simply never appeared in the picker,
+    // with no explanation — you had to guess that flipping it to multi-unit
+    // was what made it show up. A single-site property still bills fine; it
+    // just has no per-apartment breakdown.
     const { data } = await supabase.from('customers').select('*')
-      .eq('property_type', 'multi_unit').eq('active', true).order('name');
+      .eq('active', true).order('name');
     setProperties(visibleProps(data, employee));
   })(); }, []);
   const generate = async () => {

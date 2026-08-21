@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap184";
+const BUILD_TAG = "aug6-tap185";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -40622,6 +40622,7 @@ function PortalScheduleTab({ property, onOpenUnitDay }) {
 }
 
 function PortalAssignmentsTab({ property, portalKind, portalUser, approvalView = null }) {
+  const [approvedView, setApprovedView] = useState('list'); // 'list' | 'calendar'
   const [assignments, setAssignments] = useState([]);
   const [loaded, setLoaded] = useState(false);
   // Added 'wizard' kind so the PM can open the new ChecklistAssignmentWizard.
@@ -40641,10 +40642,14 @@ function PortalAssignmentsTab({ property, portalKind, portalUser, approvalView =
   const showLegacy = pmm ? !!pmm.legacy : allowLegacy;
 
   const load = async () => {
+    // Every assignment for this property, whoever raised it. The source='pm'
+    // filter meant a PM only ever saw their own requests — work the owner
+    // scheduled for their building was invisible to them, even though it's
+    // their property and their cleanings.
     const { data } = await supabase.from('assignments')
-      .select('*, targets:assignment_targets(id, status, priority, unit:units(label), party:parties(label))')
+      .select('*, targets:assignment_targets(id, status, priority, started_at, completed_at, unit:units(label), party:parties(label))')
       .eq('customer_id', property.id)
-      .eq('source', 'pm')
+      .eq('active', true)
       .is('deleted_at', null)
       .order('created_at', { ascending: false });
     setAssignments(data || []);
@@ -40687,7 +40692,15 @@ function PortalAssignmentsTab({ property, portalKind, portalUser, approvalView =
     const targets = a.targets || [];
     const hasPriority = targets.some(t => t.priority);
     const firstUnitLabel = targets.find(t => t.unit?.label)?.unit?.label || '';
-    return { ...a, hasPriority, firstUnitLabel };
+    // When the cleaning actually happened: the last item finished, and only
+    // once EVERY item is done — a half-finished bedroom isn't a cleaning the
+    // PM should see dated as complete.
+    const done = targets.filter(t => t.status === 'done' || t.status === 'blocked');
+    const allDone = targets.length > 0 && done.length === targets.length;
+    const doneOn = allDone
+      ? done.map(t => t.completed_at).filter(Boolean).sort().slice(-1)[0] || null
+      : null;
+    return { ...a, hasPriority, firstUnitLabel, doneOn, allDone };
   });
 
   // Search across title, notes, unit, bedroom
@@ -40701,11 +40714,15 @@ function PortalAssignmentsTab({ property, portalKind, portalUser, approvalView =
   };
   const visible = decorated.filter(matchesSearch);
 
+  // Owner-created assignments carry no pm_status — there was nothing for a PM
+  // to approve. They're live the moment they exist, so they belong with the
+  // approved work rather than falling into no group at all and disappearing.
+  const isLive = (a) => a.pm_status === 'approved' || (a.source !== 'pm' && !a.pm_status);
   const groups = {
-    draft: visible.filter(a => a.pm_status === 'draft'),
-    pending: visible.filter(a => a.pm_status === 'pending'),
-    approved: visible.filter(a => a.pm_status === 'approved'),
-    rejected: visible.filter(a => a.pm_status === 'rejected'),
+    draft: visible.filter(a => a.source === 'pm' && a.pm_status === 'draft'),
+    pending: visible.filter(a => a.source === 'pm' && a.pm_status === 'pending'),
+    approved: visible.filter(isLive),
+    rejected: visible.filter(a => a.source === 'pm' && a.pm_status === 'rejected'),
   };
 
   return (
@@ -40787,8 +40804,33 @@ function PortalAssignmentsTab({ property, portalKind, portalUser, approvalView =
               color="red" onOpen={(a) => setView({ kind: 'detail', assignment: a })} />
           </>)}
           {approvalView !== 'waiting' && (
-            <PortalAssignmentSection title="Approved" subtitle="Active — visible to the cleaning team" items={groups.approved}
-              color="emerald" onOpen={(a) => setView({ kind: 'detail', assignment: a })} />
+            <div>
+              {/* List or calendar, same assignments either way. A list answers
+                 "what is there"; a calendar answers "when" — which is the
+                 question a property manager usually has. */}
+              <div className="flex items-center justify-between gap-2 mb-3">
+                <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">
+                  Approved ({groups.approved.length})
+                </div>
+                <div className="flex gap-1 bg-stone-100 p-1 rounded-xl">
+                  <button onClick={() => setApprovedView('list')}
+                    className={`px-3 py-1 rounded-lg text-xs font-medium ${approvedView !== 'calendar' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+                    List
+                  </button>
+                  <button onClick={() => setApprovedView('calendar')}
+                    className={`px-3 py-1 rounded-lg text-xs font-medium ${approvedView === 'calendar' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+                    Calendar
+                  </button>
+                </div>
+              </div>
+              {approvedView === 'calendar' ? (
+                <PortalAssignmentCalendar items={groups.approved}
+                  onOpen={(a) => setView({ kind: 'detail', assignment: a })} />
+              ) : (
+                <PortalAssignmentSection title="" subtitle="Active — visible to the cleaning team" items={groups.approved}
+                  color="emerald" onOpen={(a) => setView({ kind: 'detail', assignment: a })} />
+              )}
+            </div>
           )}
           {approvalView === 'waiting' && groups.draft.length + groups.pending.length + groups.rejected.length === 0 && (
             <div className="text-center py-12 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
@@ -40806,6 +40848,160 @@ function PortalAssignmentsTab({ property, portalKind, portalUser, approvalView =
   );
 }
 
+// =================================================================
+// PM CALENDAR VIEW
+// The same assignments as the list, laid out by month. Answers
+// "what happened / what's coming" at a glance, which a vertical
+// list of cards never does well.
+//
+// A day is coloured by what's on it: green once every cleaning that
+// day is finished, amber while any is still open. Tapping a day
+// shows its cleanings underneath.
+//
+// Dates come from the assignment itself: the day it was cleaned if
+// it's finished, otherwise the day it's scheduled for. Anything
+// with neither is listed separately below the grid rather than
+// being silently dropped.
+// =================================================================
+function PortalAssignmentCalendar({ items, onOpen }) {
+  const [cursor, setCursor] = useState(() => {
+    const d = new Date();
+    return { y: d.getFullYear(), m: d.getMonth() };
+  });
+  const [selected, setSelected] = useState(null); // 'YYYY-MM-DD'
+
+  const dayKey = (d) =>
+    `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
+  // Which day each assignment belongs on.
+  const dated = [];
+  const undated = [];
+  (items || []).forEach(a => {
+    const key = a.doneOn
+      ? dayKey(new Date(a.doneOn))
+      : (a.scheduled_date ? String(a.scheduled_date).slice(0, 10) : null);
+    if (key) dated.push({ ...a, dayKey: key });
+    else undated.push(a);
+  });
+
+  const byDay = {};
+  dated.forEach(a => { (byDay[a.dayKey] = byDay[a.dayKey] || []).push(a); });
+
+  const first = new Date(cursor.y, cursor.m, 1);
+  const daysInMonth = new Date(cursor.y, cursor.m + 1, 0).getDate();
+  const leading = first.getDay();
+  const cells = [];
+  for (let i = 0; i < leading; i++) cells.push(null);
+  for (let d = 1; d <= daysInMonth; d++) cells.push(new Date(cursor.y, cursor.m, d));
+
+  const todayKey = dayKey(new Date());
+  const monthLabel = first.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+  const step = (n) => {
+    setSelected(null);
+    setCursor(c => {
+      const d = new Date(c.y, c.m + n, 1);
+      return { y: d.getFullYear(), m: d.getMonth() };
+    });
+  };
+
+  const selectedItems = selected ? (byDay[selected] || []) : [];
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <button onClick={() => step(-1)}
+          className="w-9 h-9 rounded-full border border-stone-300 flex items-center justify-center hover:bg-stone-100">
+          <ChevronRight size={16} className="rotate-180" />
+        </button>
+        <div className="font-serif text-lg text-stone-900">{monthLabel}</div>
+        <button onClick={() => step(1)}
+          className="w-9 h-9 rounded-full border border-stone-300 flex items-center justify-center hover:bg-stone-100">
+          <ChevronRight size={16} />
+        </button>
+      </div>
+
+      <div className="grid grid-cols-7 gap-1 text-center">
+        {['S', 'M', 'T', 'W', 'T', 'F', 'S'].map((d, i) => (
+          <div key={i} className="text-[10px] font-mono text-stone-400 py-1">{d}</div>
+        ))}
+        {cells.map((d, i) => {
+          if (!d) return <div key={`x${i}`} />;
+          const k = dayKey(d);
+          const list = byDay[k] || [];
+          const isToday = k === todayKey;
+          const isSel = k === selected;
+          const anyOpen = list.some(a => !a.allDone);
+          const tone = list.length === 0
+            ? 'bg-white border-stone-200 text-stone-400'
+            : anyOpen
+              ? 'bg-amber-50 border-amber-300 text-amber-900'
+              : 'bg-emerald-50 border-emerald-300 text-emerald-900';
+          return (
+            <button key={k} onClick={() => setSelected(isSel ? null : k)}
+              disabled={list.length === 0}
+              className={`aspect-square rounded-lg border text-xs font-mono flex flex-col items-center justify-center gap-0.5 transition-colors ${tone} ${isSel ? 'ring-2 ring-stone-900' : ''} ${isToday ? 'font-bold underline' : ''} ${list.length > 0 ? 'hover:border-stone-900' : ''}`}>
+              <span>{d.getDate()}</span>
+              {list.length > 0 && (
+                <span className={`text-[9px] px-1 rounded-full ${anyOpen ? 'bg-amber-200' : 'bg-emerald-200'}`}>
+                  {list.length}
+                </span>
+              )}
+            </button>
+          );
+        })}
+      </div>
+
+      <div className="flex items-center gap-3 text-[10px] font-mono text-stone-500">
+        <span className="inline-flex items-center gap-1">
+          <span className="w-3 h-3 rounded border bg-emerald-50 border-emerald-300" /> all cleaned
+        </span>
+        <span className="inline-flex items-center gap-1">
+          <span className="w-3 h-3 rounded border bg-amber-50 border-amber-300" /> still open
+        </span>
+      </div>
+
+      {selected && (
+        <div className="pt-1">
+          <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-2">
+            {new Date(selected + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}
+            {' · '}{selectedItems.length}
+          </div>
+          <div className="space-y-2">
+            {selectedItems.map(a => (
+              <button key={a.id} onClick={() => onOpen(a)}
+                className={`w-full text-left p-3 rounded-xl border-2 transition-colors hover:border-stone-900 ${a.allDone ? 'border-emerald-300 bg-emerald-50' : 'border-amber-300 bg-amber-50'}`}>
+                <div className="font-serif text-sm text-stone-900 truncate">{a.title}</div>
+                <div className="text-[11px] font-mono text-stone-500 mt-0.5">
+                  {a.allDone ? 'Cleaned' : 'Scheduled'} · {a.targets?.length || 0} {a.targets?.length === 1 ? 'item' : 'items'}
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {undated.length > 0 && (
+        <div className="pt-2 border-t border-stone-200">
+          <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-2">
+            No date yet · {undated.length}
+          </div>
+          <div className="space-y-2">
+            {undated.map(a => (
+              <button key={a.id} onClick={() => onOpen(a)}
+                className="w-full text-left p-3 rounded-xl border border-stone-200 bg-white hover:border-stone-900 transition-colors">
+                <div className="font-serif text-sm text-stone-900 truncate">{a.title}</div>
+                <div className="text-[11px] font-mono text-stone-400 mt-0.5">
+                  Not scheduled · {a.targets?.length || 0} {a.targets?.length === 1 ? 'item' : 'items'}
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function PortalAssignmentSection({ title, subtitle, items, color, onOpen }) {
   if (items.length === 0) return null;
   const colors = {
@@ -40816,9 +41012,13 @@ function PortalAssignmentSection({ title, subtitle, items, color, onOpen }) {
   };
   return (
     <div>
-      <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2">
-        {title} ({items.length})
-      </div>
+      {/* The Approved block draws its own heading (it has the view toggle
+         beside it), so an empty title means "don't repeat it". */}
+      {title && (
+        <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2">
+          {title} ({items.length})
+        </div>
+      )}
       <p className="text-xs text-stone-500 mb-3">{subtitle}</p>
       <div className="space-y-2">
         {items.map(a => (
@@ -40840,8 +41040,21 @@ function PortalAssignmentSection({ title, subtitle, items, color, onOpen }) {
                     <AssignmentTypeChip type={a.assignment_type} />
                   </div>
                 )}
-                <div className="text-xs text-stone-500 font-mono">
-                  {fmtDate(a.created_at)} · {a.targets?.length || 0} {a.targets?.length === 1 ? 'target' : 'targets'}
+                {/* One bare date was ambiguous — it was created_at, which reads
+                   like the cleaning date and isn't. Each date is now labelled,
+                   and only the ones that exist are shown. */}
+                <div className="text-xs text-stone-500 font-mono flex flex-wrap items-center gap-x-3 gap-y-0.5">
+                  <span>Submitted {fmtDate(a.created_at)}</span>
+                  {a.approved_at && <span>Accepted {fmtDate(a.approved_at)}</span>}
+                  {a.scheduled_date && (
+                    <span className="text-stone-700">Scheduled {fmtDate(a.scheduled_date + 'T12:00:00')}</span>
+                  )}
+                  {a.doneOn && (
+                    <span className="text-emerald-700">Cleaned {fmtDate(a.doneOn)}</span>
+                  )}
+                  <span className="text-stone-400">
+                    {a.targets?.length || 0} {a.targets?.length === 1 ? 'item' : 'items'}
+                  </span>
                 </div>
                 {a.pm_rejection_reason && (
                   <div className="text-xs text-red-700 italic mt-1">"{a.pm_rejection_reason}"</div>

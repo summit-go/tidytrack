@@ -26,7 +26,6 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 // =================================================================
 const GOOGLE_TRANSLATE_API_KEY = "AIzaSyD7ceHPryMzs45hWJOyFNBxtOzQOEmJcSA";
 
-
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // ============================================================
@@ -119,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap191";
+const BUILD_TAG = "aug6-tap193";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -21630,6 +21629,60 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
       const { data: mcs } = await supabase.from('manual_charges').select('unit_id, amount').in('unit_id', mcUnitIds.slice(i, i + 200));
       (mcs || []).forEach(m => { if (Number(m.amount) > 0) manualByUnit[m.unit_id] = Number(m.amount); });
     }
+    // ---- WHAT YOU CHARGED LAST TIME --------------------------------------
+    // The "combo" memory below only fires when the item set matches EXACTLY,
+    // which almost never happens twice — one extra item, or a different
+    // cleaning type, and the key changes and nothing prefills. That's why the
+    // auto-fill has felt like it isn't working.
+    //
+    // So: read the actual invoice history for this property and remember the
+    // last amount billed for each bedroom, and for each apartment SIZE. No
+    // learning period and no new keys — it works off invoices already sent.
+    const lastByParty = {};   // "unitId:partyId:type" -> amount
+    const lastBySize = {};    // "3x2:type"            -> amount
+    // Amounts charged historically for jobs of a similar SHAPE — this many
+    // items, this many of them heavy. This is the bit that learns that a
+    // 5-item job with a tub in it costs more than a 5-item job without.
+    const shapeHistory = {};  // profileKey -> [amounts]
+    try {
+      const { data: priorInv } = await supabase.from('invoices')
+        .select('id, invoice_date').eq('customer_id', property.id)
+        .order('invoice_date', { ascending: true });
+      const priorIds = (priorInv || []).map(i => i.id);
+      if (priorIds.length) {
+        // Ascending order means later invoices overwrite earlier ones, so
+        // what's left is the most recent price for each bedroom.
+        for (let i = 0; i < priorIds.length; i += 100) {
+          const { data: pl } = await supabase.from('invoice_lines')
+            .select('unit_id, party_id, service_type, amount, non_billable')
+            .in('invoice_id', priorIds.slice(i, i + 100));
+          (pl || []).forEach(l => {
+            const amt = Number(l.amount);
+            if (!amt || amt <= 0 || l.non_billable) return;
+            // What this line's item set looked like, so the same SHAPE of job
+            // can be priced from history even at a different apartment.
+            const keys = Array.isArray(l.subsections) ? l.subsections.map(s => s.key) : [];
+            if (keys.length) {
+              const p = itemProfile(keys);
+              const pk = profileKey(p, l.service_type);
+              (shapeHistory[pk] = shapeHistory[pk] || []).push(amt);
+              const anyType = profileKey(p, '');
+              (shapeHistory[anyType] = shapeHistory[anyType] || []).push(amt);
+            }
+            if (l.unit_id && l.party_id) {
+              lastByParty[`${l.unit_id}:${l.party_id}:${l.service_type || ''}`] = amt;
+              lastByParty[`${l.unit_id}:${l.party_id}:`] = amt; // type-agnostic fallback
+            }
+            const m = unitMetaById[l.unit_id];
+            if (m && m.bedrooms != null && m.bathrooms != null) {
+              lastBySize[`${m.bedrooms}x${m.bathrooms}:${l.service_type || ''}`] = amt;
+              lastBySize[`${m.bedrooms}x${m.bathrooms}:`] = amt;
+            }
+          });
+        }
+      }
+    } catch (e) { console.warn('[last charged] lookup skipped', e); }
+
     const SEC_LABEL = { bathroom: 'Bathroom', vanity: 'Vanity', general: 'General / kitchen', bedroom: 'Bedroom' };
     // Every type present in this range, so the chips only offer real choices.
     setTypesInRange([...new Set(Array.from(byAssign.values()).map(g => g.type).filter(Boolean))]);
@@ -21731,10 +21784,45 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
       const comboSig = subs.filter(s => s.included).map(s => s.key).sort().join('|');
       const comboKey = comboSig ? `__combo__:${g.type || 'clean'}:${comboSig}` : null;
       const comboBook = comboKey ? book[comboKey] : null;
-      const amountOverride = (comboBook && comboBook.base_amount != null && Number(comboBook.base_amount) > 0)
-        ? String(comboBook.base_amount) : '';
+      // Prefill in order of how specific the match is:
+      //   1. this exact item set (the combo memory)
+      //   2. what this exact bedroom was charged last time, same cleaning type
+      //   3. same bedroom, any cleaning type
+      //   4. same apartment size, same type
+      //   5. same apartment size, any type
+      // Anything found is a starting point, not a decision — it lands in the
+      // override box and you can change it.
+      const sizeMeta = unitMetaById[g.unit_id] || {};
+      const sizeKey = (sizeMeta.bedrooms != null && sizeMeta.bathrooms != null)
+        ? `${sizeMeta.bedrooms}x${sizeMeta.bathrooms}` : null;
+      // What KIND of job this is: how many items, how many are the expensive
+      // ones. Drives both the suggestion and the explanation shown on screen.
+      const prof = itemProfile(subs.filter(x => x.included).map(x => x.key));
+      const shapeSamples = shapeHistory[profileKey(prof, g.type)] || shapeHistory[profileKey(prof, '')] || [];
+      const shapeGuess = median(shapeSamples);
+
+      const remembered =
+        (comboBook && Number(comboBook.base_amount) > 0 ? Number(comboBook.base_amount) : null)
+        ?? lastByParty[`${g.unit_id}:${g.party_id}:${g.type || ''}`]
+        ?? lastByParty[`${g.unit_id}:${g.party_id}:`]
+        // Before falling back to "any job at this apartment size", try jobs
+        // of the same shape — 6 items with an oven in them is a better guide
+        // to price than a 1-item touch-up at the same apartment.
+        ?? (shapeSamples.length >= 2 ? shapeGuess : null)
+        ?? (sizeKey ? lastBySize[`${sizeKey}:${g.type || ''}`] : null)
+        ?? (sizeKey ? lastBySize[`${sizeKey}:`] : null)
+        ?? shapeGuess
+        ?? null;
+      const amountOverride = remembered != null && remembered > 0 ? String(remembered) : '';
       const fromMemory = amountOverride !== '';
-      return { key: g.aid, unitId: g.unit_id, partyId: g.party_id, label, serviceType: g.type, tookLonger, cleanedDays: Array.from(g.days).sort(), description: INVOICE_DESCR[g.type] || '', subsections: subs, amountOverride, comboKey, fromMemory, extraOn: tookLonger, extraMode: 'fixed', extraAmount: '', extraMinutes: '', extraRate: '', extraNote: '', sourceTargetIds: g.targetIds };
+      const priceBasis = {
+        count: prof.count,
+        heavy: prof.heavy,
+        heavyLabels: prof.heavyKeys.map(k => resolveItemLabel(k, 'en', {}, null)).filter(Boolean).slice(0, 4),
+        samples: shapeSamples.length,
+        median: shapeGuess,
+      };
+      return { key: g.aid, unitId: g.unit_id, partyId: g.party_id, label, serviceType: g.type, tookLonger, cleanedDays: Array.from(g.days).sort(), description: INVOICE_DESCR[g.type] || '', subsections: subs, amountOverride, comboKey, fromMemory, priceBasis, extraOn: tookLonger, extraMode: 'fixed', extraAmount: '', extraMinutes: '', extraRate: '', extraNote: '', sourceTargetIds: g.targetIds };
     }).filter(l => l.label && l.subsections.length > 0).sort((a, b) => a.label.localeCompare(b.label, undefined, { numeric: true }));
 
     // Reopen path: carry the SAVED invoice's customizations onto the
@@ -21749,6 +21837,8 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
       seedInvoice.lines.forEach(sl => {
         savedByKey[`${sl.unit_id || ''}:${sl.party_id || ''}`] = sl;
       });
+      // Reopen keeps the freshly computed priceBasis (it's explanation, not
+      // data) while restoring your saved amounts below.
       builtSeeded = built.map(l => {
         const sl = savedByKey[`${l.unitId || ''}:${l.partyId || ''}`];
         if (!sl) return l;
@@ -21970,6 +22060,13 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
     if (lineRows.length) {
       const { error: le } = await supabase.from('invoice_lines').insert(lineRows);
       if (le) { setSaving(false); alert('Invoice saved but lines failed: ' + le.message); return; }
+    }
+    // The replacement exists and its lines are written — only now is it safe
+    // to remove the invoice this one supersedes. If anything above failed we
+    // returned early, so the original is still there to fall back on.
+    if (seedInvoice?.__supersedes) {
+      const { error: delErr } = await supabase.from('invoices').delete().eq('id', seedInvoice.__supersedes);
+      if (delErr) console.warn('[reopen] could not remove the superseded invoice', delErr);
     }
     // #3 — learn the combo price. For each billable line that has a combo key
     // (its exact item set) and a real total, remember that amount so the next
@@ -22630,11 +22727,34 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
                           <span className="text-[10px] font-mono text-stone-400">replaces the standard total — the extra still applies</span>
                           {l.fromMemory && (
                             <span className="text-[10px] font-mono text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-1.5 py-0.5 flex items-center gap-1">
-                              <Clock size={9} /> from last time
+                              <Clock size={9} /> {l.priceBasis?.samples >= 2 ? 'suggested' : 'from last time'}
                             </span>
                           )}
                           <div className="flex-1 h-px bg-stone-200" />
                         </div>
+                        {/* Why this number. A suggested price you can't
+                           interrogate is worse than no suggestion — you have
+                           to be able to see whether it's based on anything. */}
+                        {l.priceBasis && l.priceBasis.count > 0 && (
+                          <div className="mb-2 text-[11px] font-mono text-stone-500 bg-stone-50 border border-stone-200 rounded-lg px-2.5 py-1.5 leading-relaxed">
+                            {l.priceBasis.count} item{l.priceBasis.count === 1 ? '' : 's'}
+                            {l.priceBasis.heavy > 0 ? (
+                              <span className="text-amber-800">
+                                {' · '}{l.priceBasis.heavy} big{l.priceBasis.heavyLabels.length > 0 ? ` (${l.priceBasis.heavyLabels.join(', ')})` : ''}
+                              </span>
+                            ) : ' · nothing heavy'}
+                            {l.priceBasis.samples >= 2 && l.priceBasis.median != null && (
+                              <span className="block text-stone-600">
+                                You've charged around {fmtMoney(l.priceBasis.median)} for {l.priceBasis.samples} similar {l.priceBasis.samples === 1 ? 'job' : 'jobs'}.
+                              </span>
+                            )}
+                            {l.priceBasis.samples < 2 && (
+                              <span className="block text-stone-400">
+                                Not enough history for this shape of job yet — what you set here will be used next time.
+                              </span>
+                            )}
+                          </div>
+                        )}
                         <div className="flex items-center justify-between mb-2">
                           <span className="text-[11px] font-mono text-stone-500">Set a flat total</span>
                           <div className="flex p-0.5 bg-stone-100 rounded-lg">
@@ -22711,10 +22831,48 @@ const INVOICE_TYPE_LABEL = {
   reclean: 'Re-clean',
   standard: 'Standard Cleaning',
 };
+// =================================================================
+// HEAVY ITEMS
+// Some items take far longer than the rest and drive the price up:
+// an oven, a tub, a toilet, a fridge. Matched on the item KEY so
+// "oven_inside_short", "oven_outside" and "oven_handle" all count as
+// oven work without listing every variant.
+// =================================================================
+const HEAVY_ITEM_PATTERNS = [
+  'tub', 'shower', 'toilet', 'stove', 'oven', 'range', 'hood',
+  'fridge', 'refrigerator', 'freezer', 'microwave', 'dishwasher',
+  'carpet', 'wall',
+];
+const isHeavyItemKey = (key) => {
+  const k = String(key || '').toLowerCase();
+  return HEAVY_ITEM_PATTERNS.some(p => k.includes(p));
+};
+// What the price is really driven by: how many items, and how many of
+// them are the expensive kind.
+const itemProfile = (keys) => {
+  const list = (keys || []).filter(Boolean);
+  const heavy = list.filter(isHeavyItemKey);
+  return { count: list.length, heavy: heavy.length, heavyKeys: heavy };
+};
+// Item counts are bucketed rather than matched exactly — 5 items and 6
+// items should draw on the same history, 5 and 25 should not.
+const countBucket = (n) => (n <= 2 ? '1-2' : n <= 5 ? '3-5' : n <= 10 ? '6-10' : n <= 20 ? '11-20' : '20+');
+const heavyBucket = (h) => (h === 0 ? 'none' : h <= 2 ? 'some' : 'many');
+const profileKey = (p, type) => `${type || ''}|${countBucket(p.count)}|${heavyBucket(p.heavy)}`;
+const median = (nums) => {
+  const a = (nums || []).filter(n => typeof n === 'number' && n > 0).sort((x, y) => x - y);
+  if (a.length === 0) return null;
+  const mid = Math.floor(a.length / 2);
+  return a.length % 2 ? a[mid] : Math.round(((a[mid - 1] + a[mid]) / 2) * 100) / 100;
+};
+
 const INVOICE_STATUS_STYLE = {
   draft: 'bg-stone-100 text-stone-600',
   sent: 'bg-blue-100 text-blue-700',
   paid: 'bg-emerald-100 text-emerald-700',
+  // Parked while a replacement is being written. Visible on purpose — if a
+  // reopen is abandoned halfway, the original is still here to go back to.
+  superseded: 'bg-amber-100 text-amber-800',
 };
 function fmtInvoiceDate(d) {
   if (!d) return '—';
@@ -24297,8 +24455,19 @@ function InvoiceView({ employee, onSignOut, onOpenMessages, onLogoClick, topTogg
     // regeneration query sees them as un-invoiced.
     const { error: freeErr } = await supabase.from('assignment_targets').update({ invoiced_on: null }).eq('invoiced_on', inv.id);
     if (freeErr) { alert('Could not reopen: ' + freeErr.message); return; }
-    await supabase.from('invoices').delete().eq('id', inv.id);
-    setSeedInvoice({ ...(full || inv), lines: savedLines || [] });
+    // The original is NOT deleted here any more. It used to be, which meant
+    // the only copy of your amounts lived in browser memory between reopening
+    // and saving — and if the rebuild dropped a price, or the tab reloaded,
+    // the invoice was gone with no way back. It's parked as 'superseded'
+    // instead, and the replacement's save removes it once it exists.
+    const { error: parkErr } = await supabase.from('invoices')
+      .update({ status: 'superseded' }).eq('id', inv.id);
+    if (parkErr) {
+      // Old databases may have a CHECK constraint on status. Falling back to
+      // leaving it as-is is still safer than deleting it.
+      console.warn('[reopen] could not mark superseded, leaving original untouched', parkErr);
+    }
+    setSeedInvoice({ ...(full || inv), lines: savedLines || [], __supersedes: inv.id });
     setSelectedId(inv.customer_id);
     setStart(inv.period_start || twoWeeksAgo);
     setEnd(inv.period_end || today);

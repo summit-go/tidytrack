@@ -26,6 +26,7 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 // =================================================================
 const GOOGLE_TRANSLATE_API_KEY = "AIzaSyD7ceHPryMzs45hWJOyFNBxtOzQOEmJcSA";
 
+
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // ============================================================
@@ -118,7 +119,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap189";
+const BUILD_TAG = "aug6-tap191";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -32907,6 +32908,7 @@ function ChecklistAssignmentWizard({ property, employee, actorKind = null, porta
       const c = config[pid] || {};
       const checkedKeys = Object.keys(c.checked || {});
       if (checkedKeys.length === 0) throw new Error('Pick at least one item, or delete the assignment instead.');
+      if (!pid) throw new Error('Pick an apartment and bedroom.');
 
       const { error: aErr } = await supabase.from('assignments').update({
         assignment_type: c.cleaningType || editAssignment.assignment_type || null,
@@ -34497,6 +34499,26 @@ function AssignmentDetail({ property, assignment: assignmentInit, employee, onBa
           <div className="text-xs uppercase tracking-wider text-stone-500 font-mono truncate">{property.name}</div>
           <div className="font-serif text-xl text-stone-900 truncate">{assignment.title}</div>
         </div>
+        {/* OWNER ONLY. PMs lose the pencil once a job has been cleaned — a
+           finished assignment is the record an invoice is built from. The
+           owner keeps it, because someone has to be able to fix a genuine
+           mistake, and the save still refuses to delete completed items. */}
+        {(() => {
+          const doneCount = (targets || []).filter(t => t.status === 'done' || t.status === 'blocked').length;
+          return (
+            <button onClick={() => {
+                if (doneCount > 0 && !confirm(
+                  `${doneCount} item${doneCount === 1 ? ' has' : 's have'} already been cleaned on this assignment.\n\n`
+                  + 'You can still fix the apartment, date or cleaning type. Items already done cannot be removed.\n\nEdit it anyway?'
+                )) return;
+                setEditing(true);
+              }}
+              title="Edit this assignment"
+              className="w-9 h-9 rounded-full border border-stone-300 text-stone-600 flex items-center justify-center hover:border-stone-900 hover:text-stone-900 active:scale-95 transition flex-shrink-0">
+              <Edit2 size={15} />
+            </button>
+          );
+        })()}
       </div>
       {(assignment.assignment_type || assignment.scheduled_date) && (
         <div className="flex gap-2 flex-wrap px-5 pt-3">
@@ -40978,6 +41000,19 @@ function PortalAssignmentsTab({ property, portalKind, portalUser, approvalView =
       onSaved={() => { setView({ kind: 'list' }); load(); }} />;
   }
   if (view.kind === 'edit') {
+    // Belt and braces: a cleaned assignment is not editable by a PM, whatever
+    // route got them here.
+    if ((view.assignment?.targets || []).some(t => t.status === 'done' || t.status === 'blocked')) {
+      return (
+        <div className="px-5 py-10 text-center">
+          <div className="text-sm text-stone-600 mb-4">
+            This assignment has already been cleaned, so it can't be changed. Contact Summit Clean if something needs correcting.
+          </div>
+          <button onClick={() => setView({ kind: 'list' })}
+            className="px-4 py-2 rounded-xl bg-stone-900 text-stone-50 text-sm font-medium">Back</button>
+        </div>
+      );
+    }
     // Edit on the SAME form it was created with. A checklist upload goes back
     // to the wizard, a quick upload back to the quick form. Sending a Bridges
     // assignment to the old generic form meant correcting a typo on a screen
@@ -42130,13 +42165,14 @@ function RecheckRequestModal({ assignment, property, portalUser, onClose, onSave
 
 function PortalAssignmentDetail({ property, assignment, portalUser, onBack, onEdit }) {
   const [busy, setBusy] = useState(false);
-  // Mistakes get made after approval too — wrong apartment, wrong date, wrong
-  // cleaning type. Editing was previously limited to drafts and rejects,
-  // which meant an approved assignment with the wrong apartment on it could
-  // only be deleted and re-created. Anything not yet finished is editable;
-  // once cleaners have completed it, it's a record and stays put.
+  // Editing is always available. Blocking it once anything was cleaned meant
+  // the most common corrections — wrong apartment, wrong date, wrong cleaning
+  // type — became impossible on exactly the jobs that had already gone out.
+  // Completed items are protected by the save itself: it adds and removes
+  // items by diff and refuses to delete anything a cleaner has started or
+  // finished, so history can't be rewritten by an edit.
   const anyDone = (assignment.targets || []).some(t => t.status === 'done' || t.status === 'blocked');
-  const canEdit = !anyDone;
+  const canEdit = true;
   const canDelete = assignment.pm_status === 'draft' || assignment.pm_status === 'rejected' || !anyDone;
   // Recheck modal — only relevant when the assignment is APPROVED
   // (visible to cleaners) and has at least one item not yet passed.
@@ -42289,8 +42325,17 @@ function PortalAssignmentDetail({ property, assignment, portalUser, onBack, onEd
           // submission and the cleaner arriving.
           <div className="space-y-3">
             <div className="p-4 rounded-2xl bg-emerald-50 border border-emerald-200 text-sm text-stone-700">
-              This assignment is active and visible to the cleaning team. It can't be edited from here.
+              This assignment is active and visible to the cleaning team.
+              {anyDone && ' Items already cleaned stay as they are, but you can still fix the apartment, date or type.'}
             </div>
+            {/* This used to say "can't be edited from here" and stop. Editing
+               opens the same upload screen the assignment was created on. */}
+            {onEdit && (
+              <button onClick={onEdit}
+                className="w-full py-3 rounded-2xl bg-stone-900 text-stone-50 text-sm font-medium flex items-center justify-center gap-2 active:scale-98 transition">
+                <Edit2 size={15} /> Edit this assignment
+              </button>
+            )}
             {pendingRecheck ? (
               <div className="p-4 rounded-2xl bg-amber-50 border border-amber-200">
                 <div className="text-xs uppercase tracking-wider font-mono text-amber-800 mb-1">Recheck pending review</div>

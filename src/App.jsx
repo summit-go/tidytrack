@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap193";
+const BUILD_TAG = "aug6-tap194";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -21645,18 +21645,36 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
     // 5-item job with a tub in it costs more than a 5-item job without.
     const shapeHistory = {};  // profileKey -> [amounts]
     try {
-      const { data: priorInv } = await supabase.from('invoices')
+      // Hard ceiling on the whole lookup. It's a nicety — a suggested price —
+      // and it must never be the reason the draft doesn't open. If it's slow,
+      // we go on without it and lines simply start blank.
+      const withTimeout = (p, ms) => Promise.race([
+        p,
+        new Promise((_, rej) => setTimeout(() => rej(new Error('price history timed out')), ms)),
+      ]);
+      // Bounded on purpose. This walked EVERY invoice ever written for the
+      // property, in sequential batches — on a property with hundreds of them
+      // the draft sat on "Building draft…" for minutes. The last 40 invoices
+      // are more than enough to price from, and it's one round trip.
+      const { data: priorInv } = await withTimeout(supabase.from('invoices')
         .select('id, invoice_date').eq('customer_id', property.id)
-        .order('invoice_date', { ascending: true });
-      const priorIds = (priorInv || []).map(i => i.id);
+        .order('invoice_date', { ascending: false })
+        .limit(40), 6000);
+      // Oldest first, so newer invoices overwrite older ones and what's left
+      // is the most recent price for each bedroom.
+      const priorIds = (priorInv || []).map(i => i.id).reverse();
       if (priorIds.length) {
-        // Ascending order means later invoices overwrite earlier ones, so
-        // what's left is the most recent price for each bedroom.
-        for (let i = 0; i < priorIds.length; i += 100) {
-          const { data: pl } = await supabase.from('invoice_lines')
-            .select('unit_id, party_id, service_type, amount, non_billable')
-            .in('invoice_id', priorIds.slice(i, i + 100));
-          (pl || []).forEach(l => {
+        {
+          const { data: pl } = await withTimeout(supabase.from('invoice_lines')
+            // subsections is what makes the shape model work — without it
+            // every line looked like it had no items and nothing was learned.
+            .select('unit_id, party_id, service_type, amount, non_billable, subsections, invoice_id')
+            .in('invoice_id', priorIds)
+            .limit(2000), 8000);
+          // Keep the oldest-first ordering the overwrite logic depends on.
+          const order = {};
+          priorIds.forEach((id, idx) => { order[id] = idx; });
+          (pl || []).sort((a, b) => (order[a.invoice_id] ?? 0) - (order[b.invoice_id] ?? 0)).forEach(l => {
             const amt = Number(l.amount);
             if (!amt || amt <= 0 || l.non_billable) return;
             // What this line's item set looked like, so the same SHAPE of job

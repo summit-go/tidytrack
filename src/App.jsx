@@ -26,6 +26,7 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 // =================================================================
 const GOOGLE_TRANSLATE_API_KEY = "AIzaSyD7ceHPryMzs45hWJOyFNBxtOzQOEmJcSA";
 
+
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // ============================================================
@@ -118,7 +119,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap194";
+const BUILD_TAG = "aug6-tap195";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -21450,6 +21451,12 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
 
   useEffect(() => { (async () => {
     setLoading(true);
+    // The whole build runs inside try/finally. It didn't before, and
+    // setLoading(false) was the very last statement — so a single exception
+    // anywhere above it left the screen on "Building draft…" forever with
+    // nothing in the UI to say why. Now a failure shows the reason and still
+    // releases the screen.
+    try {
     // 1) Price book for this property (+ preset hourly rate).
     const { data: pb } = await supabase.from('invoice_price_book').select('*').eq('customer_id', property.id);
     let defRate = 0; const book = {};
@@ -21836,7 +21843,7 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
       const priceBasis = {
         count: prof.count,
         heavy: prof.heavy,
-        heavyLabels: prof.heavyKeys.map(k => resolveItemLabel(k, 'en', {}, null)).filter(Boolean).slice(0, 4),
+        heavyLabels: prof.heavyKeys.map(k => resolveItemLabel(k, 'en', null, null)).filter(Boolean).slice(0, 4),
         samples: shapeSamples.length,
         median: shapeGuess,
       };
@@ -21995,7 +22002,13 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
       phone: seedInvoice?.bill_to_phone || property.billing_phone || '',
       address: seedInvoice?.bill_to_address || property.billing_address || property.address || '',
     });
-    setLoading(false);
+    } catch (err) {
+      console.error('[invoice draft] build failed', err);
+      setLines([]);
+      setDiag(d => ({ ...(d || {}), buildError: err?.message || String(err) }));
+    } finally {
+      setLoading(false);
+    }
   // Rebuilds when the cleaning-type filter changes, so the chips actually
   // reshape the draft rather than only affecting the next one.
   })(); /* eslint-disable-next-line */ }, [typeFilter]);
@@ -22470,6 +22483,11 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
                 <div>Bedrooms with work: <span className="text-stone-800">{diag.bedrooms}</span></div>
                 <div>Priced items in price book: <span className="text-stone-800">{diag.pricedKeys}</span></div>
                 {diag.err && <div className="text-red-600 break-words">Query error: {diag.err}</div>}
+                {diag.buildError && (
+                  <div className="mb-2 p-2.5 rounded-lg bg-red-50 border border-red-200 text-red-800">
+                    The draft couldn't be built: {diag.buildError}
+                  </div>
+                )}
                 <div className="pt-2 text-stone-400">
                   {diag.units === 0 ? 'This property has no units — an invoice built from cleanings needs unit/bedroom data. You can still bill it by hand below.'
                     : diag.doneItems === 0 ? 'No items were marked done with a completion date in this range. Try widening the dates, or check that these cleans were completed (not just started).'

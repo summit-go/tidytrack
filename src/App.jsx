@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap188";
+const BUILD_TAG = "aug6-tap189";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -31260,15 +31260,40 @@ const QUICK_TYPES = [
   { key: 'reclean',         label: 'Re-clean' },
   { key: 'trash_out',       label: 'Trash out' },
 ];
-function QuickAssignmentForm({ property, employee, portalUser = null, portalKind = null, onCancel, onSaved }) {
+function QuickAssignmentForm({ property, employee, portalUser = null, portalKind = null, onCancel, onSaved,
+  editAssignment = null }) {
+  // Editing reuses this exact form rather than a separate one, so the screen
+  // someone corrects a mistake on is the screen they filled in — same fields,
+  // same order, same wording.
+  const isEditMode = !!editAssignment;
   const isPM = portalKind === 'pm' || !!portalUser; // PMs: no cleaner picker, saves as a draft for owner approval
   const [apt, setApt] = useState('');
   const [bedrooms, setBedrooms] = useState(2);
   const [bathrooms, setBathrooms] = useState(2);
-  const [cleanType, setCleanType] = useState('');
-  const [scheduledDate, setScheduledDate] = useState('');
+  const [cleanType, setCleanType] = useState(editAssignment?.assignment_type || '');
+  const [scheduledDate, setScheduledDate] = useState(
+    editAssignment?.scheduled_date ? String(editAssignment.scheduled_date).slice(0, 10) : ''
+  );
   const [priority, setPriority] = useState(false);
-  const [notes, setNotes] = useState('');
+  const [notes, setNotes] = useState(editAssignment?.notes || '');
+  // Where the assignment currently sits, so a move can be detected on save.
+  const [editTargets, setEditTargets] = useState([]);
+  useEffect(() => {
+    if (!isEditMode) return;
+    (async () => {
+      const { data } = await supabase.from('assignment_targets')
+        .select('id, unit_id, party_id, status, priority, unit:units(label, bedrooms, bathrooms)')
+        .eq('assignment_id', editAssignment.id);
+      const rows = data || [];
+      setEditTargets(rows);
+      const u = rows[0]?.unit;
+      if (u?.label) setApt(u.label);
+      if (u?.bedrooms != null) setBedrooms(u.bedrooms);
+      if (u?.bathrooms != null) setBathrooms(u.bathrooms);
+      setPriority(rows.some(t => t.priority));
+    })();
+    /* eslint-disable-next-line */
+  }, [isEditMode]);
   const [assignedTo, setAssignedTo] = useState('');
   const [cleaners, setCleaners] = useState([]);
   const [busy, setBusy] = useState(false);
@@ -31328,6 +31353,28 @@ function QuickAssignmentForm({ property, employee, portalUser = null, portalKind
       if (property.property_type !== 'multi_unit') {
         await supabase.from('customers').update({ property_type: 'multi_unit' }).eq('id', property.id);
       }
+      // EDITING: update in place and repoint the existing targets. The four
+      // "Entire" items already exist, so re-inserting them would duplicate the
+      // job; and moving the rows keeps completion status and photos, which
+      // delete-and-recreate would throw away.
+      if (isEditMode) {
+        const { error: ue2 } = await supabase.from('assignments').update({
+          title, notes: notes.trim() || null,
+          assignment_type: cleanType,
+          scheduled_date: scheduledDate || null,
+        }).eq('id', editAssignment.id);
+        if (ue2) throw ue2;
+        const moved = editTargets[0] && (editTargets[0].unit_id !== unit.id || editTargets[0].party_id !== party.id);
+        const patch = { priority: isPM ? false : !!priority };
+        if (moved) { patch.unit_id = unit.id; patch.party_id = party.id; }
+        const { error: te2 } = await supabase.from('assignment_targets')
+          .update(patch).eq('assignment_id', editAssignment.id);
+        if (te2) throw te2;
+        setBusy(false);
+        onSaved({ id: editAssignment.id });
+        return;
+      }
+
       const { data: asg, error: ae } = await supabase.from('assignments').insert({
         customer_id: property.id, title, notes: notes.trim() || null,
         uploaded_by: isPM ? null : employee.id, active: true, assignment_type: cleanType,
@@ -31392,7 +31439,9 @@ function QuickAssignmentForm({ property, employee, portalUser = null, portalKind
         </button>
         <div>
           <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">{property.name}</div>
-          <div className="font-serif text-xl text-stone-900">Bridges/Citifront</div>
+          <div className="font-serif text-xl text-stone-900">
+            {isEditMode ? 'Edit assignment' : 'Bridges/Citifront'}
+          </div>
         </div>
       </div>
 
@@ -31461,7 +31510,9 @@ function QuickAssignmentForm({ property, employee, portalUser = null, portalKind
 
         <button onClick={submit} disabled={busy || !apt.trim() || !cleanType}
           className="w-full py-4 rounded-2xl bg-stone-900 text-stone-50 font-medium active:scale-98 disabled:opacity-50 flex items-center justify-center gap-2">
-          <Plus size={18} /> {busy ? 'Creating…' : 'Create assignment'}
+          {isEditMode
+            ? <>{busy ? 'Saving…' : 'Save changes'}</>
+            : <><Plus size={18} /> {busy ? 'Creating…' : 'Create assignment'}</>}
         </button>
       </div>
     </div>
@@ -34422,7 +34473,14 @@ function AssignmentDetail({ property, assignment: assignmentInit, employee, onBa
   });
 
   if (editing) {
-    return <ChecklistAssignmentWizard property={property} employee={employee}
+    // Same rule as the PM side: edit on whichever form created it.
+    if (assignment.template_set_id) {
+      return <ChecklistAssignmentWizard property={property} employee={employee}
+        editAssignment={assignment}
+        onCancel={() => setEditing(false)}
+        onSaved={() => { setEditing(false); reload(); }} />;
+    }
+    return <QuickAssignmentForm property={property} employee={employee}
       editAssignment={assignment}
       onCancel={() => setEditing(false)}
       onSaved={() => { setEditing(false); reload(); }} />;
@@ -40920,9 +40978,10 @@ function PortalAssignmentsTab({ property, portalKind, portalUser, approvalView =
       onSaved={() => { setView({ kind: 'list' }); load(); }} />;
   }
   if (view.kind === 'edit') {
-    // A checklist assignment has per-item targets, which the simple form
-    // can't express — send those to the wizard in edit mode so the items
-    // themselves are editable. Everything else keeps the simple form.
+    // Edit on the SAME form it was created with. A checklist upload goes back
+    // to the wizard, a quick upload back to the quick form. Sending a Bridges
+    // assignment to the old generic form meant correcting a typo on a screen
+    // nobody had ever filled in.
     if (view.assignment?.template_set_id) {
       return <ChecklistAssignmentWizard property={property}
         employee={null} actorKind={portalKind || 'pm'} portalUser={portalUser}
@@ -40930,7 +40989,9 @@ function PortalAssignmentsTab({ property, portalKind, portalUser, approvalView =
         onCancel={() => setView({ kind: 'list' })}
         onSaved={() => { setView({ kind: 'list' }); load(); }} />;
     }
-    return <PortalAssignmentForm property={property} assignment={view.assignment} portalKind={portalKind}
+    return <QuickAssignmentForm property={property} employee={null}
+      portalKind={portalKind || 'pm'} portalUser={portalUser}
+      editAssignment={view.assignment}
       onCancel={() => setView({ kind: 'list' })}
       onSaved={() => { setView({ kind: 'list' }); load(); }} />;
   }

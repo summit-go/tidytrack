@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap185";
+const BUILD_TAG = "aug6-tap188";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -32112,10 +32112,26 @@ function SheetQuickViewModal({ file, url, onClose }) {
   );
 }
 
-function ChecklistAssignmentWizard({ property, employee, actorKind = null, portalUser = null, onCancel, onSaved }) {
+function ChecklistAssignmentWizard({ property, employee, actorKind = null, portalUser = null, onCancel, onSaved,
+  editAssignment = null }) {
+  // EDIT MODE. The wizard normally creates one assignment per bedroom. When
+  // handed an existing assignment it edits that ONE bedroom instead: the
+  // apartment/bedroom step is skipped (moving a job to a different bedroom is
+  // a different operation — that's what Reassign is for), and the item
+  // checkboxes load from the targets already on it.
+  //
+  // Saving diffs rather than replacing: items you tick get inserted, items
+  // you untick get deleted, and anything already started or done is left
+  // alone. Wiping and re-inserting would destroy completion history and any
+  // photos hanging off those targets.
+  const isEditMode = !!editAssignment;
   // 6 steps total. The wizard is short enough that an accidental
   // refresh just starts over — no state persistence here.
-  const [step, setStep] = useState(0);
+  // Editing starts on Configure — sheet upload and apartment choice are
+  // already settled for an existing assignment.
+  const [step, setStep] = useState(isEditMode ? 3 : 0);
+  // Targets already on this assignment, so save can diff instead of replace.
+  const [existingTargets, setExistingTargets] = useState([]);
   // When invoked from the PM portal, every created assignment is
   // marked source='pm' + pm_status='pending' so it flows through the
   // owner-approval queue. When invoked from staff (no actorKind),
@@ -32278,6 +32294,51 @@ function ChecklistAssignmentWizard({ property, employee, actorKind = null, porta
       setParties(data || []);
     })();
   }, [units]);
+
+  // -----------------------------------------------------------------
+  // EDIT MODE PREFILL. Loads the assignment's existing targets and
+  // reconstructs the wizard's config for that one bedroom, so the ticked
+  // boxes match what's actually on the job right now.
+  // -----------------------------------------------------------------
+  const editPrefilledRef = useRef(false);
+  useEffect(() => {
+    if (!isEditMode || parties.length === 0) return;
+    // Runs once. Without the guard, re-running would overwrite a bedroom the
+    // user just switched to in the picker.
+    if (editPrefilledRef.current) return;
+    editPrefilledRef.current = true;
+    (async () => {
+      const { data } = await supabase.from('assignment_targets')
+        .select('id, unit_id, party_id, status, template_section, template_item_key, status_notes')
+        .eq('assignment_id', editAssignment.id);
+      const rows = data || [];
+      setExistingTargets(rows);
+      const pid = rows[0]?.party_id || null;
+      if (!pid) return;
+      const checked = {};
+      const customLabels = {};
+      rows.forEach(t => {
+        if (!t.template_section || !t.template_item_key) return;
+        const k = `${t.template_section}:${t.template_item_key}`;
+        checked[k] = true;
+        if (t.status_notes && String(t.template_item_key).startsWith('custom_')) customLabels[k] = t.status_notes;
+      });
+      setSelectedParties({ [pid]: true });
+      setActivePartyId(pid);
+      setSheetType(editAssignment.sheet_type || 'move_out_check');
+      setConfig({
+        [pid]: {
+          mode: 'configure',
+          checked,
+          customLabels,
+          cleaningType: editAssignment.assignment_type || null,
+          bathroomVariant: editAssignment.bathroom_variant || null,
+          generalVariant: editAssignment.general_variant || null,
+        },
+      });
+    })();
+    /* eslint-disable-next-line */
+  }, [isEditMode, parties.length]);
 
   // -----------------------------------------------------------------
   // Sheet image previews — build object URLs for any image files in
@@ -32782,7 +32843,106 @@ function ChecklistAssignmentWizard({ property, employee, actorKind = null, porta
   // listed in the title/notes for now (a future migration can add a
   // proper `sheet_files JSONB` column).
   // -----------------------------------------------------------------
+  // EDIT SAVE. Updates the assignment's own fields, then adds/removes only
+  // the items that changed. Started or finished work is never touched — a
+  // wipe-and-reinsert would take completion history and photos with it.
+  const submitEdit = async () => {
+    if (submittingRef.current || busy) return;
+    submittingRef.current = true;
+    setBusy(true);
+    setError('');
+    try {
+      const pid = Object.keys(selectedParties).find(k => selectedParties[k]);
+      const c = config[pid] || {};
+      const checkedKeys = Object.keys(c.checked || {});
+      if (checkedKeys.length === 0) throw new Error('Pick at least one item, or delete the assignment instead.');
+
+      const { error: aErr } = await supabase.from('assignments').update({
+        assignment_type: c.cleaningType || editAssignment.assignment_type || null,
+        sheet_type: sheetType || editAssignment.sheet_type || null,
+        bathroom_variant: c.bathroomVariant || null,
+        general_variant: c.generalVariant || null,
+      }).eq('id', editAssignment.id);
+      if (aErr) throw new Error('Could not update the assignment: ' + aErr.message);
+
+      // Moved to a different apartment/bedroom? Repoint every target on the
+      // assignment, including ones already worked. Photos hang off tasks, and
+      // completion lives on the target row, so moving rows keeps both — which
+      // deleting and re-creating would not.
+      const newPartyId = pid;
+      const oldPartyId = existingTargets[0]?.party_id || null;
+      const moved = newPartyId && oldPartyId && newPartyId !== oldPartyId;
+      let movedUnitId = existingTargets[0]?.unit_id || null;
+      if (moved) {
+        const newParty = parties.find(p => p.id === newPartyId);
+        movedUnitId = newParty?.unit_id || movedUnitId;
+        const { error: mErr } = await supabase.from('assignment_targets')
+          .update({ unit_id: movedUnitId, party_id: newPartyId })
+          .eq('assignment_id', editAssignment.id);
+        if (mErr) throw new Error('Could not move the assignment: ' + mErr.message);
+        // Keep the title honest — it prints the apartment and bedroom.
+        const newUnit = units.find(u => u.id === movedUnitId);
+        const base = String(editAssignment.title || '').split(' · ')[0];
+        await supabase.from('assignments').update({
+          title: `${base} · ${newUnit?.label || ''}${newParty?.label ? ' · ' + newParty.label : ''}`.trim(),
+        }).eq('id', editAssignment.id);
+      }
+
+      const keyOf = (t) => `${t.template_section}:${t.template_item_key}`;
+      const existingByKey = {};
+      existingTargets.forEach(t => { existingByKey[keyOf(t)] = t; });
+
+      // Remove unticked items — but only ones nobody has touched. An item
+      // that's already been started or done stays, because deleting it would
+      // erase work that really happened.
+      const toDelete = existingTargets.filter(t =>
+        !checkedKeys.includes(keyOf(t)) && t.status === 'pending'
+      );
+      const keptBusy = existingTargets.filter(t =>
+        !checkedKeys.includes(keyOf(t)) && t.status !== 'pending'
+      );
+      if (toDelete.length) {
+        const { error: dErr } = await supabase.from('assignment_targets')
+          .delete().in('id', toDelete.map(t => t.id));
+        if (dErr) throw new Error('Could not remove items: ' + dErr.message);
+      }
+
+      // Add newly ticked items.
+      const toAdd = checkedKeys.filter(k => !existingByKey[k]).map(k => {
+        const [sectionKey, itemKey] = k.split(':', 2);
+        const row = {
+          assignment_id: editAssignment.id,
+          unit_id: movedUnitId,
+          party_id: newPartyId,
+          status: 'pending',
+          template_section: sectionKey,
+          template_item_key: itemKey,
+        };
+        if (itemKey && itemKey.startsWith('custom_') && c.customLabels && c.customLabels[k]) {
+          row.status_notes = c.customLabels[k];
+        }
+        return row;
+      });
+      if (toAdd.length) {
+        const { error: iErr } = await supabase.from('assignment_targets').insert(toAdd);
+        if (iErr) throw new Error('Could not add items: ' + iErr.message);
+      }
+
+      if (keptBusy.length > 0) {
+        alert(`${keptBusy.length} item${keptBusy.length === 1 ? '' : 's'} could not be removed because a cleaner has already started or finished ${keptBusy.length === 1 ? 'it' : 'them'}. Everything else was saved.`);
+      }
+      setSubmitted(true);
+      setTimeout(() => onSaved([{ id: editAssignment.id }]), 600);
+    } catch (e) {
+      setError(e.message || 'Something went wrong.');
+    } finally {
+      setBusy(false);
+      submittingRef.current = false;
+    }
+  };
+
   const submit = async () => {
+    if (isEditMode) return submitEdit();
     // Ref-based lock: flips synchronously so a second rapid tap never
     // gets through. setBusy is async and can be raced.
     if (submittingRef.current || busy) return;
@@ -33393,8 +33553,68 @@ function ChecklistAssignmentWizard({ property, employee, actorKind = null, porta
 
     return (
       <div>
-        <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-1">Step 4 · Configure each bedroom</div>
-        <div className="text-sm text-stone-600 mb-3">Tap a bedroom tab, then mark sections as passed or check the items that need cleaning.</div>
+        {isEditMode ? (
+          <>
+            <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-1">Edit this assignment</div>
+            <div className="text-sm text-stone-600 mb-3">Change which apartment and bedroom it's for, the cleaning type, or the items on it.</div>
+            {/* Moving the job. Reassign was removed from the boards, so this
+               is the only way to correct an assignment uploaded against the
+               wrong apartment. It repoints every target on the assignment,
+               which keeps completion history and photos intact — deleting and
+               re-creating would lose both. */}
+            <div className="mb-4 p-3 rounded-2xl bg-white border border-stone-200 space-y-2">
+              <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500">Apartment &amp; bedroom</div>
+              <select
+                value={(() => {
+                  const pid = Object.keys(selectedParties).find(k => selectedParties[k]);
+                  return pid || '';
+                })()}
+                onChange={(e) => {
+                  const pid = e.target.value;
+                  if (!pid) return;
+                  // Carry the current item selection across to the new bedroom
+                  // so changing apartment doesn't wipe what's ticked.
+                  const oldPid = Object.keys(selectedParties).find(k => selectedParties[k]);
+                  const carried = (oldPid && config[oldPid]) ? config[oldPid] : { mode: 'configure', checked: {}, customLabels: {} };
+                  setSelectedParties({ [pid]: true });
+                  setActivePartyId(pid);
+                  setConfig({ [pid]: carried });
+                }}
+                className="w-full px-3 py-2.5 rounded-xl border border-stone-300 bg-white text-sm">
+                {[...parties]
+                  .sort((a, b) => {
+                    const ua = units.find(u => u.id === a.unit_id);
+                    const ub = units.find(u => u.id === b.unit_id);
+                    return naturalCompare(ua?.label || '', ub?.label || '')
+                      || naturalCompare(a.label || '', b.label || '');
+                  })
+                  .map(p => {
+                    const u = units.find(x => x.id === p.unit_id);
+                    return (
+                      <option key={p.id} value={p.id}>
+                        {u?.label || 'Apartment'}{p.label ? ` · ${p.label}` : ''}
+                      </option>
+                    );
+                  })}
+              </select>
+              {(() => {
+                const pid = Object.keys(selectedParties).find(k => selectedParties[k]);
+                const orig = existingTargets[0]?.party_id;
+                if (!orig || !pid || pid === orig) return null;
+                return (
+                  <div className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5">
+                    This will move the whole assignment — items, photos and any work already done — to the new bedroom.
+                  </div>
+                );
+              })()}
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-1">Step 4 · Configure each bedroom</div>
+            <div className="text-sm text-stone-600 mb-3">Tap a bedroom tab, then mark sections as passed or check the items that need cleaning.</div>
+          </>
+        )}
 
         {/* Which template is loaded — confirms move-out vs cleaning-check. */}
         <div className={`mb-3 px-3 py-2 rounded-lg text-[11px] font-mono flex items-center gap-2 ${templateSet?.sheet_type === 'move_out_clean' ? 'bg-emerald-50 text-emerald-800 border border-emerald-200' : 'bg-stone-100 text-stone-600'}`}>
@@ -33960,18 +34180,26 @@ function ChecklistAssignmentWizard({ property, employee, actorKind = null, porta
     <div className="min-h-screen bg-stone-50 pb-[176px]">
       <div className="px-5 py-4 border-b border-stone-200 bg-white sticky top-0 z-10">
         <div className="flex items-center gap-3 mb-3">
-          <button onClick={() => { if (step > 0) setStep(step - 1); else onCancel(); }}
+          <button onClick={() => { if (!isEditMode && step > 0) setStep(step - 1); else onCancel(); }}
             className="p-2 -ml-2 rounded-full hover:bg-stone-100"
             title="Back">
             <ArrowLeft size={20} />
           </button>
           <div className="flex-1 min-w-0">
             <div className="text-xs uppercase tracking-wider font-mono text-stone-500">{property.name}</div>
-            <div className="font-serif text-lg text-stone-900 font-bold">Carriage Cove Uploads</div>
+            <div className="font-serif text-lg text-stone-900 font-bold">
+              {isEditMode ? 'Edit assignment' : 'Carriage Cove Uploads'}
+            </div>
+            {isEditMode && (
+              <div className="text-[11px] font-mono text-stone-500 truncate">{editAssignment.title}</div>
+            )}
           </div>
         </div>
-        <ProgressBar steps={stepLabels} currentStep={step} complete={submitted}
-          onStepClick={(targetStep) => { if (!submitted) setStep(targetStep); }} />
+        {/* No step rail when editing — there's only one step. */}
+        {!isEditMode && (
+          <ProgressBar steps={stepLabels} currentStep={step} complete={submitted}
+            onStepClick={(targetStep) => { if (!submitted) setStep(targetStep); }} />
+        )}
       </div>
 
       {/* Step content. The wizard root has pb-[136px] so the fixed
@@ -34052,11 +34280,19 @@ function ChecklistAssignmentWizard({ property, employee, actorKind = null, porta
          hides behind the nav (exactly what happened in Business mode). */}
       <div className="fixed bottom-[104px] left-0 right-0 bg-white border-t border-stone-200 px-5 py-3 flex gap-2 z-30 shadow-[0_-4px_12px_rgba(0,0,0,0.06)]">
         <button
-          onClick={() => { if (step > 0) setStep(step - 1); else onCancel(); }}
+          onClick={() => { if (!isEditMode && step > 0) setStep(step - 1); else onCancel(); }}
           className="px-4 py-3 rounded-xl bg-stone-100 hover:bg-stone-200 text-stone-700 text-sm font-medium flex items-center gap-1.5 active:scale-95">
-          <ArrowLeft size={14} /> Back
+          <ArrowLeft size={14} /> {isEditMode ? 'Cancel' : 'Back'}
         </button>
-        {step < 4 && (
+        {/* Editing has no Next — the configure step IS the whole thing, so
+           it gets a Save straight away. */}
+        {isEditMode && !submitted && (
+          <button onClick={submit} disabled={busy}
+            className="flex-1 py-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-medium disabled:opacity-50">
+            {busy ? 'Saving…' : 'Save changes'}
+          </button>
+        )}
+        {!isEditMode && step < 4 && (
           <button
             onClick={() => {
               if (canAdvanceFromStep()) {
@@ -34081,7 +34317,7 @@ function ChecklistAssignmentWizard({ property, employee, actorKind = null, porta
               : 'Next'}
           </button>
         )}
-        {step === 4 && !submitted && (
+        {!isEditMode && step === 4 && !submitted && (
           <button onClick={submit} disabled={busy}
             className="flex-1 py-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-medium disabled:opacity-50">
             {busy ? 'Creating…' : 'Create assignments'}
@@ -34184,6 +34420,13 @@ function AssignmentDetail({ property, assignment: assignmentInit, employee, onBa
     if (ua !== ub) return naturalCompare(ua, ub);
     return naturalCompare(a.party?.label || '', b.party?.label || '');
   });
+
+  if (editing) {
+    return <ChecklistAssignmentWizard property={property} employee={employee}
+      editAssignment={assignment}
+      onCancel={() => setEditing(false)}
+      onSaved={() => { setEditing(false); reload(); }} />;
+  }
 
   return (
     <div className="pb-24">
@@ -40677,6 +40920,16 @@ function PortalAssignmentsTab({ property, portalKind, portalUser, approvalView =
       onSaved={() => { setView({ kind: 'list' }); load(); }} />;
   }
   if (view.kind === 'edit') {
+    // A checklist assignment has per-item targets, which the simple form
+    // can't express — send those to the wizard in edit mode so the items
+    // themselves are editable. Everything else keeps the simple form.
+    if (view.assignment?.template_set_id) {
+      return <ChecklistAssignmentWizard property={property}
+        employee={null} actorKind={portalKind || 'pm'} portalUser={portalUser}
+        editAssignment={view.assignment}
+        onCancel={() => setView({ kind: 'list' })}
+        onSaved={() => { setView({ kind: 'list' }); load(); }} />;
+    }
     return <PortalAssignmentForm property={property} assignment={view.assignment} portalKind={portalKind}
       onCancel={() => setView({ kind: 'list' })}
       onSaved={() => { setView({ kind: 'list' }); load(); }} />;
@@ -40797,38 +41050,47 @@ function PortalAssignmentsTab({ property, portalKind, portalUser, approvalView =
              standalone. */}
           {approvalView !== 'approved' && (<>
             <PortalAssignmentSection title="Drafts" subtitle="You can still edit these" items={groups.draft}
-              color="stone" onOpen={(a) => setView({ kind: 'detail', assignment: a })} />
+              color="stone" onOpen={(a) => setView({ kind: 'detail', assignment: a })}
+              onEdit={(a) => setView({ kind: 'edit', assignment: a })} />
             <PortalAssignmentSection title="Pending review" subtitle="Waiting for the owner to approve" items={groups.pending}
-              color="amber" onOpen={(a) => setView({ kind: 'detail', assignment: a })} />
+              color="amber" onOpen={(a) => setView({ kind: 'detail', assignment: a })}
+              onEdit={(a) => setView({ kind: 'edit', assignment: a })} />
             <PortalAssignmentSection title="Needs changes" subtitle="Owner asked for changes — edit and resubmit" items={groups.rejected}
-              color="red" onOpen={(a) => setView({ kind: 'detail', assignment: a })} />
+              color="red" onOpen={(a) => setView({ kind: 'detail', assignment: a })}
+              onEdit={(a) => setView({ kind: 'edit', assignment: a })} />
           </>)}
           {approvalView !== 'waiting' && (
             <div>
               {/* List or calendar, same assignments either way. A list answers
                  "what is there"; a calendar answers "when" — which is the
                  question a property manager usually has. */}
+              {/* Calendar view is hidden for now — flip SHOW_PM_CALENDAR back
+                 on to bring the toggle back. The component is still here and
+                 still works; it just isn't good enough yet. */}
               <div className="flex items-center justify-between gap-2 mb-3">
                 <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">
                   Approved ({groups.approved.length})
                 </div>
-                <div className="flex gap-1 bg-stone-100 p-1 rounded-xl">
-                  <button onClick={() => setApprovedView('list')}
-                    className={`px-3 py-1 rounded-lg text-xs font-medium ${approvedView !== 'calendar' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
-                    List
-                  </button>
-                  <button onClick={() => setApprovedView('calendar')}
-                    className={`px-3 py-1 rounded-lg text-xs font-medium ${approvedView === 'calendar' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
-                    Calendar
-                  </button>
-                </div>
+                {SHOW_PM_CALENDAR && (
+                  <div className="flex gap-1 bg-stone-100 p-1 rounded-xl">
+                    <button onClick={() => setApprovedView('list')}
+                      className={`px-3 py-1 rounded-lg text-xs font-medium ${approvedView !== 'calendar' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+                      List
+                    </button>
+                    <button onClick={() => setApprovedView('calendar')}
+                      className={`px-3 py-1 rounded-lg text-xs font-medium ${approvedView === 'calendar' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+                      Calendar
+                    </button>
+                  </div>
+                )}
               </div>
-              {approvedView === 'calendar' ? (
+              {SHOW_PM_CALENDAR && approvedView === 'calendar' ? (
                 <PortalAssignmentCalendar items={groups.approved}
                   onOpen={(a) => setView({ kind: 'detail', assignment: a })} />
               ) : (
                 <PortalAssignmentSection title="" subtitle="Active — visible to the cleaning team" items={groups.approved}
-                  color="emerald" onOpen={(a) => setView({ kind: 'detail', assignment: a })} />
+                  color="emerald" onOpen={(a) => setView({ kind: 'detail', assignment: a })}
+                  onEdit={(a) => setView({ kind: 'edit', assignment: a })} />
               )}
             </div>
           )}
@@ -40863,6 +41125,7 @@ function PortalAssignmentsTab({ property, portalKind, portalUser, approvalView =
 // with neither is listed separately below the grid rather than
 // being silently dropped.
 // =================================================================
+const SHOW_PM_CALENDAR = false; // PM assignments — see the Approved block.
 function PortalAssignmentCalendar({ items, onOpen }) {
   const [cursor, setCursor] = useState(() => {
     const d = new Date();
@@ -41002,7 +41265,7 @@ function PortalAssignmentCalendar({ items, onOpen }) {
   );
 }
 
-function PortalAssignmentSection({ title, subtitle, items, color, onOpen }) {
+function PortalAssignmentSection({ title, subtitle, items, color, onOpen, onEdit = null }) {
   if (items.length === 0) return null;
   const colors = {
     stone: 'border-stone-300 bg-stone-50',
@@ -41022,7 +41285,17 @@ function PortalAssignmentSection({ title, subtitle, items, color, onOpen }) {
       <p className="text-xs text-stone-500 mb-3">{subtitle}</p>
       <div className="space-y-2">
         {items.map(a => (
-          <button key={a.id} onClick={() => onOpen(a)}
+          <div key={a.id} className="relative">
+          {/* Pencil sits over the card rather than inside it — the card is
+             itself a button, and a button can't contain another one. */}
+          {onEdit && !a.allDone && (
+            <button onClick={(e) => { e.stopPropagation(); onEdit(a); }}
+              title="Edit this assignment"
+              className="absolute top-2.5 right-2.5 z-10 w-8 h-8 rounded-full bg-white/90 border border-stone-300 text-stone-600 flex items-center justify-center hover:border-stone-900 hover:text-stone-900 active:scale-95 transition">
+              <Edit2 size={13} />
+            </button>
+          )}
+          <button onClick={() => onOpen(a)}
             className={`w-full text-left p-4 rounded-2xl border-2 hover:border-stone-900 transition-colors ${colors[color]}`}>
             <div className="flex items-start justify-between gap-2">
               <div className="flex-1 min-w-0">
@@ -41063,6 +41336,7 @@ function PortalAssignmentSection({ title, subtitle, items, color, onOpen }) {
               <ChevronRight size={16} className="text-stone-400 flex-shrink-0" />
             </div>
           </button>
+          </div>
         ))}
       </div>
     </div>
@@ -41795,8 +42069,14 @@ function RecheckRequestModal({ assignment, property, portalUser, onClose, onSave
 
 function PortalAssignmentDetail({ property, assignment, portalUser, onBack, onEdit }) {
   const [busy, setBusy] = useState(false);
-  const canEdit = assignment.pm_status === 'draft' || assignment.pm_status === 'rejected';
-  const canDelete = canEdit;
+  // Mistakes get made after approval too — wrong apartment, wrong date, wrong
+  // cleaning type. Editing was previously limited to drafts and rejects,
+  // which meant an approved assignment with the wrong apartment on it could
+  // only be deleted and re-created. Anything not yet finished is editable;
+  // once cleaners have completed it, it's a record and stays put.
+  const anyDone = (assignment.targets || []).some(t => t.status === 'done' || t.status === 'blocked');
+  const canEdit = !anyDone;
+  const canDelete = assignment.pm_status === 'draft' || assignment.pm_status === 'rejected' || !anyDone;
   // Recheck modal — only relevant when the assignment is APPROVED
   // (visible to cleaners) and has at least one item not yet passed.
   // PM uses this to tell us "the tenant did this part themselves, you

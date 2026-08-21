@@ -26,7 +26,6 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 // =================================================================
 const GOOGLE_TRANSLATE_API_KEY = "AIzaSyD7ceHPryMzs45hWJOyFNBxtOzQOEmJcSA";
 
-
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // ============================================================
@@ -119,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap195";
+const BUILD_TAG = "aug6-tap196";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -22979,6 +22978,20 @@ function InvoiceDocument({ invoiceId, data, preview, onBack, onChanged, onEditDr
 
   return (
     <div className="pb-28 bg-stone-100 min-h-screen">
+      {/* Kill the browser's own print furniture. Chrome and Safari only drop
+         the date, page title, URL and page numbers when the page margin is
+         zero — so the margin moves onto the document itself, which prints the
+         same but without "8/21/26, 9:20 AM · Summit Clean App" across the top
+         and the app URL along the bottom. */}
+      <style>{`
+        @media print {
+          @page { size: auto; margin: 0; }
+          html, body { margin: 0 !important; padding: 0 !important; background: #fff !important; }
+          .no-print { display: none !important; }
+          /* The margin the browser used to add, applied where we control it. */
+          .print-page { padding: 0.5in !important; box-shadow: none !important; }
+        }
+      `}</style>
       {/* Action bar — hidden when printing */}
       <div className="print:hidden flex items-center justify-between gap-2 px-5 py-3 border-b border-stone-200 bg-white sticky top-0 z-10 flex-wrap">
         <button onClick={onBack} className="flex items-center gap-2 text-stone-700 text-sm">
@@ -23015,13 +23028,26 @@ function InvoiceDocument({ invoiceId, data, preview, onBack, onChanged, onEditDr
           {!readOnly && !preview && inv.status !== 'sent' && <button onClick={() => setStatus('sent')} disabled={working} className="px-3 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-medium disabled:opacity-50">Mark sent</button>}
           {!readOnly && !preview && inv.status !== 'paid' && <button onClick={() => setStatus('paid')} disabled={working} className="px-3 py-1.5 rounded-lg bg-emerald-600 text-white text-xs font-medium disabled:opacity-50">Mark paid</button>}
           {!readOnly && !preview && inv.status !== 'draft' && <button onClick={() => setStatus('draft')} disabled={working} className="px-3 py-1.5 rounded-lg bg-white border border-stone-300 text-stone-600 text-xs">Back to draft</button>}
-          <button onClick={() => window.print()} className="px-3 py-1.5 rounded-lg bg-stone-900 text-white text-xs font-medium flex items-center gap-1.5"><FileText size={13} /> {readOnly ? 'Download / print' : 'Print / PDF'}</button>
+          {/* The saved PDF is named after the document title, and browsers
+             that still print a header use it too. "Summit Clean App" is our
+             internal name; a customer should get "Invoice 490 - Carriage
+             Cove". Restored afterwards so the app title isn't left changed. */}
+          <button onClick={() => {
+              const prev = document.title;
+              const who = inv.bill_to_org || inv.customer?.name || '';
+              document.title = `Invoice ${inv.invoice_number || ''}${who ? ' - ' + who : ''}`.trim();
+              const restore = () => { document.title = prev; window.removeEventListener('afterprint', restore); };
+              window.addEventListener('afterprint', restore);
+              window.print();
+              setTimeout(restore, 3000);
+            }}
+            className="px-3 py-1.5 rounded-lg bg-stone-900 text-white text-xs font-medium flex items-center gap-1.5"><FileText size={13} /> {readOnly ? 'Download / print' : 'Print / PDF'}</button>
           {!readOnly && !preview && <button onClick={del} disabled={working} className="p-1.5 rounded-lg text-stone-400 hover:text-red-600 hover:bg-red-50"><Trash2 size={15} /></button>}
         </div>
       </div>
 
       {/* The sheet */}
-      <div className="max-w-[800px] mx-auto bg-white my-4 print:my-0 shadow-sm print:shadow-none px-8 py-8 text-stone-800"
+      <div className="print-page max-w-[800px] mx-auto bg-white my-4 print:my-0 shadow-sm print:shadow-none px-8 py-8 text-stone-800"
         style={{ WebkitPrintColorAdjust: 'exact', printColorAdjust: 'exact' }}>
         {/* Header */}
         <div className="flex items-start justify-between gap-6 pb-6 border-b border-stone-200">
@@ -23052,7 +23078,10 @@ function InvoiceDocument({ invoiceId, data, preview, onBack, onChanged, onEditDr
             <div className="flex justify-between py-1"><span className="text-stone-500">Invoice Date:</span><span className="text-stone-800">{fmtInvoiceDate(inv.invoice_date)}</span></div>
             <div className="flex justify-between py-1"><span className="text-stone-500">Payment Due:</span><span className="text-stone-800">{fmtInvoiceDate(inv.due_date)}</span></div>
             <div className="flex justify-between py-2 mt-1 px-2 bg-stone-100 rounded"><span className="text-stone-600 font-medium">Amount Due (USD):</span><span className="font-semibold text-stone-900">${total.toFixed(2)}</span></div>
-            <div className="mt-2 text-right">
+            {/* Status is for you, not the customer. "DRAFT" stamped on a
+               $5,841 invoice a property manager opens reads as unfinished
+               work. Visible on screen, hidden on paper. */}
+            <div className="mt-2 text-right no-print">
               <span className={`text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full ${INVOICE_STATUS_STYLE[inv.status] || 'bg-stone-100 text-stone-600'}`}>{inv.status}</span>
             </div>
           </div>

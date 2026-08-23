@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap206";
+const BUILD_TAG = "aug6-tap207";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -10965,113 +10965,100 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
 
       {blockTab === 'active' && (
         <>
-          {activeTaskObj ? (
-            <ActiveWorkblockCard task={activeTaskObj}
-              onStop={() => onStopTask(activeTaskObj.id)}
-              onAddPhoto={(kind) => onAddPhoto(activeTaskObj.id, kind)}
-              onRequest={activeTaskObj.category
-                ? () => setRequestSection(activeTaskObj.category)
-                : null} />
-          ) : (
-            <div className="mx-4 mt-6 text-center py-10 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
-              You're not running anything yet.<br />
-              Tap <span className="font-mono text-stone-500">New</span> to start a task, or check <span className="font-mono text-stone-500">Done</span> to resume one.
-            </div>
-          )}
-          {/* MY OTHER OPEN WORKBLOCKS. Nothing closes when you move between
-             sections or bedrooms now, so several can be running at once —
-             this is how you get back to them. Without it a second block
-             existed in the database with no way to reach it. */}
-          {(myOpenBlocks || []).filter(b => b.id !== block.id).length > 0 && (
-            <div className="mx-4 mt-4">
-              <div className="text-[10px] uppercase tracking-wider text-stone-400 font-mono mb-2">
-                Your other open workblocks
-              </div>
-              <div className="space-y-2">
-                {(myOpenBlocks || []).filter(b => b.id !== block.id).map(ob => {
-                  const secs = [...new Set((ob.tasks || []).map(t => t.category).filter(Boolean))];
-                  const head = secs.length
-                    ? secs.map(c => taskCategoryShortLabel(c, null)).filter(Boolean).join(' \u00b7 ')
-                    : (ob.main_section ? taskCategoryShortLabel(ob.main_section, null) : 'Workblock');
-                  const items = (ob.tasks || []).flatMap(t => splitTaskName(t.name || ''));
-                  const sameBedroom = ob.party_id === block.party_id;
-                  return (
-                    <button key={ob.id} onClick={() => onGoToOpenBlock && onGoToOpenBlock(ob)}
-                      disabled={busy}
-                      className="w-full text-left p-3 rounded-2xl bg-white border border-amber-200 hover:border-amber-500 active:scale-[0.99] transition disabled:opacity-50">
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="font-serif text-[17px] text-stone-900 truncate">{head}</span>
-                        <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 flex-shrink-0 inline-flex items-center gap-1">
-                          <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" /> Open
-                        </span>
-                      </div>
-                      <div className="text-[11px] font-mono text-stone-500 mt-0.5">
-                        {!sameBedroom && `${ob.unit?.label || ''}${ob.party?.label ? ' \u00b7 ' + ob.party.label : ''} \u00b7 `}
-                        {items.length} {items.length === 1 ? 'item' : 'items'}
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-          {/* Teammates' LIVE tasks in this same workblock. These belong to
-             whoever started them — you can add photos, but you don't get a
-             Done button on someone else's running work. */}
-          {teammatesRunning.length > 0 && (
-            <div className="mx-4 mt-4">
-              <div className="text-[10px] uppercase tracking-wider text-stone-400 font-mono mb-2">
-                Also running in this workblock
-              </div>
-              <div className="space-y-3">
-                {teammatesRunning.map(t => (
-                  <div key={t.id} className="p-4 rounded-2xl bg-white border border-amber-200">
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="min-w-0 flex-1">
-                        {/* SECTION is the headline, everywhere. This showed the
-                           first item name ("Window track", "Toilet ring") with
-                           the section shrunk underneath, so two bathroom blocks
-                           read as two unrelated jobs. The items live in the
-                           dropdown below. */}
-                        <div className="font-serif text-[17px] text-stone-900 leading-tight">
-                          {taskCategoryShortLabel(t.category, t.subcategory)
-                            || splitTaskName(t.name)[0]
-                            || t.name}
-                        </div>
-                      </div>
-                      <span className="inline-flex items-center gap-1 text-[10px] font-mono px-2 py-1 rounded-full bg-amber-100 text-amber-800 flex-shrink-0">
-                        <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" /> Running
-                      </span>
+          {/* One flat list of what's open. The tab is called Active — it
+             doesn't need three headings explaining that the things on it are
+             active. Each card carries its own state (Running / Open) and its
+             own actions, so grouping them under labels was noise.
+             Order: the job you're running, then your other open blocks, then
+             work your teammates have running in this block. */}
+          <div className="mx-4 mt-3 space-y-2.5">
+
+            {activeTaskObj && (
+              <ActiveWorkblockCard task={activeTaskObj}
+                onStop={() => onStopTask(activeTaskObj.id)}
+                onAddPhoto={(kind) => onAddPhoto(activeTaskObj.id, kind)}
+                onRequest={activeTaskObj.category
+                  ? () => setRequestSection(activeTaskObj.category)
+                  : null} />
+            )}
+
+            {(myOpenBlocks || []).filter(b => b.id !== block.id).map(ob => {
+              const secs = [...new Set((ob.tasks || []).map(t => t.category).filter(Boolean))];
+              const head = secs.length
+                ? secs.map(c => taskCategoryShortLabel(c, null)).filter(Boolean).join(' · ')
+                : (ob.main_section ? taskCategoryShortLabel(ob.main_section, null) : 'Workblock');
+              const items = (ob.tasks || []).flatMap(t => splitTaskName(t.name || ''));
+              const sameBedroom = ob.party_id === block.party_id;
+              return (
+                <button key={ob.id} onClick={() => onGoToOpenBlock && onGoToOpenBlock(ob)}
+                  disabled={busy}
+                  className="w-full text-left p-4 rounded-2xl bg-white border border-amber-200 hover:border-amber-500 active:scale-[0.99] transition disabled:opacity-50">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-serif text-[17px] text-stone-900 truncate">{head}</span>
+                    <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 flex-shrink-0 inline-flex items-center gap-1">
+                      <span className="w-1.5 h-1.5 rounded-full bg-amber-500" /> Open
+                    </span>
+                  </div>
+                  <div className="text-[11px] font-mono text-stone-500 mt-0.5">
+                    {!sameBedroom && `${ob.unit?.label || ''}${ob.party?.label ? ' · ' + ob.party.label : ''} · `}
+                    {items.length} {items.length === 1 ? 'item' : 'items'}
+                  </div>
+                </button>
+              );
+            })}
+
+            {/* Teammates' running tasks in THIS block. Photos yes, Done yes —
+               you're both in the room. */}
+            {teammatesRunning.map(t => (
+              <div key={t.id} className="p-4 rounded-2xl bg-white border border-amber-200">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0 flex-1">
+                    <div className="font-serif text-[17px] text-stone-900 leading-tight">
+                      {taskCategoryShortLabel(t.category, t.subcategory)
+                        || splitTaskName(t.name)[0]
+                        || t.name}
                     </div>
-                    <div className="text-[11px] text-stone-500 font-mono mt-1.5 mb-3">
+                    <div className="text-[11px] text-stone-500 font-mono mt-0.5">
                       started {fmtClock(t.start_time)} · {fmtTimeShort(Date.now() - new Date(t.start_time).getTime())}
                     </div>
-                    {/* Same bottom row as every other task card: camera left,
-                       items middle, action right. Marking it Done is the
-                       owner's call — you can still shoot photos into it. */}
-                    <div className="flex items-center gap-2">
-                      <button onClick={() => onAddPhoto(t.id, null)} disabled={busy}
-                        aria-label="Add photo"
-                        className="px-4 py-2.5 rounded-xl bg-stone-900 hover:bg-stone-800 text-stone-50 text-sm font-medium inline-flex items-center gap-2 active:scale-95 transition-transform disabled:opacity-50 flex-shrink-0">
-                        <Camera size={18} />
-                        {(t.photos || []).filter(p => !p.deleted_at).length > 0 && (
-                          <span className="text-stone-300 font-mono text-xs">{(t.photos || []).filter(p => !p.deleted_at).length}</span>
-                        )}
-                      </button>
-                      <div className="flex-1 min-w-0">
-                        <ItemsDropdown items={splitTaskName(t.name)} />
-                      </div>
-                      <button onClick={() => onStopTask(t.id)} disabled={busy}
-                        className="px-5 py-2.5 rounded-xl bg-[#C99B5C] hover:bg-[#b8894f] text-white text-sm font-semibold active:scale-95 transition-transform disabled:opacity-50 flex-shrink-0">
-                        Done
-                      </button>
-                    </div>
                   </div>
-                ))}
+                  <span className="inline-flex items-center gap-1 text-[10px] font-mono px-2 py-1 rounded-full bg-amber-100 text-amber-800 flex-shrink-0">
+                    <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" /> Running
+                  </span>
+                </div>
+                <div className="flex items-center gap-2 mt-3">
+                  <button onClick={() => onAddPhoto(t.id, null)} disabled={busy}
+                    aria-label="Add photo"
+                    className="px-4 py-2.5 rounded-xl bg-stone-900 hover:bg-stone-800 text-stone-50 text-sm font-medium inline-flex items-center gap-2 active:scale-95 transition-transform disabled:opacity-50 flex-shrink-0">
+                    <Camera size={18} />
+                    {(t.photos || []).filter(p => !p.deleted_at).length > 0 && (
+                      <span className="text-stone-300 font-mono text-xs">{(t.photos || []).filter(p => !p.deleted_at).length}</span>
+                    )}
+                  </button>
+                  <div className="flex-1 min-w-0">
+                    <ItemsDropdown items={splitTaskName(t.name)} />
+                  </div>
+                  <button onClick={() => onStopTask(t.id)} disabled={busy}
+                    className="px-5 py-2.5 rounded-xl bg-[#C99B5C] hover:bg-[#b8894f] text-white text-sm font-semibold active:scale-95 transition-transform disabled:opacity-50 flex-shrink-0">
+                    Done
+                  </button>
+                </div>
               </div>
-            </div>
-          )}
-          <div className="mx-4 mt-4 flex items-center gap-1.5 flex-wrap">
+            ))}
+
+            {/* Only when there is genuinely nothing open anywhere. */}
+            {!activeTaskObj
+              && (myOpenBlocks || []).filter(b => b.id !== block.id).length === 0
+              && teammatesRunning.length === 0 && (
+              <div className="text-center py-10 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
+                Nothing running.<br />
+                Tap <span className="font-mono text-stone-500">New</span> to start a task, or <span className="font-mono text-stone-500">Done</span> to reopen one.
+              </div>
+            )}
+          </div>
+          {/* Only worth showing when someone ELSE is in here. "In this
+             workblock: You" is a sentence telling you where you are. */}
+          <div className={`mx-4 mt-4 flex items-center gap-1.5 flex-wrap ${others.length === 0 ? 'hidden' : ''}`}>
             <span className="text-[10px] uppercase tracking-wider font-mono text-stone-400">In this workblock:</span>
             <span className="inline-flex items-center gap-1 text-[11px] font-mono px-2 py-0.5 rounded-full bg-stone-100 text-stone-700 border border-stone-200">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" /> You

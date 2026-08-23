@@ -26,6 +26,7 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 // =================================================================
 const GOOGLE_TRANSLATE_API_KEY = "AIzaSyD7ceHPryMzs45hWJOyFNBxtOzQOEmJcSA";
 
+
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // ============================================================
@@ -118,7 +119,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap207";
+const BUILD_TAG = "aug6-tap208";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -10620,7 +10621,14 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
   myOpenBlocks = [], onGoToOpenBlock = null, onRequestItems = null }) {
   useTick(true);
   const blockElapsed = Date.now() - new Date(block.start_time).getTime();
-  const activeTaskObj = tasks.find(t => t.id === activeTask);
+  // What's genuinely running in this block right now. activeTask is separate
+  // state that drifts (switching blocks can leave it null while a task here
+  // is running), so it's only trusted when it matches reality.
+  const runningInBlock = (tasks || []).filter(t => !t.end_time);
+  const effectiveActiveId = (activeTask && runningInBlock.some(t => t.id === activeTask))
+    ? activeTask
+    : (runningInBlock[0]?.id || null);
+  const activeTaskObj = tasks.find(t => t.id === effectiveActiveId);
   // Multi-cleaner participants in this block. Loaded on mount and
   // refreshed every 30s so the header chips track joins/leaves.
   // Excludes the current cleaner (they know they're here).
@@ -10709,8 +10717,8 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
   // still-running task in a shared workblock got filed under Done with a
   // Done button on it. Join someone's block and all of their live work
   // looked finished.
-  const runningHere = (tasks || []).filter(t => !t.end_time);
-  const teammatesRunning = runningHere.filter(t => t.id !== activeTask);
+  const runningHere = runningInBlock;
+  const teammatesRunning = runningHere.filter(t => t.id !== effectiveActiveId);
   const finishedHere = (tasks || []).filter(t => !!t.end_time);
   // Other open workblocks at this bedroom (someone cleaning a different
   // section). Counted here so the Active badge reflects them.
@@ -10973,16 +10981,41 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
              work your teammates have running in this block. */}
           <div className="mx-4 mt-3 space-y-2.5">
 
-            {activeTaskObj && (
+            {activeTaskObj ? (
               <ActiveWorkblockCard task={activeTaskObj}
                 onStop={() => onStopTask(activeTaskObj.id)}
                 onAddPhoto={(kind) => onAddPhoto(activeTaskObj.id, kind)}
                 onRequest={activeTaskObj.category
                   ? () => setRequestSection(activeTaskObj.category)
                   : null} />
+            ) : (
+              /* The block you're in, with nothing running in it yet. It still
+                 belongs at the top — it's where you are — rather than being
+                 absent while other blocks are listed. */
+              <div className="p-4 rounded-2xl bg-amber-50 border-2 border-amber-300">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-serif text-[17px] text-stone-900 truncate">
+                    {block.main_section ? taskCategoryShortLabel(block.main_section, null) : 'This workblock'}
+                  </span>
+                  <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-amber-200 text-amber-900 flex-shrink-0">
+                    You're here
+                  </span>
+                </div>
+                <div className="text-[11px] font-mono text-stone-600 mt-0.5">
+                  Nothing running — tap <span className="text-stone-800">New</span> to start something.
+                </div>
+              </div>
             )}
 
-            {(myOpenBlocks || []).filter(b => b.id !== block.id).map(ob => {
+            {/* Every open block EXCEPT the one whose card is already above.
+               The list used to drop whichever block you were in, so switching
+               made one card vanish and another appear — the contents shuffled
+               every tap. Now the block you're in is always the card at the
+               top, and the rest sit below it in a stable order. */}
+            {(myOpenBlocks || [])
+              .filter(b => b.id !== block.id)
+              .sort((a, b2) => new Date(a.start_time) - new Date(b2.start_time))
+              .map(ob => {
               const secs = [...new Set((ob.tasks || []).map(t => t.category).filter(Boolean))];
               const head = secs.length
                 ? secs.map(c => taskCategoryShortLabel(c, null)).filter(Boolean).join(' · ')
@@ -11046,15 +11079,8 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
               </div>
             ))}
 
-            {/* Only when there is genuinely nothing open anywhere. */}
-            {!activeTaskObj
-              && (myOpenBlocks || []).filter(b => b.id !== block.id).length === 0
-              && teammatesRunning.length === 0 && (
-              <div className="text-center py-10 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
-                Nothing running.<br />
-                Tap <span className="font-mono text-stone-500">New</span> to start a task, or <span className="font-mono text-stone-500">Done</span> to reopen one.
-              </div>
-            )}
+            {/* No empty state — the block you're in is always the first
+               card, and it says for itself when nothing is running. */}
           </div>
           {/* Only worth showing when someone ELSE is in here. "In this
              workblock: You" is a sentence telling you where you are. */}

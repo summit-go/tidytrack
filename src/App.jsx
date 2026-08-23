@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap201";
+const BUILD_TAG = "aug6-tap202";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -5037,6 +5037,15 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   // from an earlier still-open shift stay running, which is how someone ended
   // up "active" in two different bedrooms (101 and 312) at once. Returns the
   // ids it closed so callers can update local state.
+  // Close abandoned blocks WITHOUT closing the ones I'm deliberately working.
+  //
+  // This used to close every open block I owned, which enforced "one open
+  // block per cleaner". That rule is now wrong: a cleaner can have a block
+  // running in 101:1 and another in 101:2, and reopening a finished block
+  // shouldn't shut whatever else is live. The thing actually worth guarding
+  // against is a block left running on an EARLIER shift — nobody is in that
+  // room, and it would accrue time forever. So: close blocks from my other
+  // shifts, leave this shift's blocks alone.
   const closeAllMyOpenBlocks = async (exceptId = null) => {
     if (!employee?.id) return [];
     try {
@@ -5044,7 +5053,9 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       // not) — the block is "mine" if its shift belongs to me.
       const { data: myShifts } = await supabase.from('shifts')
         .select('id').eq('employee_id', employee.id);
-      const shiftIds = (myShifts || []).map(s => s.id);
+      const shiftIds = (myShifts || []).map(s => s.id)
+        // Everything except the shift I'm on right now.
+        .filter(id => !shift?.id || id !== shift.id);
       if (shiftIds.length === 0) return [];
       let q = supabase.from('work_blocks').select('id')
         .in('shift_id', shiftIds).is('end_time', null);
@@ -5072,15 +5083,12 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       return;
     }
     setBusy(true);
-    // Close THIS cleaner's other open workblocks under this shift first
-    // so we don't end up with B owning a stale open block while also
-    // being a participant in A's. Mirrors the pre-close pattern in
-    // onPickBlockParty. The block's items stay in whatever status they
-    // were in (paused / in_progress) — nothing is lost.
+    // Stop whatever task is running so its clock doesn't tick while you're in
+    // someone else's block — but leave your own blocks OPEN. You may be
+    // mid-job in another bedroom of the same apartment, and joining a
+    // colleague shouldn't end that. Only earlier-shift leftovers get swept.
     try {
       if (activeTask) await stopTask(activeTask, false);
-      // Close every open block I own (across all my shifts), except the one
-      // I'm joining — prevents being active in two bedrooms via a stale shift.
       await closeAllMyOpenBlocks(targetBlock.id);
     } catch (e) {
       console.warn('[joinBlock] could not pre-close own open blocks', e);
@@ -5465,15 +5473,11 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
 
   const reopenBlock = async (block) => {
     setBusy(true);
-    // Pre-close any of MY currently-open blocks so we don't end up with
-    // two open at once. We scope this to the current shift since those
-    // are the only blocks "I" own right now. A block closed by mistake
-    // can belong to an earlier shift or another cleaner — we still
-    // reopen it below regardless of whose shift it's under, so anyone
-    // can recover a block that was closed by accident.
+    // Reopening no longer shuts your other work. It only sweeps blocks left
+    // running on earlier shifts; anything open on THIS shift stays open, so
+    // reopening a finished block in 101:1 doesn't close the live one in
+    // 101:2 (or take it out from under whoever joined it).
     try {
-      // Close every open block I own across all my shifts (not just the
-      // current one), except the one being reopened.
       await closeAllMyOpenBlocks(block.id);
     } catch (e) {
       console.warn('[reopenBlock] could not pre-close open blocks', e);
@@ -5695,7 +5699,23 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     const assignmentId = activeBlock?.assignment_id || pendingStart?.assignmentId || null;
     if (!shift?.id || !unitId || !partyId) return activeBlock || null;
     try {
+      // Only sweeps blocks left running on earlier shifts. Blocks on THIS
+      // shift stay open — a cleaner working two bedrooms of one apartment is
+      // deliberate, not a leak.
       await closeAllMyOpenBlocks(null);
+      // Don't open a second block at a bedroom I already have one at. The
+      // recreate path exists for a stale/missing block, not to stack blocks.
+      const { data: dupe } = await supabase.from('work_blocks')
+        .select('*, unit:units(*), party:parties(*), tasks(*, photos(*, taken_by_employee:employees!taken_by(name)))')
+        .eq('shift_id', shift.id).eq('unit_id', unitId).eq('party_id', partyId)
+        .is('end_time', null)
+        .order('start_time', { ascending: false }).limit(1);
+      if ((dupe || [])[0]) {
+        const found = dupe[0];
+        setActiveBlock(found);
+        setWorkBlocks(prev => prev.some(b => b.id === found.id) ? prev : [...prev, found]);
+        return found;
+      }
       const { data, error } = await supabase.from('work_blocks')
         .insert({
           shift_id: shift.id, unit_id: unitId, party_id: partyId,
@@ -6062,9 +6082,9 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   const confirmPendingStart = async () => {
     if (!pendingStart) return;
     setBusy(true);
-    // Safety: close every open block I own across ALL my shifts before opening
-    // a new one — a stale block from an earlier open shift must not stay
-    // running in another bedroom.
+    // Sweeps blocks left running on EARLIER shifts only. Blocks on the
+    // current shift stay open, so starting work in a second bedroom doesn't
+    // silently shut the first one — someone may still be in it.
     try {
       await closeAllMyOpenBlocks(null);
     } catch (e) {

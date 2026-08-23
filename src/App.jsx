@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap204";
+const BUILD_TAG = "aug6-tap206";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -2874,7 +2874,12 @@ function RequestItemsModal({ section, templateSetId, bathroomVariant, generalVar
     setSubmitting(true);
     const picked = items.filter(i => selected.has(i.id));
     const keys = [...picked.map(i => i.item_key), ...customItems.map(c => c.key)];
-    await onSubmit(keys);
+    // Pass the display labels too. The caller folds these into the running
+    // task's item list, and a freeform item has no label anywhere else.
+    const labels = {};
+    picked.forEach(i => { if (i.item_key) labels[i.item_key] = i.label || humanize(i.item_key); });
+    customItems.forEach(c => { if (c.key) labels[c.key] = c.label || humanize(c.key); });
+    await onSubmit(keys, labels);
     setSubmitting(false);
   };
 
@@ -2988,8 +2993,6 @@ function TaskCategoryPicker({ busy, onStartOne, onStartMany, defaultName, setDef
   // items from previous move-outs — the same bedroom cleaned three times
   // showed "Window walls" three times. Each assignment is its own job.
   assignmentId = null,
-  // Set by the Active tab to pop the request modal straight open.
-  openRequestFor = null, onRequestOpened = null,
   // Handler called when one or more checklist items are picked and
   // the cleaner taps Start. Receives an array of target rows + a
   // combined display name. Parent advances those targets to
@@ -4665,11 +4668,11 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       .select('*, unit:units(*), party:parties(*), tasks(*, photos(*, taken_by_employee:employees!taken_by(name)))').single();
     setBusy(false);
     if (error) { alert('Could not start work block: ' + error.message); return; }
-    setWorkBlocks(prev => {
-      const ts = new Date().toISOString();
-      const closed = prev.map(b => (b.end_time ? b : { ...b, end_time: ts }));
-      return [...closed, data];
-    });
+    // Just add the new block. This used to stamp end_time on every other open
+    // block to mirror a pre-close that no longer happens on the current
+    // shift — so opening a second workblock made the first vanish from Active
+    // even though it was still open in the database.
+    setWorkBlocks(prev => [...prev, data]);
     setActiveBlock(data); setTasks(data.tasks || []); setBlockStartFlow(null);
     logAction({ type: 'open_block', blockId: data.id, unitId: data.unit_id, partyId: data.party_id,
       label: `Opened the workblock at ${data.unit?.label || 'this apartment'}${data.party?.label ? ` · ${data.party.label}` : ''}` });
@@ -4704,12 +4707,8 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       .select('*, unit:units(*), party:parties(*), tasks(*, photos(*, taken_by_employee:employees!taken_by(name)))').single();
     setBusy(false);
     if (error) { alert('Could not start work block: ' + error.message); return; }
-    setWorkBlocks(prev => {
-      // Reflect any pre-closed blocks in local state too
-      const ts = new Date().toISOString();
-      const closed = prev.map(b => (b.end_time ? b : { ...b, end_time: ts }));
-      return [...closed, data];
-    });
+    // See above — no local force-close; other open blocks stay open.
+    setWorkBlocks(prev => [...prev, data]);
     setActiveBlock(data); setTasks(data.tasks || []); setBlockStartFlow(null);
     logAction({ type: 'open_block', blockId: data.id, unitId: data.unit_id, partyId: data.party_id,
       label: `Opened the workblock at ${data.unit?.label || 'this apartment'}${data.party?.label ? ` · ${data.party.label}` : ''}` });
@@ -5498,12 +5497,12 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     const updated = { ...block, end_time: null, tasks: blockTasks || [] };
     setWorkBlocks(prev => {
       const exists = prev.some(b => b.id === block.id);
-      const next = prev.map(b => {
-        if (b.id === block.id) return updated;
-        // Reflect the pre-closure in local state for any other currently-open blocks
-        if (!b.end_time) return { ...b, end_time: new Date().toISOString() };
-        return b;
-      });
+      // Only the reopened block changes. This used to stamp end_time on every
+      // other open block "to reflect the pre-closure" — but nothing is
+      // pre-closed on the current shift any more, so it was closing live
+      // workblocks in the UI while they stayed open in the database. That's
+      // why reopening one always appeared to end the other.
+      const next = prev.map(b => (b.id === block.id ? updated : b));
       // If the reopened block wasn't already in local state (e.g. it
       // belonged to another shift / the Others list), add it so the
       // active-block view has it.
@@ -5831,6 +5830,75 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     }
   };
 
+  // ---- REQUEST ITEMS INTO THE RUNNING WORKBLOCK -------------------------
+  // A cleaner spots something that isn't on the sheet while they're working.
+  // Requesting used to insert the items as pending and drop them in the
+  // picker, so they had to go find them and start them — which opened a
+  // second task. That's backwards: they're already in the room doing that
+  // section. The items are created, flagged as a request for the owner, and
+  // folded straight into the task that's running.
+  const requestItemsIntoActiveBlock = async (section, itemKeys, labels = {}) => {
+    if (!activeBlock || !itemKeys?.length) return;
+    const hostAssignmentId = activeBlock.assignment_id;
+    if (!hostAssignmentId) {
+      alert("This workblock isn't tied to an assignment, so there's nothing to attach the request to.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const nowISO = new Date().toISOString();
+      const rows = itemKeys.map(key => ({
+        assignment_id: hostAssignmentId,
+        unit_id: activeBlock.unit_id,
+        party_id: activeBlock.party_id,
+        // Straight to in_progress — the cleaner is doing it now, not later.
+        status: 'in_progress',
+        started_at: nowISO,
+        started_by: employee?.id || null,
+        template_section: section,
+        template_item_key: key.includes(':') ? key : `${section}:${key}`,
+        // Still enters the owner's approval queue; approval is after the
+        // fact and never blocks the work.
+        requested_by: employee?.id || null,
+        requested_at: nowISO,
+        request_status: 'pending',
+      }));
+      const { data: created, error } = await supabase.from('assignment_targets')
+        .insert(rows).select('id, template_item_key, template_section');
+      if (error) throw error;
+
+      // Fold the item names into the running task so they show in its list.
+      const names = (created || []).map(r =>
+        labels[r.template_item_key]
+        || labels[String(r.template_item_key).split(':').slice(1).join(':')]
+        || resolveItemLabel(r.template_item_key, 'en', null, null)
+        || String(r.template_item_key).split(':').slice(1).join(':')
+      ).filter(Boolean);
+
+      const running = (tasks || []).find(t => t.id === activeTask);
+      if (running && names.length) {
+        const merged = [...splitTaskName(running.name || ''), ...names].join(' + ');
+        const { error: uErr } = await supabase.from('tasks').update({ name: merged }).eq('id', running.id);
+        if (uErr) console.warn('[request] could not extend the task name', uErr);
+        else setTasks(prev => prev.map(t => t.id === running.id ? { ...t, name: merged } : t));
+      } else if (names.length) {
+        // Nothing running in this block — start one so the requested work is
+        // actually being tracked rather than sitting idle.
+        const ins = {
+          shift_id: shift.id, name: names.join(' + '), category: section,
+          work_block_id: activeBlock.id, is_preview: previewMode,
+        };
+        const { data: t2 } = await supabase.from('tasks').insert(ins)
+          .select('*, photos(*, taken_by_employee:employees!taken_by(name))').single();
+        if (t2) { setTasks(prev => [...prev, t2]); setActiveTask(t2.id); }
+      }
+    } catch (e) {
+      alert('Could not add the requested items: ' + (e.message || e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const startTasksFromChecklistItems = async ({ targets: pickedTargets, name, category }) => {
     if (!pickedTargets || pickedTargets.length === 0) return;
     // Stop the current active task before starting a new one (matches
@@ -6129,11 +6197,11 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       .select('*, unit:units(*), party:parties(*), tasks(*, photos(*, taken_by_employee:employees!taken_by(name)))').single();
     setBusy(false);
     if (error) { alert('Could not start work block: ' + error.message); return; }
-    setWorkBlocks(prev => {
-      const ts = new Date().toISOString();
-      const closed = prev.map(b => (b.end_time ? b : { ...b, end_time: ts }));
-      return [...closed, data];
-    });
+    // Just add the new block. This used to stamp end_time on every other open
+    // block to mirror a pre-close that no longer happens on the current
+    // shift — so opening a second workblock made the first vanish from Active
+    // even though it was still open in the database.
+    setWorkBlocks(prev => [...prev, data]);
     setActiveBlock(data);
     setTasks(data.tasks || []);
     setPendingStart(null);
@@ -6786,6 +6854,17 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       onFinishHere={finishHere}
       onSwitchBedroom={switchBedroomWithinUnit}
       onReopen={reopenBlock}
+      myOpenBlocks={(workBlocks || []).filter(b => !b.end_time)}
+      onRequestItems={requestItemsIntoActiveBlock}
+      onGoToOpenBlock={(b) => {
+        // Jump straight into another of my open blocks. Nothing closes —
+        // this is just changing which one is on screen.
+        if (activeTask) stopTask(activeTask, false);
+        setActiveBlock(b);
+        setTasks(b.tasks || []);
+        const running = (b.tasks || []).find(t => !t.end_time);
+        setActiveTask(running ? running.id : null);
+      }}
       newTaskName={newTaskName} setNewTaskName={setNewTaskName}
       onStartTask={startTask} onStartTasksFromPicker={startTasksFromPicker}
       onStartChecklistItems={startTasksFromChecklistItems}
@@ -10537,7 +10616,8 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
   newTaskName, setNewTaskName, onStartTask, onStartTasksFromPicker, onStartChecklistItems, onReleaseTargets, onStopTask, onResumeTask, onAddPhoto,
   photoModal, onClosePhotoModal, onUploadPhoto, onChangePhotoKind, onSavePhotoNote, onPhotoUpdated, onOpenMessages, onOpenBedroomHistory,
   onMoveBlock, onMoveMultiple, onLeaveBlock, onJoinBlock, onDeletePhoto, onGoToBedroom, onSwitchProperty, cleanerTab, setCleanerTab, previewMode, busy,
-  onUndoLast, lastActionLabel, onFinishHere, onSwitchBedroom }) {
+  onUndoLast, lastActionLabel, onFinishHere, onSwitchBedroom,
+  myOpenBlocks = [], onGoToOpenBlock = null, onRequestItems = null }) {
   useTick(true);
   const blockElapsed = Date.now() - new Date(block.start_time).getTime();
   const activeTaskObj = tasks.find(t => t.id === activeTask);
@@ -10635,8 +10715,22 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
   // Other open workblocks at this bedroom (someone cleaning a different
   // section). Counted here so the Active badge reflects them.
   const [otherOpenCount, setOtherOpenCount] = useState(0);
-  // Section whose request modal should open when the picker mounts.
+  // Section whose request modal is open, and the assignment behind this
+  // block — the modal needs its template set and variants to know which
+  // items exist.
   const [requestSection, setRequestSection] = useState(null);
+  const [blockAssignment, setBlockAssignment] = useState(null);
+  useEffect(() => {
+    if (!block?.assignment_id) { setBlockAssignment(null); return; }
+    let cancelled = false;
+    (async () => {
+      const { data } = await supabase.from('assignments')
+        .select('id, template_set_id, bathroom_variant, general_variant, assignment_type')
+        .eq('id', block.assignment_id).maybeSingle();
+      if (!cancelled) setBlockAssignment(data || null);
+    })();
+    return () => { cancelled = true; };
+  }, [block?.assignment_id]);
   // Auto-jump to Active the moment a task starts, and back to New the moment
   // the running task is marked Done (activeTask clears). Landing on New drops
   // the cleaner straight onto the checklist to pick their next item, instead
@@ -10876,12 +10970,49 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
               onStop={() => onStopTask(activeTaskObj.id)}
               onAddPhoto={(kind) => onAddPhoto(activeTaskObj.id, kind)}
               onRequest={activeTaskObj.category
-                ? () => { setRequestSection(activeTaskObj.category); setBlockTab('new'); }
+                ? () => setRequestSection(activeTaskObj.category)
                 : null} />
           ) : (
             <div className="mx-4 mt-6 text-center py-10 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
               You're not running anything yet.<br />
               Tap <span className="font-mono text-stone-500">New</span> to start a task, or check <span className="font-mono text-stone-500">Done</span> to resume one.
+            </div>
+          )}
+          {/* MY OTHER OPEN WORKBLOCKS. Nothing closes when you move between
+             sections or bedrooms now, so several can be running at once —
+             this is how you get back to them. Without it a second block
+             existed in the database with no way to reach it. */}
+          {(myOpenBlocks || []).filter(b => b.id !== block.id).length > 0 && (
+            <div className="mx-4 mt-4">
+              <div className="text-[10px] uppercase tracking-wider text-stone-400 font-mono mb-2">
+                Your other open workblocks
+              </div>
+              <div className="space-y-2">
+                {(myOpenBlocks || []).filter(b => b.id !== block.id).map(ob => {
+                  const secs = [...new Set((ob.tasks || []).map(t => t.category).filter(Boolean))];
+                  const head = secs.length
+                    ? secs.map(c => taskCategoryShortLabel(c, null)).filter(Boolean).join(' \u00b7 ')
+                    : (ob.main_section ? taskCategoryShortLabel(ob.main_section, null) : 'Workblock');
+                  const items = (ob.tasks || []).flatMap(t => splitTaskName(t.name || ''));
+                  const sameBedroom = ob.party_id === block.party_id;
+                  return (
+                    <button key={ob.id} onClick={() => onGoToOpenBlock && onGoToOpenBlock(ob)}
+                      disabled={busy}
+                      className="w-full text-left p-3 rounded-2xl bg-white border border-amber-200 hover:border-amber-500 active:scale-[0.99] transition disabled:opacity-50">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-serif text-[17px] text-stone-900 truncate">{head}</span>
+                        <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 flex-shrink-0 inline-flex items-center gap-1">
+                          <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" /> Open
+                        </span>
+                      </div>
+                      <div className="text-[11px] font-mono text-stone-500 mt-0.5">
+                        {!sameBedroom && `${ob.unit?.label || ''}${ob.party?.label ? ' \u00b7 ' + ob.party.label : ''} \u00b7 `}
+                        {items.length} {items.length === 1 ? 'item' : 'items'}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
             </div>
           )}
           {/* Teammates' LIVE tasks in this same workblock. These belong to
@@ -10992,8 +11123,6 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
               unitId={block.unit_id}
               partyId={block.party_id}
               assignmentId={block.assignment_id || null}
-              openRequestFor={requestSection}
-              onRequestOpened={() => setRequestSection(null)}
               employee={employee}
               defaultName={newTaskName}
               setDefaultName={setNewTaskName} />
@@ -11204,6 +11333,22 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
           onSaveNote={onSavePhotoNote}
           onPhotoUpdated={onPhotoUpdated}
           onClose={onClosePhotoModal} />
+      )}
+      {/* Request items — opens over whatever tab you're on, so asking for an
+         extra item mid-job doesn't move you off the work. Submitting adds
+         them to the RUNNING task rather than parking them in the picker. */}
+      {requestSection && (
+        <RequestItemsModal
+          section={requestSection}
+          templateSetId={blockAssignment?.template_set_id || null}
+          bathroomVariant={blockAssignment?.bathroom_variant || null}
+          generalVariant={blockAssignment?.general_variant || null}
+          assignmentType={blockAssignment?.assignment_type || null}
+          onClose={() => setRequestSection(null)}
+          onSubmit={async (itemKeys, labels) => {
+            setRequestSection(null);
+            if (onRequestItems) await onRequestItems(requestSection, itemKeys, labels || {});
+          }} />
       )}
       {moveModalOpen && (
         <MoveBlockModalInline

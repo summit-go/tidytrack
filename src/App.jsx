@@ -26,7 +26,6 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 // =================================================================
 const GOOGLE_TRANSLATE_API_KEY = "AIzaSyD7ceHPryMzs45hWJOyFNBxtOzQOEmJcSA";
 
-
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // ============================================================
@@ -119,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap208";
+const BUILD_TAG = "aug6-tap209";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -10973,114 +10972,121 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
 
       {blockTab === 'active' && (
         <>
-          {/* One flat list of what's open. The tab is called Active — it
-             doesn't need three headings explaining that the things on it are
-             active. Each card carries its own state (Running / Open) and its
-             own actions, so grouping them under labels was noise.
-             Order: the job you're running, then your other open blocks, then
-             work your teammates have running in this block. */}
+          {/* One card shape for every workblock. The only difference is the
+             one you're in: it sits on top, reads slightly larger, and is the
+             only one with actions on it — you can't photograph or finish work
+             in a block you aren't standing in. Everything else is identical
+             so the list scans as a list instead of a pile of unrelated
+             widgets. */}
           <div className="mx-4 mt-3 space-y-2.5">
+            {(() => {
+              // Current block first, then the rest in a fixed order. Named
+              // otherBlocks, not `others` — that name already means "other
+              // people in this block" further up and shadowing it here would
+              // be a trap for the next change.
+              const otherBlocks = (myOpenBlocks || [])
+                .filter(b => b.id !== block.id)
+                .sort((a, b2) => new Date(a.start_time) - new Date(b2.start_time));
 
-            {activeTaskObj ? (
-              <ActiveWorkblockCard task={activeTaskObj}
-                onStop={() => onStopTask(activeTaskObj.id)}
-                onAddPhoto={(kind) => onAddPhoto(activeTaskObj.id, kind)}
-                onRequest={activeTaskObj.category
-                  ? () => setRequestSection(activeTaskObj.category)
-                  : null} />
-            ) : (
-              /* The block you're in, with nothing running in it yet. It still
-                 belongs at the top — it's where you are — rather than being
-                 absent while other blocks are listed. */
-              <div className="p-4 rounded-2xl bg-amber-50 border-2 border-amber-300">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="font-serif text-[17px] text-stone-900 truncate">
-                    {block.main_section ? taskCategoryShortLabel(block.main_section, null) : 'This workblock'}
-                  </span>
-                  <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-amber-200 text-amber-900 flex-shrink-0">
-                    You're here
-                  </span>
-                </div>
-                <div className="text-[11px] font-mono text-stone-600 mt-0.5">
-                  Nothing running — tap <span className="text-stone-800">New</span> to start something.
-                </div>
-              </div>
-            )}
+              const sectionOf = (b, tasksList) => {
+                const secs = [...new Set((tasksList || []).map(t => t.category).filter(Boolean))];
+                if (secs.length) return secs.map(c => taskCategoryShortLabel(c, null)).filter(Boolean).join(' · ');
+                return b.main_section ? taskCategoryShortLabel(b.main_section, null) : 'Workblock';
+              };
 
-            {/* Every open block EXCEPT the one whose card is already above.
-               The list used to drop whichever block you were in, so switching
-               made one card vanish and another appear — the contents shuffled
-               every tap. Now the block you're in is always the card at the
-               top, and the rest sit below it in a stable order. */}
-            {(myOpenBlocks || [])
-              .filter(b => b.id !== block.id)
-              .sort((a, b2) => new Date(a.start_time) - new Date(b2.start_time))
-              .map(ob => {
-              const secs = [...new Set((ob.tasks || []).map(t => t.category).filter(Boolean))];
-              const head = secs.length
-                ? secs.map(c => taskCategoryShortLabel(c, null)).filter(Boolean).join(' · ')
-                : (ob.main_section ? taskCategoryShortLabel(ob.main_section, null) : 'Workblock');
-              const items = (ob.tasks || []).flatMap(t => splitTaskName(t.name || ''));
-              const sameBedroom = ob.party_id === block.party_id;
+              const Card = ({ heading, meta, pill, pillTone, current, onClick, children }) => {
+                const shell = current
+                  ? 'p-4 rounded-2xl bg-amber-50 border-2 border-amber-300'
+                  : 'w-full text-left p-3.5 rounded-2xl bg-white border border-stone-300 hover:border-amber-500 active:scale-[0.99] transition disabled:opacity-50';
+                const inner = (
+                  <>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className={`font-serif truncate text-stone-900 ${current ? 'text-xl' : 'text-[16px]'}`}>
+                        {heading}
+                      </span>
+                      <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full flex-shrink-0 inline-flex items-center gap-1 ${pillTone}`}>
+                        <span className={`w-1.5 h-1.5 rounded-full ${current ? 'bg-amber-500 animate-pulse' : 'bg-amber-400'}`} />
+                        {pill}
+                      </span>
+                    </div>
+                    {meta && <div className="text-[11px] font-mono text-stone-500 mt-0.5">{meta}</div>}
+                    {children}
+                  </>
+                );
+                return current
+                  ? <div className={shell}>{inner}</div>
+                  : <button onClick={onClick} disabled={busy} className={shell}>{inner}</button>;
+              };
+
               return (
-                <button key={ob.id} onClick={() => onGoToOpenBlock && onGoToOpenBlock(ob)}
-                  disabled={busy}
-                  className="w-full text-left p-4 rounded-2xl bg-white border border-amber-200 hover:border-amber-500 active:scale-[0.99] transition disabled:opacity-50">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="font-serif text-[17px] text-stone-900 truncate">{head}</span>
-                    <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 flex-shrink-0 inline-flex items-center gap-1">
-                      <span className="w-1.5 h-1.5 rounded-full bg-amber-500" /> Open
-                    </span>
-                  </div>
-                  <div className="text-[11px] font-mono text-stone-500 mt-0.5">
-                    {!sameBedroom && `${ob.unit?.label || ''}${ob.party?.label ? ' · ' + ob.party.label : ''} · `}
-                    {items.length} {items.length === 1 ? 'item' : 'items'}
-                  </div>
-                </button>
+                <>
+                  {/* The block you're in. */}
+                  <Card
+                    current
+                    heading={activeTaskObj
+                      ? (taskCategoryShortLabel(activeTaskObj.category, activeTaskObj.subcategory) || sectionOf(block, tasks))
+                      : sectionOf(block, tasks)}
+                    pill={activeTaskObj ? 'Running' : "You're here"}
+                    pillTone="bg-amber-200 text-amber-900"
+                    meta={activeTaskObj
+                      ? `${splitTaskName(activeTaskObj.name).length} ${splitTaskName(activeTaskObj.name).length === 1 ? 'item' : 'items'} · ${fmtTimeShort(Date.now() - new Date(activeTaskObj.start_time).getTime())}`
+                      : 'Nothing running yet'}>
+                    {activeTaskObj ? (
+                      <div className="flex items-center gap-2 mt-3">
+                        <button onClick={() => onAddPhoto(activeTaskObj.id, null)} disabled={busy}
+                          aria-label="Add photo"
+                          className="px-4 py-2.5 rounded-xl bg-stone-900 hover:bg-stone-800 text-stone-50 text-sm font-medium inline-flex items-center gap-2 active:scale-95 transition disabled:opacity-50 flex-shrink-0">
+                          <Camera size={18} />
+                          {(activeTaskObj.photos || []).filter(p => !p.deleted_at).length > 0 && (
+                            <span className="text-stone-300 font-mono text-xs">{(activeTaskObj.photos || []).filter(p => !p.deleted_at).length}</span>
+                          )}
+                        </button>
+                        <div className="flex-1 min-w-0">
+                          <ItemsDropdown items={splitTaskName(activeTaskObj.name)} />
+                        </div>
+                        {activeTaskObj.category && (
+                          <button onClick={() => setRequestSection(activeTaskObj.category)} disabled={busy}
+                            className="px-3 py-2.5 rounded-xl border border-amber-400 bg-white text-amber-800 text-[11px] font-mono uppercase tracking-wider font-bold active:scale-95 transition disabled:opacity-50 flex-shrink-0">
+                            Request
+                          </button>
+                        )}
+                        <button onClick={() => onStopTask(activeTaskObj.id)} disabled={busy}
+                          className="px-5 py-2.5 rounded-xl bg-[#C99B5C] hover:bg-[#b8894f] text-white text-sm font-semibold active:scale-95 transition disabled:opacity-50 flex-shrink-0">
+                          Done
+                        </button>
+                      </div>
+                    ) : null}
+                  </Card>
+
+                  {/* Anything else a teammate has running in THIS block. */}
+                  {teammatesRunning.map(t => (
+                    <Card key={t.id}
+                      heading={taskCategoryShortLabel(t.category, t.subcategory) || splitTaskName(t.name)[0] || t.name}
+                      pill="Running"
+                      pillTone="bg-amber-100 text-amber-800"
+                      meta={`${splitTaskName(t.name).length} ${splitTaskName(t.name).length === 1 ? 'item' : 'items'} · started ${fmtClock(t.start_time)}`}
+                      onClick={() => {}} />
+                  ))}
+
+                  {/* My other open blocks. */}
+                  {otherBlocks.map(ob => {
+                    const items = (ob.tasks || []).flatMap(t => splitTaskName(t.name || ''));
+                    const sameBedroom = ob.party_id === block.party_id;
+                    const where = sameBedroom
+                      ? ''
+                      : `${ob.unit?.label || ''}${ob.party?.label ? ' · ' + ob.party.label : ''} · `;
+                    return (
+                      <Card key={ob.id}
+                        heading={sectionOf(ob, ob.tasks)}
+                        pill="Open"
+                        pillTone="bg-amber-100 text-amber-800"
+                        meta={`${where}${items.length} ${items.length === 1 ? 'item' : 'items'}`}
+                        onClick={() => onGoToOpenBlock && onGoToOpenBlock(ob)} />
+                    );
+                  })}
+                </>
               );
-            })}
-
-            {/* Teammates' running tasks in THIS block. Photos yes, Done yes —
-               you're both in the room. */}
-            {teammatesRunning.map(t => (
-              <div key={t.id} className="p-4 rounded-2xl bg-white border border-amber-200">
-                <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0 flex-1">
-                    <div className="font-serif text-[17px] text-stone-900 leading-tight">
-                      {taskCategoryShortLabel(t.category, t.subcategory)
-                        || splitTaskName(t.name)[0]
-                        || t.name}
-                    </div>
-                    <div className="text-[11px] text-stone-500 font-mono mt-0.5">
-                      started {fmtClock(t.start_time)} · {fmtTimeShort(Date.now() - new Date(t.start_time).getTime())}
-                    </div>
-                  </div>
-                  <span className="inline-flex items-center gap-1 text-[10px] font-mono px-2 py-1 rounded-full bg-amber-100 text-amber-800 flex-shrink-0">
-                    <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" /> Running
-                  </span>
-                </div>
-                <div className="flex items-center gap-2 mt-3">
-                  <button onClick={() => onAddPhoto(t.id, null)} disabled={busy}
-                    aria-label="Add photo"
-                    className="px-4 py-2.5 rounded-xl bg-stone-900 hover:bg-stone-800 text-stone-50 text-sm font-medium inline-flex items-center gap-2 active:scale-95 transition-transform disabled:opacity-50 flex-shrink-0">
-                    <Camera size={18} />
-                    {(t.photos || []).filter(p => !p.deleted_at).length > 0 && (
-                      <span className="text-stone-300 font-mono text-xs">{(t.photos || []).filter(p => !p.deleted_at).length}</span>
-                    )}
-                  </button>
-                  <div className="flex-1 min-w-0">
-                    <ItemsDropdown items={splitTaskName(t.name)} />
-                  </div>
-                  <button onClick={() => onStopTask(t.id)} disabled={busy}
-                    className="px-5 py-2.5 rounded-xl bg-[#C99B5C] hover:bg-[#b8894f] text-white text-sm font-semibold active:scale-95 transition-transform disabled:opacity-50 flex-shrink-0">
-                    Done
-                  </button>
-                </div>
-              </div>
-            ))}
-
-            {/* No empty state — the block you're in is always the first
-               card, and it says for itself when nothing is running. */}
+            })()}
           </div>
           {/* Only worth showing when someone ELSE is in here. "In this
              workblock: You" is a sentence telling you where you are. */}

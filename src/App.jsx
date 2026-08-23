@@ -25,6 +25,7 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 // If empty, the Translate button is hidden.
 // =================================================================
 const GOOGLE_TRANSLATE_API_KEY = "AIzaSyD7ceHPryMzs45hWJOyFNBxtOzQOEmJcSA";
+
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // ============================================================
@@ -117,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap203";
+const BUILD_TAG = "aug6-tap204";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -10896,11 +10897,15 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
                   <div key={t.id} className="p-4 rounded-2xl bg-white border border-amber-200">
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0 flex-1">
+                        {/* SECTION is the headline, everywhere. This showed the
+                           first item name ("Window track", "Toilet ring") with
+                           the section shrunk underneath, so two bathroom blocks
+                           read as two unrelated jobs. The items live in the
+                           dropdown below. */}
                         <div className="font-serif text-[17px] text-stone-900 leading-tight">
-                          {splitTaskName(t.name)[0] || t.name}
-                        </div>
-                        <div className="text-[10px] uppercase tracking-wider text-stone-400 font-mono mt-0.5">
-                          {t.category || 'task'}
+                          {taskCategoryShortLabel(t.category, t.subcategory)
+                            || splitTaskName(t.name)[0]
+                            || t.name}
                         </div>
                       </div>
                       <span className="inline-flex items-center gap-1 text-[10px] font-mono px-2 py-1 rounded-full bg-amber-100 text-amber-800 flex-shrink-0">
@@ -16836,7 +16841,12 @@ function TaskDetail({ task, compact, employee }) {
       <div className="flex items-start justify-between mb-2">
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
-            <div className="font-serif text-base text-stone-900"><TranslatableText text={task.name} targetLang="en" /></div>
+            {/* Section as the heading, item list underneath — same rule as
+               every other workblock view. */}
+            <div className="font-serif text-base text-stone-900">
+              {taskCategoryShortLabel(task.category, task.subcategory)
+                || <TranslatableText text={task.name} targetLang="en" />}
+            </div>
             {damage.length > 0 && (
               <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-red-100 text-red-700">
                 ⚠ Damage reported
@@ -16854,6 +16864,12 @@ function TaskDetail({ task, compact, employee }) {
         </div>
         {!task.end_time && <span className="px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 text-xs font-mono">live</span>}
       </div>
+      {/* The items themselves. The heading names the section now, so without
+         this the individual items would have nowhere to appear. */}
+      {(() => {
+        const parts = splitTaskName(task.name);
+        return parts.length > 0 ? <div className="mt-1.5"><ItemsDropdown items={parts} /></div> : null;
+      })()}
       {(before.length > 0 || after.length > 0 || damage.length > 0 || cannot.length > 0) && (
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-2">
           <PhotoColumn label="Before" photos={before} employee={employee} />

@@ -25,7 +25,6 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 // If empty, the Translate button is hidden.
 // =================================================================
 const GOOGLE_TRANSLATE_API_KEY = "AIzaSyD7ceHPryMzs45hWJOyFNBxtOzQOEmJcSA";
-
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // ============================================================
@@ -118,7 +117,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap202";
+const BUILD_TAG = "aug6-tap203";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -5703,8 +5702,12 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       // shift stay open — a cleaner working two bedrooms of one apartment is
       // deliberate, not a leak.
       await closeAllMyOpenBlocks(null);
-      // Don't open a second block at a bedroom I already have one at. The
-      // recreate path exists for a stale/missing block, not to stack blocks.
+      // Reuse an open block at this bedroom rather than stacking another.
+      // Deliberately NOT filtered by section: this path only runs when the
+      // block we thought we had is missing, and any open block at the right
+      // bedroom is a better home for the work than a brand new one. Section
+      // splitting is handled separately by ensureActiveBlockForSection, which
+      // can and does keep several sections open here at once.
       const { data: dupe } = await supabase.from('work_blocks')
         .select('*, unit:units(*), party:parties(*), tasks(*, photos(*, taken_by_employee:employees!taken_by(name)))')
         .eq('shift_id', shift.id).eq('unit_id', unitId).eq('party_id', partyId)
@@ -5773,31 +5776,54 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     if (!live?.id || !nextSec) return live;
     const curSec = blockSectionOf(live);
     if (!crossesGeneralLine(curSec, nextSec)) return live;
-    // Close the running block, then open a fresh one at the same bedroom.
+    // Moving to a different section opens that section's block and makes it
+    // active. The section you were on is LEFT OPEN — it used to be closed
+    // here, which is why starting Vanity ended Bedroom and you could never
+    // have two sections running in one room. An open block still shows under
+    // Active, so you can flip back to it or a colleague can join it.
     try {
+      // The running task stops so its clock isn't ticking while you're in a
+      // different section. The block itself, and its items, stay as they are.
       if (activeTask) await stopTask(activeTask, false);
-      const ts = new Date().toISOString();
-      await supabase.from('work_blocks').update({ end_time: ts }).eq('id', live.id);
-      const { data, error } = await supabase.from('work_blocks')
-        .insert({
-          shift_id: shift.id,
-          unit_id: live.unit_id,
-          party_id: live.party_id,
-          assignment_id: live.assignment_id || null,
-          main_section: nextSec,
-          bill_rate_at_work: shift.customer?.bill_rate_hourly || null,
-          is_preview: previewMode,
-        })
-        .select('*, unit:units(*), party:parties(*), tasks(*, photos(*, taken_by_employee:employees!taken_by(name)))').single();
-      if (error || !data) {
-        console.warn('[section split] could not open a new block, staying put', error);
-        return live;
+
+      // Already have an open block for this section at this bedroom? Go back
+      // into it rather than stacking a second one.
+      const { data: existing } = await supabase.from('work_blocks')
+        .select('*, unit:units(*), party:parties(*), tasks(*, photos(*, taken_by_employee:employees!taken_by(name)))')
+        .eq('shift_id', shift.id)
+        .eq('unit_id', live.unit_id)
+        .eq('party_id', live.party_id)
+        .eq('main_section', nextSec)
+        .is('end_time', null)
+        .order('start_time', { ascending: false })
+        .limit(1);
+      let target = (existing || [])[0] || null;
+
+      if (!target) {
+        const { data, error } = await supabase.from('work_blocks')
+          .insert({
+            shift_id: shift.id,
+            unit_id: live.unit_id,
+            party_id: live.party_id,
+            assignment_id: live.assignment_id || null,
+            main_section: nextSec,
+            bill_rate_at_work: shift.customer?.bill_rate_hourly || null,
+            is_preview: previewMode,
+          })
+          .select('*, unit:units(*), party:parties(*), tasks(*, photos(*, taken_by_employee:employees!taken_by(name)))').single();
+        if (error || !data) {
+          console.warn('[section split] could not open a new block, staying put', error);
+          return live;
+        }
+        target = data;
       }
-      setWorkBlocks(prev => [...prev.map(b => b.id === live.id ? { ...b, end_time: ts } : b), data]);
-      setActiveBlock(data);
-      setTasks(data.tasks || []);
-      setActiveTask(null);
-      return data;
+
+      setWorkBlocks(prev => prev.some(b => b.id === target.id) ? prev : [...prev, target]);
+      setActiveBlock(target);
+      setTasks(target.tasks || []);
+      const running = (target.tasks || []).find(t => !t.end_time);
+      setActiveTask(running ? running.id : null);
+      return target;
     } catch (e) {
       console.warn('[section split] failed', e);
       return live;

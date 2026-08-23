@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap200";
+const BUILD_TAG = "aug6-tap201";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -5506,6 +5506,31 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       return exists ? next : [updated, ...next];
     });
     setActiveBlock(updated); setTasks(blockTasks || []);
+
+    // Resume the work too, not just the container. Reopening only cleared the
+    // block's end_time, so the cleaner landed on an empty Active tab, had to
+    // go back to Done, and tap Reopen again on the task itself — two steps to
+    // do one thing. Pick the most recent task back up here.
+    const tasksList = blockTasks || [];
+    const stillRunning = tasksList.find(t => !t.end_time);
+    if (stillRunning) {
+      setActiveTask(stillRunning.id);
+    } else if (tasksList.length > 0) {
+      const latest = tasksList
+        .slice()
+        .sort((a, b) => new Date(b.end_time || b.start_time) - new Date(a.end_time || a.start_time))[0];
+      const { error: tErr } = await supabase.from('tasks').update({ end_time: null }).eq('id', latest.id);
+      if (tErr) {
+        console.warn('[reopenBlock] could not resume the task', tErr);
+        setActiveTask(null);
+      } else {
+        setTasks(tasksList.map(t => t.id === latest.id ? { ...t, end_time: null } : t));
+        setActiveTask(latest.id);
+      }
+    } else {
+      setActiveTask(null);
+    }
+
     // Resume always sends the cleaner back to the Home tab (BlockView).
     // Without this, if they tapped Resume from the Assignments tab,
     // they'd stay on Assignments with the block now in state — the
@@ -11015,10 +11040,11 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
                             <span className={`inline-flex items-center gap-1 text-[10px] uppercase tracking-wider font-mono px-2 py-1 rounded-full ${b.mine ? 'bg-emerald-50 text-emerald-800 border border-emerald-200' : 'bg-amber-50 text-amber-800 border border-amber-200'}`}>
                               <User size={11} /> {b.mine ? 'You' : b.ownerName}
                             </span>
+                            {/* Reopen, not Start — this block already ran. */}
                             <button onClick={() => handleReopenDone(b)} disabled={busy}
-                              aria-label="Start this workblock again"
-                              className="h-9 px-4 rounded-full bg-stone-900 text-stone-50 text-sm font-medium flex items-center gap-1.5 active:scale-95 transition-transform disabled:opacity-40">
-                              <Play size={14} /> Start
+                              aria-label="Reopen this workblock"
+                              className="h-9 px-4 rounded-full border border-amber-300 bg-white text-amber-800 text-sm font-medium flex items-center gap-1.5 active:scale-95 transition-transform disabled:opacity-40">
+                              <RotateCcw size={14} /> Reopen
                             </button>
                           </div>
                           {(() => {
@@ -12650,14 +12676,16 @@ function TaskCard({ task, isActive, onStop, onResume, onAddPhoto }) {
               // Multi-item task → compact headline; the full list lives in a
               // scrollable dropdown below (see ItemsDropdown) so it doesn't
               // fill the card. Single-item tasks render the plain name.
+              // The headline is the SECTION — General, Bedroom, Bathroom.
+              // A single-item task used to fall through to the raw item name,
+              // so a one-item General block was titled "Freezer inside". The
+              // item belongs in the dropdown with the rest; the card says
+              // which part of the apartment it was.
               const parts = splitTaskName(task.name);
-              if (parts.length > 1) {
-                const head = task.category
-                  ? taskCategoryShortLabel(task.category, task.subcategory)
-                  : `${parts.length} items`;
-                return <span className="font-serif text-lg text-stone-900 truncate">{head}</span>;
-              }
-              return <span className="font-serif text-lg text-stone-900 truncate">{task.name}</span>;
+              const head = task.category
+                ? taskCategoryShortLabel(task.category, task.subcategory)
+                : (parts.length > 1 ? `${parts.length} items` : task.name);
+              return <span className="font-serif text-lg text-stone-900 truncate">{head}</span>;
             })()}
             {damage.length > 0 && (
               <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-red-100 text-red-700 flex-shrink-0">

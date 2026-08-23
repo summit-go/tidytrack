@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap209";
+const BUILD_TAG = "aug6-tap210";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -6406,9 +6406,21 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
 
   const stopTask = async (taskId, refetch = true) => {
     const ts = new Date().toISOString();
-    const t = (tasks || []).find(x => x.id === taskId);
+    // The task may live in a block other than the one on screen — every
+    // workblock card can finish its own work now. Look the task up across all
+    // loaded blocks, and close out items against ITS block, not whichever one
+    // happens to be active. Getting this wrong would mark the wrong
+    // bedroom's items done.
+    const t = (tasks || []).find(x => x.id === taskId)
+      || (workBlocks || []).flatMap(b => b.tasks || []).find(x => x.id === taskId);
+    const owningBlock = (workBlocks || []).find(b => b.id === t?.work_block_id) || activeBlock;
     await supabase.from('tasks').update({ end_time: ts }).eq('id', taskId);
-    if (refetch) setTasks(prev => prev.map(x => x.id === taskId ? { ...x, end_time: ts } : x));
+    if (refetch) {
+      setTasks(prev => prev.map(x => x.id === taskId ? { ...x, end_time: ts } : x));
+      setWorkBlocks(prev => prev.map(b => b.id === t?.work_block_id
+        ? { ...b, tasks: (b.tasks || []).map(x => x.id === taskId ? { ...x, end_time: ts } : x) }
+        : b));
+    }
     if (activeTask === taskId) setActiveTask(null);
     // Finishing the work should finish the ITEMS. Stopping a task only ever
     // stamped the task's end time, so the checklist items stayed
@@ -6418,16 +6430,16 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     //
     // refetch=false means we're silently stopping one task to start another;
     // that isn't the cleaner saying they're finished, so items stay open.
-    if (refetch && t?.category && activeBlock?.unit_id && activeBlock?.party_id && employee?.id) {
+    if (refetch && t?.category && owningBlock?.unit_id && owningBlock?.party_id && employee?.id) {
       try {
         let q = supabase.from('assignment_targets')
           .update({ status: 'done', completed_at: ts, completed_by: employee.id })
-          .eq('unit_id', activeBlock.unit_id)
-          .eq('party_id', activeBlock.party_id)
+          .eq('unit_id', owningBlock.unit_id)
+          .eq('party_id', owningBlock.party_id)
           .eq('template_section', t.category)
           .eq('started_by', employee.id)
           .in('status', ['in_progress', 'paused']);
-        if (activeBlock.assignment_id) q = q.eq('assignment_id', activeBlock.assignment_id);
+        if (owningBlock.assignment_id) q = q.eq('assignment_id', owningBlock.assignment_id);
         const { error } = await q;
         if (error) console.warn('[stopTask] could not close out items', error);
         // No manual refresh needed — the picker subscribes to
@@ -10994,28 +11006,72 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
                 return b.main_section ? taskCategoryShortLabel(b.main_section, null) : 'Workblock';
               };
 
-              const Card = ({ heading, meta, pill, pillTone, current, onClick, children }) => {
-                const shell = current
-                  ? 'p-4 rounded-2xl bg-amber-50 border-2 border-amber-300'
-                  : 'w-full text-left p-3.5 rounded-2xl bg-white border border-stone-300 hover:border-amber-500 active:scale-[0.99] transition disabled:opacity-50';
-                const inner = (
-                  <>
-                    <div className="flex items-center justify-between gap-2">
-                      <span className={`font-serif truncate text-stone-900 ${current ? 'text-xl' : 'text-[16px]'}`}>
-                        {heading}
-                      </span>
-                      <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full flex-shrink-0 inline-flex items-center gap-1 ${pillTone}`}>
-                        <span className={`w-1.5 h-1.5 rounded-full ${current ? 'bg-amber-500 animate-pulse' : 'bg-amber-400'}`} />
-                        {pill}
-                      </span>
+              // ONE card. Every workblock gets the same heading, the same meta
+              // line and the same action row — camera, item list, Done. The
+              // block you're in is bigger and amber; that's the only
+              // difference. Request sits top-right where the state pill used
+              // to be, and the state moved into the meta line where it reads
+              // as information rather than a badge competing with the action.
+              const Card = ({ blk, task, heading, current }) => {
+                const items = task
+                  ? splitTaskName(task.name)
+                  : (blk.tasks || []).flatMap(t => splitTaskName(t.name || ''));
+                const photoCount = task
+                  ? (task.photos || []).filter(p => !p.deleted_at).length
+                  : (blk.tasks || []).flatMap(t => (t.photos || []).filter(p => !p.deleted_at)).length;
+                const state = task ? 'Running' : 'Open';
+                const elapsed = task ? fmtTimeShort(Date.now() - new Date(task.start_time).getTime()) : null;
+                const sameBedroom = blk.party_id === block.party_id;
+                const where = sameBedroom ? '' : `${blk.unit?.label || ''}${blk.party?.label ? ' · ' + blk.party.label : ''} · `;
+                return (
+                  <div className={current
+                    ? 'p-4 rounded-2xl bg-amber-50 border-2 border-amber-300'
+                    : 'p-4 rounded-2xl bg-white border border-stone-300'}>
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <button
+                          onClick={() => { if (!current && onGoToOpenBlock) onGoToOpenBlock(blk); }}
+                          disabled={busy || current}
+                          className={`font-serif truncate text-stone-900 text-left ${current ? 'text-xl' : 'text-lg hover:underline decoration-stone-300 underline-offset-2'}`}>
+                          {heading}
+                        </button>
+                        <div className="text-[11px] font-mono text-stone-500 mt-0.5">
+                          {where}{items.length} {items.length === 1 ? 'item' : 'items'}
+                          {' · '}
+                          <span className={state === 'Running' ? 'text-amber-700' : 'text-stone-500'}>
+                            {state === 'Running' ? `running · ${elapsed}` : 'open'}
+                          </span>
+                        </div>
+                      </div>
+                      {/* Request, top-right, on whichever block you're in. */}
+                      {current && task?.category && (
+                        <button onClick={() => setRequestSection(task.category)} disabled={busy}
+                          className="px-2.5 py-1 rounded-full bg-amber-500 hover:bg-amber-600 text-amber-950 text-[10px] uppercase tracking-wider font-mono font-bold active:scale-95 transition disabled:opacity-50 flex-shrink-0">
+                          Request
+                        </button>
+                      )}
                     </div>
-                    {meta && <div className="text-[11px] font-mono text-stone-500 mt-0.5">{meta}</div>}
-                    {children}
-                  </>
+                    <div className="flex items-center gap-2 mt-3">
+                      <button
+                        onClick={() => { const id = task?.id || (blk.tasks || []).slice(-1)[0]?.id; if (id) onAddPhoto(id, null); }}
+                        disabled={busy || (!task && (blk.tasks || []).length === 0)}
+                        aria-label="Add photo"
+                        className="px-4 py-2.5 rounded-xl bg-stone-900 hover:bg-stone-800 text-stone-50 text-sm font-medium inline-flex items-center gap-2 active:scale-95 transition disabled:opacity-40 flex-shrink-0">
+                        <Camera size={18} />
+                        {photoCount > 0 && <span className="text-stone-300 font-mono text-xs">{photoCount}</span>}
+                      </button>
+                      <div className="flex-1 min-w-0">
+                        <ItemsDropdown items={items} />
+                      </div>
+                      <button
+                        onClick={() => { const id = task?.id || (blk.tasks || []).find(t => !t.end_time)?.id; if (id) onStopTask(id); }}
+                        disabled={busy || (!task && !(blk.tasks || []).some(t => !t.end_time))}
+                        className="px-5 py-2.5 rounded-xl bg-[#C99B5C] hover:bg-[#b8894f] text-white text-sm font-semibold active:scale-95 transition disabled:opacity-40 flex-shrink-0">
+                        Done
+                      </button>
+                    </div>
+                  </div>
                 );
-                return current
-                  ? <div className={shell}>{inner}</div>
-                  : <button onClick={onClick} disabled={busy} className={shell}>{inner}</button>;
               };
 
               return (
@@ -11023,67 +11079,27 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
                   {/* The block you're in. */}
                   <Card
                     current
+                    blk={{ ...block, tasks }}
+                    task={activeTaskObj}
                     heading={activeTaskObj
                       ? (taskCategoryShortLabel(activeTaskObj.category, activeTaskObj.subcategory) || sectionOf(block, tasks))
-                      : sectionOf(block, tasks)}
-                    pill={activeTaskObj ? 'Running' : "You're here"}
-                    pillTone="bg-amber-200 text-amber-900"
-                    meta={activeTaskObj
-                      ? `${splitTaskName(activeTaskObj.name).length} ${splitTaskName(activeTaskObj.name).length === 1 ? 'item' : 'items'} · ${fmtTimeShort(Date.now() - new Date(activeTaskObj.start_time).getTime())}`
-                      : 'Nothing running yet'}>
-                    {activeTaskObj ? (
-                      <div className="flex items-center gap-2 mt-3">
-                        <button onClick={() => onAddPhoto(activeTaskObj.id, null)} disabled={busy}
-                          aria-label="Add photo"
-                          className="px-4 py-2.5 rounded-xl bg-stone-900 hover:bg-stone-800 text-stone-50 text-sm font-medium inline-flex items-center gap-2 active:scale-95 transition disabled:opacity-50 flex-shrink-0">
-                          <Camera size={18} />
-                          {(activeTaskObj.photos || []).filter(p => !p.deleted_at).length > 0 && (
-                            <span className="text-stone-300 font-mono text-xs">{(activeTaskObj.photos || []).filter(p => !p.deleted_at).length}</span>
-                          )}
-                        </button>
-                        <div className="flex-1 min-w-0">
-                          <ItemsDropdown items={splitTaskName(activeTaskObj.name)} />
-                        </div>
-                        {activeTaskObj.category && (
-                          <button onClick={() => setRequestSection(activeTaskObj.category)} disabled={busy}
-                            className="px-3 py-2.5 rounded-xl border border-amber-400 bg-white text-amber-800 text-[11px] font-mono uppercase tracking-wider font-bold active:scale-95 transition disabled:opacity-50 flex-shrink-0">
-                            Request
-                          </button>
-                        )}
-                        <button onClick={() => onStopTask(activeTaskObj.id)} disabled={busy}
-                          className="px-5 py-2.5 rounded-xl bg-[#C99B5C] hover:bg-[#b8894f] text-white text-sm font-semibold active:scale-95 transition disabled:opacity-50 flex-shrink-0">
-                          Done
-                        </button>
-                      </div>
-                    ) : null}
-                  </Card>
+                      : sectionOf(block, tasks)} />
 
                   {/* Anything else a teammate has running in THIS block. */}
                   {teammatesRunning.map(t => (
                     <Card key={t.id}
-                      heading={taskCategoryShortLabel(t.category, t.subcategory) || splitTaskName(t.name)[0] || t.name}
-                      pill="Running"
-                      pillTone="bg-amber-100 text-amber-800"
-                      meta={`${splitTaskName(t.name).length} ${splitTaskName(t.name).length === 1 ? 'item' : 'items'} · started ${fmtClock(t.start_time)}`}
-                      onClick={() => {}} />
+                      blk={{ ...block, tasks: [t] }}
+                      task={t}
+                      heading={taskCategoryShortLabel(t.category, t.subcategory) || splitTaskName(t.name)[0] || t.name} />
                   ))}
 
                   {/* My other open blocks. */}
-                  {otherBlocks.map(ob => {
-                    const items = (ob.tasks || []).flatMap(t => splitTaskName(t.name || ''));
-                    const sameBedroom = ob.party_id === block.party_id;
-                    const where = sameBedroom
-                      ? ''
-                      : `${ob.unit?.label || ''}${ob.party?.label ? ' · ' + ob.party.label : ''} · `;
-                    return (
-                      <Card key={ob.id}
-                        heading={sectionOf(ob, ob.tasks)}
-                        pill="Open"
-                        pillTone="bg-amber-100 text-amber-800"
-                        meta={`${where}${items.length} ${items.length === 1 ? 'item' : 'items'}`}
-                        onClick={() => onGoToOpenBlock && onGoToOpenBlock(ob)} />
-                    );
-                  })}
+                  {otherBlocks.map(ob => (
+                    <Card key={ob.id}
+                      blk={ob}
+                      task={(ob.tasks || []).find(t => !t.end_time) || null}
+                      heading={sectionOf(ob, ob.tasks)} />
+                  ))}
                 </>
               );
             })()}

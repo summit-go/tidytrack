@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap212";
+const BUILD_TAG = "aug6-tap213";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -5837,6 +5837,39 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   // second task. That's backwards: they're already in the room doing that
   // section. The items are created, flagged as a request for the owner, and
   // folded straight into the task that's running.
+  // Close a workblock outright. Done previously only ever stopped a TASK, so
+  // a block whose tasks were all finished had no way to close — it sat on the
+  // Active tab with Done greyed out, and reopening then finishing the task
+  // just put it back. Done now closes the block when there's nothing left
+  // running in it.
+  const closeOpenBlock = async (blockId) => {
+    if (!blockId) return;
+    const ts = new Date().toISOString();
+    setBusy(true);
+    try {
+      const { error } = await supabase.from('work_blocks')
+        .update({ end_time: ts }).eq('id', blockId);
+      if (error) throw error;
+      setWorkBlocks(prev => prev.map(b => b.id === blockId ? { ...b, end_time: ts } : b));
+      // If it was the one on screen, step out of it so the view isn't
+      // pointing at a closed block.
+      if (activeBlock?.id === blockId) {
+        const nextOpen = (workBlocks || []).find(b => b.id !== blockId && !b.end_time);
+        if (nextOpen) {
+          setActiveBlock(nextOpen);
+          setTasks(nextOpen.tasks || []);
+          setActiveTask((nextOpen.tasks || []).find(t => !t.end_time)?.id || null);
+        } else {
+          setActiveBlock(null); setTasks([]); setActiveTask(null); setCleanerTab('home');
+        }
+      }
+    } catch (e) {
+      alert('Could not close that workblock: ' + (e.message || e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const requestItemsIntoActiveBlock = async (section, itemKeys, labels = {}, targetBlockId = null) => {
     // Every workblock card has a Request button, so the items must land in
     // the block that asked — not whichever one happens to be on screen.
@@ -6878,6 +6911,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       onReopen={reopenBlock}
       myOpenBlocks={(workBlocks || []).filter(b => !b.end_time)}
       onRequestItems={requestItemsIntoActiveBlock}
+      onCloseBlock={closeOpenBlock}
       onGoToOpenBlock={(b) => {
         // Jump straight into another of my open blocks. Nothing closes —
         // this is just changing which one is on screen.
@@ -10645,7 +10679,7 @@ function BedroomTabs({ unitId, currentPartyId, customerId, onSwitch, busy }) {
 // hold state.
 // =================================================================
 function WorkblockCard({ blk, task, heading, current, block, busy,
-  onGoToOpenBlock, onAddPhoto, onStopTask, setRequestFor }) {
+  onGoToOpenBlock, onAddPhoto, onStopTask, setRequestFor, onCloseBlock }) {
                 const items = task
                   ? splitTaskName(task.name)
                   : (blk.tasks || []).flatMap(t => splitTaskName(t.name || ''));
@@ -10707,9 +10741,18 @@ function WorkblockCard({ blk, task, heading, current, block, busy,
                       <div className="flex-1 min-w-0">
                         <ItemsDropdown items={items} />
                       </div>
+                      {/* Done finishes whatever is left: the running task if
+                         there is one, otherwise the block itself. It used to
+                         only ever stop a task, so a block with everything
+                         finished had Done greyed out and could never leave
+                         the Active tab. */}
                       <button
-                        onClick={() => { const id = task?.id || (blk.tasks || []).find(t => !t.end_time)?.id; if (id) onStopTask(id); }}
-                        disabled={busy || (!task && !(blk.tasks || []).some(t => !t.end_time))}
+                        onClick={() => {
+                          const runningId = task?.id || (blk.tasks || []).find(t => !t.end_time)?.id;
+                          if (runningId) { onStopTask(runningId); return; }
+                          if (onCloseBlock) onCloseBlock(blk.id);
+                        }}
+                        disabled={busy}
                         className="px-5 py-2.5 rounded-xl bg-[#C99B5C] hover:bg-[#b8894f] text-white text-sm font-semibold active:scale-95 transition disabled:opacity-40 flex-shrink-0">
                         Done
                       </button>
@@ -10723,7 +10766,7 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
   photoModal, onClosePhotoModal, onUploadPhoto, onChangePhotoKind, onSavePhotoNote, onPhotoUpdated, onOpenMessages, onOpenBedroomHistory,
   onMoveBlock, onMoveMultiple, onLeaveBlock, onJoinBlock, onDeletePhoto, onGoToBedroom, onSwitchProperty, cleanerTab, setCleanerTab, previewMode, busy,
   onUndoLast, lastActionLabel, onFinishHere, onSwitchBedroom,
-  myOpenBlocks = [], onGoToOpenBlock = null, onRequestItems = null }) {
+  myOpenBlocks = [], onGoToOpenBlock = null, onRequestItems = null, onCloseBlock = null }) {
   useTick(true);
   const blockElapsed = Date.now() - new Date(block.start_time).getTime();
   // What's genuinely running in this block right now. activeTask is separate
@@ -11129,7 +11172,7 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
                     current
                     block={block} busy={busy}
                     onGoToOpenBlock={onGoToOpenBlock} onAddPhoto={onAddPhoto}
-                    onStopTask={onStopTask} setRequestFor={setRequestFor}
+                    onStopTask={onStopTask} setRequestFor={setRequestFor} onCloseBlock={onCloseBlock}
                     blk={{ ...block, tasks }}
                     task={activeTaskObj}
                     heading={activeTaskObj
@@ -11141,7 +11184,7 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
                     <WorkblockCard key={t.id}
                       block={block} busy={busy}
                       onGoToOpenBlock={onGoToOpenBlock} onAddPhoto={onAddPhoto}
-                      onStopTask={onStopTask} setRequestFor={setRequestFor}
+                      onStopTask={onStopTask} setRequestFor={setRequestFor} onCloseBlock={onCloseBlock}
                       blk={{ ...block, tasks: [t] }}
                       task={t}
                       heading={taskCategoryShortLabel(t.category, t.subcategory) || splitTaskName(t.name)[0] || t.name} />
@@ -11152,7 +11195,7 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
                     <WorkblockCard key={ob.id}
                       block={block} busy={busy}
                       onGoToOpenBlock={onGoToOpenBlock} onAddPhoto={onAddPhoto}
-                      onStopTask={onStopTask} setRequestFor={setRequestFor}
+                      onStopTask={onStopTask} setRequestFor={setRequestFor} onCloseBlock={onCloseBlock}
                       blk={ob}
                       task={(ob.tasks || []).find(t => !t.end_time) || null}
                       heading={sectionOf(ob, ob.tasks)} />

@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap211";
+const BUILD_TAG = "aug6-tap212";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -10634,6 +10634,90 @@ function BedroomTabs({ unitId, currentPartyId, customerId, onSwitch, busy }) {
   );
 }
 
+// =================================================================
+// WORKBLOCK CARD (Active tab)
+// Top-level ON PURPOSE. This used to be defined inside the render
+// body, and BlockView ticks every second to update timers — so React
+// saw a brand new component type each tick, unmounted the old one and
+// mounted a fresh one. Any state inside it (the open/closed item
+// dropdown) was wiped a second later, which looked like the dropdown
+// refusing to stay open. A component defined during render can never
+// hold state.
+// =================================================================
+function WorkblockCard({ blk, task, heading, current, block, busy,
+  onGoToOpenBlock, onAddPhoto, onStopTask, setRequestFor }) {
+                const items = task
+                  ? splitTaskName(task.name)
+                  : (blk.tasks || []).flatMap(t => splitTaskName(t.name || ''));
+                const photoCount = task
+                  ? (task.photos || []).filter(p => !p.deleted_at).length
+                  : (blk.tasks || []).flatMap(t => (t.photos || []).filter(p => !p.deleted_at)).length;
+                const state = task ? 'Running' : 'Open';
+                const elapsed = task ? fmtTimeShort(Date.now() - new Date(task.start_time).getTime()) : null;
+                const sameBedroom = blk.party_id === block.party_id;
+                const where = sameBedroom ? '' : `${blk.unit?.label || ''}${blk.party?.label ? ' · ' + blk.party.label : ''} · `;
+                return (
+                  <div className={current
+                    ? 'p-4 rounded-2xl bg-amber-50 border-2 border-amber-300'
+                    : 'p-4 rounded-2xl bg-white border border-stone-300'}>
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <button
+                          onClick={() => { if (!current && onGoToOpenBlock) onGoToOpenBlock(blk); }}
+                          disabled={busy || current}
+                          className={`font-serif truncate text-stone-900 text-left ${current ? 'text-xl' : 'text-lg hover:underline decoration-stone-300 underline-offset-2'}`}>
+                          {heading}
+                        </button>
+                        <div className="text-[11px] font-mono text-stone-500 mt-0.5">
+                          {where}{items.length} {items.length === 1 ? 'item' : 'items'}
+                          {' · '}
+                          <span className={state === 'Running' ? 'text-amber-700' : 'text-stone-500'}>
+                            {state === 'Running' ? `running · ${elapsed}` : 'open'}
+                          </span>
+                        </div>
+                      </div>
+                      {/* Request on EVERY card, targeting that card's own
+                         block — you can add to General without leaving the
+                         Bathroom you're standing in. Section comes from the
+                         running task, or the block's own section when nothing
+                         is running in it. */}
+                      {(() => {
+                        const sec = task?.category || blk.main_section
+                          || (blk.tasks || []).map(t => t.category).find(Boolean);
+                        if (!sec) return null;
+                        return (
+                          <button onClick={() => setRequestFor({ section: sec, blockId: blk.id })} disabled={busy}
+                            className={`px-2.5 py-1 rounded-full text-[10px] uppercase tracking-wider font-mono font-bold active:scale-95 transition disabled:opacity-50 flex-shrink-0 ${current
+                              ? 'bg-amber-500 hover:bg-amber-600 text-amber-950'
+                              : 'border border-amber-400 bg-white text-amber-800 hover:bg-amber-50'}`}>
+                            Request
+                          </button>
+                        );
+                      })()}
+                    </div>
+                    <div className="flex items-center gap-2 mt-3">
+                      <button
+                        onClick={() => { const id = task?.id || (blk.tasks || []).slice(-1)[0]?.id; if (id) onAddPhoto(id, null); }}
+                        disabled={busy || (!task && (blk.tasks || []).length === 0)}
+                        aria-label="Add photo"
+                        className="px-4 py-2.5 rounded-xl bg-stone-900 hover:bg-stone-800 text-stone-50 text-sm font-medium inline-flex items-center gap-2 active:scale-95 transition disabled:opacity-40 flex-shrink-0">
+                        <Camera size={18} />
+                        {photoCount > 0 && <span className="text-stone-300 font-mono text-xs">{photoCount}</span>}
+                      </button>
+                      <div className="flex-1 min-w-0">
+                        <ItemsDropdown items={items} />
+                      </div>
+                      <button
+                        onClick={() => { const id = task?.id || (blk.tasks || []).find(t => !t.end_time)?.id; if (id) onStopTask(id); }}
+                        disabled={busy || (!task && !(blk.tasks || []).some(t => !t.end_time))}
+                        className="px-5 py-2.5 rounded-xl bg-[#C99B5C] hover:bg-[#b8894f] text-white text-sm font-semibold active:scale-95 transition disabled:opacity-40 flex-shrink-0">
+                        Done
+                      </button>
+                    </div>
+                  </div>
+                );
+}
+
 function BlockView({ shift, block, tasks, activeTask, employeeName, employee, onSignOut, onFinish, onExit, onPause, onUndo, onReopen,
   newTaskName, setNewTaskName, onStartTask, onStartTasksFromPicker, onStartChecklistItems, onReleaseTargets, onStopTask, onResumeTask, onAddPhoto,
   photoModal, onClosePhotoModal, onUploadPhoto, onChangePhotoKind, onSavePhotoNote, onPhotoUpdated, onOpenMessages, onOpenBedroomHistory,
@@ -11017,10 +11101,17 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
                 .filter((b, i, arr) => arr.findIndex(x => x.id === b.id) === i)
                 .sort((a, b2) => new Date(a.start_time) - new Date(b2.start_time));
 
+              // A block's heading is ITS section — main_section first. Joining
+              // every category found in the block produced "General · Bathroom"
+              // on blocks created before sections were split, which reads as
+              // two jobs merged into one. The block's own section is the
+              // truth; a stray task of another category doesn't rename it.
               const sectionOf = (b, tasksList) => {
+                if (b.main_section) return taskCategoryShortLabel(b.main_section, null) || 'Workblock';
                 const secs = [...new Set((tasksList || []).map(t => t.category).filter(Boolean))];
-                if (secs.length) return secs.map(c => taskCategoryShortLabel(c, null)).filter(Boolean).join(' · ');
-                return b.main_section ? taskCategoryShortLabel(b.main_section, null) : 'Workblock';
+                return secs.length
+                  ? (taskCategoryShortLabel(secs[0], null) || 'Workblock')
+                  : 'Workblock';
               };
 
               // ONE card. Every workblock gets the same heading, the same meta
@@ -11029,84 +11120,16 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
               // difference. Request sits top-right where the state pill used
               // to be, and the state moved into the meta line where it reads
               // as information rather than a badge competing with the action.
-              const Card = ({ blk, task, heading, current }) => {
-                const items = task
-                  ? splitTaskName(task.name)
-                  : (blk.tasks || []).flatMap(t => splitTaskName(t.name || ''));
-                const photoCount = task
-                  ? (task.photos || []).filter(p => !p.deleted_at).length
-                  : (blk.tasks || []).flatMap(t => (t.photos || []).filter(p => !p.deleted_at)).length;
-                const state = task ? 'Running' : 'Open';
-                const elapsed = task ? fmtTimeShort(Date.now() - new Date(task.start_time).getTime()) : null;
-                const sameBedroom = blk.party_id === block.party_id;
-                const where = sameBedroom ? '' : `${blk.unit?.label || ''}${blk.party?.label ? ' · ' + blk.party.label : ''} · `;
-                return (
-                  <div className={current
-                    ? 'p-4 rounded-2xl bg-amber-50 border-2 border-amber-300'
-                    : 'p-4 rounded-2xl bg-white border border-stone-300'}>
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="min-w-0">
-                        <button
-                          onClick={() => { if (!current && onGoToOpenBlock) onGoToOpenBlock(blk); }}
-                          disabled={busy || current}
-                          className={`font-serif truncate text-stone-900 text-left ${current ? 'text-xl' : 'text-lg hover:underline decoration-stone-300 underline-offset-2'}`}>
-                          {heading}
-                        </button>
-                        <div className="text-[11px] font-mono text-stone-500 mt-0.5">
-                          {where}{items.length} {items.length === 1 ? 'item' : 'items'}
-                          {' · '}
-                          <span className={state === 'Running' ? 'text-amber-700' : 'text-stone-500'}>
-                            {state === 'Running' ? `running · ${elapsed}` : 'open'}
-                          </span>
-                        </div>
-                      </div>
-                      {/* Request on EVERY card, targeting that card's own
-                         block — you can add to General without leaving the
-                         Bathroom you're standing in. Section comes from the
-                         running task, or the block's own section when nothing
-                         is running in it. */}
-                      {(() => {
-                        const sec = task?.category || blk.main_section
-                          || (blk.tasks || []).map(t => t.category).find(Boolean);
-                        if (!sec) return null;
-                        return (
-                          <button onClick={() => setRequestFor({ section: sec, blockId: blk.id })} disabled={busy}
-                            className={`px-2.5 py-1 rounded-full text-[10px] uppercase tracking-wider font-mono font-bold active:scale-95 transition disabled:opacity-50 flex-shrink-0 ${current
-                              ? 'bg-amber-500 hover:bg-amber-600 text-amber-950'
-                              : 'border border-amber-400 bg-white text-amber-800 hover:bg-amber-50'}`}>
-                            Request
-                          </button>
-                        );
-                      })()}
-                    </div>
-                    <div className="flex items-center gap-2 mt-3">
-                      <button
-                        onClick={() => { const id = task?.id || (blk.tasks || []).slice(-1)[0]?.id; if (id) onAddPhoto(id, null); }}
-                        disabled={busy || (!task && (blk.tasks || []).length === 0)}
-                        aria-label="Add photo"
-                        className="px-4 py-2.5 rounded-xl bg-stone-900 hover:bg-stone-800 text-stone-50 text-sm font-medium inline-flex items-center gap-2 active:scale-95 transition disabled:opacity-40 flex-shrink-0">
-                        <Camera size={18} />
-                        {photoCount > 0 && <span className="text-stone-300 font-mono text-xs">{photoCount}</span>}
-                      </button>
-                      <div className="flex-1 min-w-0">
-                        <ItemsDropdown items={items} />
-                      </div>
-                      <button
-                        onClick={() => { const id = task?.id || (blk.tasks || []).find(t => !t.end_time)?.id; if (id) onStopTask(id); }}
-                        disabled={busy || (!task && !(blk.tasks || []).some(t => !t.end_time))}
-                        className="px-5 py-2.5 rounded-xl bg-[#C99B5C] hover:bg-[#b8894f] text-white text-sm font-semibold active:scale-95 transition disabled:opacity-40 flex-shrink-0">
-                        Done
-                      </button>
-                    </div>
-                  </div>
-                );
-              };
+              // Card lives at module scope — see WorkblockCard.
 
               return (
                 <>
                   {/* The block you're in. */}
-                  <Card
+                  <WorkblockCard
                     current
+                    block={block} busy={busy}
+                    onGoToOpenBlock={onGoToOpenBlock} onAddPhoto={onAddPhoto}
+                    onStopTask={onStopTask} setRequestFor={setRequestFor}
                     blk={{ ...block, tasks }}
                     task={activeTaskObj}
                     heading={activeTaskObj
@@ -11115,7 +11138,10 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
 
                   {/* Anything else a teammate has running in THIS block. */}
                   {teammatesRunning.map(t => (
-                    <Card key={t.id}
+                    <WorkblockCard key={t.id}
+                      block={block} busy={busy}
+                      onGoToOpenBlock={onGoToOpenBlock} onAddPhoto={onAddPhoto}
+                      onStopTask={onStopTask} setRequestFor={setRequestFor}
                       blk={{ ...block, tasks: [t] }}
                       task={t}
                       heading={taskCategoryShortLabel(t.category, t.subcategory) || splitTaskName(t.name)[0] || t.name} />
@@ -11123,7 +11149,10 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
 
                   {/* My other open blocks. */}
                   {otherBlocks.map(ob => (
-                    <Card key={ob.id}
+                    <WorkblockCard key={ob.id}
+                      block={block} busy={busy}
+                      onGoToOpenBlock={onGoToOpenBlock} onAddPhoto={onAddPhoto}
+                      onStopTask={onStopTask} setRequestFor={setRequestFor}
                       blk={ob}
                       task={(ob.tasks || []).find(t => !t.end_time) || null}
                       heading={sectionOf(ob, ob.tasks)} />

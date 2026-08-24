@@ -28,6 +28,8 @@ const GOOGLE_TRANSLATE_API_KEY = "AIzaSyD7ceHPryMzs45hWJOyFNBxtOzQOEmJcSA";
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
+const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
 // ============================================================
 // SECURE SIGN-IN — calls the server-side `secure-signin` Edge
 // Function, which verifies the PIN/code against its bcrypt hash
@@ -118,7 +120,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap210";
+const BUILD_TAG = "aug6-tap211";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -4672,7 +4674,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     // block to mirror a pre-close that no longer happens on the current
     // shift — so opening a second workblock made the first vanish from Active
     // even though it was still open in the database.
-    setWorkBlocks(prev => [...prev, data]);
+    setWorkBlocks(prev => prev.some(b => b.id === data.id) ? prev : [...prev, data]);
     setActiveBlock(data); setTasks(data.tasks || []); setBlockStartFlow(null);
     logAction({ type: 'open_block', blockId: data.id, unitId: data.unit_id, partyId: data.party_id,
       label: `Opened the workblock at ${data.unit?.label || 'this apartment'}${data.party?.label ? ` · ${data.party.label}` : ''}` });
@@ -4708,7 +4710,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     setBusy(false);
     if (error) { alert('Could not start work block: ' + error.message); return; }
     // See above — no local force-close; other open blocks stay open.
-    setWorkBlocks(prev => [...prev, data]);
+    setWorkBlocks(prev => prev.some(b => b.id === data.id) ? prev : [...prev, data]);
     setActiveBlock(data); setTasks(data.tasks || []); setBlockStartFlow(null);
     logAction({ type: 'open_block', blockId: data.id, unitId: data.unit_id, partyId: data.party_id,
       label: `Opened the workblock at ${data.unit?.label || 'this apartment'}${data.party?.label ? ` · ${data.party.label}` : ''}` });
@@ -5837,9 +5839,14 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   // second task. That's backwards: they're already in the room doing that
   // section. The items are created, flagged as a request for the owner, and
   // folded straight into the task that's running.
-  const requestItemsIntoActiveBlock = async (section, itemKeys, labels = {}) => {
-    if (!activeBlock || !itemKeys?.length) return;
-    const hostAssignmentId = activeBlock.assignment_id;
+  const requestItemsIntoActiveBlock = async (section, itemKeys, labels = {}, targetBlockId = null) => {
+    // Every workblock card has a Request button, so the items must land in
+    // the block that asked — not whichever one happens to be on screen.
+    const target = targetBlockId
+      ? ((workBlocks || []).find(b => b.id === targetBlockId) || activeBlock)
+      : activeBlock;
+    if (!target || !itemKeys?.length) return;
+    const hostAssignmentId = target.assignment_id;
     if (!hostAssignmentId) {
       alert("This workblock isn't tied to an assignment, so there's nothing to attach the request to.");
       return;
@@ -5849,8 +5856,8 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       const nowISO = new Date().toISOString();
       const rows = itemKeys.map(key => ({
         assignment_id: hostAssignmentId,
-        unit_id: activeBlock.unit_id,
-        party_id: activeBlock.party_id,
+        unit_id: target.unit_id,
+        party_id: target.party_id,
         // Straight to in_progress — the cleaner is doing it now, not later.
         status: 'in_progress',
         started_at: nowISO,
@@ -5875,7 +5882,12 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
         || String(r.template_item_key).split(':').slice(1).join(':')
       ).filter(Boolean);
 
-      const running = (tasks || []).find(t => t.id === activeTask);
+      // The running task in the TARGET block, which may not be the one on
+      // screen.
+      const targetTasks = target.id === activeBlock?.id
+        ? (tasks || [])
+        : (target.tasks || []);
+      const running = targetTasks.find(t => !t.end_time);
       if (running && names.length) {
         const merged = [...splitTaskName(running.name || ''), ...names].join(' + ');
         const { error: uErr } = await supabase.from('tasks').update({ name: merged }).eq('id', running.id);
@@ -5886,7 +5898,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
         // actually being tracked rather than sitting idle.
         const ins = {
           shift_id: shift.id, name: names.join(' + '), category: section,
-          work_block_id: activeBlock.id, is_preview: previewMode,
+          work_block_id: target.id, is_preview: previewMode,
         };
         const { data: t2 } = await supabase.from('tasks').insert(ins)
           .select('*, photos(*, taken_by_employee:employees!taken_by(name))').single();
@@ -6201,7 +6213,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     // block to mirror a pre-close that no longer happens on the current
     // shift — so opening a second workblock made the first vanish from Active
     // even though it was still open in the database.
-    setWorkBlocks(prev => [...prev, data]);
+    setWorkBlocks(prev => prev.some(b => b.id === data.id) ? prev : [...prev, data]);
     setActiveBlock(data);
     setTasks(data.tasks || []);
     setPendingStart(null);
@@ -10737,7 +10749,10 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
   // Section whose request modal is open, and the assignment behind this
   // block — the modal needs its template set and variants to know which
   // items exist.
-  const [requestSection, setRequestSection] = useState(null);
+  // { section, blockId } — which block's Request button was tapped.
+  const [requestFor, setRequestFor] = useState(null);
+  const requestSection = requestFor?.section || null;
+  const setRequestSection = (sec) => setRequestFor(sec ? { section: sec, blockId: block?.id } : null);
   const [blockAssignment, setBlockAssignment] = useState(null);
   useEffect(() => {
     if (!block?.assignment_id) { setBlockAssignment(null); return; }
@@ -10998,6 +11013,10 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
               // be a trap for the next change.
               const otherBlocks = (myOpenBlocks || [])
                 .filter(b => b.id !== block.id)
+                // De-dupe by id. workBlocks can hold two copies of the same
+                // block after a switch or a realtime update, and a duplicate
+                // card is indistinguishable from a real second block.
+                .filter((b, i, arr) => arr.findIndex(x => x.id === b.id) === i)
                 .sort((a, b2) => new Date(a.start_time) - new Date(b2.start_time));
 
               const sectionOf = (b, tasksList) => {
@@ -11043,13 +11062,24 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
                           </span>
                         </div>
                       </div>
-                      {/* Request, top-right, on whichever block you're in. */}
-                      {current && task?.category && (
-                        <button onClick={() => setRequestSection(task.category)} disabled={busy}
-                          className="px-2.5 py-1 rounded-full bg-amber-500 hover:bg-amber-600 text-amber-950 text-[10px] uppercase tracking-wider font-mono font-bold active:scale-95 transition disabled:opacity-50 flex-shrink-0">
-                          Request
-                        </button>
-                      )}
+                      {/* Request on EVERY card, targeting that card's own
+                         block — you can add to General without leaving the
+                         Bathroom you're standing in. Section comes from the
+                         running task, or the block's own section when nothing
+                         is running in it. */}
+                      {(() => {
+                        const sec = task?.category || blk.main_section
+                          || (blk.tasks || []).map(t => t.category).find(Boolean);
+                        if (!sec) return null;
+                        return (
+                          <button onClick={() => setRequestFor({ section: sec, blockId: blk.id })} disabled={busy}
+                            className={`px-2.5 py-1 rounded-full text-[10px] uppercase tracking-wider font-mono font-bold active:scale-95 transition disabled:opacity-50 flex-shrink-0 ${current
+                              ? 'bg-amber-500 hover:bg-amber-600 text-amber-950'
+                              : 'border border-amber-400 bg-white text-amber-800 hover:bg-amber-50'}`}>
+                            Request
+                          </button>
+                        );
+                      })()}
                     </div>
                     <div className="flex items-center gap-2 mt-3">
                       <button
@@ -11379,10 +11409,13 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
           bathroomVariant={blockAssignment?.bathroom_variant || null}
           generalVariant={blockAssignment?.general_variant || null}
           assignmentType={blockAssignment?.assignment_type || null}
-          onClose={() => setRequestSection(null)}
+          onClose={() => setRequestFor(null)}
           onSubmit={async (itemKeys, labels) => {
-            setRequestSection(null);
-            if (onRequestItems) await onRequestItems(requestSection, itemKeys, labels || {});
+            const target = requestFor;
+            setRequestFor(null);
+            if (onRequestItems && target) {
+              await onRequestItems(target.section, itemKeys, labels || {}, target.blockId);
+            }
           }} />
       )}
       {moveModalOpen && (

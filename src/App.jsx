@@ -28,8 +28,6 @@ const GOOGLE_TRANSLATE_API_KEY = "AIzaSyD7ceHPryMzs45hWJOyFNBxtOzQOEmJcSA";
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-
 // ============================================================
 // SECURE SIGN-IN — calls the server-side `secure-signin` Edge
 // Function, which verifies the PIN/code against its bcrypt hash

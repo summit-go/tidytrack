@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap213";
+const BUILD_TAG = "aug6-tap214";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -8570,8 +8570,12 @@ function AssignmentWorkHistory({ propertyId, unitId, partyId, employee, defaultO
 // jobs start the clean directly; other-property jobs offer to switch.
 // =================================================================
 function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchProperty, onSwitchToJob, onStartJob,
-  propScope: propScopeProp, setPropScope: setPropScopeProp }) {
-  const [sub, setSub] = useState('mine'); // 'mine' | 'all'
+  propScope: propScopeProp, setPropScope: setPropScopeProp,
+  // Owner mode: the same list, but tapping a job opens the assignment rather
+  // than clocking in, and the "Assigned to me" toggle is meaningless.
+  onOpenAssignment = null, ownerMode = false }) {
+  // Owners see everything by default; the mine/all toggle is a cleaner's tool.
+  const [sub, setSub] = useState(ownerMode ? 'all' : 'mine'); // 'mine' | 'all'
   const [jobs, setJobs] = useState([]);
   const [team, setTeam] = useState([]);
   const [loaded, setLoaded] = useState(false);
@@ -9049,7 +9053,7 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
                     )}
                     <button onClick={() => openJob(j)}
                       className="text-[11px] font-medium px-3 py-1.5 rounded-full bg-amber-600 hover:bg-amber-700 text-white flex items-center gap-1 active:scale-95 transition">
-                      {onStartJob ? 'Clock in & start' : here ? 'Start' : 'Switch'} <ChevronRight size={12} />
+                      {ownerMode ? 'Open' : onStartJob ? 'Clock in & start' : here ? 'Start' : 'Switch'} <ChevronRight size={12} />
                     </button>
                   </div>
                 </div>
@@ -9083,6 +9087,9 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
   };
   const fmtDue = (d) => !d ? 'No date' : d < todayKey ? `Overdue · ${fmtDueDate(d)}` : d === todayKey ? 'Today' : fmtDueDate(d);
   const openJob = (j) => {
+    // Owner view: no clocking in, no bedroom to walk to — tapping a job opens
+    // the assignment itself so it can be edited, dated or assigned.
+    if (onOpenAssignment) { onOpenAssignment(j); return; }
     // Not clocked in yet → tapping a job clocks into its property and opens it.
     if (onStartJob) { onStartJob(j); return; }
     if (j.customerId === currentPropertyId) onGoToBedroom && onGoToBedroom({ unit_id: j.unitId, party_id: j.partyId });
@@ -9092,7 +9099,7 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
 
   return (
     <div className="px-4">
-      <div className="flex gap-1 bg-stone-100 p-1 rounded-xl mb-4 mt-4">
+      <div className={`flex gap-1 bg-stone-100 p-1 rounded-xl mb-4 mt-4 ${ownerMode ? 'hidden' : ''}`}>
         <button onClick={() => setSub('mine')} className={`flex-1 py-2 rounded-lg text-xs font-medium ${sub === 'mine' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>Assigned to me</button>
         <button onClick={() => setSub('all')} className={`flex-1 py-2 rounded-lg text-xs font-medium ${sub === 'all' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>All pending</button>
       </div>
@@ -21091,35 +21098,21 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick, init
                 No open assignments. Tap “Add assignment” to create one.
               </div>
             ) : scheduleMode === 'schedule' ? (
-              <div className="space-y-6">
-                {dateKeysSorted.map(dk => {
-                  const dJobsByProp = {};
-                  byDate[dk].forEach(j => { (dJobsByProp[j.customerId] = dJobsByProp[j.customerId] || []).push(j); });
-                  Object.keys(dJobsByProp).forEach(cid => { dJobsByProp[cid] = sortJobsInProp(dJobsByProp[cid]); });
-                  const props = Object.keys(dJobsByProp).sort((a, b) => (propById[a]?.name || '').localeCompare(propById[b]?.name || ''));
-                  return (
-                    <div key={dk}>
-                      <div className="text-xs uppercase tracking-wider text-amber-700 font-mono mb-2 flex items-center gap-1.5">
-                        <Calendar size={11} /> {fmtSched(dk)}
-                      </div>
-                      <div className="space-y-2">
-                        {props.map(cid => <PropertyCard key={cid} property={propById[cid]} cardJobs={dJobsByProp[cid]} keyId={`${dk}::${cid}`} />)}
-                      </div>
-                    </div>
-                  );
-                })}
-                {byDate['__none__'] && (
-                  <div>
-                    <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 flex items-center gap-1.5">
-                      <FileText size={11} /> No date set
-                    </div>
-                    <div className="space-y-2">
-                      {Object.entries((() => { const m = {}; byDate['__none__'].forEach(j => { (m[j.customerId] = m[j.customerId] || []).push(j); }); return m; })())
-                        .sort((a, b) => (propById[a[0]]?.name || '').localeCompare(propById[b[0]]?.name || ''))
-                        .map(([cid, cj]) => <PropertyCard key={cid} property={propById[cid]} cardJobs={cj} keyId={`none::${cid}`} />)}
-                    </div>
-                  </div>
-                )}
+              /* Same list the cleaners get — one card per job, grouped by
+                 date, with property filter pills across the top. The old
+                 property-accordion view meant three taps to reach a single
+                 job and gave no way to see everything for one property at a
+                 glance. ownerMode swaps "Clock in & start" for "Open" and
+                 drops the "Assigned to me" toggle, which means nothing here. */
+              <div className="-mx-4">
+                <CleanerWorkList
+                  employee={employee}
+                  currentPropertyId={null}
+                  ownerMode
+                  onOpenAssignment={(j) => {
+                    const prop = propById[j.customerId];
+                    if (prop) { setPicked(prop); setView('open'); }
+                  }} />
               </div>
             ) : (
               <div className="space-y-2">

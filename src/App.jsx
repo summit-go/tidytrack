@@ -14,7 +14,6 @@ import {
 // =================================================================
 // 🔧 PASTE YOUR SUPABASE KEYS HERE
 // =================================================================
-// =================================================================
 const SUPABASE_URL = "https://bbaynvqnbkjyqhzhhypr.supabase.co/";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJiYXludnFuYmtqeXFoemhoeXByIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc0NzQ2MTMsImV4cCI6MjA5MzA1MDYxM30.ZXUoHFj_IwMe6rX8RxK8Dj4kAB9AS7X9xZAhQ84wDEk";
 
@@ -119,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap217";
+const BUILD_TAG = "aug6-tap219";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -15348,6 +15347,21 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
           .sort((a, b) => naturalCompare(a[0], b[0]))
           .map(([label, size]) => size ? `${label} · ${size}` : label)
           .join(' · ');
+        // A clock-in with nothing behind it isn't a line worth paying on.
+        // Clocking into the wrong property and straight back out left a strip
+        // reading "0m · 0 blocks" with a few cents owed — noise on the card
+        // and a rounding error in the total.
+        //
+        // Anything real still shows: a saved pay row, an amount already owed
+        // or paid, any workblock at all, or more than a minute on the clock.
+        const trivial = !hasFlat && !paid && !row
+          && pBlocks === 0 && pMs < 60000 && owed < 0.5;
+        if (trivial) {
+          // Take the cents back out of the day total, since they were added
+          // above before we knew the strip was empty.
+          if (paid) out.dayPaid -= owed; else out.dayOwed -= owed;
+          return;
+        }
         out.strips.push({ pg, assignmentId: null, unitId: null,
                           title: pg.name, sub: aptSub || null,
                           key, row, hasFlat, owed, paid,
@@ -15890,11 +15904,37 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
                   {d.shifts.slice().sort((a, b) => new Date(a.start_time) - new Date(b.start_time)).map(s => {
                     const dur = s.end_time ? shiftBillableMs(s) : (new Date() - new Date(s.start_time));
                     const sb = shiftBillableAmount(s, showMoney);
+                    // WHAT this clock-in was for. Four rows of bare times are
+                    // indistinguishable, so there was no way to tell which one
+                    // is the Legends clock-in you want gone. The property comes
+                    // off the shift itself and the units come off that shift's
+                    // OWN work blocks, so the label describes only that row —
+                    // it isn't the day summary repeated.
+                    const propName = s.customer?.name || 'No property';
+                    const jobBits = Array.from(new Set(
+                      (s.work_blocks || [])
+                        .map(b => unitPartyLabel(b.unit?.label, b.party?.label))
+                        .filter(Boolean)
+                    )).sort(naturalCompare);
+                    // A clock-in with no blocks behind it is the usual reason a
+                    // shift needs deleting — say so instead of showing nothing.
+                    const jobLabel = jobBits.length
+                      ? jobBits.slice(0, 3).join(' · ') + (jobBits.length > 3 ? ` +${jobBits.length - 3} more` : '')
+                      : 'no job started';
                     return (
                       <div key={s.id}
                         className="w-full px-4 py-2.5 hover:bg-stone-50 flex items-center justify-between text-xs font-mono text-stone-600 gap-2">
-                        <button onClick={() => onOpenShift(s)} className="flex-1 text-left min-w-0 truncate">
-                          {fmtClock(s.start_time)} {s.end_time ? `— ${fmtClock(s.end_time)}` : '— active'} · {fmtTimeShort(dur)}
+                        <button onClick={() => onOpenShift(s)} className="flex-1 text-left min-w-0">
+                          <div className="truncate">
+                            {fmtClock(s.start_time)} {s.end_time ? `— ${fmtClock(s.end_time)}` : '— active'} · {fmtTimeShort(dur)}
+                          </div>
+                          <div className="mt-0.5 flex items-center gap-1 text-[10px] text-amber-700 min-w-0">
+                            <Building2 size={10} className="flex-shrink-0" />
+                            <span className="truncate">
+                              {propName}
+                              <span className="text-stone-400"> · {jobLabel}</span>
+                            </span>
+                          </div>
                         </button>
                         <span className="flex items-center gap-2 flex-shrink-0">
                           {SHOW_BILLED_ON_SHIFTS && showMoney && sb > 0 && <span className="text-emerald-700">{fmtMoney(sb)}</span>}
@@ -15902,7 +15942,10 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
                           {(currentEmployee?.role === 'owner' || currentEmployee?.role === 'manager') && (
                             <button
                               onClick={async () => {
-                                if (!confirm(`Delete this shift (${fmtClock(s.start_time)}${s.end_time ? `–${fmtClock(s.end_time)}` : ''})?\n\nUse this only for a fake or mistaken shift. It can't be undone.`)) return;
+                                // Name the property and unit in the prompt too —
+                                // the confirm was the last chance to catch a
+                                // wrong row and it only showed the same times.
+                                if (!confirm(`Delete this shift?\n\n${propName} · ${jobLabel}\n${fmtClock(s.start_time)}${s.end_time ? `–${fmtClock(s.end_time)}` : ' – still active'} · ${fmtTimeShort(dur)}\n\nUse this only for a fake or mistaken shift. It can't be undone.`)) return;
                                 const { error } = await supabase.from('shifts').delete().eq('id', s.id);
                                 if (error) { alert('Could not delete shift: ' + error.message + '\n\n(If it has work blocks, those may need removing first.)'); return; }
                                 if (onReload) onReload();

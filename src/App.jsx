@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap222";
+const BUILD_TAG = "aug6-tap223";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -30072,10 +30072,16 @@ function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenUnfi
                   !a ? (isFuture ? 'text-stone-300' : 'text-stone-400 hover:bg-stone-50') :
                   /* Border only, no fill. A grid of filled tiles reads as a
                      wall of colour; the outline says "something happened here"
-                     without shouting it at every square. */
-                  a.hasDamage ? 'border-2 border-red-400 text-red-900 hover:bg-red-50 active:scale-95' :
-                  a.hasCannot ? 'border-2 border-yellow-500 text-yellow-900 hover:bg-yellow-50 active:scale-95' :
-                  'border-2 border-amber-400 text-stone-900 hover:bg-amber-50 active:scale-95'
+                     without shouting it at every square.
+
+                     Red = damage, blue = couldn't clean, green = cleaned with
+                     neither. Damage outranks couldn't-clean when a day has
+                     both, and the dots top-right still show that it has both.
+                     The old amber/yellow pair were a shade apart and unreadable
+                     as two different meanings. */
+                  a.hasDamage ? 'border-2 border-red-600 text-red-900 hover:bg-red-50 active:scale-95' :
+                  a.hasCannot ? 'border-2 border-blue-600 text-blue-900 hover:bg-blue-50 active:scale-95' :
+                  'border-2 border-emerald-600 text-stone-900 hover:bg-emerald-50 active:scale-95'
                 } ${isToday ? 'ring-2 ring-stone-900 ring-offset-1' : ''}`}>
                 <div className={`font-mono ${a ? 'font-bold' : ''}`}>{cell.day}</div>
                 {a && (
@@ -30084,10 +30090,10 @@ function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenUnfi
                   </div>
                 )}
                 {a?.hasDamage && (
-                  <div className="absolute top-0.5 right-0.5 w-1.5 h-1.5 rounded-full bg-red-500" />
+                  <div className="absolute top-1 right-1 w-2 h-2 rounded-full bg-red-600" />
                 )}
                 {a?.hasCannot && (
-                  <div className={`absolute top-0.5 ${a?.hasDamage ? 'right-2.5' : 'right-0.5'} w-1.5 h-1.5 rounded-full bg-yellow-500`} />
+                  <div className={`absolute top-1 ${a?.hasDamage ? 'right-3.5' : 'right-1'} w-2 h-2 rounded-full bg-blue-600`} />
                 )}
               </button>
             );
@@ -30095,14 +30101,20 @@ function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenUnfi
         </div>
 
         {/* Legend */}
-        <div className="mt-4 flex-shrink-0 flex items-center justify-center gap-4 text-xs text-stone-500 font-mono">
+        <div className="mt-4 flex-shrink-0 flex flex-wrap items-center justify-center gap-x-4 gap-y-1.5 text-xs text-stone-500 font-mono">
           <div className="flex items-center gap-1.5">
-            <div className="w-3 h-3 rounded border-2 border-amber-400" />
+            <div className="w-3 h-3 rounded border-2 border-emerald-600" />
             Cleaned
           </div>
           <div className="flex items-center gap-1.5">
-            <div className="w-3 h-3 rounded border-2 border-red-400" />
+            <div className="w-3 h-3 rounded border-2 border-red-600" />
             Damage
+          </div>
+          {/* This state was on the calendar but missing from the legend, which
+             is half of why the yellow squares were a mystery. */}
+          <div className="flex items-center gap-1.5">
+            <div className="w-3 h-3 rounded border-2 border-blue-600" />
+            Couldn't clean
           </div>
           <div className="flex items-center gap-1.5">
             <div className="w-3 h-3 rounded ring-2 ring-stone-900" />

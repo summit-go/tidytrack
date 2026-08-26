@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap219";
+const BUILD_TAG = "aug6-tap221";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -15157,6 +15157,23 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
   const toggleDay = (k) => setExpandedDays(prev => {
     const n = new Set(prev); n.has(k) ? n.delete(k) : n.add(k); return n;
   });
+  // Which cleaner cards are open. This used to read straight off the single
+  // selectedCleanerId, so opening Matias slammed Catalina shut and there was
+  // no way to compare two cleaners' days side by side. The parent still keeps
+  // one id (filtering to a single cleaner drills straight into them), so that
+  // id seeds this set and toggling keeps it pointed at the last card opened.
+  const [openCleaners, setOpenCleaners] = useState(() => new Set(selectedCleanerId ? [selectedCleanerId] : []));
+  useEffect(() => {
+    if (!selectedCleanerId) return;
+    setOpenCleaners(prev => prev.has(selectedCleanerId) ? prev : new Set(prev).add(selectedCleanerId));
+  }, [selectedCleanerId]);
+  const toggleCleaner = (id) => {
+    const willOpen = !openCleaners.has(id);
+    setOpenCleaners(prev => {
+      const n = new Set(prev); willOpen ? n.add(id) : n.delete(id); return n;
+    });
+    onSelectCleaner(willOpen ? id : null);
+  };
 
   // Pay tracking. One row per cleaner per work day PER PROPERTY (v60) —
   // pay terms differ by property (Carriage Cove is hourly, Bridges and
@@ -15992,7 +16009,7 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
             const sorted = c.shifts.map(s => new Date(s.start_time)).sort((a, b) => a - b);
             const dayCount = dayKeys.size;
             const rangeLabel = dayCount <= 1 ? fmtDate(sorted[0]) : `${fmtDate(sorted[0])} – ${fmtDate(sorted[sorted.length - 1])}`;
-            const expanded = selectedCleanerId === c.id;
+            const expanded = openCleaners.has(c.id);
             // Owe / Paid totals — recomputed live from payDays, so marking a
             // day paid instantly moves that amount from Owe to Paid.
             let cOwe = 0, cPaid = 0;
@@ -16010,7 +16027,7 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
             }
             return (
               <div key={c.id} className={`rounded-2xl bg-white shadow-sm border-2 transition-colors ${expanded ? 'border-stone-800' : 'border-stone-200'}`}>
-                <button onClick={() => onSelectCleaner(expanded ? null : c.id)}
+                <button onClick={() => toggleCleaner(c.id)}
                   className="w-full text-left p-4 hover:bg-stone-50 rounded-2xl transition-colors">
                   <div className="flex items-center justify-between mb-2 gap-2">
                     <div className="flex items-center gap-2 min-w-0">

@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap221";
+const BUILD_TAG = "aug6-tap222";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -29974,6 +29974,10 @@ function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenUnfi
 
   const monthName = viewMonth.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
   const todayKey = toDateKey(today);
+  // 5 or 6, depending on how the month falls. The grid divides the leftover
+  // height between exactly this many rows, so a short month gets taller
+  // squares instead of a gap at the bottom.
+  const calRows = Math.max(1, Math.ceil(cells.length / 7));
 
   const goPrev = () => setViewMonth(new Date(year, month - 1, 1));
   const goNext = () => setViewMonth(new Date(year, month + 1, 1));
@@ -30002,11 +30006,15 @@ function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenUnfi
           { icon: <Languages size={18} />, label: 'Label overrides', onClick: () => setShowOverrides(true) },
           { icon: <ClipboardList size={18} />, label: 'Supply checklist', onClick: () => setShowSupplyChecklist(true) },
         ]} />
-      {/* Grows with the screen instead of being pinned to phone width. The
-         cells below use a fixed height rather than aspect-square, so a wider
-         window makes the month WIDER, not taller — the whole grid and the
-         legend stay on one screen without scrolling. */}
-      <div className="px-5 pt-6 max-w-md sm:max-w-2xl lg:max-w-4xl mx-auto w-full">
+      {/* Fills the screen instead of sitting in a small box. The column is
+         told to be as tall as the viewport minus the header and the bottom
+         nav, and the grid below takes whatever is left over — so the month
+         grows to fit the window on a desktop and still fits a phone, with no
+         scrolling either way. maxWidth is inline so it can't be lost to a
+         missing Tailwind class; it stops the squares stretching into long
+         letterboxes on a very wide monitor. */}
+      <div className="px-5 pt-6 mx-auto w-full flex flex-col"
+        style={{ maxWidth: '72rem', minHeight: 'calc(100dvh - 12rem)' }}>
         {/* The inbox banner was removed — PM assignments now surface in the
            header notification bell. Tapping a bell item opens the same
            review screen (InboxView) to approve/deny. */}
@@ -30040,7 +30048,7 @@ function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenUnfi
         </div>
 
         {/* Weekday headers */}
-        <div className="grid grid-cols-7 gap-1 mb-1">
+        <div className="grid grid-cols-7 gap-1.5 mb-1 flex-shrink-0">
           {['S','M','T','W','T','F','S'].map((d, i) => (
             <div key={i} className="text-center text-[10px] font-mono uppercase tracking-wider text-stone-400 py-1">
               {d}
@@ -30049,7 +30057,8 @@ function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenUnfi
         </div>
 
         {/* Calendar grid */}
-        <div className="grid grid-cols-7 gap-1">
+        <div className="grid grid-cols-7 gap-1.5 flex-1"
+          style={{ gridTemplateRows: `repeat(${calRows}, minmax(2.75rem, 1fr))` }}>
           {cells.map((cell, i) => {
             if (!cell) return <div key={i} />;
             const a = activity[cell.key];
@@ -30059,7 +30068,7 @@ function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenUnfi
               <button key={i}
                 disabled={!a}
                 onClick={() => a && onPickDay(cell.key)}
-                className={`h-12 sm:h-14 lg:h-16 rounded-lg flex flex-col items-center justify-center text-[13px] sm:text-sm relative transition-all ${
+                className={`h-full min-h-0 rounded-lg flex flex-col items-center justify-center text-base sm:text-lg relative transition-all ${
                   !a ? (isFuture ? 'text-stone-300' : 'text-stone-400 hover:bg-stone-50') :
                   /* Border only, no fill. A grid of filled tiles reads as a
                      wall of colour; the outline says "something happened here"
@@ -30070,7 +30079,7 @@ function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenUnfi
                 } ${isToday ? 'ring-2 ring-stone-900 ring-offset-1' : ''}`}>
                 <div className={`font-mono ${a ? 'font-bold' : ''}`}>{cell.day}</div>
                 {a && (
-                  <div className="text-[8px] font-mono mt-0.5 leading-none text-stone-500">
+                  <div className="text-[10px] font-mono mt-1 leading-none text-stone-500">
                     {a.shiftCount}
                   </div>
                 )}
@@ -30086,7 +30095,7 @@ function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenUnfi
         </div>
 
         {/* Legend */}
-        <div className="mt-4 flex items-center justify-center gap-4 text-xs text-stone-500 font-mono">
+        <div className="mt-4 flex-shrink-0 flex items-center justify-center gap-4 text-xs text-stone-500 font-mono">
           <div className="flex items-center gap-1.5">
             <div className="w-3 h-3 rounded border-2 border-amber-400" />
             Cleaned

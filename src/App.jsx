@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap223";
+const BUILD_TAG = "aug6-tap224";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -30079,10 +30079,10 @@ function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenUnfi
                      both, and the dots top-right still show that it has both.
                      The old amber/yellow pair were a shade apart and unreadable
                      as two different meanings. */
-                  a.hasDamage ? 'border-2 border-red-600 text-red-900 hover:bg-red-50 active:scale-95' :
-                  a.hasCannot ? 'border-2 border-blue-600 text-blue-900 hover:bg-blue-50 active:scale-95' :
-                  'border-2 border-emerald-600 text-stone-900 hover:bg-emerald-50 active:scale-95'
-                } ${isToday ? 'ring-2 ring-stone-900 ring-offset-1' : ''}`}>
+                  a.hasDamage ? 'border-4 border-red-600 text-red-900 hover:bg-red-50 active:scale-95' :
+                  a.hasCannot ? 'border-4 border-blue-600 text-blue-900 hover:bg-blue-50 active:scale-95' :
+                  'border-4 border-emerald-600 text-stone-900 hover:bg-emerald-50 active:scale-95'
+                } ${isToday ? 'ring-4 ring-stone-900 ring-offset-2' : ''}`}>
                 <div className={`font-mono ${a ? 'font-bold' : ''}`}>{cell.day}</div>
                 {a && (
                   <div className="text-[10px] font-mono mt-1 leading-none text-stone-500">
@@ -30103,21 +30103,21 @@ function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenUnfi
         {/* Legend */}
         <div className="mt-4 flex-shrink-0 flex flex-wrap items-center justify-center gap-x-4 gap-y-1.5 text-xs text-stone-500 font-mono">
           <div className="flex items-center gap-1.5">
-            <div className="w-3 h-3 rounded border-2 border-emerald-600" />
+            <div className="w-4 h-4 rounded border-4 border-emerald-600" />
             Cleaned
           </div>
           <div className="flex items-center gap-1.5">
-            <div className="w-3 h-3 rounded border-2 border-red-600" />
+            <div className="w-4 h-4 rounded border-4 border-red-600" />
             Damage
           </div>
           {/* This state was on the calendar but missing from the legend, which
              is half of why the yellow squares were a mystery. */}
           <div className="flex items-center gap-1.5">
-            <div className="w-3 h-3 rounded border-2 border-blue-600" />
+            <div className="w-4 h-4 rounded border-4 border-blue-600" />
             Couldn't clean
           </div>
           <div className="flex items-center gap-1.5">
-            <div className="w-3 h-3 rounded ring-2 ring-stone-900" />
+            <div className="w-4 h-4 rounded ring-4 ring-stone-900" />
             Today
           </div>
         </div>

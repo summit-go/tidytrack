@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap215";
+const BUILD_TAG = "aug6-tap216";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -29920,9 +29920,11 @@ function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenUnfi
           { icon: <Languages size={18} />, label: 'Label overrides', onClick: () => setShowOverrides(true) },
           { icon: <ClipboardList size={18} />, label: 'Supply checklist', onClick: () => setShowSupplyChecklist(true) },
         ]} />
-      {/* Capped width and centred. Full-bleed on a wide screen made the day
-         squares enormous and pushed everything below the fold. */}
-      <div className="px-5 pt-6 max-w-md mx-auto w-full">
+      {/* Grows with the screen instead of being pinned to phone width. The
+         cells below use a fixed height rather than aspect-square, so a wider
+         window makes the month WIDER, not taller — the whole grid and the
+         legend stay on one screen without scrolling. */}
+      <div className="px-5 pt-6 max-w-md sm:max-w-2xl lg:max-w-4xl mx-auto w-full">
         {/* The inbox banner was removed — PM assignments now surface in the
            header notification bell. Tapping a bell item opens the same
            review screen (InboxView) to approve/deny. */}
@@ -29975,7 +29977,7 @@ function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenUnfi
               <button key={i}
                 disabled={!a}
                 onClick={() => a && onPickDay(cell.key)}
-                className={`aspect-square rounded-lg flex flex-col items-center justify-center text-[13px] relative transition-all ${
+                className={`h-12 sm:h-14 lg:h-16 rounded-lg flex flex-col items-center justify-center text-[13px] sm:text-sm relative transition-all ${
                   !a ? (isFuture ? 'text-stone-300' : 'text-stone-400 hover:bg-stone-50') :
                   /* Border only, no fill. A grid of filled tiles reads as a
                      wall of colour; the outline says "something happened here"

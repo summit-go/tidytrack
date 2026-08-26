@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap214";
+const BUILD_TAG = "aug6-tap215";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -28524,6 +28524,13 @@ function DailyView({ employee, onSignOut, onOpenMessages, onLogoClick, onOpenUnf
   if (view.kind === 'day') {
     return <DailyDayDetail date={view.date} employee={employee} showMoney={showMoney}
       onBack={() => setView({ kind: 'calendar' })}
+      onShiftDay={(delta) => {
+        // Step a day at a time without going back out to the month grid.
+        const [y, m, d] = String(view.date).split('-').map(Number);
+        const nd = new Date(y, m - 1, d + delta);
+        const key = `${nd.getFullYear()}-${String(nd.getMonth() + 1).padStart(2, '0')}-${String(nd.getDate()).padStart(2, '0')}`;
+        setView({ kind: 'day', date: key });
+      }}
       onOpenUnit={(propertyId, unitId, unitLabel, propertyName) =>
         setView({ kind: 'unit-day', date: view.date, propertyId, unitId, unitLabel, propertyName })} />;
   }
@@ -29913,7 +29920,9 @@ function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenUnfi
           { icon: <Languages size={18} />, label: 'Label overrides', onClick: () => setShowOverrides(true) },
           { icon: <ClipboardList size={18} />, label: 'Supply checklist', onClick: () => setShowSupplyChecklist(true) },
         ]} />
-      <div className="px-5 pt-6">
+      {/* Capped width and centred. Full-bleed on a wide screen made the day
+         squares enormous and pushed everything below the fold. */}
+      <div className="px-5 pt-6 max-w-md mx-auto w-full">
         {/* The inbox banner was removed — PM assignments now surface in the
            header notification bell. Tapping a bell item opens the same
            review screen (InboxView) to approve/deny. */}
@@ -29966,16 +29975,19 @@ function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenUnfi
               <button key={i}
                 disabled={!a}
                 onClick={() => a && onPickDay(cell.key)}
-                className={`aspect-square rounded-xl flex flex-col items-center justify-center text-sm relative transition-all ${
+                className={`aspect-square rounded-lg flex flex-col items-center justify-center text-[13px] relative transition-all ${
                   !a ? (isFuture ? 'text-stone-300' : 'text-stone-400 hover:bg-stone-50') :
-                  a.hasDamage ? 'bg-red-50 border-2 border-red-300 text-red-900 hover:border-red-500 active:scale-95' :
-                  a.hasCannot ? 'bg-yellow-50 border-2 border-yellow-400 text-yellow-900 hover:border-yellow-600 active:scale-95' :
-                  'bg-amber-50 border-2 border-amber-300 text-amber-900 hover:border-amber-500 active:scale-95'
+                  /* Border only, no fill. A grid of filled tiles reads as a
+                     wall of colour; the outline says "something happened here"
+                     without shouting it at every square. */
+                  a.hasDamage ? 'border-2 border-red-400 text-red-900 hover:bg-red-50 active:scale-95' :
+                  a.hasCannot ? 'border-2 border-yellow-500 text-yellow-900 hover:bg-yellow-50 active:scale-95' :
+                  'border-2 border-amber-400 text-stone-900 hover:bg-amber-50 active:scale-95'
                 } ${isToday ? 'ring-2 ring-stone-900 ring-offset-1' : ''}`}>
                 <div className={`font-mono ${a ? 'font-bold' : ''}`}>{cell.day}</div>
                 {a && (
-                  <div className="text-[9px] font-mono mt-0.5 leading-none">
-                    {a.shiftCount} {a.shiftCount === 1 ? 'shift' : 'shifts'}
+                  <div className="text-[8px] font-mono mt-0.5 leading-none text-stone-500">
+                    {a.shiftCount}
                   </div>
                 )}
                 {a?.hasDamage && (
@@ -29992,11 +30004,11 @@ function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenUnfi
         {/* Legend */}
         <div className="mt-4 flex items-center justify-center gap-4 text-xs text-stone-500 font-mono">
           <div className="flex items-center gap-1.5">
-            <div className="w-3 h-3 rounded bg-amber-50 border-2 border-amber-300" />
+            <div className="w-3 h-3 rounded border-2 border-amber-400" />
             Cleaned
           </div>
           <div className="flex items-center gap-1.5">
-            <div className="w-3 h-3 rounded bg-red-50 border-2 border-red-300" />
+            <div className="w-3 h-3 rounded border-2 border-red-400" />
             Damage
           </div>
           <div className="flex items-center gap-1.5">
@@ -30050,7 +30062,7 @@ function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenUnfi
 }
 
 // Day detail: shows all properties + units cleaned on this date
-function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit }) {
+function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit, onShiftDay = null }) {
   const [data, setData] = useState(null);
   // Open assignment per unit, so the same inline controls (done / size /
   // assign / due date) work straight from a Daily card.
@@ -30285,12 +30297,30 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit }) {
         <button onClick={onBack} className="flex items-center gap-2 text-stone-400 text-sm mb-4 hover:text-stone-50">
           <ArrowLeft size={16} /> Back to calendar
         </button>
-        <div className="text-xs uppercase tracking-widest text-stone-400 font-mono mb-2">
-          {dateObj.toLocaleDateString('en-US', { weekday:'long' })}
+        {/* Step through days from here. Reviewing a week meant back to the
+           calendar, find the next square, tap in — every single day. */}
+        <div className="flex items-center gap-3">
+          {onShiftDay && (
+            <button onClick={() => onShiftDay(-1)} aria-label="Previous day"
+              className="w-9 h-9 rounded-full border border-stone-700 text-stone-300 hover:bg-stone-800 hover:text-stone-50 flex items-center justify-center flex-shrink-0">
+              <ChevronRight size={18} className="rotate-180" />
+            </button>
+          )}
+          <div className="min-w-0 flex-1">
+            <div className="text-xs uppercase tracking-widest text-stone-400 font-mono mb-1">
+              {dateObj.toLocaleDateString('en-US', { weekday:'long' })}
+            </div>
+            <h1 className="font-serif text-3xl mb-1 truncate">
+              {dateObj.toLocaleDateString('en-US', { month:'long', day:'numeric', year:'numeric' })}
+            </h1>
+          </div>
+          {onShiftDay && (
+            <button onClick={() => onShiftDay(1)} aria-label="Next day"
+              className="w-9 h-9 rounded-full border border-stone-700 text-stone-300 hover:bg-stone-800 hover:text-stone-50 flex items-center justify-center flex-shrink-0">
+              <ChevronRight size={18} />
+            </button>
+          )}
         </div>
-        <h1 className="font-serif text-3xl mb-1">
-          {dateObj.toLocaleDateString('en-US', { month:'long', day:'numeric', year:'numeric' })}
-        </h1>
         <div className="text-sm text-stone-300 mt-2">
           {totalShifts} {totalShifts === 1 ? 'shift' : 'shifts'} across {totalProperties} {totalProperties === 1 ? 'property' : 'properties'}
         </div>

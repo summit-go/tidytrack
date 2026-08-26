@@ -14,6 +14,7 @@ import {
 // =================================================================
 // 🔧 PASTE YOUR SUPABASE KEYS HERE
 // =================================================================
+// =================================================================
 const SUPABASE_URL = "https://bbaynvqnbkjyqhzhhypr.supabase.co/";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJiYXludnFuYmtqeXFoemhoeXByIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc0NzQ2MTMsImV4cCI6MjA5MzA1MDYxM30.ZXUoHFj_IwMe6rX8RxK8Dj4kAB9AS7X9xZAhQ84wDEk";
 
@@ -118,7 +119,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap216";
+const BUILD_TAG = "aug6-tap217";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -15330,8 +15331,26 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
         const pMs = pg.shifts.filter(x => x.end_time).reduce((sum, x) => sum + shiftBillableMs(x), 0);
         const pBlocks = pg.shifts.reduce((n, x) => n + (x.work_blocks?.length || 0), 0);
         const apts = new Set();
-        pg.shifts.forEach(x => (x.work_blocks || []).forEach(b => { if (b.unit?.label) apts.add(b.unit.label); }));
-        out.strips.push({ pg, assignmentId: null, unitId: null, title: pg.name, sub: null, key, row, hasFlat, owed, paid,
+        // Which apartments, and what size they are. The hourly strip named the
+        // PROPERTY and nothing else, so "Legends at River Oaks · 54m" told you
+        // nothing about what was actually cleaned — while the summary above it
+        // listed the units and sizes. Same information, both places.
+        const aptBits = new Map();
+        pg.shifts.forEach(x => (x.work_blocks || []).forEach(b => {
+          if (!b.unit?.label) return;
+          apts.add(b.unit.label);
+          if (!aptBits.has(b.unit.label)) {
+            const br = b.unit?.bedrooms, ba = b.unit?.bathrooms;
+            aptBits.set(b.unit.label, (br != null && ba != null) ? `${br}x${ba}` : null);
+          }
+        }));
+        const aptSub = Array.from(aptBits.entries())
+          .sort((a, b) => naturalCompare(a[0], b[0]))
+          .map(([label, size]) => size ? `${label} · ${size}` : label)
+          .join(' · ');
+        out.strips.push({ pg, assignmentId: null, unitId: null,
+                          title: pg.name, sub: aptSub || null,
+                          key, row, hasFlat, owed, paid,
                           pMs, pBlocks, aptCount: apts.size, hourly: true, stale: isUnpaidStale(dateKey, paid) });
         return;
       }
@@ -15389,7 +15408,10 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
           if (paid) out.dayPaid += owed; else out.dayOwed += owed;
           const subParts = [g.size, g.type ? assignmentTypeLabel(g.type) : null].filter(Boolean);
           out.strips.push({
-            pg, assignmentId: asgId, unitId: unitKeyId, title: g.unitLabel || pg.name,
+            pg, assignmentId: asgId, unitId: unitKeyId,
+            // Property AND apartment. A day can span two properties, and
+            // "B408" alone doesn't say which building it's in.
+            title: g.unitLabel ? `${pg.name} · ${g.unitLabel}` : pg.name,
             sub: subParts.join(' · ') + (g.blocks > 1 ? ` · ${g.blocks} visits` : ''),
             key, row, hasFlat, owed, paid,
             pMs: g.ms, pBlocks: g.blocks, aptCount: 1, hourly: false,

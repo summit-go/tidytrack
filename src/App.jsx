@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap225";
+const BUILD_TAG = "aug6-tap227";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -28475,10 +28475,15 @@ function PortalPhotoSection({ label, photos, highlight, description, onResolve, 
   // adapts to whatever width the parent gives us:
   //   - compact + phone (outer collapses to 1 col, full width): 4 cols inside
   //   - compact + desktop (outer is 3 cols, ~200px each): 2 cols inside
-  //   - non-compact (standalone full-width "All photos" mode): 3/4 cols
+  //   - non-compact (standalone full-width "All photos" mode): matches the
+  //     compact thumbnail size exactly. By-section lands at 3 outer columns
+  //     x 2 inner = 6 across on desktop, and 1 x 4 = 4 across on a phone;
+  //     "All photos" has no outer split, so it needs those same 6 and 4
+  //     itself. It used to be 3/4, which made the same photo half again as
+  //     wide in one tab as the other.
   const innerGridClass = compact
     ? 'grid grid-cols-4 sm:grid-cols-2 gap-1.5'
-    : 'grid grid-cols-3 sm:grid-cols-4 gap-2';
+    : 'grid grid-cols-4 sm:grid-cols-6 gap-1.5';
   if (photos.length === 0) {
     return (
       <div>
@@ -28504,7 +28509,7 @@ function PortalPhotoSection({ label, photos, highlight, description, onResolve, 
     const bg = k === 'damage' ? 'bg-red-600' : k === KIND_CANNOT ? 'bg-yellow-600'
              : k === 'before' ? 'bg-blue-600' : k === 'after' ? 'bg-emerald-600' : 'bg-stone-700';
     return (
-      <span className={`absolute top-0.5 left-0.5 px-1 py-0.5 rounded text-white text-[8px] font-mono uppercase tracking-wider ${bg}/90`}>
+      <span className={`absolute top-1 left-1 px-1.5 py-0.5 rounded text-white text-[10px] font-mono font-bold uppercase tracking-wider shadow-sm ${bg}`}>
         {photoKindLabel(k)}
       </span>
     );

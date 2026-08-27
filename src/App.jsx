@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap224";
+const BUILD_TAG = "aug6-tap225";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -30074,13 +30074,12 @@ function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenUnfi
                      wall of colour; the outline says "something happened here"
                      without shouting it at every square.
 
-                     Red = damage, blue = couldn't clean, green = cleaned with
-                     neither. Damage outranks couldn't-clean when a day has
-                     both, and the dots top-right still show that it has both.
-                     The old amber/yellow pair were a shade apart and unreadable
-                     as two different meanings. */
-                  a.hasDamage ? 'border-4 border-red-600 text-red-900 hover:bg-red-50 active:scale-95' :
-                  a.hasCannot ? 'border-4 border-blue-600 text-blue-900 hover:bg-blue-50 active:scale-95' :
+                     The border is ALWAYS green, because the day did get
+                     cleaned. Damage and couldn't-clean are things that happened
+                     to PART of a day's work, not a verdict on the whole day —
+                     colouring the whole square blue for one bedroom nobody
+                     could get into hid the eight apartments that went fine.
+                     They're flags now, shown as dots inside the square. */
                   'border-4 border-emerald-600 text-stone-900 hover:bg-emerald-50 active:scale-95'
                 } ${isToday ? 'ring-4 ring-stone-900 ring-offset-2' : ''}`}>
                 <div className={`font-mono ${a ? 'font-bold' : ''}`}>{cell.day}</div>
@@ -30089,11 +30088,15 @@ function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenUnfi
                     {a.shiftCount}
                   </div>
                 )}
-                {a?.hasDamage && (
-                  <div className="absolute top-1 right-1 w-2 h-2 rounded-full bg-red-600" />
-                )}
-                {a?.hasCannot && (
-                  <div className={`absolute top-1 ${a?.hasDamage ? 'right-3.5' : 'right-1'} w-2 h-2 rounded-full bg-blue-600`} />
+                {a && (a.hasDamage || a.hasCannot) && (
+                  <div className="mt-1.5 flex items-center gap-1.5">
+                    {a.hasDamage && (
+                      <span className="w-2.5 h-2.5 rounded-full bg-red-600" title="Damage reported" />
+                    )}
+                    {a.hasCannot && (
+                      <span className="w-2.5 h-2.5 rounded-full bg-blue-600" title="Something couldn't be cleaned" />
+                    )}
+                  </div>
                 )}
               </button>
             );
@@ -30106,14 +30109,14 @@ function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenUnfi
             <div className="w-4 h-4 rounded border-4 border-emerald-600" />
             Cleaned
           </div>
+          {/* Both of these were missing or mislabelled before: damage was a
+             border colour and couldn't-clean wasn't in the legend at all. */}
           <div className="flex items-center gap-1.5">
-            <div className="w-4 h-4 rounded border-4 border-red-600" />
+            <div className="w-2.5 h-2.5 rounded-full bg-red-600" />
             Damage
           </div>
-          {/* This state was on the calendar but missing from the legend, which
-             is half of why the yellow squares were a mystery. */}
           <div className="flex items-center gap-1.5">
-            <div className="w-4 h-4 rounded border-4 border-blue-600" />
+            <div className="w-2.5 h-2.5 rounded-full bg-blue-600" />
             Couldn't clean
           </div>
           <div className="flex items-center gap-1.5">

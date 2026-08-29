@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap227";
+const BUILD_TAG = "aug6-tap228";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -21732,6 +21732,12 @@ function PriceBookEditor({ property, onBack }) {
   const [defaultRate, setDefaultRate] = useState(''); // preset $/hr for time items
   const [aptSizes, setAptSizes] = useState([]);        // [{key:'2x2', bedrooms, bathrooms, label}]
   const [aptPrices, setAptPrices] = useState({});      // '__apt__:2x2' -> amount string
+  // What the CLEANER is paid for that same apartment, when pay is a flat
+  // job price rather than hours × rate. Stored alongside the charge as
+  // '__aptpay__:2x2' rows in the same price book table. The invoice
+  // generator only reads keys it names explicitly, so these ride along
+  // without ever touching a bill. The P&L reads them for the Paid column.
+  const [aptPay, setAptPay] = useState({});            // '__aptpay__:2x2' -> amount string
   const [expanded, setExpanded] = useState(new Set());
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState(null);
@@ -21806,12 +21812,16 @@ function PriceBookEditor({ property, onBack }) {
       const sizes = Array.from(sizeSet.values()).sort((a, b) => a.bedrooms - b.bedrooms || a.bathrooms - b.bathrooms);
       setAptSizes(sizes);
       const apmap = {};
+      const paymap = {};
       (pb || []).forEach(r => {
         if (r.subsection_key?.startsWith('__apt__:')) {
           apmap[r.subsection_key] = r.base_amount != null ? String(r.base_amount) : '';
+        } else if (r.subsection_key?.startsWith('__aptpay__:')) {
+          paymap[r.subsection_key] = r.base_amount != null ? String(r.base_amount) : '';
         }
       });
       setAptPrices(apmap);
+      setAptPay(paymap);
       setOriginalKeys((pb || []).filter(r => r.subsection_key !== '__hourly_rate__').map(r => r.subsection_key));
     } catch (e) { setError(e.message || 'Could not load template.'); }
     setLoaded(true);
@@ -21866,6 +21876,21 @@ function PriceBookEditor({ property, onBack }) {
         sort_order: 0, updated_at: new Date().toISOString(),
       });
     });
+    // What you PAY per apartment of that size (__aptpay__:2x2 etc). Same
+    // shape, same table, never read by the invoice generator.
+    const aptPayKeep = [];
+    aptSizes.forEach(sz => {
+      const k = `__aptpay__:${sz.key}`;
+      const amt = parseFloat(aptPay[k]) || 0;
+      if (amt <= 0) return;
+      aptPayKeep.push(k);
+      payload.push({
+        customer_id: property.id, subsection_key: k,
+        label: `${sz.bedrooms}x${sz.bathrooms} cleaner pay`,
+        mode: 'fixed', base_amount: amt, rate: 0, default_minutes: 0,
+        sort_order: 0, updated_at: new Date().toISOString(),
+      });
+    });
     // Persist the preset hourly rate as a sentinel row (skipped by the
     // invoice generator). Generators must ignore keys starting with '__'.
     const dr = parseFloat(defaultRate) || 0;
@@ -21896,6 +21921,14 @@ function PriceBookEditor({ property, onBack }) {
       .map(sz => `__apt__:${sz.key}`)
       .filter(k => !aptKeep.includes(k) && originalKeys.includes(k));
     for (const k of aptClearedKeys) {
+      await supabase.from('invoice_price_book').delete().eq('customer_id', property.id).eq('subsection_key', k);
+    }
+    // Same for cleared pay tiers — blanking one puts that size back on
+    // hours × rate in the P&L rather than leaving a stale flat amount.
+    const aptPayClearedKeys = aptSizes
+      .map(sz => `__aptpay__:${sz.key}`)
+      .filter(k => !aptPayKeep.includes(k) && originalKeys.includes(k));
+    for (const k of aptPayClearedKeys) {
       await supabase.from('invoice_price_book').delete().eq('customer_id', property.id).eq('subsection_key', k);
     }
     setSaving(false); onBack();
@@ -21945,24 +21978,42 @@ function PriceBookEditor({ property, onBack }) {
            was cleaned. Only the sizes that exist at this property show. */}
         {aptSizes.length > 0 && (
           <div className="mb-5 p-3 rounded-2xl bg-stone-100 border border-stone-200">
-            <div className="text-xs font-mono uppercase tracking-wider text-stone-600 mb-1">Whole-apartment price by size</div>
+            <div className="text-xs font-mono uppercase tracking-wider text-stone-600 mb-1">Whole-apartment rates by size</div>
             <p className="text-[11px] text-stone-500 mb-3">
-              A flat rate per apartment size, used when the whole unit is cleaned. Leave blank for sizes you price by item instead.
+              A flat rate per apartment size, used when the whole unit is cleaned. Leave the charge blank for sizes you price by item instead. Fill in <span className="font-medium">You pay</span> when the cleaner is paid a flat job price — the P&amp;L then costs the clean at that amount instead of hours × their hourly rate.
             </p>
+            <div className="flex items-center gap-2 mb-1 px-1">
+              <span className="w-16" />
+              <span className="flex-1" />
+              <span className="w-28 text-center text-[10px] font-mono uppercase tracking-wider text-stone-500">You charge</span>
+              <span className="w-28 text-center text-[10px] font-mono uppercase tracking-wider text-stone-500">You pay</span>
+              <span className="w-20 text-right text-[10px] font-mono uppercase tracking-wider text-stone-500">Margin</span>
+            </div>
             <div className="space-y-2">
               {aptSizes.map(sz => {
                 const k = `__apt__:${sz.key}`;
+                const pk = `__aptpay__:${sz.key}`;
+                const charge = parseFloat(aptPrices[k]) || 0;
+                const pay = parseFloat(aptPay[pk]) || 0;
+                const hasBoth = charge > 0 && pay > 0;
+                const margin = charge - pay;
                 return (
                   <div key={k} className="flex items-center gap-2">
                     <span className="font-mono text-sm text-stone-800 w-16">{sz.bedrooms}x{sz.bathrooms}</span>
                     <span className="text-[10px] font-mono text-stone-400 flex-1">
                       {sz.bedrooms} bed / {sz.bathrooms} bath
                     </span>
-                    <span className="text-stone-400 font-mono">$</span>
                     <input type="number" step="0.01" value={aptPrices[k] || ''}
                       onChange={e => setAptPrices(p => ({ ...p, [k]: e.target.value }))}
                       placeholder="0.00"
                       className="w-28 px-3 py-1.5 rounded-lg border border-stone-300 bg-white text-right text-sm font-mono" />
+                    <input type="number" step="0.01" value={aptPay[pk] || ''}
+                      onChange={e => setAptPay(p => ({ ...p, [pk]: e.target.value }))}
+                      placeholder="hourly"
+                      className="w-28 px-3 py-1.5 rounded-lg border border-stone-300 bg-white text-right text-sm font-mono" />
+                    <span className={`w-20 text-right text-sm font-mono ${!hasBoth ? 'text-stone-300' : margin >= 0 ? 'text-emerald-700' : 'text-red-600'}`}>
+                      {hasBoth ? (margin >= 0 ? `+${margin.toFixed(2)}` : margin.toFixed(2)) : '—'}
+                    </span>
                   </div>
                 );
               })}
@@ -24141,9 +24192,15 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
       const lineUnitIds = [...new Set(lines.map(l => l.unit_id).filter(Boolean))];
       const linePartyIds = [...new Set(lines.map(l => l.party_id).filter(Boolean))];
       const unitLabelById = {};
+      // Size (1x1 / 2x2 / 3x2) too — properties that pay a flat job price
+      // per apartment cost their cleans off the size, not off the clock.
+      const unitSizeById = {};
       for (let i = 0; i < lineUnitIds.length; i += 200) {
-        const { data } = await supabase.from('units').select('id, label').in('id', lineUnitIds.slice(i, i + 200));
-        (data || []).forEach(u => { unitLabelById[u.id] = u.label; });
+        const { data } = await supabase.from('units').select('id, label, bedrooms, bathrooms').in('id', lineUnitIds.slice(i, i + 200));
+        (data || []).forEach(u => {
+          unitLabelById[u.id] = u.label;
+          if (u.bedrooms != null && u.bathrooms != null) unitSizeById[u.id] = `${u.bedrooms}x${u.bathrooms}`;
+        });
       }
       const partyLabelById = {};
       for (let i = 0; i < linePartyIds.length; i += 200) {
@@ -24161,6 +24218,8 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
         reviews = reviews.concat(data || []);
       }
       const reviewByLine = Object.fromEntries(reviews.map(r => [r.invoice_line_id, r]));
+
+
 
       // 4. Labor. One window wide enough to cover every invoice period
       //    touched, then matched per line to that invoice's own period.
@@ -24185,6 +24244,44 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
         });
       }
       const liveBlocks = sensibleOf(allBlocks);
+
+      // 4b. Flat cleaner pay by apartment size, per property. Bridges,
+      //     Citifront and Legends pay a job price — a 3x2 is $114 whether it
+      //     took three hours or fifteen — so hours × hourly rate is simply
+      //     not what those cleans cost. Where a tier exists we use it; where
+      //     it doesn't we fall back to the clock, so hourly properties are
+      //     untouched. Covers properties reached through an invoice AND
+      //     through unbilled labor, since both build rows below.
+      //     Keyed customerId -> { '3x2': 114, ... }.
+      const payBookByProp = {};
+      {
+        const propIds = [...new Set([
+          ...invoices.map(i => i.customer_id),
+          ...liveBlocks.map(b => b.shift?.customer_id),
+        ].filter(Boolean))];
+        for (let i = 0; i < propIds.length; i += 50) {
+          const { data } = await supabase.from('invoice_price_book')
+            .select('customer_id, subsection_key, base_amount')
+            .in('customer_id', propIds.slice(i, i + 50))
+            .like('subsection_key', '__aptpay__:%');
+          (data || []).forEach(r => {
+            const size = String(r.subsection_key).slice('__aptpay__:'.length);
+            const amt = num(r.base_amount);
+            if (!size || amt <= 0) return;
+            payBookByProp[r.customer_id] = payBookByProp[r.customer_id] || {};
+            payBookByProp[r.customer_id][size] = amt;
+          });
+        }
+      }
+      // The flat job price for an apartment, or null when this property or
+      // this size is still paid by the clock.
+      const flatPayFor = (customerId, unitId) => {
+        const size = unitSizeById[unitId];
+        if (!size) return null;
+        const book = payBookByProp[customerId];
+        if (!book) return null;
+        return book[size] != null ? book[size] : null;
+      };
 
       // 5. Build a row per invoice line.
       const invById = Object.fromEntries(invoices.map(i => [i.id, i]));
@@ -24222,7 +24319,15 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
         const rev = reviewByLine[l.id];
         const baseCharge = num(l.amount);
         const charge = rev && rev.charged_override != null ? num(rev.charged_override) : baseCharge;
-        const paid = rev && rev.paid_override != null ? num(rev.paid_override) : pay;
+        // Flat-pay properties: one invoiced clean costs one job price. The
+        // hours stay on screen, but they measure how long it took, not what
+        // it cost. Only charge for labor we actually saw clocked — a line
+        // with no clocked clean behind it costs nothing until someone works
+        // it, same as before.
+        const flatRate = flatPayFor(inv?.customer_id, l.unit_id);
+        const isFlatPay = flatRate != null && mine.length > 0;
+        const basePay = isFlatPay ? flatRate : pay;
+        const paid = rev && rev.paid_override != null ? num(rev.paid_override) : basePay;
         const hoursEff = rev && rev.hours_override != null ? num(rev.hours_override) : hours;
         return {
           id: l.id,
@@ -24246,7 +24351,11 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
           cleanedDays,
           baseHours: hours,
           hours: hoursEff,
-          baseCharge, basePay: pay,
+          baseCharge, basePay,
+          // What the clock would have said, kept for the drawer so a flat
+          // job price can be compared against the labor it actually took.
+          clockPay: pay,
+          isFlatPay, flatRate,
           charge, paid,
           editedCharge: !!rev && rev.charged_override != null,
           editedPaid: !!rev && rev.paid_override != null,
@@ -24287,8 +24396,11 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
         (data || []).forEach(m => { manualByApt[`${m.unit_id}:${m.party_id || ''}`] = m; });
       }
       for (let i = 0; i < uUnitIds.length; i += 200) {
-        const { data } = await supabase.from('units').select('id, label').in('id', uUnitIds.slice(i, i + 200));
-        (data || []).forEach(u => { if (!unitLabelById[u.id]) unitLabelById[u.id] = u.label; });
+        const { data } = await supabase.from('units').select('id, label, bedrooms, bathrooms').in('id', uUnitIds.slice(i, i + 200));
+        (data || []).forEach(u => {
+          if (!unitLabelById[u.id]) unitLabelById[u.id] = u.label;
+          if (!unitSizeById[u.id] && u.bedrooms != null && u.bathrooms != null) unitSizeById[u.id] = `${u.bedrooms}x${u.bathrooms}`;
+        });
       }
       for (let i = 0; i < uPartyIds.length; i += 200) {
         const { data } = await supabase.from('parties').select('id, label').in('id', uPartyIds.slice(i, i + 200));
@@ -24297,6 +24409,11 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
       const manualRows = Object.values(aptGroups).map(g => {
         const mc = manualByApt[`${g.unitId}:${g.partyId || ''}`];
         const charge = mc ? num(mc.amount) : 0;
+        // Same rule as the invoiced rows: a flat-pay apartment costs its
+        // job price. These aren't invoiced yet, so one group is one clean.
+        const flatRate = flatPayFor(g.customerId, g.unitId);
+        const isFlatPay = flatRate != null;
+        const basePay = isFlatPay ? flatRate : g.pay;
         return {
           id: `manual:${g.unitId}:${g.partyId || 'none'}`,
           isManual: true,
@@ -24321,9 +24438,11 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
           baseHours: g.hours,
           hours: g.hours,
           baseCharge: charge,
-          basePay: g.pay,
+          basePay,
+          clockPay: g.pay,
+          isFlatPay, flatRate,
           charge,
-          paid: g.pay,
+          paid: basePay,
           editedCharge: false,
           editedPaid: false,
           editedHours: false,
@@ -24489,7 +24608,7 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
             <p className="text-sm text-stone-500 mt-1">Every invoiced apartment: what you charged, who cleaned it, what they cost.</p>
             <p className="text-[11px] text-stone-400 mt-1">
               <span className="font-medium text-stone-500">Charged</span> is the amount on the invoice line.
-              <span className="font-medium text-stone-500"> Paid</span> is hours × each cleaner's rate.
+              <span className="font-medium text-stone-500"> Paid</span> is the flat job price for the apartment size where one is set, otherwise hours × each cleaner's rate.
               Profit is the difference — hours never set the charge.
             </p>
           </div>
@@ -24692,7 +24811,15 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
                               <td className={`px-3 py-2 text-right font-mono font-medium whitespace-nowrap ${p >= 0 ? 'text-emerald-700' : 'text-red-600'}`}>
                                 {p >= 0 ? '+' : ''}{p.toFixed(2)}
                               </td>
-                              <td className="px-1 py-2">{r.isManual ? <span className="font-mono text-stone-500 block text-right pr-1">{r.paid.toFixed(2)}</span> : editCell('paid', r.paid.toFixed(2), r.editedPaid)}</td>
+                              <td className="px-1 py-2">
+                                {r.isManual ? <span className="font-mono text-stone-500 block text-right pr-1">{r.paid.toFixed(2)}</span> : editCell('paid', r.paid.toFixed(2), r.editedPaid)}
+                                {r.isFlatPay && !r.editedPaid && (
+                                  <div className="text-[9px] font-mono text-stone-400 text-right pr-1 leading-tight"
+                                    title={`Flat job price for this apartment size. The clock would have said ${fmtMoney(r.clockPay)}.`}>
+                                    flat rate
+                                  </div>
+                                )}
+                              </td>
                               <td className="px-1 py-2">{r.isManual ? <span className="font-mono text-stone-500 block text-right pr-1">{r.hours.toFixed(2)}</span> : editCell('hours', r.hours.toFixed(2), r.editedHours)}</td>
                               <td className="px-3 py-2 font-mono text-stone-600 whitespace-nowrap">
                                 {r.cleanedDays.length === 0 ? <span className="text-stone-400">—</span>
@@ -24745,6 +24872,47 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
                                   {r.description && (
                                     <div className="mt-2 text-[11px] text-stone-500 italic">Prints as: “{r.description}”</div>
                                   )}
+
+                                  {/* The labor behind the row. This used to be a
+                                     black box — you could see a Paid number and a
+                                     cleaner name but not which days or how long,
+                                     which made a wrong number impossible to chase. */}
+                                  <div className="mt-4 pt-3 border-t border-stone-200">
+                                    <div className="text-[10px] uppercase tracking-wider font-mono text-stone-400 mb-2">
+                                      Labor behind this row
+                                    </div>
+                                    {r.cleaners.length === 0 ? (
+                                      <div className="text-[11px] font-mono text-stone-400">No clocked clean matched this line.</div>
+                                    ) : (
+                                      <>
+                                        <div className="flex flex-wrap gap-x-6 gap-y-1 mb-2">
+                                          {r.cleaners.map(c => (
+                                            <div key={c.name} className="text-[11px] font-mono text-stone-700">
+                                              {c.name} <span className="text-stone-400">· {c.hours.toFixed(2)}h</span>
+                                            </div>
+                                          ))}
+                                        </div>
+                                        <div className="text-[11px] font-mono text-stone-500">
+                                          Cleaned {r.cleanedDays.length === 1 ? 'on' : 'across'}{' '}
+                                          {r.cleanedDays.map(d => fmtInvoiceDate(d)).join(', ')}
+                                          {r.cleanedDays.length > 1 && (
+                                            <span className="ml-2 text-amber-700">
+                                              — {r.cleanedDays.length} separate days on one line
+                                            </span>
+                                          )}
+                                        </div>
+                                        {r.isFlatPay && (
+                                          <div className="mt-2 text-[11px] font-mono text-stone-500">
+                                            Paid at the flat {fmtMoney(r.flatRate)} job price.
+                                            On the clock this was {r.baseHours.toFixed(2)}h ≈ {fmtMoney(r.clockPay)}
+                                            <span className={r.clockPay > r.flatRate ? 'text-amber-700' : 'text-stone-400'}>
+                                              {' '}({r.clockPay > r.flatRate ? 'slower' : 'faster'} than the job price assumes)
+                                            </span>
+                                          </div>
+                                        )}
+                                      </>
+                                    )}
+                                  </div>
                                 </td>
                               </tr>
                             )}

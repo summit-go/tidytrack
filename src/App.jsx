@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap228";
+const BUILD_TAG = "aug6-tap229";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -24110,7 +24110,7 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
         let out = []; const PAGE = 1000;
         for (let from = 0; ; from += PAGE) {
           const { data, error } = await supabase.from('work_blocks')
-            .select('id, unit_id, party_id, start_time, end_time, unit:units(label), shift:shifts!inner(customer_id, is_preview, employee:employees(id, name, pay_rate_hourly), customer:customers(id, name))')
+            .select('id, unit_id, party_id, assignment_id, start_time, end_time, unit:units(label), shift:shifts!inner(customer_id, is_preview, employee:employees(id, name, pay_rate_hourly), customer:customers(id, name))')
             .gte('start_time', winStart + 'T00:00:00').lte('start_time', winEnd + 'T23:59:59')
             .not('end_time', 'is', null)
             .range(from, from + PAGE - 1);
@@ -24245,13 +24245,55 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
       }
       const liveBlocks = sensibleOf(allBlocks);
 
-      // 4b. Flat cleaner pay by apartment size, per property. Bridges,
-      //     Citifront and Legends pay a job price — a 3x2 is $114 whether it
-      //     took three hours or fifteen — so hours × hourly rate is simply
-      //     not what those cleans cost. Where a tier exists we use it; where
-      //     it doesn't we fall back to the clock, so hourly properties are
-      //     untouched. Covers properties reached through an invoice AND
-      //     through unbilled labor, since both build rows below.
+      // 4b. WHAT YOU ACTUALLY PAID. On flat-rate properties you mark each
+      //     apartment's pay on the shift — that writes an employee_pay_days
+      //     row with a flat_amount. That is the real cost of the clean, and
+      //     the report was ignoring it and recomputing from the clock.
+      //     Keyed exactly the way ShiftsByCleanerView keys it, so the two
+      //     screens can never disagree about what a day cost.
+      const payDayByKey = {};
+      {
+        const PAGE = 1000;
+        for (let from = 0; ; from += PAGE) {
+          const { data, error } = await supabase.from('employee_pay_days')
+            .select('id, employee_id, work_date, customer_id, assignment_id, unit_id, flat_amount')
+            .gte('work_date', winStart).lte('work_date', winEnd)
+            .not('flat_amount', 'is', null)
+            .range(from, from + PAGE - 1);
+          if (error || !data) break;   // table missing → fall through to tiers
+          data.forEach(r => {
+            payDayByKey[`${r.employee_id}:${r.work_date}:${r.customer_id}:${r.assignment_id || ''}:${r.unit_id || ''}`] = r;
+          });
+          if (data.length < PAGE) break;
+          if (from > 100000) break;
+        }
+      }
+      // The marked pay behind a set of work blocks. One pay row can cover
+      // several blocks (an assignment cleaned in three sittings is still one
+      // job you paid once), so rows are counted once each.
+      const markedPayFor = (blocks) => {
+        const seen = new Set();
+        let total = 0, count = 0;
+        (blocks || []).forEach(b => {
+          const empId = b.shift?.employee?.id;
+          const custId = b.shift?.customer_id;
+          if (!empId || !custId) return;
+          const asgId = b.assignment_id || null;
+          const key = `${empId}:${localDayKey(b.start_time)}:${custId}:${asgId || ''}:${asgId ? '' : (b.unit_id || '')}`;
+          if (seen.has(key)) return;
+          seen.add(key);
+          const row = payDayByKey[key];
+          if (!row) return;
+          total += num(row.flat_amount);
+          count += 1;
+        });
+        return count > 0 ? { total, count } : null;
+      };
+
+      // 4c. Fallback pay tiers by apartment size, per property — what you
+      //     "usually always" pay for a 1x1 / 2x2 / 3x2. Used only where you
+      //     haven't marked the shift yet, so a row you haven't got to reads
+      //     the expected cost instead of an invented one.
       //     Keyed customerId -> { '3x2': 114, ... }.
       const payBookByProp = {};
       {
@@ -24319,14 +24361,15 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
         const rev = reviewByLine[l.id];
         const baseCharge = num(l.amount);
         const charge = rev && rev.charged_override != null ? num(rev.charged_override) : baseCharge;
-        // Flat-pay properties: one invoiced clean costs one job price. The
-        // hours stay on screen, but they measure how long it took, not what
-        // it cost. Only charge for labor we actually saw clocked — a line
-        // with no clocked clean behind it costs nothing until someone works
-        // it, same as before.
-        const flatRate = flatPayFor(inv?.customer_id, l.unit_id);
-        const isFlatPay = flatRate != null && mine.length > 0;
-        const basePay = isFlatPay ? flatRate : pay;
+        // What this clean COST, in order of how much we trust it:
+        //   1. what you marked on the shift  — the real number
+        //   2. the size tier for the property — what you usually pay
+        //   3. hours × rate                   — genuinely hourly properties
+        // Hours never price a flat-rate clean; they only say how long it took.
+        const marked = markedPayFor(mine);
+        const tierRate = flatPayFor(inv?.customer_id, l.unit_id);
+        const paySource = marked ? 'marked' : (tierRate != null && mine.length > 0) ? 'tier' : 'hourly';
+        const basePay = marked ? marked.total : paySource === 'tier' ? tierRate : pay;
         const paid = rev && rev.paid_override != null ? num(rev.paid_override) : basePay;
         const hoursEff = rev && rev.hours_override != null ? num(rev.hours_override) : hours;
         return {
@@ -24355,7 +24398,9 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
           // What the clock would have said, kept for the drawer so a flat
           // job price can be compared against the labor it actually took.
           clockPay: pay,
-          isFlatPay, flatRate,
+          paySource, tierRate,
+          unitSize: unitSizeById[l.unit_id] || null,
+          markedCount: marked ? marked.count : 0,
           charge, paid,
           editedCharge: !!rev && rev.charged_override != null,
           editedPaid: !!rev && rev.paid_override != null,
@@ -24379,8 +24424,9 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
         if (hrs <= 0) return;
         const emp = b.shift.employee; if (!emp) return;
         const key = `${b.shift.customer_id}:${b.unit_id}:${b.party_id || ''}`;
-        if (!aptGroups[key]) aptGroups[key] = { customerId: b.shift.customer_id, customerName: b.shift.customer?.name || 'Property', unitId: b.unit_id, partyId: b.party_id || null, unitLabelFallback: b.unit?.label || '', pay: 0, hours: 0, byPerson: {}, days: new Set() };
+        if (!aptGroups[key]) aptGroups[key] = { customerId: b.shift.customer_id, customerName: b.shift.customer?.name || 'Property', unitId: b.unit_id, partyId: b.party_id || null, unitLabelFallback: b.unit?.label || '', pay: 0, hours: 0, byPerson: {}, days: new Set(), blocks: [] };
         const g = aptGroups[key];
+        g.blocks.push(b);
         const rate = num(emp.pay_rate_hourly);
         g.pay += hrs * rate; g.hours += hrs;
         g.days.add(String(b.start_time).slice(0, 10));
@@ -24409,11 +24455,12 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
       const manualRows = Object.values(aptGroups).map(g => {
         const mc = manualByApt[`${g.unitId}:${g.partyId || ''}`];
         const charge = mc ? num(mc.amount) : 0;
-        // Same rule as the invoiced rows: a flat-pay apartment costs its
-        // job price. These aren't invoiced yet, so one group is one clean.
-        const flatRate = flatPayFor(g.customerId, g.unitId);
-        const isFlatPay = flatRate != null;
-        const basePay = isFlatPay ? flatRate : g.pay;
+        // Same order as the invoiced rows: what you marked, then the tier,
+        // then the clock.
+        const marked = markedPayFor(g.blocks);
+        const tierRate = flatPayFor(g.customerId, g.unitId);
+        const paySource = marked ? 'marked' : tierRate != null ? 'tier' : 'hourly';
+        const basePay = marked ? marked.total : paySource === 'tier' ? tierRate : g.pay;
         return {
           id: `manual:${g.unitId}:${g.partyId || 'none'}`,
           isManual: true,
@@ -24440,7 +24487,9 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
           baseCharge: charge,
           basePay,
           clockPay: g.pay,
-          isFlatPay, flatRate,
+          paySource, tierRate,
+          unitSize: unitSizeById[g.unitId] || null,
+          markedCount: marked ? marked.count : 0,
           charge,
           paid: basePay,
           editedCharge: false,
@@ -24608,7 +24657,7 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
             <p className="text-sm text-stone-500 mt-1">Every invoiced apartment: what you charged, who cleaned it, what they cost.</p>
             <p className="text-[11px] text-stone-400 mt-1">
               <span className="font-medium text-stone-500">Charged</span> is the amount on the invoice line.
-              <span className="font-medium text-stone-500"> Paid</span> is the flat job price for the apartment size where one is set, otherwise hours × each cleaner's rate.
+              <span className="font-medium text-stone-500"> Paid</span> is what you marked on the shift, or the rate you usually pay for that apartment size when you haven't marked it yet.
               Profit is the difference — hours never set the charge.
             </p>
           </div>
@@ -24813,10 +24862,16 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
                               </td>
                               <td className="px-1 py-2">
                                 {r.isManual ? <span className="font-mono text-stone-500 block text-right pr-1">{r.paid.toFixed(2)}</span> : editCell('paid', r.paid.toFixed(2), r.editedPaid)}
-                                {r.isFlatPay && !r.editedPaid && (
-                                  <div className="text-[9px] font-mono text-stone-400 text-right pr-1 leading-tight"
-                                    title={`Flat job price for this apartment size. The clock would have said ${fmtMoney(r.clockPay)}.`}>
-                                    flat rate
+                                {!r.editedPaid && r.paySource === 'marked' && (
+                                  <div className="text-[9px] font-mono text-emerald-600 text-right pr-1 leading-tight"
+                                    title={`From the pay you marked on ${r.markedCount === 1 ? 'the shift' : `${r.markedCount} shifts`}.`}>
+                                    marked
+                                  </div>
+                                )}
+                                {!r.editedPaid && r.paySource === 'tier' && (
+                                  <div className="text-[9px] font-mono text-amber-600 text-right pr-1 leading-tight"
+                                    title={`Not marked on the shift yet — using the ${r.unitSize ? r.unitSize + ' ' : ''}rate you usually pay. The clock would have said ${fmtMoney(r.clockPay)}.`}>
+                                    not marked
                                   </div>
                                 )}
                               </td>
@@ -24901,13 +24956,21 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
                                             </span>
                                           )}
                                         </div>
-                                        {r.isFlatPay && (
+                                        {r.paySource === 'marked' && (
+                                          <div className="mt-2 text-[11px] font-mono text-emerald-700">
+                                            Paid {fmtMoney(r.basePay)} — the amount you marked on {r.markedCount === 1 ? 'the shift' : `${r.markedCount} shifts`}.
+                                            <span className="text-stone-500"> On the clock this was {r.baseHours.toFixed(2)}h ≈ {fmtMoney(r.clockPay)}.</span>
+                                          </div>
+                                        )}
+                                        {r.paySource === 'tier' && (
+                                          <div className="mt-2 text-[11px] font-mono text-amber-700">
+                                            Not marked on a shift yet — showing {fmtMoney(r.tierRate)}, what you usually pay for this size.
+                                            <span className="text-stone-500"> Mark it on the shift to make this real. On the clock it was {r.baseHours.toFixed(2)}h ≈ {fmtMoney(r.clockPay)}.</span>
+                                          </div>
+                                        )}
+                                        {r.paySource === 'hourly' && (
                                           <div className="mt-2 text-[11px] font-mono text-stone-500">
-                                            Paid at the flat {fmtMoney(r.flatRate)} job price.
-                                            On the clock this was {r.baseHours.toFixed(2)}h ≈ {fmtMoney(r.clockPay)}
-                                            <span className={r.clockPay > r.flatRate ? 'text-amber-700' : 'text-stone-400'}>
-                                              {' '}({r.clockPay > r.flatRate ? 'slower' : 'faster'} than the job price assumes)
-                                            </span>
+                                            Paid by the clock — {r.baseHours.toFixed(2)}h × each cleaner's rate. Set a size rate in this property's price book, or mark the pay on the shift, to cost it as a job instead.
                                           </div>
                                         )}
                                       </>

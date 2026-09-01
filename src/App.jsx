@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap229";
+const BUILD_TAG = "aug6-tap230";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -1073,6 +1073,101 @@ const sessionStore = {
 // =================================================================
 // Top-level App
 // =================================================================
+// =================================================================
+// ERROR BOUNDARY — the app had none, so ANY exception thrown during a
+// render unmounted the whole tree and left a white screen with no clue
+// what happened. A cleaner mid-shift just sees the app "die".
+//
+// This catches it, keeps them signed in, and shows what actually broke
+// plus a way back. The details panel is collapsed by default — it's for
+// screenshotting, not for reading on the job.
+// =================================================================
+class ErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { err: null, info: null, showDetail: false };
+  }
+  static getDerivedStateFromError(err) { return { err }; }
+  componentDidCatch(err, info) {
+    // Keep the real stack in the console for anyone with devtools open.
+    console.error('[crash]', err, info?.componentStack);
+    this.setState({ info });
+    // Best-effort breadcrumb so a crash can be traced after the fact.
+    try {
+      const log = JSON.parse(localStorage.getItem('tt_crash_log') || '[]');
+      log.unshift({
+        at: new Date().toISOString(),
+        build: typeof BUILD_TAG === 'string' ? BUILD_TAG : '',
+        route: window.location.hash || '',
+        msg: String(err?.message || err),
+        stack: String(info?.componentStack || '').split('\n').slice(0, 12).join('\n'),
+      });
+      localStorage.setItem('tt_crash_log', JSON.stringify(log.slice(0, 10)));
+    } catch { /* storage full or private mode — not worth failing over */ }
+  }
+  render() {
+    const { err, info, showDetail } = this.state;
+    if (!err) return this.props.children;
+    const detail = `${String(err?.message || err)}\n\n${String(info?.componentStack || '').trim()}`;
+    return (
+      <div className="min-h-screen bg-stone-50 flex items-center justify-center p-6" style={{ minHeight: '100dvh' }}>
+        <div className="w-full max-w-md">
+          <div className="rounded-2xl bg-white border border-stone-200 p-6">
+            <div className="flex items-center gap-2 mb-2">
+              <AlertCircle size={18} className="text-red-600 flex-shrink-0" />
+              <span className="font-serif text-xl text-stone-900">This screen hit a snag</span>
+            </div>
+            <p className="text-sm text-stone-600 mb-1">
+              Nothing you did caused this and nothing was lost — your work is saved. Go back and carry on.
+            </p>
+            <p className="text-[11px] font-mono text-stone-400 mb-4">
+              {typeof BUILD_TAG === 'string' ? BUILD_TAG : ''}{window.location.hash ? ` · ${window.location.hash}` : ''}
+            </p>
+
+            <div className="flex gap-2">
+              <button onClick={() => {
+                  // Persisted tab state means a reload lands right back on the
+                  // screen that just crashed — an inescapable white screen. Put
+                  // every remembered page back to its default on the way out.
+                  try {
+                    Object.keys(localStorage)
+                      .filter(k => k.startsWith('tidytrack_page_'))
+                      .forEach(k => localStorage.removeItem(k));
+                  } catch { /* private mode */ }
+                  window.location.reload();
+                }}
+                className="flex-1 px-4 py-3 rounded-xl bg-stone-900 text-stone-50 text-sm font-medium active:scale-98">
+                Back to the start
+              </button>
+              <button onClick={() => this.setState({ err: null, info: null, showDetail: false })}
+                className="px-4 py-3 rounded-xl bg-white border border-stone-300 text-stone-700 text-sm font-medium active:scale-98">
+                Try again
+              </button>
+            </div>
+
+            <button onClick={() => this.setState({ showDetail: !showDetail })}
+              className="mt-4 text-[11px] font-mono uppercase tracking-wider text-stone-400 hover:text-stone-600">
+              {showDetail ? 'Hide' : 'Show'} details for the office
+            </button>
+            {showDetail && (
+              <>
+                <pre className="mt-2 p-3 rounded-xl bg-stone-900 text-stone-100 text-[10px] font-mono overflow-auto max-h-60 whitespace-pre-wrap break-words">
+                  {detail}
+                </pre>
+                <button
+                  onClick={() => { try { navigator.clipboard.writeText(detail); } catch { /* no clipboard */ } }}
+                  className="mt-2 px-3 py-1.5 rounded-full bg-stone-100 text-stone-700 text-[11px] font-mono active:scale-95">
+                  Copy
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
+}
+
 export default function App() {
   // Hash-based routing so we can have different routes (#/portal, #/staff, etc.)
   // without setting up react-router.
@@ -1105,7 +1200,7 @@ export default function App() {
   } else {
     inner = <RootRouter />;
   }
-  return <TranslationProvider>{inner}</TranslationProvider>;
+  return <ErrorBoundary><TranslationProvider>{inner}</TranslationProvider></ErrorBoundary>;
 }
 
 // Decides between LandingPage and StaffApp at the root URL based on remembered choice.

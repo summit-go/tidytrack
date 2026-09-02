@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap231";
+const BUILD_TAG = "aug6-tap233";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -4211,6 +4211,28 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   const [activeBlock, setActiveBlock] = useState(null);
   const [tasks, setTasks] = useState([]);
   const [activeTask, setActiveTask] = useState(null);
+  // Keep the active block's entry in workBlocks carrying the SAME tasks the
+  // screen is working from. `tasks` is the live list; workBlocks held whatever
+  // the block had when it was first fetched, and nothing ever wrote the new
+  // work back — so a block you had filled with items came back as "0 items".
+  //
+  // Only the tasks that BELONG to this block go in. `tasks` can hold work
+  // merged from every open block at the same bedroom (reload does that on
+  // purpose so photos aren't stranded), and writing that whole list onto one
+  // block would credit it with a neighbour's items.
+  useEffect(() => {
+    if (!activeBlock?.id) return;
+    setWorkBlocks(prev => {
+      const i = prev.findIndex(b => b.id === activeBlock.id);
+      if (i === -1) return prev;
+      const mine = (tasks || []).filter(t => t.work_block_id === activeBlock.id);
+      const cur = prev[i].tasks || [];
+      if (cur.length === mine.length && cur.every((t, n) => t === mine[n])) return prev;
+      const next = prev.slice();
+      next[i] = { ...next[i], tasks: mine };
+      return next;
+    });
+  }, [tasks, activeBlock?.id]);
   const [photoModal, setPhotoModal] = useState(null);
   const [clockInFlow, setClockInFlow] = useState(null);
   // Bottom-nav tab — Home / Assignments / More. Lifted to AuthedShift
@@ -4271,6 +4293,11 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   const [viewOnlyProperty, setViewOnlyProperty] = useState(null); // the property they picked to view
 
   useTick(!!shift && !shift.end_time);
+  // reload() runs from a mount effect, so its closure is frozen at the first
+  // render where activeBlock is still null. A ref is the only way for it to
+  // know which block the cleaner is standing in right now.
+  const activeBlockIdRef = useRef(null);
+  useEffect(() => { activeBlockIdRef.current = activeBlock?.id || null; }, [activeBlock?.id]);
   useEffect(() => { reload(); /* eslint-disable-next-line */ }, []);
 
   const reload = async () => {
@@ -4328,7 +4355,18 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
           console.warn('[reload] could not merge own earlier blocks', e);
         }
         setWorkBlocks(allBlocks);
-        const live = allBlocks.find(b => !b.end_time);
+        // Which block should be on screen. allBlocks is sorted start_time
+        // ASCENDING, so the old `find(b => !b.end_time)` handed back the
+        // OLDEST open block every time — meaning a reload dragged the cleaner
+        // out of the section they'd just started and into whatever they
+        // opened first, taking the task list with it. Their new items looked
+        // deleted. Prefer the block they're actually in; failing that, the
+        // one most recently started.
+        const openBlocks = allBlocks.filter(b => !b.end_time);
+        const live =
+          openBlocks.find(b => b.id === activeBlockIdRef.current) ||
+          openBlocks[openBlocks.length - 1] ||
+          null;
         if (live) {
           setActiveBlock(live);
           // A cleaner can end up with more than one open block at the SAME
@@ -4737,22 +4775,19 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   const onPickBlockParty = async (party, workNotes) => {
     setBusy(true);
     const { unit } = blockStartFlow;
-    // Defensive safety: only one open work block per shift. If another open
-    // block exists (could happen across devices / stale state), close it
-    // first so the new one's start time is correct and we never end up
-    // double-clocked.
-    try {
-      const { data: openBlocks } = await supabase.from('work_blocks')
-        .select('id').eq('shift_id', shift.id).is('end_time', null);
-      if (openBlocks && openBlocks.length > 0) {
-        const ts = new Date().toISOString();
-        await supabase.from('work_blocks')
-          .update({ end_time: ts })
-          .in('id', openBlocks.map(b => b.id));
-      }
-    } catch (e) {
-      console.warn('[onPickBlockParty] could not pre-close open blocks', e);
-    }
+    // NO pre-close. This used to stamp end_time on every open block of this
+    // shift before inserting the new one — while local state kept showing
+    // them as open. So the database said "closed" and the Active tab said
+    // "open", and every card except the one you were standing in was a ghost:
+    // it rendered, but its tasks and photos read as empty and stepping into
+    // it gave you a dead screen. The comment below already claimed this
+    // pre-close was gone; the code was still doing it.
+    //
+    // Several blocks open at once on one shift is the intended design, not a
+    // leak — ensureActiveBlockForSection deliberately leaves the section you
+    // came from open, and ensureActiveBlock says the same thing in as many
+    // words. Only blocks left running on EARLIER shifts get swept, which is
+    // what closeAllMyOpenBlocks already handles.
     const { data, error } = await supabase.from('work_blocks')
       .insert({
         shift_id: shift.id, unit_id: unit.id, party_id: party.id,
@@ -6098,6 +6133,10 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     setTasks(prev => [...prev, row]);
     setActiveTask(row.id);
     setNewTaskName('');
+    // Name the block after the section that was just started. This path never
+    // stamped at all — the two picker paths did — so a block started from the
+    // checklist stayed section-less and had no name to show on its card.
+    stampMainSectionFromCategories([category], liveBlock);
     logAction({
       type: 'start_task', taskId: row.id,
       // Remember what each item's status WAS so undo puts it back exactly.
@@ -6445,8 +6484,14 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   // of a section-less workblock. Only stamps when main_section is null
   // so later cross-section work in the same block doesn't keep flipping
   // the label.
-  const stampMainSectionFromCategories = async (categories) => {
-    if (!activeBlock || activeBlock.main_section) return;
+  const stampMainSectionFromCategories = async (categories, blockOverride = null) => {
+    // The block the work actually went into. After a section split the tasks
+    // land in a brand new block, but `activeBlock` here is still the closure
+    // value from the render that started the tap — the block they LEFT. That
+    // stamped the old block with the new section's name and left the new one
+    // unnamed, which is how a card ends up labelled as the wrong section.
+    const target = blockOverride || activeBlock;
+    if (!target || target.main_section) return;
     const valid = (categories || []).filter(c => c && ['bedroom', 'vanity', 'bathroom', 'general'].includes(c));
     if (valid.length === 0) return;
     const counts = {};
@@ -6454,10 +6499,10 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     const dominant = Object.keys(counts).sort((a, b) => counts[b] - counts[a])[0];
     if (!dominant) return;
     const { error } = await supabase.from('work_blocks')
-      .update({ main_section: dominant }).eq('id', activeBlock.id);
+      .update({ main_section: dominant }).eq('id', target.id);
     if (error) { console.warn('[stampMainSection] failed', error); return; }
-    setActiveBlock(prev => prev ? { ...prev, main_section: dominant } : prev);
-    setWorkBlocks(prev => prev.map(b => b.id === activeBlock.id ? { ...b, main_section: dominant } : b));
+    setActiveBlock(prev => (prev && prev.id === target.id) ? { ...prev, main_section: dominant } : prev);
+    setWorkBlocks(prev => prev.map(b => b.id === target.id ? { ...b, main_section: dominant } : b));
   };
 
   const startTask = async (overrideName = null, category = null, subcategory = null) => {
@@ -6477,7 +6522,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     advancePendingTargetsAtActiveBedroom();
     // Stamp the workblock's section so other cleaners can see what
     // section A is working on (e.g. "Cleaner A · Bedroom is here").
-    stampMainSectionFromCategories([category]);
+    stampMainSectionFromCategories([category], liveBlockT);
     return data;
   };
 
@@ -6539,7 +6584,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     advancePendingTargetsAtActiveBedroom();
     // Stamp the workblock's section from the dominant category in
     // this batch of tasks so other cleaners can see what's claimed.
-    stampMainSectionFromCategories(taskInputs.map(t => t.category));
+    stampMainSectionFromCategories(taskInputs.map(t => t.category), liveBlockP);
   };
 
   const stopTask = async (taskId, refetch = true) => {
@@ -7007,14 +7052,32 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       myOpenBlocks={(workBlocks || []).filter(b => !b.end_time)}
       onRequestItems={requestItemsIntoActiveBlock}
       onCloseBlock={closeOpenBlock}
-      onGoToOpenBlock={(b) => {
+      onGoToOpenBlock={async (b) => {
         // Jump straight into another of my open blocks. Nothing closes —
         // this is just changing which one is on screen.
         if (activeTask) stopTask(activeTask, false);
+        // Show what we have immediately so the tap feels instant...
         setActiveBlock(b);
         setTasks(b.tasks || []);
-        const running = (b.tasks || []).find(t => !t.end_time);
-        setActiveTask(running ? running.id : null);
+        setActiveTask(((b.tasks || []).find(t => !t.end_time) || {}).id || null);
+        // ...then take the block's real contents from the database. The local
+        // copy can be stale (tasks added since it was fetched) or empty (the
+        // block was created before any work went into it), and seeding the
+        // screen from that is what made a bathroom full of photos open as a
+        // blank, greyed-out block. A teammate's work lands here too.
+        try {
+          const { data } = await supabase.from('work_blocks')
+            .select('*, unit:units(*), party:parties(*), tasks(*, photos(*, taken_by_employee:employees!taken_by(name)))')
+            .eq('id', b.id).single();
+          if (!data) return;
+          setActiveBlock(data);
+          setTasks(data.tasks || []);
+          setWorkBlocks(prev => prev.map(x => (x.id === data.id ? data : x)));
+          const running = (data.tasks || []).find(t => !t.end_time);
+          setActiveTask(running ? running.id : null);
+        } catch (e) {
+          console.warn('[onGoToOpenBlock] could not refresh block', e);
+        }
       }}
       newTaskName={newTaskName} setNewTaskName={setNewTaskName}
       onStartTask={startTask} onStartTasksFromPicker={startTasksFromPicker}
@@ -7024,7 +7087,6 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       onAddPhoto={(taskId, kind) => setPhotoModal({ taskId, kind })}
       photoModal={photoModal} onClosePhotoModal={() => setPhotoModal(null)}
       onUploadPhoto={uploadPhoto}
-    onChangePhotoKind={changePhotoKind}
       onChangePhotoKind={changePhotoKind}
       onSavePhotoNote={savePhotoNote}
       onPhotoUpdated={patchPhoto}
@@ -11251,12 +11313,19 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
               // on blocks created before sections were split, which reads as
               // two jobs merged into one. The block's own section is the
               // truth; a stray task of another category doesn't rename it.
+              //
+              // There is no fifth name. A block is Bedroom, Vanity, Bathroom
+              // or General — nothing else. A block with no stamp yet (you
+              // walked into the bedroom but haven't picked items) is a bedroom
+              // block, which is the same rule OtherWorkblocksHere already uses
+              // for legacy null sections. It used to fall through to the
+              // literal word "Workblock", which named nothing.
               const sectionOf = (b, tasksList) => {
-                if (b.main_section) return taskCategoryShortLabel(b.main_section, null) || 'Workblock';
+                if (b.main_section) return taskCategoryShortLabel(b.main_section, null) || 'Bedroom';
                 const secs = [...new Set((tasksList || []).map(t => t.category).filter(Boolean))];
                 return secs.length
-                  ? (taskCategoryShortLabel(secs[0], null) || 'Workblock')
-                  : 'Workblock';
+                  ? (taskCategoryShortLabel(secs[0], null) || 'Bedroom')
+                  : 'Bedroom';
               };
 
               // ONE card. Every workblock gets the same heading, the same meta
@@ -11267,19 +11336,27 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
               // as information rather than a badge competing with the action.
               // Card lives at module scope — see WorkblockCard.
 
+              // This block's own work. Tasks created before work_block_id was
+              // stamped carry none, so they still count as belonging here.
+              const ownTasks = (tasks || []).filter(t => !t.work_block_id || t.work_block_id === block.id);
+
               return (
                 <>
-                  {/* The block you're in. */}
+                  {/* The block you're in. Its own tasks only. `tasks` can
+                     carry work merged from every open block at this bedroom,
+                     so passing it straight through made the current card
+                     count a neighbouring section's items as its own — the one
+                     card that didn't agree with the rest. */}
                   <WorkblockCard
                     current
                     block={block} busy={busy}
                     onGoToOpenBlock={onGoToOpenBlock} onAddPhoto={onAddPhoto}
                     onStopTask={onStopTask} setRequestFor={setRequestFor} onCloseBlock={onCloseBlock}
-                    blk={{ ...block, tasks }}
+                    blk={{ ...block, tasks: ownTasks }}
                     task={activeTaskObj}
                     heading={activeTaskObj
-                      ? (taskCategoryShortLabel(activeTaskObj.category, activeTaskObj.subcategory) || sectionOf(block, tasks))
-                      : sectionOf(block, tasks)} />
+                      ? (taskCategoryShortLabel(activeTaskObj.category, activeTaskObj.subcategory) || sectionOf(block, ownTasks))
+                      : sectionOf(block, ownTasks)} />
 
                   {/* Anything else a teammate has running in THIS block. */}
                   {teammatesRunning.map(t => (

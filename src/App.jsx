@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap230";
+const BUILD_TAG = "aug6-tap231";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -38530,6 +38530,13 @@ function AssignmentTabContent({ propertyId, property = null, employee, statusFil
     // Only show categories that actually exist in the data
     return TASK_CATEGORIES.filter(c => cats.has(c.id));
   })();
+  // Done-family tabs get the completed-date range picker.
+  // MUST stay above activeFilterCount, which reads it. It used to be
+  // declared ~50 lines further down, so reading it here threw
+  // "Cannot access 'isDoneView' before initialization" and took the whole
+  // app down to a white screen the moment the Done tab had anything in it.
+  const isDoneView = statusFilter === 'done' || statusFilter === 'mine' || statusFilter === 'recheck_passed';
+
   // Three filters, same three on every tab: cleaning type, date range,
   // apartment search. (Search lives above the panel, so it isn't counted
   // here — you can always see whether it's set.)
@@ -38581,9 +38588,6 @@ function AssignmentTabContent({ propertyId, property = null, employee, statusFil
     if (next.has(b)) next.delete(b); else next.add(b);
     return next;
   });
-  // Done-family tabs get the completed-date range picker.
-  const isDoneView = statusFilter === 'done' || statusFilter === 'mine' || statusFilter === 'recheck_passed';
-
   // Count DISTINCT assignments in a target list. Each assignment is an
   // independent job — a cleaning-check and a move-out check at the same
   // bedroom are two separate assignments and count as two. This matches

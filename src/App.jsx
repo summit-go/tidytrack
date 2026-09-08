@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap233";
+const BUILD_TAG = "aug6-tap237";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -278,6 +278,10 @@ async function translateText(strings, targetLang) {
 // =================================================================
 const LocaleContext = React.createContext({ locale: 'en', setLocale: () => {}, applyEmployeeLocale: () => {} });
 const PreviewContext = React.createContext(null);
+// Carries the global-search handlers down to Header. Every manager tab
+// renders its own Header, so a context is what lets one search bar appear
+// on all of them without threading a prop through six components.
+const SearchContext = React.createContext(null);
 
 function useLocale() {
   return React.useContext(LocaleContext);
@@ -14265,7 +14269,176 @@ function NotificationBell({ employee, isOwner, onNavigate }) {
   );
 }
 
-function Header({ name, onSignOut, role, employee, onOpenMessages, onLogoClick, onBack, onOpenWhosHere, menuItems, onNotificationNavigate, cleanerView = false }) {
+// =================================================================
+// GLOBAL SEARCH — one box that finds apartments, properties and
+// assignments. Lives in the owner header and the PM portal header.
+//
+// scopePropertyId pins the search to a single property. The PM portal
+// passes its property so a PM can never surface another client's
+// apartments; the owner passes null and searches everything.
+//
+// Apartments are the point of this, so they rank first and always show,
+// even when a property or assignment matches the same string.
+// =================================================================
+function GlobalSearch({ scopePropertyId = null, onOpenUnit, onOpenProperty, onOpenAssignment, dark = false, placeholder = 'Search apartments…' }) {
+  const [q, setQ] = useState('');
+  const [open, setOpen] = useState(false);
+  const [res, setRes] = useState({ units: [], props: [], asgs: [], loading: false });
+  const ref = useRef(null);
+  // Every keystroke fires a query; only the newest one is allowed to write
+  // its results. Without this a slow early request can land after a fast
+  // later one and repaint the list with results for a string the person has
+  // already typed past.
+  const seqRef = useRef(0);
+
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener('mousedown', handler);
+    document.addEventListener('touchstart', handler);
+    return () => {
+      document.removeEventListener('mousedown', handler);
+      document.removeEventListener('touchstart', handler);
+    };
+  }, [open]);
+
+  useEffect(() => {
+    const term = q.trim();
+    if (term.length < 2) { setRes({ units: [], props: [], asgs: [], loading: false }); return; }
+    const mine = ++seqRef.current;
+    setRes(r => ({ ...r, loading: true }));
+    const t = setTimeout(async () => {
+      // Escape the PostgREST pattern wildcards so a stray % doesn't turn
+      // into a match-everything query.
+      const like = `%${term.replace(/[%_]/g, m => '\\' + m)}%`;
+      try {
+        let unitQ = supabase.from('units')
+          .select('id, label, bedrooms, bathrooms, customer_id, customer:customers(id, name)')
+          .ilike('label', like).eq('active', true).limit(12);
+        if (scopePropertyId) unitQ = unitQ.eq('customer_id', scopePropertyId);
+
+        let asgQ = supabase.from('assignments')
+          .select('id, title, assignment_type, scheduled_date, customer_id, customer:customers(id, name)')
+          .ilike('title', like).eq('active', true).is('deleted_at', null)
+          .order('scheduled_date', { ascending: false }).limit(8);
+        if (scopePropertyId) asgQ = asgQ.eq('customer_id', scopePropertyId);
+
+        // A PM already knows which property they're in, so searching
+        // properties would only ever return the one they're looking at.
+        const propP = scopePropertyId
+          ? Promise.resolve({ data: [] })
+          : supabase.from('customers').select('id, name').ilike('name', like).limit(6);
+
+        const [u, a, p] = await Promise.all([unitQ, asgQ, propP]);
+        if (seqRef.current !== mine) return;   // a newer keystroke won
+        setRes({
+          units: (u.data || []).sort((x, y) => naturalCompare(x.label || '', y.label || '')),
+          props: p.data || [],
+          asgs: a.data || [],
+          loading: false,
+        });
+      } catch (e) {
+        if (seqRef.current !== mine) return;
+        console.warn('[search] failed', e);
+        setRes({ units: [], props: [], asgs: [], loading: false });
+      }
+    }, 220);
+    return () => clearTimeout(t);
+  }, [q, scopePropertyId]);
+
+  const pick = (fn, ...args) => { setOpen(false); setQ(''); if (fn) fn(...args); };
+  const total = res.units.length + res.props.length + res.asgs.length;
+  const showPanel = open && q.trim().length >= 2;
+
+  return (
+    <div className="relative" ref={ref} data-no-translate>
+      <Search size={15} className={`absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none ${dark ? 'text-stone-400' : 'text-stone-400'}`} />
+      <input
+        value={q}
+        onChange={e => { setQ(e.target.value); setOpen(true); }}
+        onFocus={() => setOpen(true)}
+        onKeyDown={e => { if (e.key === 'Escape') { setOpen(false); e.currentTarget.blur(); } }}
+        placeholder={placeholder}
+        className={`w-full pl-9 pr-8 py-2 rounded-xl text-sm font-mono outline-none transition ${dark
+          ? 'bg-white/10 border border-white/20 text-stone-50 placeholder-stone-400 focus:bg-white/15 focus:border-white/40'
+          : 'bg-white border border-stone-300 text-stone-900 placeholder-stone-400 focus:border-stone-500'}`} />
+      {q && (
+        <button onClick={() => { setQ(''); setOpen(false); }}
+          className={`absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded-full ${dark ? 'text-stone-300 hover:text-stone-50' : 'text-stone-400 hover:text-stone-700'}`}
+          aria-label="Clear search">
+          <X size={14} />
+        </button>
+      )}
+
+      {showPanel && (
+        <div className="absolute left-0 right-0 mt-1.5 rounded-2xl bg-white border border-stone-300 shadow-xl overflow-hidden z-50 max-h-[70vh] overflow-y-auto">
+          {res.loading && total === 0 && (
+            <div className="px-4 py-3 text-xs font-mono text-stone-400">Searching…</div>
+          )}
+          {!res.loading && total === 0 && (
+            <div className="px-4 py-3 text-xs font-mono text-stone-400">Nothing matches “{q.trim()}”.</div>
+          )}
+
+          {res.units.length > 0 && (
+            <div>
+              <div className="px-4 pt-3 pb-1 text-[10px] uppercase tracking-wider font-mono text-stone-400">Apartments</div>
+              {res.units.map(u => (
+                <button key={u.id} onClick={() => pick(onOpenUnit, u)}
+                  className="w-full text-left px-4 py-2.5 hover:bg-stone-50 flex items-center justify-between gap-3 border-t border-stone-100">
+                  <span className="min-w-0">
+                    <span className="font-mono text-sm text-stone-900">{u.label}</span>
+                    {u.bedrooms != null && u.bathrooms != null && (
+                      <span className="ml-2 text-[10px] font-mono text-stone-400">{u.bedrooms}x{u.bathrooms}</span>
+                    )}
+                    {!scopePropertyId && u.customer?.name && (
+                      <span className="block text-[11px] text-stone-500 truncate">{u.customer.name}</span>
+                    )}
+                  </span>
+                  <ChevronRight size={16} className="text-stone-300 flex-shrink-0" />
+                </button>
+              ))}
+            </div>
+          )}
+
+          {res.props.length > 0 && (
+            <div>
+              <div className="px-4 pt-3 pb-1 text-[10px] uppercase tracking-wider font-mono text-stone-400">Properties</div>
+              {res.props.map(p => (
+                <button key={p.id} onClick={() => pick(onOpenProperty, p)}
+                  className="w-full text-left px-4 py-2.5 hover:bg-stone-50 flex items-center justify-between gap-3 border-t border-stone-100">
+                  <span className="text-sm text-stone-900 truncate">{p.name}</span>
+                  <ChevronRight size={16} className="text-stone-300 flex-shrink-0" />
+                </button>
+              ))}
+            </div>
+          )}
+
+          {res.asgs.length > 0 && (
+            <div>
+              <div className="px-4 pt-3 pb-1 text-[10px] uppercase tracking-wider font-mono text-stone-400">Assignments</div>
+              {res.asgs.map(a => (
+                <button key={a.id} onClick={() => pick(onOpenAssignment, a)}
+                  className="w-full text-left px-4 py-2.5 hover:bg-stone-50 flex items-center justify-between gap-3 border-t border-stone-100">
+                  <span className="min-w-0">
+                    <span className="text-sm text-stone-900 truncate block">{a.title || assignmentTypeLabel(a.assignment_type) || 'Assignment'}</span>
+                    <span className="text-[11px] font-mono text-stone-500">
+                      {assignmentTypeLabel(a.assignment_type)}
+                      {a.scheduled_date ? ` · ${fmtDateWithDay(a.scheduled_date + 'T12:00:00')}` : ''}
+                      {!scopePropertyId && a.customer?.name ? ` · ${a.customer.name}` : ''}
+                    </span>
+                  </span>
+                  <ChevronRight size={16} className="text-stone-300 flex-shrink-0" />
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Header({ name, onSignOut, role, employee, onOpenMessages, onLogoClick, onBack, onOpenWhosHere, menuItems, onNotificationNavigate, cleanerView = false, search = null }) {
   // Messages icon in header for all signed-in roles (cleaner/manager/owner)
   const showMessagesIcon = !!(onOpenMessages && employee);
   // Cleaners get a bare header (just the logo) — their language / messages /
@@ -14277,6 +14450,7 @@ function Header({ name, onSignOut, role, employee, onOpenMessages, onLogoClick, 
   const unread = useUnreadCount({ employee: showMessagesIcon ? employee : null });
   const { locale, setLocale } = useLocale();
   const previewCtx = React.useContext(PreviewContext);
+  const searchCtx = React.useContext(SearchContext);
   const translateConfigured = isTextTranslateConfigured();
   // Overflow "⋯" menu — holds occasional owner tools so they don't
   // clutter the home screen. Only rendered when menuItems are provided.
@@ -14312,7 +14486,8 @@ function Header({ name, onSignOut, role, employee, onOpenMessages, onLogoClick, 
   );
 
   return (
-    <div className="flex items-center justify-between px-5 py-3 border-b" style={{ backgroundColor: '#3E5C76', borderColor: '#2E4657' }}>
+    <div className="border-b" style={{ backgroundColor: '#3E5C76', borderColor: '#2E4657' }}>
+    <div className="flex items-center justify-between px-5 py-3">
       <div className="flex items-center gap-2 min-w-0">
         {/* Back button — pure history step, not "home". Shown only when
            the parent provides onBack. Keeps the logo's "go home" role
@@ -14429,6 +14604,24 @@ function Header({ name, onSignOut, role, employee, onOpenMessages, onLogoClick, 
         </div>
       )}
     </div>
+    {/* Search sits on its own row under the logo. Sharing the top row would
+       squeeze it to nothing on a phone, and this is meant to be tapped, not
+       hunted for. Staff only — a cleaner's header stays bare. The explicit
+       `search` prop wins; otherwise it comes from SearchContext, which is how
+       every manager tab gets one without passing it in. */}
+    {(search || (searchCtx && !isCleaner)) && (
+      <div className="px-5 pb-3">
+        {search || (
+          <GlobalSearch
+            onOpenUnit={searchCtx.onOpenUnit}
+            onOpenProperty={searchCtx.onOpenProperty}
+            onOpenAssignment={searchCtx.onOpenAssignment}
+            dark
+            placeholder="Search apartments, properties, assignments…" />
+        )}
+      </div>
+    )}
+    </div>
   );
 }
 // =================================================================
@@ -14517,6 +14710,22 @@ function ManagerShell({ employee, onSignOut }) {
   const colCount = showMoneyTabs ? 6 : 5;
   const openMessages = () => setShowMessages(true);
   const goHome = () => setTab('daily');
+  // Global search. A unit result opens the apartment's full history over the
+  // top of whatever tab is showing; a property jumps to Properties and an
+  // assignment to Assignments, since those tabs already do that job well.
+  const [searchUnit, setSearchUnit] = useState(null);
+  const searchHandlers = React.useMemo(() => ({
+    onOpenUnit: (u) => setSearchUnit({
+      unitId: u.id, unitLabel: u.label,
+      propertyId: u.customer_id, propertyName: u.customer?.name || '',
+    }),
+    onOpenProperty: () => { setSearchUnit(null); setMode('business'); setTab('props'); },
+    onOpenAssignment: () => { setSearchUnit(null); setMode('ops'); setTab('assignments'); },
+    /* eslint-disable-next-line */
+  }), []);
+  // The overlay sits on top of the tabs, so switching tabs underneath it
+  // would look like the nav had stopped responding. Changing tab closes it.
+  useEffect(() => { setSearchUnit(null); }, [tab]);
 
   // Exiting preview mode: gracefully close any open preview-mode shift
   // / work_block so we don't leave dangling rows. They're flagged
@@ -14579,7 +14788,17 @@ function ManagerShell({ employee, onSignOut }) {
 
   return (
     <PreviewContext.Provider value={{ onPreview: () => setPreviewMode(true), isOwner: employee?.role === 'owner' }}>
+    <SearchContext.Provider value={searchHandlers}>
     <div className="min-h-screen bg-stone-50 flex flex-col" style={{ minHeight: '100dvh' }}>
+      {/* A search result takes over the screen rather than switching tabs, so
+         closing it puts the owner back exactly where they were. */}
+      {searchUnit ? (
+        <UnitHistoryView
+          propertyId={searchUnit.propertyId} propertyName={searchUnit.propertyName}
+          unitId={searchUnit.unitId} unitLabel={searchUnit.unitLabel}
+          employee={employee} onBack={() => setSearchUnit(null)} />
+      ) : (
+      <>
       {tab === 'daily'       && <DailyView         employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} onLogoClick={goHome}
         onOpenUnfinishedTab={() => { setTab('assignments'); setAssignmentsMode('unfinished'); }} />}
       {tab === 'dashboard'   && <ManagerDashboard  employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} onLogoClick={goHome} />}
@@ -14588,6 +14807,8 @@ function ManagerShell({ employee, onSignOut }) {
       {tab === 'assignments' && <AssignmentsTab   employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} onLogoClick={goHome}
         initialMode={assignmentsMode} onModeConsumed={() => setAssignmentsMode(null)} />}
       {showMoneyTabs && tab === 'money' && <MoneyView employee={employee} onSignOut={onSignOut} onOpenMessages={openMessages} onLogoClick={goHome} />}
+      </>
+      )}
 
       {/* Sticky, not fixed — see CleanerBottomNav. Staying in normal flow means
          no spacer is needed and iOS can't paint it out of position. */}
@@ -14635,6 +14856,7 @@ function ManagerShell({ employee, onSignOut }) {
         )}
       </div>
     </div>
+    </SearchContext.Provider>
     </PreviewContext.Provider>
   );
 }
@@ -27153,6 +27375,18 @@ function PortalDashboard({ property, portalKind, portalUser, properties, onSwitc
   const [schedRecentOpen, setSchedRecentOpen] = useState(false);
   const [homeFilter, setHomeFilter] = useState('7d'); // History range: 7d / 30d / 1y
 
+  if (view.kind === 'unit-history') {
+    return <UnitHistoryView propertyId={property.id} propertyName={property.name}
+      unitId={view.unitId} unitLabel={view.unitLabel}
+      employee={null}
+      onBack={() => {
+        setView({ kind: 'home' });
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          window.scrollTo(0, homeScrollY);
+        }));
+      }} />;
+  }
+
   if (view.kind === 'unit-day') {
     return <PortalUnitDay property={property} unitId={view.unitId} date={view.date}
       portalUser={portalUser}
@@ -27178,6 +27412,11 @@ function PortalDashboard({ property, portalKind, portalUser, properties, onSwitc
     damageSubTab={homeDamageSubTab} setDamageSubTab={setHomeDamageSubTab}
     damageExpanded={homeDamageExpanded} setDamageExpanded={setHomeDamageExpanded}
     asgApproval={homeAsgApproval} setAsgApproval={setHomeAsgApproval}
+    onOpenUnitHistory={(u) => {
+      setHomeScrollY(window.scrollY || 0);
+      setView({ kind: 'unit-history', unitId: u.id, unitLabel: u.label });
+      window.scrollTo(0, 0);
+    }}
     onOpenUnitDay={(unitId, date) => {
       setHomeScrollY(window.scrollY || 0);
       setView({ kind: 'unit-day', unitId, date });
@@ -27211,7 +27450,7 @@ function PortalLangToggle({ portalUser }) {
   );
 }
 
-function PortalHome({ property, portalKind, portalUser, properties, onSwitchProperty, hasMultipleProperties, onBackToPicker, onSignOut, onRefreshProperty, onOpenUnitDay,
+function PortalHome({ property, portalKind, portalUser, properties, onSwitchProperty, hasMultipleProperties, onBackToPicker, onSignOut, onRefreshProperty, onOpenUnitDay, onOpenUnitHistory,
   tab: tabProp, setTab: setTabProp, asgSub: asgSubProp, setAsgSub: setAsgSubProp,
   cleanSub: cleanSubProp, setCleanSub: setCleanSubProp,
   damageSubTab: damageSubTabProp, setDamageSubTab: setDamageSubTabProp,
@@ -27480,6 +27719,16 @@ function PortalHome({ property, portalKind, portalUser, properties, onSwitchProp
               <Menu size={16} />
             </button>
           </div>
+        </div>
+        {/* Pinned to this property — a PM can only ever surface their own
+           apartments, never another client's. */}
+        <div className="mt-3">
+          <GlobalSearch
+            scopePropertyId={property.id}
+            dark
+            placeholder="Search apartments…"
+            onOpenUnit={(u) => onOpenUnitHistory && onOpenUnitHistory(u)}
+            onOpenAssignment={() => setTab('assignments')} />
         </div>
         {portalUser?.name && (
           <div className="text-xs text-stone-300 mt-2 font-mono">
@@ -31298,6 +31547,240 @@ function DayPhotoTabs({ photos, isStaff }) {
           );
         })}
       </div>
+    </div>
+  );
+}
+
+// =================================================================
+// UNIT HISTORY — everything that ever happened in ONE apartment, all
+// bedrooms together. Opened from the global search.
+//
+// The important difference from BedroomHistoryView: that one folds a
+// whole day into a single block, which is wrong for an apartment where
+// two different cleanings can happen on the same date (a move-out in
+// the morning, a reclean after the walkthrough). Here each day splits
+// into one card PER CLEANING, so you can tell them apart.
+//
+// A "cleaning" is one assignment. Work with no assignment behind it —
+// somebody walked in and cleaned — is grouped by the shift it was done
+// on, which is the closest thing to a visit that data has.
+// =================================================================
+function UnitHistoryView({ propertyId, propertyName, unitId, unitLabel, employee, onBack, onOpenBedroom = null }) {
+  const isStaff = employee?.role === 'owner' || employee?.role === 'manager';
+  const [state, setState] = useState({ days: [], loading: true });
+  const WINDOW_DAYS = isStaff ? 365 : 180;
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setState({ days: [], loading: true });
+      const since = new Date();
+      since.setDate(since.getDate() - WINDOW_DAYS);
+      since.setHours(0, 0, 0, 0);
+
+      // Cleaner identity is only requested when staff are looking. Hiding the
+      // names in the markup would still ship them to the PM's browser, where
+      // they sit in the network response for anyone who opens devtools — so
+      // the join simply isn't asked for. Nothing to leak if it never arrives.
+      const peopleJoin = isStaff
+        ? `shift:shifts!inner(id, customer_id, employee:employees(id, name)),
+           participants:work_block_participants(id, employee:employees(id, name)),`
+        : `shift:shifts!inner(id, customer_id),`;
+
+      const { data: blocksRaw } = await supabase.from('work_blocks')
+        .select(`
+          *, party:parties(id, label, full_name),
+          ${peopleJoin}
+          assignment:assignments(id, title, assignment_type, scheduled_date),
+          tasks(*, photos(*${isStaff ? ', taken_by_employee:employees!taken_by(name)' : ''}))
+        `)
+        .eq('unit_id', unitId)
+        .gte('start_time', since.toISOString())
+        .order('start_time', { ascending: false });
+      if (cancelled) return;
+
+      // The customer filter can't go in the query — it's on the joined
+      // shift — so it happens here, same as the other history views.
+      const blocks = (blocksRaw || []).filter(b => b.shift?.customer_id === propertyId);
+
+      // Day → cleanings → blocks.
+      const dayMap = new Map();
+      blocks.forEach(b => {
+        const d = new Date(b.start_time);
+        const dayKey = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+        if (!dayMap.has(dayKey)) dayMap.set(dayKey, { key: dayKey, cleanings: new Map() });
+        const day = dayMap.get(dayKey);
+        // One card per assignment. No assignment → fall back to the shift,
+        // so a walk-in clean still reads as one visit instead of one card
+        // per bedroom.
+        const cKey = b.assignment_id ? `a:${b.assignment_id}` : `s:${b.shift?.id || b.id}`;
+        if (!day.cleanings.has(cKey)) {
+          day.cleanings.set(cKey, {
+            key: cKey,
+            assignment: b.assignment || null,
+            blocks: [], photos: [], people: new Map(),
+            totalMs: 0, firstStart: b.start_time, lastEnd: b.end_time, open: false,
+          });
+        }
+        const c = day.cleanings.get(cKey);
+        c.blocks.push(b);
+        c.totalMs += (b.end_time ? new Date(b.end_time) : new Date()) - new Date(b.start_time);
+        if (!b.end_time) c.open = true;
+        if (new Date(b.start_time) < new Date(c.firstStart)) c.firstStart = b.start_time;
+        if (b.end_time && (!c.lastEnd || new Date(b.end_time) > new Date(c.lastEnd))) c.lastEnd = b.end_time;
+        const owner = b.shift?.employee;
+        if (owner?.id) c.people.set(owner.id, owner.name || '?');
+        (b.participants || []).forEach(p => { if (p.employee?.id) c.people.set(p.employee.id, p.employee.name || '?'); });
+        (b.tasks || []).forEach(t => (t.photos || []).forEach(p => {
+          if (p.deleted_at) return;
+          c.photos.push({ ...p, taskName: t.name, bedroom: b.party?.label || '' });
+        }));
+      });
+
+      const days = [...dayMap.values()]
+        .map(d => ({
+          ...d,
+          cleanings: [...d.cleanings.values()].sort((a, b) => new Date(b.firstStart) - new Date(a.firstStart)),
+        }))
+        .sort((a, b) => (a.key < b.key ? 1 : -1));
+
+      setState({ days, loading: false });
+    })();
+    return () => { cancelled = true; };
+    /* eslint-disable-next-line */
+  }, [unitId, propertyId, isStaff]);
+
+  const { days, loading } = state;
+
+  return (
+    <div className="min-h-screen bg-stone-50" style={{ minHeight: '100dvh' }}>
+      <div className="px-5 py-4 border-b border-stone-200 bg-white sticky top-0 z-20">
+        <button onClick={onBack}
+          className="mb-2 inline-flex items-center gap-1 text-xs font-mono text-stone-500 hover:text-stone-900">
+          <ArrowLeft size={14} /> Back
+        </button>
+        <div className="flex items-baseline gap-2 flex-wrap">
+          <h1 className="font-serif text-2xl text-stone-900">{unitLabel}</h1>
+          <span className="text-xs font-mono text-stone-500">{propertyName}</span>
+        </div>
+        <div className="text-[11px] font-mono text-stone-400 mt-0.5">
+          Everything at this apartment · last {WINDOW_DAYS} days
+        </div>
+      </div>
+
+      {loading ? (
+        <div className="px-5 py-8 text-sm font-mono text-stone-400">Loading…</div>
+      ) : days.length === 0 ? (
+        <div className="px-5 py-8 text-sm font-mono text-stone-400">
+          No cleanings recorded at {unitLabel} in the last {WINDOW_DAYS} days.
+        </div>
+      ) : (
+        <div className="px-4 py-4 space-y-6">
+          {days.map(day => (
+            <div key={day.key}>
+              <div className="flex items-baseline gap-2 mb-2 px-1">
+                <span className="font-serif text-lg text-stone-900">{fmtDateWithDay(day.key + 'T12:00:00')}</span>
+                {day.cleanings.length > 1 && (
+                  <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-amber-100 text-amber-800">
+                    {day.cleanings.length} cleanings
+                  </span>
+                )}
+              </div>
+
+              <div className="space-y-2.5">
+                {day.cleanings.map(c => {
+                  const people = [...c.people.values()];
+                  const bedrooms = [...new Set(c.blocks.map(b => b.party?.label).filter(Boolean))];
+                  return (
+                    <div key={c.key} className={`rounded-2xl border p-4 ${c.open ? 'bg-amber-50 border-amber-300' : 'bg-white border-stone-200'}`}>
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="font-serif text-base text-stone-900 truncate">
+                            {c.assignment?.title
+                              || assignmentTypeLabel(c.assignment?.assignment_type)
+                              || 'Cleaning'}
+                          </div>
+                          <div className="text-[11px] font-mono text-stone-500 mt-0.5">
+                            {/* Times are staff-only. The start and end clock
+                               readings go with the duration — leaving them in
+                               would let anyone subtract one from the other and
+                               get the number back. A PM sees which day the
+                               cleaning happened, from the heading above, and
+                               whether it's still running. */}
+                            {isStaff ? (
+                              <>
+                                {fmtClock(c.firstStart)}
+                                {c.lastEnd ? ` – ${fmtClock(c.lastEnd)}` : ''}
+                                {' · '}{fmtTimeShort(c.totalMs)}
+                                {c.open && <span className="text-amber-700"> · in progress</span>}
+                              </>
+                            ) : (
+                              c.open
+                                ? <span className="text-amber-700">In progress</span>
+                                : <span>Completed</span>
+                            )}
+                          </div>
+                        </div>
+                        {c.assignment?.assignment_type && (
+                          <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-100 text-stone-600 flex-shrink-0">
+                            {assignmentTypeLabel(c.assignment.assignment_type)}
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[11px] font-mono text-stone-600">
+                        {/* Who cleaned is staff-only, and so is how many —
+                           a headcount still lets a PM reason about how the
+                           job was staffed. They get that the work happened
+                           and how much of it there was; the crew is ours.
+                           DayPhotoTabs gates its name overlay the same way. */}
+                        {isStaff && (
+                          <span>{people.length ? people.join(', ') : 'No cleaner recorded'}</span>
+                        )}
+                        <span className="text-stone-400">
+                          {isStaff && (
+                            <>
+                              {c.blocks.length} {c.blocks.length === 1 ? 'workblock' : 'workblocks'}
+                              {' · '}
+                            </>
+                          )}
+                          {c.photos.length} {c.photos.length === 1 ? 'photo' : 'photos'}
+                        </span>
+                      </div>
+
+                      {/* The bedroom breakdown shows how the apartment was
+                         divided up, which is a read on how the job was
+                         staffed. Staff only. */}
+                      {isStaff && bedrooms.length > 0 && (
+                        <div className="mt-2 flex flex-wrap gap-1.5">
+                          {bedrooms.map(b => {
+                            const blk = c.blocks.find(x => x.party?.label === b);
+                            return (
+                              <button key={b}
+                                onClick={() => onOpenBedroom && blk?.party?.id
+                                  && onOpenBedroom(blk.party.id, b)}
+                                disabled={!onOpenBedroom || !blk?.party?.id}
+                                className="px-2.5 py-1 rounded-full text-[11px] font-mono bg-stone-100 text-stone-700 hover:bg-stone-200 disabled:hover:bg-stone-100">
+                                {b}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+
+                      {c.photos.length > 0 && (
+                        <div className="mt-3">
+                          <DayPhotoTabs photos={c.photos} isStaff={isStaff} />
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

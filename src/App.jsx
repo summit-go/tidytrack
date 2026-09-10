@@ -28982,11 +28982,6 @@ function PortalUnitDay({ property, unitId, date, portalUser, onBack }) {
                       {b.party.label}{b.party.full_name && ` · ${b.party.full_name}`}
                     </div>
                   )}
-                  {b.work_notes && (
-                    <div className="text-sm text-stone-600 italic mb-2">
-                      "<TranslatableText text={b.work_notes} targetLang="en" />"
-                    </div>
-                  )}
                   {b.tasks?.length > 0 && (
                     <ul className="text-sm text-stone-700 space-y-0.5">
                       {b.tasks.map(t => <li key={t.id} className="flex items-center gap-2">
@@ -33214,12 +33209,12 @@ function QuickAssignmentForm({ property, employee, portalUser = null, portalKind
       if (!unit) {
         const { data: created, error: ue } = await supabase.from('units').insert({
           customer_id: property.id, label, kind: 'townhome',
-          bedrooms: br, bathrooms: ba, active: true, sort_order: 0,
+          bedrooms: isPM ? null : br, bathrooms: isPM ? null : ba, active: true, sort_order: 0,
         }).select().single();
         if (ue) throw ue;
         unit = created;
       } else {
-        await supabase.from('units').update({ bedrooms: br, bathrooms: ba }).eq('id', unit.id);
+        if (!isPM) await supabase.from('units').update({ bedrooms: br, bathrooms: ba }).eq('id', unit.id);
       }
       // Ensure a party to attach the job to (whole-apartment "Main").
       const { data: parties } = await supabase.from('parties').select('*')
@@ -33238,7 +33233,7 @@ function QuickAssignmentForm({ property, employee, portalUser = null, portalKind
       // Route this property through the multi-unit cleaner flow (property →
       // pick apartment → clean), like Carriage — otherwise a cleaner
       // clocking in jumps straight into one clean with no apartment shown.
-      if (property.property_type !== 'multi_unit') {
+      if (!isPM && property.property_type !== 'multi_unit') {
         await supabase.from('customers').update({ property_type: 'multi_unit' }).eq('id', property.id);
       }
       // EDITING: update in place and repoint the existing targets. The four
@@ -42590,7 +42585,7 @@ function PortalScheduleTab({ property, onOpenUnitDay }) {
     let all = [];
     for (let from = 0; ; from += PAGE) {
       const { data, error } = await supabase.from('assignments')
-        .select('id, title, assignment_type, scheduled_date, file_url, file_kind, targets:assignment_targets(id, status, completed_at, template_section, unit_id, unit:units(label, bedrooms, bathrooms), party:parties(label))')
+        .select('id, title, assignment_type, scheduled_date, file_url, file_kind, source, pm_status, targets:assignment_targets(id, status, completed_at, template_section, unit_id, unit:units(label, bedrooms, bathrooms), party:parties(label))')
         .eq('customer_id', property.id)
         .is('deleted_at', null)
         .order('scheduled_date', { ascending: false, nullsFirst: false })
@@ -42628,7 +42623,7 @@ function PortalScheduleTab({ property, onOpenUnitDay }) {
   // A PM wants one question answered: what is still owed on my property,
   // and where. So: every open job, in building order, with its date (or
   // lack of one) stated on the card.
-  const openJobs = (rows || []).filter(stillOpen);
+  const openJobs = (rows || []).filter(a => (a.source !== 'pm' || a.pm_status === 'approved') && stillOpen(a));
 
   const buildingOf = (a) => {
     const lbl = (a.targets || [])[0]?.unit?.label || '';

@@ -146,13 +146,38 @@ const photoKindLabel = (k) => PHOTO_KIND_LABELS[k] || k || 'Other';
 // Kinds that represent a problem someone has to see and clear.
 const FLAG_KINDS = ['damage', KIND_CANNOT];
 
-function AssignmentTypeChip({ type, size = 'sm' }) {
-  if (!type) return null;
-  const meta = assignmentTypeMeta(type);
-  if (!meta) return null;
+// showEmpty: render a deliberately drab "No type" chip instead of nothing
+// when no type is recorded. Off by default so existing callers keep their
+// "hide the chip entirely" behaviour. Callers turn it on where an untyped
+// job is something the owner needs to SEE and go label.
+function AssignmentTypeChip({ type, size = 'sm', showEmpty = false }) {
   const sz = size === 'xs'
     ? 'text-[9px] px-1.5 py-0'
     : 'text-[10px] px-2 py-0.5';
+  // Nothing recorded. Grey on grey with a dashed edge so it can't be
+  // mistaken for one of the real, coloured types.
+  if (!type) {
+    if (!showEmpty) return null;
+    return (
+      <span className={`${sz} uppercase tracking-wider font-mono rounded-full border border-dashed border-stone-300 bg-stone-100 text-stone-400 inline-flex items-center gap-1`}>
+        No type
+      </span>
+    );
+  }
+  const meta = assignmentTypeMeta(type);
+  if (!meta) {
+    // A type we don't have a colour for (an older value). It IS typed, so
+    // it must not read as "No type" — show its label, plainly.
+    // assignmentTypeLabel hands back the raw database value when it doesn't
+    // recognise it, so swap the underscores out: "move_out" reads as
+    // MOVE OUT, not MOVE_OUT.
+    if (!showEmpty) return null;
+    return (
+      <span className={`${sz} uppercase tracking-wider font-mono rounded-full border border-stone-200 bg-stone-100 text-stone-600 inline-flex items-center gap-1`}>
+        {assignmentTypeLabel(type).replace(/_/g, ' ')}
+      </span>
+    );
+  }
   return (
     <span className={`${sz} uppercase tracking-wider font-mono rounded-full border inline-flex items-center gap-1 ${meta.color}`}>
       {meta.short}
@@ -282,6 +307,18 @@ const PreviewContext = React.createContext(null);
 // renders its own Header, so a context is what lets one search bar appear
 // on all of them without threading a prop through six components.
 const SearchContext = React.createContext(null);
+
+// Every apartment name in the PM portal has to be able to open the
+// apartment card, and those names are rendered four levels apart in
+// components that don't share a parent worth threading a prop through.
+// Same answer the file already gives for the global search: a context
+// holding one function, provided by PortalDashboard. A screen that wants
+// the behaviour calls the hook; one that doesn't gets null and renders
+// nothing, so no list is forced to know about it.
+const PortalUnitCardContext = React.createContext(null);
+function usePortalUnitCard() {
+  return React.useContext(PortalUnitCardContext);
+}
 
 function useLocale() {
   return React.useContext(LocaleContext);
@@ -1419,12 +1456,16 @@ function Splash({ text }) {
   return <div className="min-h-screen bg-stone-50 flex items-center justify-center text-stone-400 text-sm">{text}</div>;
 }
 
-// Corner screen tag. Every named screen renders one so a bug report can
-// say "OW-ASGN is broken" instead of "the assignments page". Codes are
-// role-prefixed: CL- cleaner, OW- owner/staff, PM- portal. The build tag
-// rides along so a screenshot also tells us which deploy it came from.
-// pointer-events-none so it can never swallow a tap, and print:hidden so
-// it stays out of PM printouts.
+// Corner screen tag. Every named staff screen renders one so a bug report
+// can say "OW-ASGN is broken" instead of "the assignments page". Codes are
+// role-prefixed: CL- cleaner, OW- owner/staff. The build tag rides along so
+// a screenshot also tells us which deploy it came from. pointer-events-none
+// so it can never swallow a tap.
+//
+// STAFF ONLY. Do not render this on a property-manager screen — the portal
+// is a customer-facing product and a debug tag on it reads as an unfinished
+// one. Anything shared between staff and PMs must gate it (see
+// QuickAssignmentForm), which is why there are no PM- codes left.
 function ScreenId({ id }) {
   return (
     <div className="fixed top-1 left-1/2 -translate-x-1/2 z-[60] pointer-events-none select-none print:hidden flex items-center gap-1.5 px-2 py-0.5 rounded-lg bg-stone-900/90 border border-amber-400/50 shadow-lg">
@@ -13785,7 +13826,7 @@ function PhotoModal({ kind, taskName, existing, onUpload, onSaveNote, onClose, e
          viewer also surfaces the photo's note (when present). */}
       {zoomPhoto && (
         <PhotoZoomViewer photos={existingPhotos} initialUrl={zoomPhoto.public_url}
-          onClose={() => setZoomPhoto(null)} employee={employee} />
+          onClose={() => setZoomPhoto(null)} employee={employee} isStaff />
       )}
     </div>
   );
@@ -17685,7 +17726,7 @@ function PhotoColumn({ label, photos, highlight, employee }) {
         </div>
       )}
       {zoom && (
-        <PhotoZoomViewer photos={photos} initialUrl={zoom} onClose={() => setZoom(null)} employee={employee} />
+        <PhotoZoomViewer photos={photos} initialUrl={zoom} onClose={() => setZoom(null)} employee={employee} isStaff />
       )}
     </div>
   );
@@ -17910,8 +17951,19 @@ async function sharePhotos(photos, contextFn) {
   }
 }
 
-// Photo viewer that lets you swipe through all photos in a bucket
-function PhotoZoomViewer({ photos, initialUrl, onClose, onResolveCurrent, employee, onPhotoResolved }) {
+// Photo viewer that lets you swipe through all photos in a bucket.
+//
+// isStaff says WHO IS LOOKING, and it decides whether the cleaner's name and
+// the cleaner's note are drawn at all. It defaults to false because this
+// component is reached from both apps: the PM portal opens it from
+// PortalPhotoSection and ResolvedDamageHistory, and a property manager must
+// never see who cleaned or what they wrote. Only call sites inside our own
+// app — the cleaner's photo modal and the staff photo columns — pass it.
+// The portal's queries no longer ask for either field, but a query and a
+// render are two different mistakes and a future caller will make one of
+// them, so both are closed: default-false here means a caller that forgets
+// gets the safe screen rather than the leak.
+function PhotoZoomViewer({ photos, initialUrl, onClose, onResolveCurrent, employee, onPhotoResolved, isStaff = false }) {
   const startIdx = Math.max(0, photos.findIndex(p => p.public_url === initialUrl));
   const [idx, setIdx] = useState(startIdx);
   // Local optimistic overlay for resolution state — keyed by photo.id
@@ -18004,8 +18056,10 @@ function PhotoZoomViewer({ photos, initialUrl, onClose, onResolveCurrent, employ
       {/* Photo attribution + capture time. Resolves from the joined
          taken_by_employee (set by the multi-cleaner work). Falls back
          to the cleanerName field that BedroomHistoryView enriches
-         (shift owner) for legacy / pre-multi-cleaner photos. */}
-      {(photo.taken_by_employee?.name || photo.cleanerName) && (
+         (shift owner) for legacy / pre-multi-cleaner photos.
+         Staff only — who cleaned is ours, not the customer's, and the
+         capture clock time goes with it. */}
+      {isStaff && (photo.taken_by_employee?.name || photo.cleanerName) && (
         <div className="mt-3 max-w-md w-full px-4 py-2 rounded-xl bg-stone-800/70 text-stone-100 text-xs font-mono flex items-center justify-between gap-3">
           <span className="truncate">by {photo.taken_by_employee?.name || photo.cleanerName}</span>
           <span className="text-stone-400 flex-shrink-0 text-right leading-tight">
@@ -18036,8 +18090,13 @@ function PhotoZoomViewer({ photos, initialUrl, onClose, onResolveCurrent, employ
         </div>
       )}
       {/* Show the cleaner's note when one is attached — useful for
-         damage photos where the note explains what's broken. */}
-      {photo.notes && photo.notes.trim() && (
+         damage photos where the note explains what's broken.
+         Staff only, the whole block. This is the cleaner's own free text,
+         written for our managers about residents and units; the English
+         line is a translation of it, so showing "just the translation" to
+         a customer leaks the same sentence. A PM gets the photo and the
+         bedroom, and the message thread for anything else. */}
+      {isStaff && photo.notes && photo.notes.trim() && (
         <div className="mt-3 max-w-md w-full px-4 py-2.5 rounded-xl bg-stone-800/90 text-stone-100 text-sm">
           <div className="text-[10px] uppercase tracking-wider text-stone-400 font-mono mb-0.5">Note</div>
           {/* When the cleaner wrote in another language we stored an English
@@ -18747,6 +18806,48 @@ function PortalUserForm({ employee, user, allProperties, onCancel, onSaved }) {
     });
   };
 
+  // Write only the ticks that changed, judged against what is linked RIGHT
+  // NOW rather than against what was on screen when the form opened.
+  // Removals are limited twice over: to properties this screen actually
+  // rendered a checkbox for, and to ones that were ticked when it opened.
+  // So a link nobody here could see — a deactivated property — and a link
+  // someone else added while this form was open both survive.
+  // Returns an error string to show, or null.
+  const syncUserPropertyLinks = async (savedId) => {
+    if (!savedId) return null;
+    const { data: liveRows, error: readErr } = await supabase
+      .from('portal_user_properties').select('property_id').eq('portal_user_id', savedId);
+    if (readErr) {
+      return 'Saved their details, but property access was left unchanged — could not read it: ' + readErr.message;
+    }
+    const live = new Set((liveRows || []).map(l => l.property_id));
+    const shown = new Set((allProperties || []).map(p => p.id));
+    const wasTicked = new Set((user?.properties || []).map(p => p.id));
+    const toAdd = Array.from(assignedPropIds).filter(pid => !live.has(pid));
+    const toRemove = Array.from(live).filter(pid =>
+      shown.has(pid) && wasTicked.has(pid) && !assignedPropIds.has(pid));
+    if (!toAdd.length && !toRemove.length) return null;
+    // Add before remove. If the second call fails, someone keeps access
+    // they were meant to lose — the wrong way round is someone losing
+    // access they were meant to keep.
+    if (toAdd.length) {
+      const { error: insErr } = await supabase.from('portal_user_properties')
+        .insert(toAdd.map(pid => ({ portal_user_id: savedId, property_id: pid })));
+      if (insErr) {
+        return 'Saved their details, but property access was not changed: ' + insErr.message;
+      }
+    }
+    if (toRemove.length) {
+      const { error: delErr } = await supabase.from('portal_user_properties')
+        .delete().eq('portal_user_id', savedId).in('property_id', toRemove);
+      if (delErr) {
+        return `Saved their details and added ${toAdd.length} ${toAdd.length === 1 ? 'property' : 'properties'}, `
+          + `but could not remove ${toRemove.length}: ${delErr.message} — they still have access to those.`;
+      }
+    }
+    return null;
+  };
+
   const save = async () => {
     setError('');
     if (!name.trim()) { setError('Please enter a name.'); return; }
@@ -18808,15 +18909,14 @@ function PortalUserForm({ employee, user, allProperties, onCancel, onSaved }) {
       await secureSetCredential('portal', savedId, cleanCode);
     }
 
-    // Sync property assignments: delete existing then insert current set
-    await supabase.from('portal_user_properties').delete().eq('portal_user_id', savedId);
-    if (assignedPropIds.size > 0) {
-      const rows = Array.from(assignedPropIds).map(pid => ({
-        portal_user_id: savedId,
-        property_id: pid,
-      }));
-      await supabase.from('portal_user_properties').insert(rows);
-    }
+    // Sync property assignments — only the boxes that changed, never a
+    // delete-everything-and-re-add. `allProperties` is ACTIVE properties
+    // only, so a link to a deactivated property is invisible on this
+    // screen; the old delete-all threw those away for good, which meant
+    // editing someone's phone number quietly cut their access to a
+    // property that was only paused. Same shape as PropertyForm's sync.
+    const linkErr = await syncUserPropertyLinks(savedId);
+    if (linkErr) { setBusy(false); setError(linkErr); return; }
 
     setBusy(false);
     onSaved();
@@ -19268,7 +19368,7 @@ function PropertySetup({ property, onDone, onAssignPortalUsers, onAddUnits, onEd
 // portal users with checkboxes to assign to the current property.
 // Includes a Quick Add button for creating someone on the spot.
 // =================================================================
-function PortalUserAssignmentSection({ portalUsers, assignedIds, loaded, search, setSearch, onToggle, onUserCreated }) {
+function PortalUserAssignmentSection({ portalUsers, assignedIds, loaded, loadError = '', search, setSearch, onToggle, onUserCreated }) {
   const [kindFilter, setKindFilter] = useState('pm'); // 'pm' | 'property_owner' | 'pm_staff'
   const [showQuickAdd, setShowQuickAdd] = useState(false);
 
@@ -19334,7 +19434,17 @@ function PortalUserAssignmentSection({ portalUsers, assignedIds, loaded, search,
           className="w-full mb-3 px-3 py-2 text-sm rounded-lg border border-stone-200 bg-stone-50 focus:outline-none focus:border-stone-400" />
       )}
 
-      {!loaded ? (
+      {loadError ? (
+        // Said out loud, because an empty checkbox list is indistinguishable
+        // from "nobody has access" — and saving on that reading is how a
+        // whole property loses its team.
+        <div className="py-4 px-3 text-xs text-red-800 bg-red-50 border border-red-200 rounded-xl">
+          {loadError}
+          <div className="mt-1 text-red-700">
+            Access is not being changed. Close this screen, reopen it, and if it keeps failing use the property's Team tab.
+          </div>
+        </div>
+      ) : !loaded ? (
         <div className="text-center py-6 text-stone-400 text-xs font-mono">Loading…</div>
       ) : filtered.length === 0 ? (
         <div className="text-center py-6 text-stone-400 text-xs border-2 border-dashed border-stone-200 rounded-xl">
@@ -19530,27 +19640,89 @@ function PropertyForm({ property, currentUserRole, onCancel, onSaved, onManageAs
   const [allPortalUsers, setAllPortalUsers] = useState([]);
   const [assignedPortalUserIds, setAssignedPortalUserIds] = useState(new Set());
   const [portalSearch, setPortalSearch] = useState('');
+  // portalLoaded means "the current links really arrived", not "the load
+  // function finished". supabase-js reports a failed read as
+  // { data: null, error } instead of throwing, so the old version turned a
+  // failed read into an empty list that looked exactly like "nobody has
+  // access" — and then let a save act on it.
   const [portalLoaded, setPortalLoaded] = useState(false);
+  const [portalLoadError, setPortalLoadError] = useState('');
+  // Who was ticked when this form opened. Removals are limited to this set,
+  // so a person added while the form was open is never quietly dropped.
+  const [initialPortalUserIds, setInitialPortalUserIds] = useState(new Set());
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const { data: users } = await supabase.from('portal_users')
+      setPortalLoadError('');
+      const { data: users, error: usersErr } = await supabase.from('portal_users')
         .select('id, name, kind, active, code')
         .order('name');
       if (cancelled) return;
+      if (usersErr) {
+        setPortalLoadError('Could not load the portal user list: ' + usersErr.message);
+        return; // portalLoaded stays false — saving will leave access alone
+      }
       setAllPortalUsers(users || []);
       if (property?.id) {
-        const { data: links } = await supabase.from('portal_user_properties')
+        const { data: links, error: linksErr } = await supabase.from('portal_user_properties')
           .select('portal_user_id')
           .eq('property_id', property.id);
         if (cancelled) return;
-        setAssignedPortalUserIds(new Set((links || []).map(l => l.portal_user_id)));
+        if (linksErr) {
+          setPortalLoadError('Could not load who currently has access: ' + linksErr.message);
+          return;
+        }
+        const linked = new Set((links || []).map(l => l.portal_user_id));
+        setAssignedPortalUserIds(linked);
+        setInitialPortalUserIds(new Set(linked));
       }
       setPortalLoaded(true);
     })();
     return () => { cancelled = true; };
   }, [property?.id]);
+
+  // Write only the ticks that changed, judged against what is linked RIGHT
+  // NOW. Removals are limited twice over: to users the checkbox list
+  // actually showed (it hides deactivated ones), and to users who were
+  // ticked when the form opened. Nothing here can touch a row the operator
+  // didn't name, so there is no path from one save to an empty property.
+  // Returns an error string to show, or null.
+  const syncPropertyPortalLinks = async (propertyId) => {
+    const { data: liveRows, error: readErr } = await supabase
+      .from('portal_user_properties').select('portal_user_id').eq('property_id', propertyId);
+    if (readErr) {
+      return 'Saved the property, but portal access was left unchanged — could not read it: ' + readErr.message;
+    }
+    const live = new Set((liveRows || []).map(l => l.portal_user_id));
+    const shown = new Set((allPortalUsers || []).filter(u => u.active !== false).map(u => u.id));
+    const toAdd = Array.from(assignedPortalUserIds).filter(uid => !live.has(uid));
+    const toRemove = Array.from(live).filter(uid =>
+      shown.has(uid) && initialPortalUserIds.has(uid) && !assignedPortalUserIds.has(uid));
+    if (!toAdd.length && !toRemove.length) return null;
+    // Add before remove. If the second call fails, someone keeps access
+    // they were meant to lose — the wrong way round is someone losing
+    // access they were meant to keep.
+    if (toAdd.length) {
+      const { error: insErr } = await supabase.from('portal_user_properties')
+        .insert(toAdd.map(uid => ({ portal_user_id: uid, property_id: propertyId })));
+      if (insErr) {
+        return 'Saved the property, but portal access was not changed: ' + insErr.message;
+      }
+    }
+    if (toRemove.length) {
+      const { error: delErr } = await supabase.from('portal_user_properties')
+        .delete().eq('property_id', propertyId).in('portal_user_id', toRemove);
+      if (delErr) {
+        return `Saved the property and added ${toAdd.length} ${toAdd.length === 1 ? 'person' : 'people'}, `
+          + `but could not remove ${toRemove.length}: ${delErr.message} — they still have access.`;
+      }
+    }
+    const after = new Set([...live, ...toAdd]);
+    toRemove.forEach(uid => after.delete(uid));
+    setInitialPortalUserIds(after);
+    return null;
+  };
 
   const togglePortalUser = (pid) => {
     setAssignedPortalUserIds(prev => {
@@ -19624,23 +19796,14 @@ function PropertyForm({ property, currentUserRole, onCancel, onSaved, onManageAs
       savedRow = { ...property, ...payload };
     }
 
-    // Sync portal user assignments: insert all checked links, delete unchecked ones.
-    // For new properties: just insert. For edits: clear then re-insert (idempotent + simple).
-    if (savedRow?.id) {
-      try {
-        await supabase.from('portal_user_properties')
-          .delete().eq('property_id', savedRow.id);
-        if (assignedPortalUserIds.size > 0) {
-          const rows = Array.from(assignedPortalUserIds).map(uid => ({
-            portal_user_id: uid,
-            property_id: savedRow.id,
-          }));
-          await supabase.from('portal_user_properties').insert(rows);
-        }
-      } catch (linkErr) {
-        // Property saved fine, but portal links failed — log and continue
-        console.warn('[PropertyForm] portal user link sync failed:', linkErr);
-      }
+    // Portal access. Only written when we actually know what's there now:
+    // saving before the list arrives, or after the read failed, leaves
+    // access exactly as it is rather than acting on an empty set.
+    if (savedRow?.id && portalLoaded) {
+      const linkErr = await syncPropertyPortalLinks(savedRow.id);
+      if (linkErr) { setBusy(false); setError(linkErr); return; }
+    } else if (savedRow?.id) {
+      console.warn('[PropertyForm] portal user links never loaded — left portal access untouched');
     }
 
     setBusy(false);
@@ -19704,6 +19867,7 @@ function PropertyForm({ property, currentUserRole, onCancel, onSaved, onManageAs
           portalUsers={allPortalUsers}
           assignedIds={assignedPortalUserIds}
           loaded={portalLoaded}
+          loadError={portalLoadError}
           search={portalSearch}
           setSearch={setPortalSearch}
           onToggle={togglePortalUser}
@@ -21343,9 +21507,16 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick, init
               return (
               <div key={j.id} className="px-3 py-2.5 rounded-lg bg-stone-50 flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2">
                 <button onClick={() => { setPicked(property); setView('open'); }} className="min-w-0 sm:flex-1 text-left">
-                  <div className="text-sm text-stone-800 font-medium">{unitPartyLabel(j.unitLabel, j.partyLabel) || 'Job'}</div>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-sm text-stone-800 font-medium">{unitPartyLabel(j.unitLabel, j.partyLabel) || 'Job'}</span>
+                    {/* Was plain text that read "Clean" when nothing was
+                       recorded, which hid the untyped jobs the owner is
+                       hunting for. Same chip, same grey "No type", as the
+                       Daily cards. */}
+                    <AssignmentTypeChip type={j.type} showEmpty />
+                  </div>
                   <div className="text-[11px] text-stone-500 font-mono">
-                    {j.type ? assignmentTypeLabel(j.type) : 'Clean'}{j.scheduledDate ? ` · ${fmtSched(j.scheduledDate)}` : ' · no date'} · {j.count} item{j.count === 1 ? '' : 's'}
+                    {j.scheduledDate ? fmtSched(j.scheduledDate) : 'no date'} · {j.count} item{j.count === 1 ? '' : 's'}
                   </div>
                   {secBits.length > 0 ? (
                     <div className="grid grid-cols-2 gap-x-4 gap-y-0.5 mt-1.5 max-w-[220px]">
@@ -26448,7 +26619,33 @@ function TranslateButton({ texts, defaultTargetLang = 'es' }) {
 }
 
 
-function WelcomeModal({ propertyName, onClose }) {
+// The copy here has to match the tabs PortalHome actually renders, or the
+// first thing a new customer does is look for something that isn't there.
+// What exists today: the apartment search in the header, Cleanings (done /
+// pending), Assignments (waiting approval / approved / concerns), and
+// Invoices — which is gated on can_view_invoices, so the Invoices step is
+// only included when this PM actually has it. Never promise a tab they
+// can't see.
+function WelcomeModal({ propertyName, canViewInvoices = false, onClose }) {
+  const steps = [
+    {
+      title: 'Find any apartment',
+      body: 'Use the search box at the top to pull up an apartment by number. You get its full cleaning history — every visit, with photos.',
+    },
+    {
+      title: 'Cleanings',
+      body: 'What we’ve finished, with the photos from each visit, and what’s still booked or under way.',
+    },
+    {
+      title: 'Assignments',
+      body: 'Ask for specific work — a deep clean on one bedroom, say. Track it while we approve it, then see it once it’s approved. Concerns is where you send us a photo or a note about something that needs attention.',
+    },
+    ...(canViewInvoices ? [{
+      title: 'Invoices',
+      body: 'Your invoices from Summit Clean, oldest to newest.',
+    }] : []),
+  ];
+
   return (
     <div className="fixed inset-0 bg-stone-900/80 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
       <div className="bg-stone-50 w-full sm:max-w-lg sm:rounded-3xl rounded-t-3xl max-h-[90vh] flex flex-col">
@@ -26464,45 +26661,27 @@ function WelcomeModal({ propertyName, onClose }) {
 
         <div className="flex-1 overflow-y-auto p-5 space-y-5">
           <div className="text-stone-700 leading-relaxed">
-            We're so glad to have you on board! Summit Clean is excited to be cleaning <span className="font-medium text-stone-900">{propertyName}</span> for you. This portal is your way to stay involved — see what's been cleaned, send us photos when something needs attention, and request assignments for the team.
+            We're glad to have you on board. Summit Clean is cleaning <span className="font-medium text-stone-900">{propertyName}</span> for you, and this portal is where you can see what we've done and tell us what you need.
           </div>
 
           <div className="space-y-4">
-            <div className="flex gap-3">
-              <div className="flex-shrink-0 w-9 h-9 rounded-xl bg-stone-900 text-stone-50 flex items-center justify-center font-mono text-sm font-bold">
-                1
+            {steps.map((s, i) => (
+              <div key={s.title} className="flex gap-3">
+                <div className="flex-shrink-0 w-9 h-9 rounded-xl bg-stone-900 text-stone-50 flex items-center justify-center font-mono text-sm font-bold">
+                  {i + 1}
+                </div>
+                <div>
+                  <div className="font-serif text-lg text-stone-900 leading-tight">{s.title}</div>
+                  <div className="text-sm text-stone-600 mt-0.5">{s.body}</div>
+                </div>
               </div>
-              <div>
-                <div className="font-serif text-lg text-stone-900 leading-tight">History</div>
-                <div className="text-sm text-stone-600 mt-0.5">See every cleaning, with photos and damage reports. Tap any day or unit to see the details.</div>
-              </div>
-            </div>
-
-            <div className="flex gap-3">
-              <div className="flex-shrink-0 w-9 h-9 rounded-xl bg-stone-900 text-stone-50 flex items-center justify-center font-mono text-sm font-bold">
-                2
-              </div>
-              <div>
-                <div className="font-serif text-lg text-stone-900 leading-tight">Upload photo</div>
-                <div className="text-sm text-stone-600 mt-0.5">Send us photos of damage, items left behind, or anything else worth flagging. We see them right away.</div>
-              </div>
-            </div>
-
-            <div className="flex gap-3">
-              <div className="flex-shrink-0 w-9 h-9 rounded-xl bg-stone-900 text-stone-50 flex items-center justify-center font-mono text-sm font-bold">
-                3
-              </div>
-              <div>
-                <div className="font-serif text-lg text-stone-900 leading-tight">Assignments</div>
-                <div className="text-sm text-stone-600 mt-0.5">Request specific work — like a deep clean on a particular bedroom. Submit it for approval, and once Summit Clean approves it, the team sees it on their next visit.</div>
-              </div>
-            </div>
+            ))}
           </div>
 
           <div className="p-4 rounded-2xl bg-amber-50 border border-amber-200">
             <div className="text-xs uppercase tracking-wider font-mono text-amber-700 mb-1">A quick note</div>
             <div className="text-sm text-stone-800">
-              Assignments you create start as <span className="font-medium">drafts</span>. Once you submit one, Summit Clean reviews and approves it before the cleaning team sees it. You can always come back to this overview by tapping <span className="font-mono">"How this works"</span> at the top.
+              Anything you request comes to us first — we confirm it before the cleaning team sees it, so you'll know it's booked. If you'd rather just ask, use the message button at the top. You can open this overview again any time from the menu.
             </div>
           </div>
         </div>
@@ -26785,8 +26964,11 @@ function PortalTeamModal({ property, portalUser, onClose }) {
 
   const load = async () => {
     setLoaded(false);
+    // Exactly the four fields this modal draws. `*` also shipped every
+    // teammate's personal access `code` to whoever opened the screen —
+    // those codes are the credential we're moving people onto.
     const { data: links } = await supabase.from('portal_user_properties')
-      .select('portal_user:portal_users(*)')
+      .select('portal_user:portal_users(id, name, kind, phone)')
       .eq('property_id', property.id);
     const all = (links || [])
       .map(l => l.portal_user)
@@ -26932,13 +27114,19 @@ function ChangePortalCodeModal({ portalUser, onClose, onSaved }) {
     }
     // Hash the new code so it survives table lockdown.
     await secureSetCredential('portal', portalUser.id, cleanNew);
-    // Update local portal session so the new code is remembered
+    // Rewrite the stored session in the current shape — no code in it. The
+    // old version wrote the new code back here; nothing ever read it, and
+    // restore goes by userId. signedInAt is preserved, so changing your
+    // code doesn't buy another 30 days.
     try {
       const stored = localStorage.getItem('tidytrack_portal');
       if (stored) {
         const parsed = JSON.parse(stored);
-        parsed.code = cleanNew;
-        localStorage.setItem('tidytrack_portal', JSON.stringify(parsed));
+        localStorage.setItem('tidytrack_portal', JSON.stringify({
+          userId: parsed.userId || portalUser.id,
+          propertyId: parsed.propertyId || null,
+          signedInAt: Number(parsed.signedInAt) || Date.now(),
+        }));
       }
     } catch {}
     setBusy(false);
@@ -27006,11 +27194,40 @@ function ChangePortalCodeModal({ portalUser, onClose, onSaved }) {
 // pick one. They see only that property's photos, dates, and units.
 // No cleaner names, no $ amounts (unless their kind allows it later).
 // =================================================================
+// How long a portal sign-in lasts. Absolute from the moment they signed
+// in, not a rolling window: this portal lives on leasing-office machines
+// that get opened every morning, and a rolling window on one of those
+// never expires at all. 30 days is a hard ceiling that still doesn't have
+// a PM digging out their code every week.
+const PORTAL_SESSION_MS = 30 * 24 * 60 * 60 * 1000;
+
 function PortalApp({ previewMode = false, previewEmployee = null, onExitPreview = null }) {
   const [portalUser, setPortalUser] = useState(null); // the portal_users row
   const [properties, setProperties] = useState([]);   // all props this user can access
   const [selectedProperty, setSelectedProperty] = useState(null);
   const [loaded, setLoaded] = useState(false);
+  // When this session started. Held in a ref so that picking a property or
+  // going back to the picker carries the ORIGINAL timestamp forward — the
+  // clock must not be restartable by switching property.
+  const sessionStartedAt = useRef(null);
+
+  // Every write to the stored session goes through here, so there is exactly
+  // one place that decides the shape. Note what is NOT in it: the access
+  // code. It used to be written on every save and read only by the oldest
+  // legacy restore path, so it was a working password sitting in plain text
+  // on the device and buying nothing — restore goes by userId.
+  // userId is passed explicitly by the sign-in path, which saves in the same
+  // tick it calls setPortalUser and so can't read it back off state yet.
+  const saveSession = (propertyId, userId = portalUser?.id) => {
+    if (!sessionStartedAt.current) sessionStartedAt.current = Date.now();
+    try {
+      localStorage.setItem('tidytrack_portal', JSON.stringify({
+        userId: userId || null,
+        propertyId: propertyId || null,
+        signedInAt: sessionStartedAt.current,
+      }));
+    } catch {}
+  };
 
   // Load properties for a given portal user
   const loadProperties = async (userId) => {
@@ -27045,38 +27262,49 @@ function PortalApp({ previewMode = false, previewEmployee = null, onExitPreview 
         const stored = localStorage.getItem('tidytrack_portal');
         if (stored) {
           const parsed = JSON.parse(stored);
-          // New format: { userId, propertyId, code }
-          if (parsed.userId) {
+          // Sessions written before this change have no signedInAt. Stamp
+          // them now rather than treating them as expired — nobody gets
+          // signed out on the day this deploys. They still age out inside
+          // 30 days, because the stamp is written back once and never
+          // renewed.
+          const startedAt = Number(parsed.signedInAt) || Date.now();
+          const expired = Date.now() - startedAt > PORTAL_SESSION_MS;
+          if (expired) {
+            // Checked only here, on mount. A tab left open for 40 days
+            // won't be yanked mid-sentence; it ends next time the app opens.
+            localStorage.removeItem('tidytrack_portal');
+          } else if (parsed.userId) {
+            // Current format: { userId, propertyId, signedInAt }
             const { data: pu } = await supabase.from('portal_users')
               .select('*').eq('id', parsed.userId).eq('active', true).maybeSingle();
             if (pu) {
               const props = await loadProperties(pu.id);
+              sessionStartedAt.current = startedAt;
               setPortalUser(pu);
               setProperties(props);
               // Re-select previously-viewed property if it's still in their list
               const stillThere = props.find(p => p.id === parsed.propertyId);
               if (stillThere) setSelectedProperty(stillThere);
               else if (props.length === 1) setSelectedProperty(props[0]);
+              saveSession(stillThere?.id || (props.length === 1 ? props[0].id : null), pu.id);
             } else {
               localStorage.removeItem('tidytrack_portal');
             }
           } else if (parsed.code) {
-            // Old localStorage format — restore via the secure function
-            // (the app can't read portal_users by code once locked).
+            // Oldest localStorage format, code only — restore via the secure
+            // function (the app can't read portal_users by code once locked)
+            // so nobody on an old device is locked out. Upgrading it below
+            // is also what finally drops the stored code.
             const pu = await securePortalSignIn(parsed.code);
             if (pu) {
               const props = await loadProperties(pu.id);
+              sessionStartedAt.current = startedAt;
               setPortalUser(pu);
               setProperties(props);
               const stillThere = props.find(p => p.id === parsed.propertyId);
               if (stillThere) setSelectedProperty(stillThere);
               else if (props.length === 1) setSelectedProperty(props[0]);
-              // Upgrade localStorage to the new format
-              localStorage.setItem('tidytrack_portal', JSON.stringify({
-                userId: pu.id,
-                propertyId: stillThere?.id || (props.length === 1 ? props[0].id : null),
-                code: pu.code,
-              }));
+              saveSession(stillThere?.id || (props.length === 1 ? props[0].id : null), pu.id);
             } else {
               localStorage.removeItem('tidytrack_portal');
             }
@@ -27095,36 +27323,27 @@ function PortalApp({ previewMode = false, previewEmployee = null, onExitPreview 
     // If only 1 property, auto-select it
     const auto = props.length === 1 ? props[0] : null;
     setSelectedProperty(auto);
-    localStorage.setItem('tidytrack_portal', JSON.stringify({
-      userId: user.id,
-      propertyId: auto?.id || null,
-      code: user.code,
-    }));
+    // The 30 days start here, and only here.
+    sessionStartedAt.current = Date.now();
+    saveSession(auto?.id || null, user.id);
   };
 
   const onPickProperty = (prop) => {
     setSelectedProperty(prop);
     if (previewMode) return;
-    localStorage.setItem('tidytrack_portal', JSON.stringify({
-      userId: portalUser.id,
-      propertyId: prop.id,
-      code: portalUser.code,
-    }));
+    saveSession(prop.id);
   };
 
   const onBackToPicker = () => {
     setSelectedProperty(null);
     if (previewMode) return;
-    localStorage.setItem('tidytrack_portal', JSON.stringify({
-      userId: portalUser.id,
-      propertyId: null,
-      code: portalUser.code,
-    }));
+    saveSession(null);
   };
 
   const onSignOut = () => {
     if (previewMode) { onExitPreview && onExitPreview(); return; }
     localStorage.removeItem('tidytrack_portal');
+    sessionStartedAt.current = null;
     setPortalUser(null);
     setProperties([]);
     setSelectedProperty(null);
@@ -27179,6 +27398,13 @@ function PortalSignIn({ onSignIn }) {
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
 
+  // ONE refusal message for every way a code can fail: never issued, wrong,
+  // or a shared property code that's been switched off. Two different
+  // messages would tell whoever is typing which codes exist, which is worth
+  // more to someone guessing than it is to the PM reading it. It still
+  // points a locked-out PM at the thing that will work.
+  const REFUSED = "That code didn't match. If you've been given your own personal access code, use that one — otherwise check with your cleaning company.";
+
   const tryLogin = async () => {
     if (!code.trim()) return;
     setError(''); setBusy(true);
@@ -27218,7 +27444,27 @@ function PortalSignIn({ onSignIn }) {
     }
     setBusy(false);
     if (!data) {
-      setError("That code didn't match. Check with your cleaning company.");
+      setError(REFUSED);
+      return;
+    }
+    // A shared property code is a password everyone on the property knows,
+    // so removing one person can never revoke it. Once a property's people
+    // are on personal codes, the owner switches this off and the shared
+    // code stops signing anyone in. The personal-code path above is
+    // untouched — this only closes the shared-code door.
+    //
+    // Deliberately `=== false`, not `!data.legacy_signin_enabled`: if the
+    // column hasn't been added to the database yet the field reads
+    // undefined, and undefined must mean "carry on as before". Deploying
+    // this code before the migration runs locks nobody out.
+    //
+    // Deliberately the same message as a code that doesn't exist. An
+    // attacker with a guessed code learns nothing about whether it was
+    // real; there is no attempt limit on this screen, so a "that one's
+    // switched off" reply would be a free way to sort properties into
+    // still-open and closed.
+    if (data.legacy_signin_enabled === false) {
+      setError(REFUSED);
       return;
     }
     // Synthesize a "fake" portal user so the rest of the flow works
@@ -27375,31 +27621,47 @@ function PortalDashboard({ property, portalKind, portalUser, properties, onSwitc
   const [schedRecentOpen, setSchedRecentOpen] = useState(false);
   const [homeFilter, setHomeFilter] = useState('7d'); // History range: 7d / 30d / 1y
 
-  if (view.kind === 'unit-history') {
-    return <UnitHistoryView propertyId={property.id} propertyName={property.name}
-      unitId={view.unitId} unitLabel={view.unitLabel}
-      employee={null}
-      onBack={() => {
-        setView({ kind: 'home' });
-        requestAnimationFrame(() => requestAnimationFrame(() => {
-          window.scrollTo(0, homeScrollY);
-        }));
-      }} />;
+  const backHome = () => {
+    setView({ kind: 'home' });
+    // Restore the scroll position after the home screen has painted.
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      window.scrollTo(0, homeScrollY);
+    }));
+  };
+
+  // Every apartment name in the portal routes here. Held at dashboard level
+  // so the card replaces the whole screen (same as unit-day) and Back puts
+  // the PM exactly where they were.
+  const openUnitCard = (u) => {
+    if (!u || !u.id) return;
+    setHomeScrollY(window.scrollY || 0);
+    setView({ kind: 'unit-card', unitId: u.id, unitLabel: u.label });
+    window.scrollTo(0, 0);
+  };
+
+  if (view.kind === 'unit-card') {
+    // The message shortcut lives here rather than inside the card: the card
+    // is a full screen, and every state it can't answer for — blocked,
+    // nothing on file, couldn't load — ends in "ask us", which needs a real
+    // screen to go to.
+    if (view.messages) {
+      return <PortalMessagesTab property={property} portalKind={portalKind}
+        unitLabel={view.unitLabel}
+        onClose={() => setView({ ...view, messages: false })} />;
+    }
+    return <PortalUnitCard property={property} unitId={view.unitId} unitLabel={view.unitLabel}
+      onBack={backHome}
+      onOpenMessages={() => setView({ ...view, messages: true })} />;
   }
 
   if (view.kind === 'unit-day') {
     return <PortalUnitDay property={property} unitId={view.unitId} date={view.date}
       portalUser={portalUser}
-      onBack={() => {
-        setView({ kind: 'home' });
-        // Restore the scroll position after the home screen has painted.
-        requestAnimationFrame(() => requestAnimationFrame(() => {
-          window.scrollTo(0, homeScrollY);
-        }));
-      }} />;
+      onBack={backHome} />;
   }
 
-  return <PortalHome property={property} portalKind={portalKind} portalUser={portalUser}
+  return <PortalUnitCardContext.Provider value={openUnitCard}>
+    <PortalHome property={property} portalKind={portalKind} portalUser={portalUser}
     properties={properties} onSwitchProperty={onSwitchProperty}
     hasMultipleProperties={hasMultipleProperties} onBackToPicker={onBackToPicker}
     onSignOut={onSignOut}
@@ -27412,16 +27674,732 @@ function PortalDashboard({ property, portalKind, portalUser, properties, onSwitc
     damageSubTab={homeDamageSubTab} setDamageSubTab={setHomeDamageSubTab}
     damageExpanded={homeDamageExpanded} setDamageExpanded={setHomeDamageExpanded}
     asgApproval={homeAsgApproval} setAsgApproval={setHomeAsgApproval}
-    onOpenUnitHistory={(u) => {
-      setHomeScrollY(window.scrollY || 0);
-      setView({ kind: 'unit-history', unitId: u.id, unitLabel: u.label });
-      window.scrollTo(0, 0);
-    }}
+    onOpenUnitHistory={openUnitCard}
     onOpenUnitDay={(unitId, date) => {
       setHomeScrollY(window.scrollY || 0);
       setView({ kind: 'unit-day', unitId, date });
       window.scrollTo(0, 0);
-    }} />;
+    }} />
+  </PortalUnitCardContext.Provider>;
+}
+
+// =================================================================
+// APARTMENT CARD — "is 5-203 ready?" answered in one look.
+//
+// The portal could not answer that question anywhere. The header search
+// found the apartment and opened a 180-day history, which tells a property
+// manager what happened, not whether the place is clean now. This screen
+// leads with the current state and keeps that same history underneath —
+// literally the same component, not a fifth copy of it.
+//
+// Four rules it exists to hold. The first two are why it was rebuilt:
+//
+//  1. AN UNKNOWN DATE IS NEVER AN ALL-CLEAR. A blocked bedroom routinely
+//     has neither a started_at nor a scheduled_date — nothing writes
+//     started_at when a cleaner blocks an item, blocking straight from
+//     pending is the normal flow, and every PM checklist request is born
+//     with no date. Anything here that can't date a block still shows it
+//     and says the date isn't known. Dropping it is how a screen ends up
+//     telling a leasing office "nothing outstanding at this apartment"
+//     because a cleaner couldn't get in.
+//
+//  2. ONE DATE CONVENTION: LOCAL. UnitHistoryView, rendered directly
+//     below this panel, groups days by the LOCAL calendar day. Every day
+//     this card derives comes from localDayKey / localTodayKey and is
+//     printed with fmtDueDate, so the headline and the list two inches
+//     under it can't name different days for one cleaning. Ordering is by
+//     real instants, never by a sliced day string.
+//
+//  3. BLOCKED IS A STATE, NOT A GAP. "Cleanings done" only lists an
+//     apartment whose assignment is CURRENTLY marked done, so a bedroom a
+//     cleaner couldn't get into drops out of the list and the apartment
+//     reads as though nobody ever went. This card names blocked bedrooms
+//     and dates them.
+//
+//  4. NO CLEANER FREE TEXT, EVER. When a cleaner blocks an item they type
+//     a note (status_notes). It is written for our managers, about
+//     residents and units, and it is not for a customer to read. The card
+//     shows the STATE and the DAY and sends the PM to the message thread
+//     for the rest. status_notes is not even requested from the API:
+//     hiding a field in the markup still ships it to the browser for
+//     anyone who opens devtools. The same reasoning governs everything
+//     else here — the queries ask for what this panel renders and nothing
+//     more. Where a timestamp is unavoidable (a local calendar day has to
+//     be cut from an instant in the browser) exactly one per row is
+//     fetched, never a start and an end together, so no work duration is
+//     derivable from anything this screen loads.
+//
+// Everything here is read-only against the existing schema.
+// =================================================================
+function PortalUnitCard({ property, unitId, unitLabel, onBack, onOpenMessages }) {
+  const [state, setState] = useState({ loading: true, failed: false, data: null });
+  // Bumped by "Try again" so a failed load is recoverable without making
+  // the PM back out of the screen and find the apartment again.
+  const [reloadKey, setReloadKey] = useState(0);
+
+  // Every day this card prints goes through here.
+  //  • A day in another year gets the year. "Cleaned Wed, Jun 14" over an
+  //    empty history list reads as this June; it can be 2023.
+  //  • A key that isn't a real calendar day prints nothing, so a corrupt
+  //    value can't put the literal string "Invalid Date" in front of a
+  //    property manager. Callers treat '' as "we don't know".
+  const showDay = (key) => {
+    const k = String(key || '').slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(k)) return '';
+    const d = new Date(`${k}T00:00:00`);
+    if (Number.isNaN(d.getTime())) return '';
+    const opts = { weekday: 'short', month: 'short', day: 'numeric' };
+    if (d.getFullYear() !== new Date().getFullYear()) opts.year = 'numeric';
+    return d.toLocaleDateString('en-US', opts);
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setState({ loading: true, failed: false, data: null });
+      try {
+        // 1. Every assignment item that covers this apartment.
+        //
+        //    WHAT COUNTS AS "AT THIS APARTMENT". A job booked for the whole
+        //    property is written with unit_id NULL and party_id NULL, and
+        //    `=` never matches NULL — so an apartment-only filter cannot see
+        //    it, and this card said "nothing is booked or outstanding here"
+        //    while Cleanings pending listed the job on the same screen. Worse,
+        //    a blocked whole-property item read as clean on every apartment.
+        //    The union below is the same one BedroomHistoryView and the
+        //    assignment list use to answer "what work applies here".
+        const unitScope = `unit_id.eq.${unitId},and(unit_id.is.null,party_id.is.null)`;
+
+        //    Paginated for the same reason the history queries are: past
+        //    PostgREST's row cap an unordered query returns an arbitrary
+        //    slice, so the same bedroom is present on one load and missing on
+        //    the next. A failed page is not an empty page — breaking quietly
+        //    there is exactly how a dropped request became the sentence
+        //    "Nothing is booked or outstanding here".
+        const PAGE = 1000;
+        const fetchAll = async (build) => {
+          let out = [];
+          for (let from = 0; ; from += PAGE) {
+            const { data, error } = await build()
+              .order('id', { ascending: true })
+              .range(from, from + PAGE - 1);
+            if (error) throw error;
+            out = out.concat(data || []);
+            if (!data || data.length < PAGE) break;
+            if (from > 100000) break;
+          }
+          return out;
+        };
+        const targetsIn = (select) => supabase.from('assignment_targets')
+          .select(select)
+          .or(unitScope)
+          .eq('assignment.customer_id', property.id);
+
+        //    WHAT THE ROWS CARRY. started_at and completed_at used to come
+        //    back on the same row for every item ever booked here. That is a
+        //    clock pair per bedroom, and one subtraction turns it into how
+        //    long a named cleaner spent in a customer's flat — a number this
+        //    card never prints and has no business shipping. So the two
+        //    stamps are fetched in separate, status-filtered queries: a done
+        //    item carries only when it was closed, an open one only when it
+        //    was started, and no row on the wire ever carries both.
+        //
+        //    One instant per row is the floor, not a compromise I skipped.
+        //    Every day this card prints is the LOCAL day, and a timestamptz
+        //    cast server-side would be cut on the database's timezone, which
+        //    is the exact bug — card and history naming different days — that
+        //    the local-date rule at the top of this file exists to prevent.
+        const [baseRows, doneStamps, openStamps] = await Promise.all([
+          fetchAll(() => targetsIn(`
+            id, status, unit_id, party_id,
+            party:parties(label),
+            assignment:assignments!inner(id, customer_id, active, deleted_at, source, pm_status, scheduled_date)
+          `)),
+          // The assignment embed on these two is there for the customer
+          // filter, not for the data: !inner is what scopes the row to this
+          // property server-side, and customer_id is named so the filter
+          // reads against a column that is actually in the select.
+          fetchAll(() => targetsIn('id, completed_at, assignment:assignments!inner(customer_id)')
+            .eq('status', 'done')),
+          fetchAll(() => targetsIn('id, started_at, assignment:assignments!inner(customer_id)')
+            .in('status', ['blocked', 'in_progress'])),
+        ]);
+        const completedById = new Map(doneStamps.map(r => [r.id, r.completed_at]));
+        const startedById = new Map(openStamps.map(r => [r.id, r.started_at]));
+        // The three reads are one round trip but not one snapshot: an item
+        // can finish between them. Then baseRows says 'pending' and no stamp
+        // is found, and the card reports outstanding work a moment longer
+        // than it existed. That is the direction to be wrong in, and the next
+        // load corrects it.
+        const rows = baseRows.map(r => ({
+          ...r,
+          completed_at: completedById.get(r.id) || null,
+          started_at: startedById.get(r.id) || null,
+        }));
+
+        // 2. The last completed visit, for apartments cleaned without an
+        //    assignment behind them — otherwise the card can say "nothing on
+        //    file" above a history list showing yesterday's cleaning.
+        //    One column, one row: the newest start, ordered and limited
+        //    server-side. end_time is filtered on but never selected, so
+        //    there is no clock pair and no shift duration in the response;
+        //    the one instant that is left is what the local day is cut from,
+        //    and it is the same instant UnitHistoryView groups that day by.
+        //    The customer check is a server-side filter on the joined shift,
+        //    not a hopeful pass afterwards.
+        const { data: visitRows, error: visitError } = await supabase.from('work_blocks')
+          .select('start_time, shift:shifts!inner(customer_id)')
+          .eq('unit_id', unitId)
+          .eq('shift.customer_id', property.id)
+          .not('end_time', 'is', null)
+          .order('start_time', { ascending: false })
+          .limit(1);
+        if (visitError) throw visitError;
+
+        if (cancelled) return;
+
+        // Only agreed work counts. An unapproved or rejected PM request is
+        // not scheduled work, and Cleanings pending drops it — this has to
+        // agree with that list or the portal gives two answers about one
+        // apartment in the same minute.
+        const live = rows.filter(t => {
+          const a = t.assignment;
+          if (!a) return false;
+          if (a.customer_id !== property.id) return false;
+          if (a.active === false || a.deleted_at) return false;
+          if (a.source === 'pm' && a.pm_status !== 'approved') return false;
+          return true;
+        });
+
+        // TWO SCOPES, AND ONLY ONE OF THEM IS EVIDENCE ABOUT THIS APARTMENT.
+        //
+        // A row with unit_id NULL belongs to a job booked for the whole
+        // property. It has to be loaded — a building-wide job covers this
+        // apartment, and hiding it is how the card said "nothing is booked"
+        // over a job Cleanings pending was listing. But it is a membership
+        // fact about the building, not an observation of this flat, and
+        // every mark-done path in the app closes a job by assignment
+        // (`.eq('assignment_id', …)`), never apartment by apartment. So one
+        // person closing a whole-property job would otherwise put a green
+        // "Cleaned Thu, Sep 10" on every apartment in the building at once,
+        // above a history list showing that nobody went into any of them —
+        // and worse, it would retire a real block on 5-203 because a
+        // property-wide row keys under the same '_unit' bucket a
+        // whole-apartment block uses.
+        //
+        // The split below is the rule: property-wide rows may say what is
+        // BOOKED or STUCK (both true of the building, both useful, neither
+        // an assertion about this flat), and may never say this apartment
+        // was cleaned, never retire this apartment's blocks, and never
+        // appear as a bedroom in the rollup. They get their own line.
+        const unitLive = live.filter(t => t.unit_id);
+        const propLive = live.filter(t => !t.unit_id);
+
+        // Instants, not day strings. Comparing sliced dates is what made an
+        // 20:00 block and a 10:00 re-clean the next morning collapse onto one
+        // day and report a clean apartment as blocked.
+        const ms = (ts) => {
+          if (!ts) return null;
+          const n = new Date(ts).getTime();
+          return Number.isFinite(n) ? n : null;
+        };
+
+        // Latest completion per bedroom, used to retire stale blocks. Built
+        // from this apartment's rows only — see the split above.
+        const clearedByRoom = new Map();
+        unitLive.forEach(t => {
+          if (t.status !== 'done') return;
+          const at = ms(t.completed_at);
+          if (at === null) return;
+          const k = t.party_id || '_unit';
+          const cur = clearedByRoom.get(k);
+          if (cur == null || at > cur) clearedByRoom.set(k, at);
+        });
+
+        // When a block happened. started_at is when the cleaner was actually
+        // standing there. It is very often absent, so the job's scheduled
+        // date is the fallback — taken as the END of that local day, because
+        // a date carrying no clock time cannot rule out a clean later the
+        // same day. Both absent is ordinary and means exactly one thing:
+        // we do not know when.
+        const blockedAt = (t) => {
+          const started = ms(t.started_at);
+          if (started !== null) return started;
+          const sd = t.assignment?.scheduled_date ? String(t.assignment.scheduled_date).slice(0, 10) : null;
+          return sd ? ms(`${sd}T23:59:59`) : null;
+        };
+        const blockedDay = (t) => (t.started_at
+          ? localDayKey(t.started_at)
+          : (t.assignment?.scheduled_date ? String(t.assignment.scheduled_date).slice(0, 10) : null));
+
+        // A target stays status='blocked' until somebody changes it, so a
+        // bedroom blocked in June and cleaned again in September would
+        // headline this card as stuck for good. A block is retired only when
+        // that same bedroom has demonstrably been completed SINCE. No date on
+        // the block means it is not retired — an unknown date keeps the block
+        // on screen rather than turning it into good news.
+        const isRetired = (t) => {
+          if (t.status !== 'blocked') return false;
+          const cleared = clearedByRoom.get(t.party_id || '_unit');
+          if (cleared == null) return false;      // nothing done in that room since
+          const when = blockedAt(t);
+          if (when === null) return false;        // undated block — keep showing it
+          return cleared > when;                  // cleaned strictly after the block
+        };
+        // A whole-property block is retired by whole-property work finishing
+        // later, and by nothing else. Scope answers scope: one apartment
+        // being cleaned says nothing about a job booked for the building,
+        // and a building-wide job closing says nothing about one apartment.
+        const clearedProperty = propLive.reduce((acc, t) => {
+          if (t.status !== 'done') return acc;
+          const at = ms(t.completed_at);
+          return at !== null && (acc === null || at > acc) ? at : acc;
+        }, null);
+        const isPropRetired = (t) => {
+          if (t.status !== 'blocked') return false;
+          if (clearedProperty === null) return false;
+          const when = blockedAt(t);
+          if (when === null) return false;
+          return clearedProperty > when;
+        };
+        const retiredIds = new Set([
+          ...unitLive.filter(isRetired).map(t => t.id),
+          ...propLive.filter(isPropRetired).map(t => t.id),
+        ]);
+        const currentlyBlocked = unitLive.filter(t => t.status === 'blocked' && !retiredIds.has(t.id));
+
+        const blockedRooms = (() => {
+          const m = new Map();
+          currentlyBlocked.forEach(t => {
+            const k = t.party_id || '_unit';
+            const when = blockedDay(t);
+            const cur = m.get(k);
+            if (!cur) m.set(k, { key: k, label: t.party?.label || '', when, count: 1 });
+            else {
+              cur.count += 1;
+              if (when && (!cur.when || when > cur.when)) cur.when = when;
+            }
+          });
+          return [...m.values()].sort((a, b) => naturalCompare(a.label, b.label));
+        })();
+        const blockedKeys = new Set(blockedRooms.map(r => r.key));
+
+        // Open work, defined the way Cleanings pending defines it: anything
+        // not done, blocked included. A blocked bedroom on a job booked for
+        // next Friday is still a job booked for next Friday, and that list
+        // says so. Retired blocks are the single exception — that bedroom has
+        // been cleaned since, and counting it would have this card report
+        // outstanding work in the same breath as "Cleaned Sep 11".
+        //
+        // This is the one place property-wide rows join in, and only in the
+        // future-facing direction: a whole-property job booked for Friday IS
+        // a cleaning booked for this apartment on Friday, and saying
+        // "nothing booked" over one is the false all-clear this card was
+        // rebuilt to stop. Nothing below reads a completion off these rows.
+        const openTargets = live.filter(t => t.status !== 'done' && !retiredIds.has(t.id));
+        const outstandingTargets = openTargets.filter(t => t.status !== 'blocked');
+        const openJobIds = new Set(openTargets.map(t => t.assignment?.id).filter(Boolean));
+
+        const openDates = [...new Set(openTargets
+          .map(t => t.assignment?.scheduled_date)
+          .filter(Boolean)
+          .map(dt => String(dt).slice(0, 10)))].sort();
+        const todayKey = localTodayKey();
+        // "Next scheduled" means next. When nothing is upcoming it says so
+        // rather than reaching back for the newest date in the past, which is
+        // how this strip once printed a three-week-old date under a label
+        // that asserts futurity.
+        const nextDate = openDates.find(x => x >= todayKey) || null;
+        const pastDate = [...openDates].reverse().find(x => x < todayKey) || null;
+        const undatedJobs = new Set(openTargets
+          .filter(t => !t.assignment?.scheduled_date)
+          .map(t => t.assignment?.id).filter(Boolean)).size;
+
+        // Whichever cleaning was LATER, not whichever kind of record we
+        // happen to prefer. Preferring the assignment completion and only
+        // falling back to the visit headlined an apartment cleaned on a job
+        // in June over a history list whose top entry was a September
+        // walk-in: one screen, one apartment, two dates. Both are real
+        // cleanings; the newer one is the answer.
+        const lastDoneAt = [...clearedByRoom.values()].reduce((a, b) => (b > a ? b : a), 0) || null;
+        const lastVisit = (visitRows || [])[0]?.start_time || null;
+        const cleanInstants = [lastDoneAt, ms(lastVisit)].filter(v => v !== null);
+        const lastCleanDay = cleanInstants.length ? localDayKey(Math.max(...cleanInstants)) : null;
+
+        // Someone is here now = an item is in progress and was started in the
+        // last 24 hours, so an item nobody closed three weeks ago can't tell a
+        // PM a cleaner is standing in the apartment. An in-progress item with
+        // no start stamp falls through to "outstanding" — never to "clean".
+        // Apartment rows only: "someone is at this apartment" is a claim
+        // about this apartment, and a building-wide job being underway
+        // somewhere in the property is not evidence of it.
+        const DAY_MS = 24 * 60 * 60 * 1000;
+        const inProgress = openTargets.some(t => {
+          if (!t.unit_id) return false;
+          if (t.status !== 'in_progress') return false;
+          const at = ms(t.started_at);
+          return at !== null && (Date.now() - at) < DAY_MS;
+        });
+
+        // Per-bedroom rollup. Bedroom labels ("A", "Bedroom 2") are our own
+        // controlled values and already appear elsewhere in the portal. An
+        // item with no bedroom is the whole apartment, and it is called that
+        // in every place this data is rendered — one concept, one word.
+        // Apartment rows only. A property-wide row has no bedroom and is not
+        // the whole of this apartment either — folding it in here is what
+        // produced a "Whole apartment · Cleaned" chip on every flat in the
+        // building the moment one person closed one building-wide job.
+        const rooms = (() => {
+          const m = new Map();
+          unitLive.forEach(t => {
+            const k = t.party_id || '_unit';
+            if (!m.has(k)) m.set(k, { key: k, label: t.party?.label || '', openCount: 0, doneAt: null, nextDate: null });
+            const r = m.get(k);
+            if (t.status !== 'done' && t.status !== 'blocked' && !retiredIds.has(t.id)) {
+              r.openCount += 1;
+              const sd = t.assignment?.scheduled_date ? String(t.assignment.scheduled_date).slice(0, 10) : null;
+              if (sd && (!r.nextDate || sd < r.nextDate)) r.nextDate = sd;
+            }
+            const cd = ms(t.completed_at);
+            if (t.status === 'done' && cd !== null && (r.doneAt === null || cd > r.doneAt)) r.doneAt = cd;
+          });
+          return [...m.values()].map(r => {
+            // Blocked outranks outstanding: a bedroom nobody could get into is
+            // the thing the PM needs to know, not that items remain on it.
+            const status = blockedKeys.has(r.key) ? 'blocked' : r.openCount > 0 ? 'open' : 'done';
+            const when = status === 'blocked'
+              ? (blockedRooms.find(b => b.key === r.key)?.when || null)
+              : status === 'open'
+                ? r.nextDate
+                : (r.doneAt !== null ? localDayKey(r.doneAt) : null);
+            return { key: r.key, label: r.label, status, when };
+          }).sort((a, b) => naturalCompare(a.label, b.label));
+        })();
+
+        // Whole-property work, kept as its own fact and rendered as its own
+        // line. What it is allowed to say: this building has a job booked
+        // (with its date), or a job on this building couldn't be finished
+        // (with the day it stuck). What it is not allowed to say: anything
+        // in the past tense about this apartment. Property-wide rows that
+        // are done contribute nothing at all — the record of what happened
+        // inside this flat is its own targets and its own work blocks.
+        const propOpen = propLive.filter(t => t.status !== 'done' && !retiredIds.has(t.id));
+        const propBlockedRows = propOpen.filter(t => t.status === 'blocked');
+        const propDates = [...new Set(propOpen
+          .map(t => t.assignment?.scheduled_date)
+          .filter(Boolean)
+          .map(dt => String(dt).slice(0, 10)))].sort();
+        const propertyWide = propOpen.length ? {
+          blocked: propBlockedRows.length > 0,
+          blockedWhen: propBlockedRows
+            .map(blockedDay)
+            .filter(Boolean)
+            .sort()
+            .slice(-1)[0] || null,
+          nextDate: propDates.find(x => x >= todayKey) || null,
+          pastDate: [...propDates].reverse().find(x => x < todayKey) || null,
+        } : null;
+
+        setState({
+          loading: false,
+          failed: false,
+          data: {
+            blockedRooms, rooms, inProgress,
+            lastCleanDay, propertyWide,
+            openJobs: openJobIds.size,
+            outstandingCount: outstandingTargets.length,
+            nextDate, pastDate, undatedJobs,
+            // A whole-property row that is DONE is deliberately not a record
+            // here: if that is all there is, this card has nothing about this
+            // apartment and should offer the message thread rather than imply
+            // we know something.
+            hasAnyRecord: unitLive.length > 0 || !!lastVisit || propOpen.length > 0,
+          },
+        });
+      } catch (e) {
+        // A failure is a failure. It is emphatically NOT "nothing is booked
+        // or outstanding here" — that sentence, produced by a dropped
+        // request, is the worst thing this screen can say.
+        console.warn('[apartment card] load failed', e);
+        if (cancelled) return;
+        setState({ loading: false, failed: true, data: null });
+      }
+    })();
+    return () => { cancelled = true; };
+    /* eslint-disable-next-line */
+  }, [unitId, property.id, reloadKey]);
+
+  const d = state.data;
+
+  // The headline. One state, said in words a leasing office would use, in
+  // the order that matters to whoever is standing at the front desk.
+  const head = (() => {
+    if (state.loading || state.failed || !d) return null;
+    if (d.inProgress) return {
+      tone: 'amber', Icon: Clock,
+      title: 'Being cleaned now',
+      sub: 'Someone is at this apartment. Photos appear below once the cleaning is closed out.',
+    };
+    if (d.blockedRooms.length) {
+      const named = d.blockedRooms.filter(r => r.label);
+      const n = named.length;
+      return {
+        tone: 'amber', Icon: AlertCircle,
+        title: 'Not finished — the cleaner was blocked',
+        sub: n === d.blockedRooms.length
+          ? `${n} ${n === 1 ? 'bedroom' : 'bedrooms'} couldn't be cleaned. Message us and we'll tell you what's holding it up.`
+          : "This apartment couldn't be finished. Message us and we'll tell you what's holding it up.",
+      };
+    }
+    // A whole-property job that got stuck. Named as what it is. The row says
+    // a job covering the building couldn't be finished; it does not say a
+    // cleaner stood in this apartment and failed, and this card will not put
+    // words in its mouth.
+    if (d.propertyWide?.blocked) return {
+      tone: 'amber', Icon: AlertCircle,
+      title: "Whole-property job not finished",
+      sub: "A cleaning booked for the whole property couldn't be completed. Message us and we'll tell you what's holding it up and whether it reached this apartment.",
+    };
+    if (d.outstandingCount > 0) {
+      // A date we can't format is a date we don't have — it falls through to
+      // "no date yet" rather than printing "Cleaning booked for ".
+      const nextTxt = showDay(d.nextDate);
+      const pastTxt = showDay(d.pastDate);
+      if (nextTxt) return {
+        tone: 'stone', Icon: Calendar,
+        title: `Cleaning booked for ${nextTxt}`,
+        sub: 'Not cleaned yet — this apartment still has work outstanding.',
+      };
+      if (pastTxt) return {
+        tone: 'stone', Icon: Calendar,
+        title: 'Not cleaned yet',
+        sub: `Booked for ${pastTxt}. Message us if you need it sooner.`,
+      };
+      return {
+        tone: 'stone', Icon: Calendar,
+        title: 'Cleaning requested — no date yet',
+        sub: "We've got the request. Message us if you need it by a particular day.",
+      };
+    }
+    if (d.lastCleanDay) return {
+      tone: 'emerald', Icon: Check,
+      title: `Cleaned ${showDay(d.lastCleanDay)}`,
+      sub: 'Nothing outstanding at this apartment.',
+    };
+    return {
+      tone: 'stone', Icon: Home,
+      title: 'No cleaning scheduled',
+      sub: "Nothing is booked or outstanding here. That isn't the same as it being dirty — message us if you'd like it on the list.",
+    };
+  })();
+
+  const tones = {
+    amber: 'bg-amber-50 border-amber-300',
+    emerald: 'bg-emerald-50 border-emerald-300',
+    stone: 'bg-white border-stone-200',
+  };
+  const iconTones = { amber: 'text-amber-700', emerald: 'text-emerald-700', stone: 'text-stone-500' };
+  const roomChips = {
+    done: 'bg-emerald-100 text-emerald-800 border-emerald-300',
+    blocked: 'bg-amber-100 text-amber-900 border-amber-300',
+    open: 'bg-stone-100 text-stone-700 border-stone-300',
+  };
+  const roomWords = { done: 'Cleaned', blocked: 'Blocked', open: 'Outstanding' };
+
+  const panel = (
+    <div className="px-4 pt-4 space-y-3">
+      {state.loading ? (
+        <div className="rounded-2xl border border-stone-200 bg-white p-4 text-sm font-mono text-stone-400">
+          Checking this apartment…
+        </div>
+      ) : (state.failed || !d || !head) ? (
+        /* We couldn't check. That is a different thing from "we checked and
+           it's clear", and it has to read as different — a network failure
+           must never come out of this screen as good news. */
+        <div className="rounded-2xl border border-amber-300 bg-amber-50 p-4">
+          <div className="flex items-start gap-3">
+            <AlertCircle size={20} className="flex-shrink-0 mt-0.5 text-amber-700" />
+            <div className="min-w-0">
+              <div className="font-serif text-xl text-stone-900 leading-tight">
+                We couldn't load this apartment right now
+              </div>
+              <div className="text-sm text-stone-700 mt-1">
+                This is a problem at our end, not an answer about {unitLabel}. The cleaning
+                history below loads separately and may still be showing.
+              </div>
+            </div>
+          </div>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button onClick={() => setReloadKey(k => k + 1)}
+              className="px-4 py-2.5 rounded-xl bg-stone-900 text-stone-50 text-sm font-medium flex items-center justify-center gap-2 active:scale-98 transition">
+              <RotateCcw size={14} /> Try again
+            </button>
+            {onOpenMessages && (
+              <button onClick={onOpenMessages}
+                className="px-4 py-2.5 rounded-xl bg-white border border-stone-300 text-stone-800 text-sm font-medium flex items-center justify-center gap-2">
+                <MessageCircle size={14} /> Ask us about {unitLabel}
+              </button>
+            )}
+          </div>
+        </div>
+      ) : (
+        <>
+          <div className={`rounded-2xl border p-4 ${tones[head.tone]}`}>
+            <div className="flex items-start gap-3">
+              <head.Icon size={20} className={`flex-shrink-0 mt-0.5 ${iconTones[head.tone]}`} />
+              <div className="min-w-0">
+                <div className="font-serif text-xl text-stone-900 leading-tight">{head.title}</div>
+                <div className="text-sm text-stone-700 mt-1">{head.sub}</div>
+              </div>
+            </div>
+
+            {/* The two facts behind the headline, always both stated so the
+               PM never has to work out which one is missing. */}
+            <div className="mt-3 pt-3 border-t border-stone-900/10 grid grid-cols-2 gap-3">
+              <div>
+                <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500">Last cleaned</div>
+                <div className="text-sm text-stone-900 mt-0.5">
+                  {showDay(d.lastCleanDay) || 'Not recorded'}
+                </div>
+              </div>
+              <div>
+                <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500">Next scheduled</div>
+                <div className="text-sm text-stone-900 mt-0.5">
+                  {showDay(d.nextDate)
+                    || (d.openJobs === 0
+                      ? 'Nothing booked'
+                      : d.pastDate
+                        ? 'Nothing upcoming'
+                        : 'No date yet')}
+                </div>
+              </div>
+            </div>
+
+            {/* Undated open work is stated rather than left to be inferred
+               from an empty "Next scheduled" — including when undated work is
+               the whole story, which is the one case it used to be hidden. */}
+            {d.undatedJobs > 0 && (d.undatedJobs > 1 || d.nextDate || d.pastDate) && (
+              <div className="mt-2 text-[11px] font-mono text-stone-600">
+                {d.undatedJobs === 1
+                  ? '1 request has no date set yet.'
+                  : `${d.undatedJobs} requests have no date set yet.`}
+              </div>
+            )}
+          </div>
+
+          {/* Blocked bedrooms, named and dated. No cleaner's note — the
+             state and the day are what a PM can act on. A block we can't
+             date is still listed, and says so. */}
+          {d.blockedRooms.length > 0 && (
+            <div className="rounded-2xl border border-amber-300 bg-white p-4">
+              <div className="text-[10px] uppercase tracking-wider font-mono text-amber-800 mb-2">
+                Couldn't be cleaned
+              </div>
+              <div className="space-y-1.5">
+                {d.blockedRooms.map(r => (
+                  <div key={r.key} className="flex items-center justify-between gap-3 text-sm">
+                    <span className="text-stone-900">{r.label || 'Whole apartment'}</span>
+                    <span className="text-[11px] font-mono text-stone-500 flex-shrink-0">
+                      {showDay(r.when) || 'Date unknown'}
+                    </span>
+                  </div>
+                ))}
+              </div>
+              {onOpenMessages && (
+                <button onClick={onOpenMessages}
+                  className="mt-3 w-full py-2.5 rounded-xl bg-stone-900 text-stone-50 text-sm font-medium flex items-center justify-center gap-2 active:scale-98 transition">
+                  <MessageCircle size={14} /> Ask us about {unitLabel}
+                </button>
+              )}
+            </div>
+          )}
+
+          {/* Whole-property work, on its own line and in its own words.
+             It is here because a job booked for the building is a job that
+             covers this apartment and the PM should see it. It is SEPARATE
+             because it is not a record of anything done inside this flat:
+             every mark-done path closes a job by assignment, so one person
+             closing one building-wide job would otherwise tick off every
+             apartment in the property at once. */}
+          {d.propertyWide && (
+            <div className={`rounded-2xl border p-4 ${d.propertyWide.blocked ? 'border-amber-300 bg-white' : 'border-stone-200 bg-white'}`}>
+              <div className={`text-[10px] uppercase tracking-wider font-mono mb-1 ${d.propertyWide.blocked ? 'text-amber-800' : 'text-stone-500'}`}>
+                Whole-property work
+              </div>
+              <div className="text-sm text-stone-900">
+                {d.propertyWide.blocked
+                  ? `A job booked for the whole property couldn't be finished${showDay(d.propertyWide.blockedWhen) ? ` · ${showDay(d.propertyWide.blockedWhen)}` : ''}.`
+                  : showDay(d.propertyWide.nextDate)
+                    ? `A cleaning is booked for the whole property on ${showDay(d.propertyWide.nextDate)}.`
+                    : showDay(d.propertyWide.pastDate)
+                      ? `A cleaning booked for the whole property on ${showDay(d.propertyWide.pastDate)} is still open.`
+                      : 'A cleaning is booked for the whole property, with no date set yet.'}
+              </div>
+              <div className="text-[11px] text-stone-600 mt-1">
+                This covers the building, {unitLabel} included. It isn't a record of anything
+                done inside {unitLabel} — that's the history below.
+              </div>
+            </div>
+          )}
+
+          {/* Bedroom-by-bedroom, so an apartment that is half done reads as
+             half done instead of as one word. */}
+          {d.rooms.length > 1 && (
+            <div className="rounded-2xl border border-stone-200 bg-white p-4">
+              <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-2">
+                By bedroom
+              </div>
+              <div className="space-y-1.5">
+                {d.rooms.map(r => (
+                  <div key={r.key} className="flex items-center justify-between gap-3">
+                    <span className="text-sm text-stone-900 truncate">{r.label || 'Whole apartment'}</span>
+                    <span className="flex items-center gap-2 flex-shrink-0">
+                      {showDay(r.when) && (
+                        <span className="text-[11px] font-mono text-stone-500">{showDay(r.when)}</span>
+                      )}
+                      <span className={`text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full border ${roomChips[r.status]}`}>
+                        {roomWords[r.status]}
+                      </span>
+                    </span>
+                  </div>
+                ))}
+              </div>
+              {/* These dates come from booked jobs. A cleaner who walked in
+                 without one leaves no assignment item, so the headline above
+                 can legitimately name a more recent day than any row here —
+                 it can see the visit and this rollup can't. Said out loud
+                 rather than left looking like a contradiction. */}
+              <div className="text-[11px] text-stone-500 mt-2 pt-2 border-t border-stone-100">
+                Bedroom dates come from booked jobs. A cleaning done without one shows in the
+                history below and in "Last cleaned", not here.
+              </div>
+            </div>
+          )}
+
+          {/* Nothing on file at all. Says so plainly and offers the one
+             thing that helps, rather than implying the apartment is dirty. */}
+          {!d.hasAnyRecord && onOpenMessages && (
+            <button onClick={onOpenMessages}
+              className="w-full py-3 rounded-2xl bg-stone-100 border border-stone-300 text-stone-800 text-sm font-medium flex items-center justify-center gap-2">
+              <MessageCircle size={14} /> Ask us about {unitLabel}
+            </button>
+          )}
+        </>
+      )}
+    </div>
+  );
+
+  return (
+    <UnitHistoryView
+      propertyId={property.id}
+      propertyName={property.name}
+      unitId={unitId}
+      unitLabel={unitLabel}
+      employee={null}
+      onBack={onBack}
+      subtitle="Where this apartment stands, then everything that's happened here"
+      beforeContent={panel} />
+  );
 }
 
 // Language toggle for the PM portal header. The portal already lives
@@ -27847,7 +28825,8 @@ function PortalHome({ property, portalKind, portalUser, properties, onSwitchProp
       )}
 
       {showWelcome && (
-        <WelcomeModal propertyName={property.name} onClose={dismissWelcome} />
+        <WelcomeModal propertyName={property.name} canViewInvoices={canViewInvoices}
+          onClose={dismissWelcome} />
       )}
       {showMenu && (
         <PortalMenuSheet
@@ -27961,6 +28940,7 @@ function PortalInvoicesTab({ property }) {
 function PortalHistoryTab({ property, groups, loaded, filter, setFilter, onOpenUnitDay,
   damageSubTab: damageSubTabProp, setDamageSubTab: setDamageSubTabProp,
   damageExpanded: damageExpandedProp, setDamageExpanded: setDamageExpandedProp }) {
+  const openUnitCard = usePortalUnitCard();
   // Filters — PM-appropriate. Date, building, and apartment. We
   // intentionally don't expose category/cleaner filters here because PMs
   // shouldn't be slicing by who did the work or by task type.
@@ -28120,7 +29100,6 @@ function PortalHistoryTab({ property, groups, loaded, filter, setFilter, onOpenU
 
   return (
     <div className="px-5 pt-6">
-      <ScreenId id="PM-HOME" />
       {/* Sticky damage indicator — pins to the top of the viewport when the
          PM scrolls past the stats row, so they never lose sight of active
          damage while reviewing the cleaning history below. Hidden when no
@@ -28380,9 +29359,8 @@ function PortalHistoryTab({ property, groups, loaded, filter, setFilter, onOpenU
               </div>
               <div className="space-y-2">
                 {bg.rows.map(({ g, u }) => (
-                  <button key={`${g.date}-${u.unitId || 'simple'}`}
-                    onClick={() => onOpenUnitDay(u.unitId, g.date)}
-                    className={`w-full text-left p-4 rounded-2xl border transition-colors relative overflow-hidden ${
+                  <div key={`${g.date}-${u.unitId || 'simple'}`}
+                    className={`rounded-2xl border transition-colors relative overflow-hidden ${
                       u.hasDamage
                         ? 'bg-red-50 border-red-300 hover:border-red-500 border-l-4 border-l-red-600'
                         : u.hasCannot
@@ -28391,6 +29369,9 @@ function PortalHistoryTab({ property, groups, loaded, filter, setFilter, onOpenU
                             ? 'bg-white border-stone-200 hover:border-stone-400 border-l-4 border-l-emerald-500'
                             : 'bg-white border-stone-200 hover:border-stone-400'
                     }`}>
+                  <button
+                    onClick={() => onOpenUnitDay(u.unitId, g.date)}
+                    className="w-full text-left p-4">
                     <div className="flex items-center justify-between gap-3">
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2 flex-wrap">
@@ -28444,6 +29425,19 @@ function PortalHistoryTab({ property, groups, loaded, filter, setFilter, onOpenU
                       <ChevronRight size={16} className={`flex-shrink-0 ${u.hasDamage ? 'text-red-600' : u.hasCannot ? 'text-yellow-600' : 'text-stone-400'}`} />
                     </div>
                   </button>
+                  {/* Every apartment name in the portal has to reach the
+                     apartment card, or it's a screen nobody finds. A sibling
+                     button rather than a nested one — the row itself is a
+                     button and a button can't contain another. */}
+                  {openUnitCard && u.unitId && (
+                    <div className="px-4 pb-3 -mt-1">
+                      <button onClick={() => openUnitCard({ id: u.unitId, label: u.label })}
+                        className="text-[11px] font-mono text-stone-600 hover:text-stone-900 inline-flex items-center gap-1 underline decoration-dotted underline-offset-2">
+                        <Home size={11} /> Is {u.label} ready?
+                      </button>
+                    </div>
+                  )}
+                  </div>
                 ))}
               </div>
             </div>
@@ -28460,6 +29454,11 @@ function PortalUnitDay({ property, unitId, date, portalUser, onBack }) {
   const [unit, setUnit] = useState(null);
   const [blocks, setBlocks] = useState([]);
   const [loaded, setLoaded] = useState(false);
+  // A failed photo query is not a day with no photos. Without this, a
+  // dropped request renders as "No photos recorded for this date", which
+  // tells a property manager something we don't know.
+  const [failed, setFailed] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
   const [viewMode, setViewMode] = useState('all'); // 'all' | 'by-section'
   // Selection mode lets the PM check photos and bulk-download or share
   const [selectMode, setSelectMode] = useState(false);
@@ -28489,6 +29488,7 @@ function PortalUnitDay({ property, unitId, date, portalUser, onBack }) {
 
   useEffect(() => { (async () => {
     setLoaded(false);
+    setFailed(false);
 
     // Enforce portal start date — refuse to load anything before it
     if (property.portal_start_date && date < property.portal_start_date) {
@@ -28501,37 +29501,60 @@ function PortalUnitDay({ property, unitId, date, portalUser, onBack }) {
     const dayEnd = new Date(dyY, dyM - 1, dyD, 23, 59, 59, 999).toISOString();
 
     if (unitId) {
-      const { data: u } = await supabase.from('units').select('*').eq('id', unitId).maybeSingle();
+      const { data: u } = await supabase.from('units').select('id, label').eq('id', unitId).maybeSingle();
       setUnit(u);
-      const { data: bs } = await supabase
+      // Every column named here is one this screen draws. It used to be `*`
+      // on work_blocks, tasks and photos plus the taken_by join, which put
+      // work_blocks.work_notes, photos.notes and photos.notes_en — cleaners'
+      // raw free text, written for our managers — and the cleaner's real
+      // name into the property manager's browser on every open. Hiding them
+      // in the markup is not enough: they still sit in the network response
+      // for anyone who opens devtools. So they are not asked for.
+      // start_time is filtered and ordered on server-side, never selected:
+      // the PM is looking at one named day, not at a cleaner's clock.
+      const { data: bs, error: bsError } = await supabase
         .from('work_blocks')
-        .select('*, party:parties(label,full_name), shift:shifts!inner(customer_id), tasks(*, photos(*, taken_by_employee:employees!taken_by(name)))')
+        .select('id, party:parties(label,full_name), shift:shifts!inner(customer_id), tasks(id, name, category, subcategory, photos(id, public_url, kind, deleted_at, resolved_at, took_extra))')
         .eq('unit_id', unitId)
         .or('is_preview.is.null,is_preview.eq.false')
         .gte('start_time', dayStart).lte('start_time', dayEnd)
         .order('start_time');
+      if (bsError) {
+        console.warn('[PortalUnitDay] photo load failed', bsError);
+        setBlocks([]); setFailed(true); setLoaded(true);
+        return;
+      }
       const filtered = (bs || []).filter(b => b.shift?.customer_id === property.id);
       setBlocks(filtered);
     } else {
-      // Simple property: pull tasks for shifts on this date
-      const { data: shifts } = await supabase
+      // Simple property: pull tasks for shifts on this date. Same narrowing
+      // as the multi-unit branch above, and for the same reason — `*` here
+      // shipped the shift row and every photo's notes / notes_en with the
+      // cleaner's name attached.
+      const { data: shifts, error: shiftError } = await supabase
         .from('shifts')
-        .select('*, tasks(*, photos(*, taken_by_employee:employees!taken_by(name)))')
+        .select('id, tasks(id, name, category, subcategory, photos(id, public_url, kind, deleted_at, resolved_at, took_extra))')
         .eq('customer_id', property.id)
         .or('is_preview.is.null,is_preview.eq.false')
         .gte('start_time', dayStart).lte('start_time', dayEnd)
         .order('start_time');
-      // Wrap each shift as a "block" for uniform display
+      if (shiftError) {
+        console.warn('[PortalUnitDay] photo load failed', shiftError);
+        setBlocks([]); setFailed(true); setLoaded(true);
+        return;
+      }
+      // Wrap each shift as a "block" for uniform display. The shift's own
+      // start and end are the cleaner's clock readings and nothing here
+      // renders them, so they are neither selected nor carried.
       const fakeBlocks = (shifts || []).map(s => ({
         id: s.id,
-        start_time: s.start_time, end_time: s.end_time,
         party: null,
         tasks: s.tasks || []
       }));
       setBlocks(fakeBlocks);
     }
     setLoaded(true);
-  })(); }, [unitId, date, property.id]);
+  })(); }, [unitId, date, property.id, reloadKey]);
 
   // Compute the list of bedrooms (parties) that were cleaned on this
   // day. When there's more than one, we default the tab to the first
@@ -28569,6 +29592,38 @@ function PortalUnitDay({ property, unitId, date, portalUser, onBack }) {
   })();
 
   if (!loaded) return <Splash text="Loading…" />;
+
+  // We couldn't load. Said as a failure at our end, because the alternative
+  // this screen used to print — "No photos recorded for this date" — is an
+  // answer, and we don't have one.
+  if (failed) return (
+    <div className="min-h-screen bg-stone-50">
+      <div className="bg-stone-900 text-stone-50 px-5 py-4">
+        <button onClick={onBack} className="flex items-center gap-2 text-stone-400 text-sm hover:text-stone-50">
+          <ArrowLeft size={16} /> Back
+        </button>
+      </div>
+      <div className="px-5 pt-6">
+        <div className="rounded-2xl border border-amber-300 bg-amber-50 p-4">
+          <div className="flex items-start gap-3">
+            <AlertCircle size={20} className="flex-shrink-0 mt-0.5 text-amber-700" />
+            <div className="min-w-0">
+              <div className="font-serif text-xl text-stone-900 leading-tight">
+                We couldn't load the photos for this day
+              </div>
+              <div className="text-sm text-stone-700 mt-1">
+                This is a problem at our end, not a day with nothing on it.
+              </div>
+            </div>
+          </div>
+          <button onClick={() => setReloadKey(k => k + 1)}
+            className="mt-3 px-4 py-2.5 rounded-xl bg-stone-900 text-stone-50 text-sm font-medium inline-flex items-center gap-2 active:scale-98 transition">
+            <RotateCcw size={14} /> Try again
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 
   // Aggregate all photos for this unit/day, separated by kind.
   // We also tag each photo with the task's category/subcategory so
@@ -28700,7 +29755,6 @@ function PortalUnitDay({ property, unitId, date, portalUser, onBack }) {
 
   return (
     <div className="min-h-screen bg-stone-50 pb-12">
-      <ScreenId id="PM-DAY" />
       <style>{`
         @media print {
           body { background: white !important; }
@@ -28830,7 +29884,7 @@ function PortalUnitDay({ property, unitId, date, portalUser, onBack }) {
                 label="Couldn't clean"
                 photos={allCannotActive}
                 highlight="yellow"
-                description="Rooms the cleaner was not able to clean. Tap a photo to read the note and resolve."
+                description="Rooms the cleaner was not able to clean. Tap a photo to see it, then Resolve — or message us and we'll tell you what's holding it up."
                 onResolve={(p) => setPhotoResolution(p, true)}
                 selectMode={selectMode} selectedIds={selectedIds} onToggleSelect={toggleSelectOne}
               />
@@ -28960,7 +30014,7 @@ function PortalUnitDay({ property, unitId, date, portalUser, onBack }) {
                 {buckets.cannot.length > 0 && (
                   <PortalPhotoSection
                     label="Couldn't clean" photos={buckets.cannot} highlight="yellow"
-                    description="Not cleaned. Tap to read the note and resolve."
+                    description="Not cleaned. Tap to see the photo, then Resolve."
                     onResolve={(p) => setPhotoResolution(p, true)}
                     selectMode={selectMode} selectedIds={selectedIds} onToggleSelect={toggleSelectOne}
                   />
@@ -29091,6 +30145,9 @@ function ResolvedDamageHistory({ photos, onReopen, title = 'Resolved damage', bl
         ))}
       </div>
       {zoom && (
+        /* No isStaff — this is the property manager's screen, so the viewer
+           draws the photo and the bedroom and nothing about who took it or
+           what they wrote. */
         <PhotoZoomViewer photos={photos} initialUrl={zoom.public_url} onClose={() => setZoom(null)} />
       )}
     </div>
@@ -29221,6 +30278,8 @@ function PortalPhotoSection({ label, photos, highlight, description, onResolve, 
         })}
       </div>
       {zoom && (
+        /* No isStaff — see ResolvedDamageHistory. The PM can resolve a
+           flagged photo from here; they cannot read the note behind it. */
         <PhotoZoomViewer photos={photos} initialUrl={zoom.public_url}
           onClose={() => setZoom(null)}
           onResolveCurrent={onResolve && flagged ? (p) => { onResolve(p); setZoom(null); } : null} />
@@ -30821,12 +31880,35 @@ function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenUnfi
   );
 }
 
+// Which assignment stands for a unit's current job when the unit has more
+// than one. Prefer an OPEN one; within the same open/done state prefer the
+// most recently created. Deterministic on purpose: PostgREST returns rows
+// in no guaranteed order, so "whichever row came back first" let the Daily
+// card and the unit-day screen name different jobs for the same apartment.
+// Used by DailyDayDetail.loadUnitAsg and DailyUnitDayDetail.reload — it is
+// one function so the two cannot drift apart. Returns true if cand wins.
+function unitAssignmentWins(cand, prev) {
+  if (!prev) return true;
+  if (cand.open !== prev.open) return cand.open;
+  const ca = cand.createdAt || '';
+  const pa = prev.createdAt || '';
+  if (ca !== pa) return ca > pa;
+  return String(cand.id) > String(prev.id); // last resort, still stable
+}
+
 // Day detail: shows all properties + units cleaned on this date
 function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit, onShiftDay = null }) {
   const [data, setData] = useState(null);
   // Open assignment per unit, so the same inline controls (done / size /
   // assign / due date) work straight from a Daily card.
-  const [unitAsg, setUnitAsg] = useState({}); // unitId -> {id, scheduledDate, tookLonger, open, assignees[]} — NO size here, see unitSize
+  const [unitAsg, setUnitAsg] = useState({}); // unitId -> {id, scheduledDate, tookLonger, open, assignmentType, assignees[]} — NO size here, see unitSize
+  // Which set of units unitAsg currently describes, as a joined id string.
+  // The type chip reads "No type" for an unlabelled job, so it must never
+  // paint that from a map built for different units. Stepping to the next
+  // day re-renders this component rather than remounting it, so a plain
+  // "loaded" boolean would stay true and every apartment new to today
+  // would flash NO TYPE until four queries came back.
+  const [unitAsgKey, setUnitAsgKey] = useState(null);
   const [dTeam, setDTeam] = useState([]);
   const [dBusy, setDBusy] = useState(null);
   const [dAssignFor, setDAssignFor] = useState(null);
@@ -30844,25 +31926,41 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit, onShift
     // 1000-row cap once there are thousands of done items, which silently
     // drops assignments (units then look like they have none).
     const ids = (unitIds || []).filter(Boolean);
-    if (!ids.length) { setUnitAsg({}); setUnitSize({}); return; }
-    const { data: rows } = await supabase.from('assignment_targets')
-      .select('unit_id, status, completed_at, unit:units(id, bedrooms, bathrooms), assignment:assignments!inner(id, active, deleted_at, scheduled_date, took_longer)')
-      .in('unit_id', ids)
-      .not('status', 'eq', 'blocked');
+    if (!ids.length) { setUnitAsg({}); setUnitSize({}); setUnitAsgKey(''); return; }
+    // Page through. Scoping to the day's units reduces the row count but
+    // doesn't bound it — 35 apartments with a year of history each still
+    // crosses PostgREST's 1000-row default, and a truncated response
+    // doesn't error. It just makes units look like they have no
+    // assignment, which now also shows as a false "No type" chip.
+    // .order('id') so paging can't repeat or skip rows.
+    const PAGE = 1000;
+    let rows = [];
+    let rowsComplete = true;
+    for (let from = 0; ; from += PAGE) {
+      const { data: page, error: pageErr } = await supabase.from('assignment_targets')
+        .select('id, unit_id, status, completed_at, unit:units(id, bedrooms, bathrooms), assignment:assignments!inner(id, active, deleted_at, scheduled_date, took_longer, assignment_type, created_at)')
+        .in('unit_id', ids)
+        .not('status', 'eq', 'blocked')
+        .order('id')
+        .range(from, from + PAGE - 1);
+      if (pageErr) { rowsComplete = false; break; }
+      rows = rows.concat(page || []);
+      if (!page || page.length < PAGE) break;
+    }
     // Sizes come straight from units so they're always right, even for
     // units with no assignment at all.
     const { data: unitRows } = await supabase.from('units').select('id, bedrooms, bathrooms').in('id', ids);
     const m = {}; const sizes = {};
     (unitRows || []).forEach(u => { sizes[u.id] = { bedrooms: u.bedrooms, bathrooms: u.bathrooms }; });
-    (rows || []).forEach(t => {
+    rows.forEach(t => {
       const a = t.assignment;
       if (!a || a.active === false || a.deleted_at || !t.unit_id) return;
-      const open = t.status !== 'done';
-      const prev = m[t.unit_id];
-      // Prefer an OPEN assignment; otherwise keep the most recent done one.
-      if (!prev || (open && !prev.open)) {
-        m[t.unit_id] = { id: a.id, scheduledDate: a.scheduled_date || null, tookLonger: !!a.took_longer, open, assignees: [] };
-      }
+      const cand = {
+        id: a.id, scheduledDate: a.scheduled_date || null, tookLonger: !!a.took_longer,
+        open: t.status !== 'done', assignmentType: a.assignment_type || null,
+        createdAt: a.created_at || null, assignees: [],
+      };
+      if (unitAssignmentWins(cand, m[t.unit_id])) m[t.unit_id] = cand;
     });
     setUnitSize(sizes);
     // Roster first, so assignee names resolve without a PostgREST embed.
@@ -30880,6 +31978,9 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit, onShift
       });
     }
     setUnitAsg(m);
+    // Only claim this map describes these units if we actually got all of
+    // it. A failed page leaves the chips hidden rather than guessing.
+    setUnitAsgKey(rowsComplete ? ids.join(',') : null);
     setDTeam((emps || []).filter(e => e.role !== 'owner'));
   };
   // Unit ids present on this day (from the loaded work blocks).
@@ -30892,6 +31993,10 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit, onShift
   }, [data]);
   const refreshUnitAsg = () => loadUnitAsg(dayUnitIds);
   useEffect(() => { if (dayUnitIds.length) loadUnitAsg(dayUnitIds); /* eslint-disable-next-line */ }, [dayUnitIds.join(',')]);
+  // True only when unitAsg was built for the units on screen right now.
+  // Goes false by itself the instant the day changes, because dayUnitIds
+  // changes in the same render.
+  const unitAsgFresh = unitAsgKey === dayUnitIds.join(',');
 
   const dSaveDue = async (asgId, val) => {
     setDDueFor(null); setDBusy(asgId);
@@ -31299,6 +32404,14 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit, onShift
                               <div className="flex-1 min-w-0">
                                 <div className="flex items-center gap-2 flex-wrap mb-1">
                                   <span className="font-serif text-lg text-stone-900">{u.unitLabel}</span>
+                                  {/* What kind of clean this is. Reads off the same
+                                     open assignment the controls below act on, so
+                                     the chip and the buttons can never disagree.
+                                     Held back until that query lands for THESE
+                                     units — see unitAsgFresh. */}
+                                  {unitAsgFresh && (
+                                    <AssignmentTypeChip type={ua?.assignmentType} showEmpty />
+                                  )}
                                   {u.hasDamage && (
                                     <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-red-100 text-red-700">
                                       ⚠ Damage
@@ -31559,8 +32672,14 @@ function DayPhotoTabs({ photos, isStaff }) {
 // A "cleaning" is one assignment. Work with no assignment behind it —
 // somebody walked in and cleaned — is grouped by the shift it was done
 // on, which is the closest thing to a visit that data has.
+//
+// beforeContent renders between the sticky title bar and the day list, so
+// the PM portal can lead with the apartment card and keep this list —
+// literally this component — underneath it instead of growing a fifth
+// copy of a history renderer. Staff callers pass neither new prop and get
+// exactly the screen they had.
 // =================================================================
-function UnitHistoryView({ propertyId, propertyName, unitId, unitLabel, employee, onBack, onOpenBedroom = null }) {
+function UnitHistoryView({ propertyId, propertyName, unitId, unitLabel, employee, onBack, onOpenBedroom = null, beforeContent = null, subtitle = null }) {
   const isStaff = employee?.role === 'owner' || employee?.role === 'manager';
   const [state, setState] = useState({ days: [], loading: true });
   const WINDOW_DAYS = isStaff ? 365 : 180;
@@ -31582,12 +32701,25 @@ function UnitHistoryView({ propertyId, propertyName, unitId, unitLabel, employee
            participants:work_block_participants(id, employee:employees(id, name)),`
         : `shift:shifts!inner(id, customer_id),`;
 
+      // The same reasoning applied to the columns, not just the joins. This
+      // used to be `*` on work_blocks, tasks and photos, which shipped
+      // work_blocks.work_notes and photos.notes / notes_en — cleaners' raw
+      // free text, written for our managers — into the PM's browser on every
+      // open, and parties.full_name with it. None of it is rendered here.
+      // Now the select names what this screen actually reads, which is the
+      // enumerated set below; staff see exactly the same screen, because
+      // nothing that was dropped was ever displayed to them here either.
+      // photos.created_at is in that set even though nothing prints it:
+      // DayPhotoTabs sorts every bucket by it, and without it the comparator
+      // returns 0 for every pair and the photos come out in whatever order
+      // the embed happened to return — on the staff screen too.
       const { data: blocksRaw } = await supabase.from('work_blocks')
         .select(`
-          *, party:parties(id, label, full_name),
+          id, assignment_id, start_time, end_time,
+          party:parties(id, label),
           ${peopleJoin}
           assignment:assignments(id, title, assignment_type, scheduled_date),
-          tasks(*, photos(*${isStaff ? ', taken_by_employee:employees!taken_by(name)' : ''}))
+          tasks(id, name, photos(id, public_url, kind, created_at, deleted_at${isStaff ? ', taken_by_employee:employees!taken_by(name)' : ''}))
         `)
         .eq('unit_id', unitId)
         .gte('start_time', since.toISOString())
@@ -31659,9 +32791,11 @@ function UnitHistoryView({ propertyId, propertyName, unitId, unitLabel, employee
           <span className="text-xs font-mono text-stone-500">{propertyName}</span>
         </div>
         <div className="text-[11px] font-mono text-stone-400 mt-0.5">
-          Everything at this apartment · last {WINDOW_DAYS} days
+          {subtitle || `Everything at this apartment · last ${WINDOW_DAYS} days`}
         </div>
       </div>
+
+      {beforeContent}
 
       {loading ? (
         <div className="px-5 py-8 text-sm font-mono text-stone-400">Loading…</div>
@@ -32168,6 +33302,13 @@ function DailyUnitDayDetail({ date, propertyId, unitId, unitLabel, propertyName,
   const [deletingBlock, setDeletingBlock] = useState(null);
   const [deletingShift, setDeletingShift] = useState(null); // shift obj
   const [busy, setBusy] = useState(false);
+  // What kind of clean this apartment's job is. Resolved here rather than
+  // passed down so the screen is right even on a reload, and only shown
+  // once `loaded` flips — an untyped job says "No type", and that has to
+  // mean "nobody labelled it", never "we haven't asked yet" or "the read
+  // failed" (asgTypeKnown covers the second).
+  const [asgType, setAsgType] = useState(null);
+  const [asgTypeKnown, setAsgTypeKnown] = useState(false);
 
   const reload = async () => {
     setLoaded(false);
@@ -32183,6 +33324,28 @@ function DailyUnitDayDetail({ date, propertyId, unitId, unitLabel, propertyName,
       .order('start_time');
     const filtered = (data || []).filter(b => b.shift?.customer_id === propertyId);
     setBlocks(filtered);
+
+    // Same rule as the Daily day list, through the same function, so the
+    // card the owner tapped and this screen always name the same job.
+    // One unit, so no paging needed here.
+    const { data: tRows, error: tErr } = await supabase.from('assignment_targets')
+      .select('status, assignment:assignments!inner(id, active, deleted_at, assignment_type, created_at)')
+      .eq('unit_id', unitId)
+      .not('status', 'eq', 'blocked');
+    let picked = null;
+    (tRows || []).forEach(t => {
+      const a = t.assignment;
+      if (!a || a.active === false || a.deleted_at) return;
+      const cand = {
+        id: a.id, open: t.status !== 'done',
+        assignmentType: a.assignment_type || null, createdAt: a.created_at || null,
+      };
+      if (unitAssignmentWins(cand, picked)) picked = cand;
+    });
+    // A failed read is "we don't know", not "no type".
+    setAsgTypeKnown(!tErr);
+    setAsgType(picked ? picked.assignmentType : null);
+
     setLoaded(true);
   };
 
@@ -32272,7 +33435,13 @@ function DailyUnitDayDetail({ date, propertyId, unitId, unitLabel, propertyName,
         <div className="text-xs uppercase tracking-widest text-stone-400 font-mono mb-2">
           {dateObj.toLocaleDateString('en-US', { weekday:'long', month:'long', day:'numeric', year:'numeric' })}
         </div>
-        <h1 className="font-serif text-3xl text-stone-900 mb-1">{unitLabel}</h1>
+        <div className="flex items-center gap-3 flex-wrap mb-1">
+          <h1 className="font-serif text-3xl text-stone-900">{unitLabel}</h1>
+          {/* Job type, up next to the title — the first thing the owner
+             looks for after the apartment name. "No type" here means it
+             still needs labelling. */}
+          {asgTypeKnown && <AssignmentTypeChip type={asgType} showEmpty />}
+        </div>
         <div className="text-sm text-stone-600 flex items-center gap-1.5">
           <Building2 size={13} /> {propertyName}
         </div>
@@ -33315,7 +34484,9 @@ function QuickAssignmentForm({ property, employee, portalUser = null, portalKind
 
   return (
     <div className="min-h-screen bg-stone-50 pb-28">
-      <ScreenId id={isPM ? 'PM-QUICK' : 'OW-QUICK'} />
+      {/* Staff only — the tag is a support aid for us, not something a
+         property manager should ever see on their own screen. */}
+      {!isPM && <ScreenId id="OW-QUICK" />}
       <div className="flex items-center gap-3 px-5 py-4 border-b border-stone-200 sticky top-0 bg-stone-50 z-10">
         <button onClick={onCancel} className="p-2 -ml-2 rounded-full hover:bg-stone-100">
           <ArrowLeft size={20} className="text-stone-700" />
@@ -42287,6 +43458,7 @@ function AllOpenAssignments({ employee, onBack, onOpenAssignment }) {
 // Property manager uploads a photo (or set of photos) for owner review.
 // =================================================================
 function PortalPhotoUploadTab({ property, portalKind }) {
+  const openUnitCard = usePortalUnitCard();
   const isMulti = property.property_type === 'multi_unit';
   const [units, setUnits] = useState([]);
   const [unitId, setUnitId] = useState('');
@@ -42321,8 +43493,11 @@ function PortalPhotoUploadTab({ property, portalKind }) {
 
   // Load history of PM photos for this property
   const loadHistory = async () => {
+    // Named columns rather than `*`: this row also carries who on our side
+    // reviewed the photo and when, which is our workflow, not the sender's
+    // business. Everything listed here is drawn below or in the zoom modal.
     const { data } = await supabase.from('pm_photos')
-      .select('*, unit:units(label), party:parties(label)')
+      .select('id, title, notes, photo_url, status, created_at, unit:units(id, label), party:parties(label)')
       .eq('customer_id', property.id)
       .neq('status', 'archived')
       .order('created_at', { ascending: false })
@@ -42380,7 +43555,6 @@ function PortalPhotoUploadTab({ property, portalKind }) {
 
   return (
     <div className="px-5 pt-6 space-y-5">
-      <ScreenId id="PM-PHOTOS" />
       <div>
         <h2 className="font-serif text-2xl text-stone-900 mb-1">Send a photo</h2>
         <p className="text-sm text-stone-600">
@@ -42507,10 +43681,21 @@ function PortalPhotoUploadTab({ property, portalKind }) {
                     {p.title && (
                       <div className="font-serif text-sm text-stone-900 truncate mb-0.5">{p.title}</div>
                     )}
+                    {/* The apartment name is a way through to the apartment
+                       card here too — a concern is usually raised about a
+                       specific apartment, and "so where does it stand" is
+                       the next question. */}
                     {(p.unit?.label || p.party?.label) && (
-                      <div className="text-[10px] font-mono text-stone-500 mb-1">
-                        {p.unit?.label}{p.party?.label && ` · ${p.party.label}`}
-                      </div>
+                      openUnitCard && p.unit?.id ? (
+                        <button onClick={() => openUnitCard({ id: p.unit.id, label: p.unit.label })}
+                          className="block text-[10px] font-mono text-stone-600 hover:text-stone-900 mb-1 underline decoration-dotted underline-offset-2 text-left">
+                          {p.unit.label}{p.party?.label && ` · ${p.party.label}`}
+                        </button>
+                      ) : (
+                        <div className="text-[10px] font-mono text-stone-500 mb-1">
+                          {p.unit?.label}{p.party?.label && ` · ${p.party.label}`}
+                        </div>
+                      )
                     )}
                     {p.notes && (
                       <div className="text-xs text-stone-600 line-clamp-2 mb-1">{p.notes}</div>
@@ -42562,6 +43747,7 @@ function PortalPhotoUploadTab({ property, portalKind }) {
 // by due date), with a toggle to peek at what was done the last 3 days.
 // =================================================================
 function PortalScheduleTab({ property, onOpenUnitDay }) {
+  const openUnitCard = usePortalUnitCard();
   const [aptQuery, setAptQuery] = useState('');
   const [buildingFilter, setBuildingFilter] = useState(null);
   const [rows, setRows] = useState(null);
@@ -42691,6 +43877,14 @@ function PortalScheduleTab({ property, onOpenUnitDay }) {
     const secLabel = { bedroom: 'Bedroom', vanity: 'Vanity', bathroom: 'Bathroom', general: 'General' };
     ts.forEach(t => { const l = secLabel[t.template_section] || (t.template_section ? t.template_section.charAt(0).toUpperCase() + t.template_section.slice(1) : 'Other'); byCat[l] = (byCat[l] || 0) + 1; });
     const cats = Object.entries(byCat);
+    // One target, not two — see PortalAssignmentsTab's firstUnitTarget. Two
+    // .find()s can name one apartment and open another.
+    const cardUnitTarget = ts.find(t => t.unit_id && t.unit?.label)
+      || ts.find(t => t.unit_id)
+      || ts.find(t => t.unit?.label)
+      || null;
+    const cardUnitId = cardUnitTarget?.unit_id || null;
+    const cardUnitLabel = cardUnitTarget?.unit?.label || '';
     return (
       <div key={a.id} className="rounded-2xl p-4 border bg-white border-stone-200">
         <div className="flex items-start justify-between gap-2">
@@ -42733,6 +43927,17 @@ function PortalScheduleTab({ property, onOpenUnitDay }) {
             ))}
           </div>
         )}
+        {/* The apartment name on a pending job leads to the same apartment
+           card as everywhere else — a PM looking at open work is one tap
+           from "so is it clean right now or not". */}
+        {openUnitCard && cardUnitId && (
+          <div className="mt-2.5">
+            <button onClick={() => openUnitCard({ id: cardUnitId, label: cardUnitLabel })}
+              className="text-[11px] font-mono text-stone-600 hover:text-stone-900 inline-flex items-center gap-1 underline decoration-dotted underline-offset-2">
+              <Home size={11} /> Is {cardUnitLabel || 'this apartment'} ready?
+            </button>
+          </div>
+        )}
         {a.file_url && (
           <div className="mt-3 flex justify-end">
             <button onClick={() => setAttach({ url: a.file_url, kind: a.file_kind, title })}
@@ -42749,7 +43954,6 @@ function PortalScheduleTab({ property, onOpenUnitDay }) {
 
   return (
     <div className="px-5 pt-5 pb-24 space-y-5">
-      <ScreenId id="PM-SCHED" />
       <div>
         <h2 className="font-serif text-2xl text-stone-900 mb-1">Cleanings pending</h2>
         <p className="text-sm text-stone-600">
@@ -42860,7 +44064,7 @@ function PortalAssignmentsTab({ property, portalKind, portalUser, approvalView =
     // scheduled for their building was invisible to them, even though it's
     // their property and their cleanings.
     const { data } = await supabase.from('assignments')
-      .select('*, targets:assignment_targets(id, status, priority, started_at, completed_at, unit:units(label), party:parties(label))')
+      .select('*, targets:assignment_targets(id, status, priority, started_at, completed_at, unit_id, unit:units(label), party:parties(label))')
       .eq('customer_id', property.id)
       .eq('active', true)
       .is('deleted_at', null)
@@ -42930,7 +44134,17 @@ function PortalAssignmentsTab({ property, portalKind, portalUser, approvalView =
   const decorated = assignments.map(a => {
     const targets = a.targets || [];
     const hasPriority = targets.some(t => t.priority);
-    const firstUnitLabel = targets.find(t => t.unit?.label)?.unit?.label || '';
+    // Carried alongside the label so each row can open the apartment card.
+    // Both come off the SAME target: taken from two independent .find()s the
+    // id could come from one apartment and the label from another, and the
+    // row would offer "Is 5-201 ready?" and open 5-207. Prefer a target that
+    // has both, then fall back to whichever half exists.
+    const firstUnitTarget = targets.find(t => t.unit_id && t.unit?.label)
+      || targets.find(t => t.unit_id)
+      || targets.find(t => t.unit?.label)
+      || null;
+    const firstUnitLabel = firstUnitTarget?.unit?.label || '';
+    const firstUnitId = firstUnitTarget?.unit_id || null;
     // When the cleaning actually happened: the last item finished, and only
     // once EVERY item is done — a half-finished bedroom isn't a cleaning the
     // PM should see dated as complete.
@@ -42939,7 +44153,7 @@ function PortalAssignmentsTab({ property, portalKind, portalUser, approvalView =
     const doneOn = allDone
       ? done.map(t => t.completed_at).filter(Boolean).sort().slice(-1)[0] || null
       : null;
-    return { ...a, hasPriority, firstUnitLabel, doneOn, allDone };
+    return { ...a, hasPriority, firstUnitLabel, firstUnitId, doneOn, allDone };
   });
 
   // Search across title, notes, unit, bedroom
@@ -42966,7 +44180,6 @@ function PortalAssignmentsTab({ property, portalKind, portalUser, approvalView =
 
   return (
     <div className="px-5 pt-6 space-y-5">
-      <ScreenId id="PM-ASGN" />
       <div>
         <h2 className="font-serif text-2xl text-stone-900 mb-1">Your assignments</h2>
         <p className="text-sm text-stone-600">
@@ -43252,6 +44465,7 @@ function PortalAssignmentCalendar({ items, onOpen }) {
 }
 
 function PortalAssignmentSection({ title, subtitle, items, color, onOpen, onEdit = null }) {
+  const openUnitCard = usePortalUnitCard();
   if (items.length === 0) return null;
   const colors = {
     stone: 'border-stone-300 bg-stone-50',
@@ -43271,7 +44485,7 @@ function PortalAssignmentSection({ title, subtitle, items, color, onOpen, onEdit
       <p className="text-xs text-stone-500 mb-3">{subtitle}</p>
       <div className="space-y-2">
         {items.map(a => (
-          <div key={a.id} className="relative">
+          <div key={a.id} className={`relative rounded-2xl border-2 hover:border-stone-900 transition-colors ${colors[color]}`}>
           {/* Pencil sits over the card rather than inside it — the card is
              itself a button, and a button can't contain another one. */}
           {onEdit && !a.allDone && (
@@ -43282,7 +44496,7 @@ function PortalAssignmentSection({ title, subtitle, items, color, onOpen, onEdit
             </button>
           )}
           <button onClick={() => onOpen(a)}
-            className={`w-full text-left p-4 rounded-2xl border-2 hover:border-stone-900 transition-colors ${colors[color]}`}>
+            className="w-full text-left p-4">
             <div className="flex items-start justify-between gap-2">
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2 mb-1">
@@ -43322,6 +44536,17 @@ function PortalAssignmentSection({ title, subtitle, items, color, onOpen, onEdit
               <ChevronRight size={16} className="text-stone-400 flex-shrink-0" />
             </div>
           </button>
+          {/* Same apartment card as the header search and both cleanings
+             lists reach. A request is about an apartment; "did you do it"
+             and "is it ready now" are one tap apart. */}
+          {openUnitCard && a.firstUnitId && (
+            <div className="px-4 pb-3 -mt-1">
+              <button onClick={() => openUnitCard({ id: a.firstUnitId, label: a.firstUnitLabel })}
+                className="text-[11px] font-mono text-stone-600 hover:text-stone-900 inline-flex items-center gap-1 underline decoration-dotted underline-offset-2">
+                <Home size={11} /> Is {a.firstUnitLabel || 'this apartment'} ready?
+              </button>
+            </div>
+          )}
           </div>
         ))}
       </div>
@@ -43601,7 +44826,6 @@ function PortalAssignmentForm({ property, assignment, portalKind, onCancel, onSa
 
   return (
     <div className="min-h-screen bg-stone-50 pb-12">
-      <ScreenId id="PM-ASGN-NEW" />
       <div className="flex items-center gap-3 px-5 py-4 border-b border-stone-200">
         <button onClick={onCancel} className="p-2 -ml-2 rounded-full hover:bg-stone-100">
           <ArrowLeft size={20} className="text-stone-700" />
@@ -43911,12 +45135,30 @@ function RecheckRequestModal({ assignment, property, portalUser, onClose, onSave
     (async () => {
       // Load open targets (not done, not already recheck-passed).
       // These are the ones the PM can choose to pass on recheck.
-      const { data } = await supabase.from('assignment_targets')
-        .select('id, status, template_section, template_item_key, status_notes, unit:units(label), party:parties(label), recheck_passed_at')
+      //
+      // status_notes carries two different things in one column. On a PM- or
+      // uploader-added item it IS the item's name, and this list has to print
+      // it. On every other item it is the cleaner's own note about why the
+      // item stuck — written for our managers, and NOT cleared when an item
+      // is unblocked, so it sits on ordinary-looking rows. So it is asked for
+      // only where it is a label: a second read, filtered server-side to the
+      // two key prefixes that mean "the note is the name", merged by id. If
+      // that read fails the labels fall back to the derived key — the notes
+      // still don't arrive.
+      const openTargets = supabase.from('assignment_targets')
+        .select('id, status, template_section, template_item_key, unit:units(label), party:parties(label), recheck_passed_at')
         .eq('assignment_id', assignment.id)
         .not('status', 'in', '(done,blocked)')
         .is('recheck_passed_at', null);
-      setTargets(data || []);
+      const customLabels = supabase.from('assignment_targets')
+        .select('id, status_notes')
+        .eq('assignment_id', assignment.id)
+        .not('status', 'in', '(done,blocked)')
+        .is('recheck_passed_at', null)
+        .or('template_item_key.like.requested:*,template_item_key.like.custom_*');
+      const [{ data }, { data: labelRows }] = await Promise.all([openTargets, customLabels]);
+      const labelById = new Map((labelRows || []).map(r => [r.id, r.status_notes]));
+      setTargets((data || []).map(t => ({ ...t, status_notes: labelById.get(t.id) || null })));
       setLoaded(true);
     })();
   }, [assignment.id]);
@@ -44120,7 +45362,6 @@ function PortalAssignmentDetail({ property, assignment, portalUser, onBack, onEd
 
   return (
     <div className="min-h-screen bg-stone-50 pb-12">
-      <ScreenId id="PM-ASGN-DET" />
       <div className="flex items-center gap-3 px-5 py-4 border-b border-stone-200">
         <button onClick={onBack} className="p-2 -ml-2 rounded-full hover:bg-stone-100">
           <ArrowLeft size={20} className="text-stone-700" />
@@ -45737,10 +46978,12 @@ function NewPropertyThreadPicker({ employee, onBack, onPicked }) {
 
 
 // ---- The conversation/thread view ----
-function MessageThread({ conversationId, otherName, asEmployee = null, asPmCustomer = null, pmActorKind = null, isPropertyThread = false, propertyName, onBack }) {
+function MessageThread({ conversationId, otherName, asEmployee = null, asPmCustomer = null, pmActorKind = null, isPropertyThread = false, propertyName, initialText = '', onBack }) {
   const [messages, setMessages] = useState([]);
   const [loaded, setLoaded] = useState(false);
-  const [text, setText] = useState('');
+  // Seeded only on mount, so it can't wipe something half-typed on a
+  // re-render. Everyone who doesn't pass it gets the empty box they had.
+  const [text, setText] = useState(initialText);
   const [photoFile, setPhotoFile] = useState(null);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState('');
@@ -46011,7 +47254,11 @@ function MessageThread({ conversationId, otherName, asEmployee = null, asPmCusto
 
 
 // ---- PM-side Messages tab ----
-function PortalMessagesTab({ property, portalKind, onClose, onPropertyRefresh }) {
+// unitLabel is set when this is opened from an apartment card's "Ask us
+// about 5-203". The button named an apartment and the screen it opened had
+// no idea which one, so the PM had to type it again — the composer now
+// starts with it.
+function PortalMessagesTab({ property, portalKind, onClose, onPropertyRefresh, unitLabel = null }) {
   const [conversationId, setConversationId] = useState(null);
   const [loaded, setLoaded] = useState(false);
 
@@ -46044,5 +47291,6 @@ function PortalMessagesTab({ property, portalKind, onClose, onPropertyRefresh })
     pmActorKind={portalKind || 'pm'}
     isPropertyThread={true}
     propertyName={property.name}
+    initialText={unitLabel ? `About ${unitLabel}: ` : ''}
     onBack={handleBack} />;
 }

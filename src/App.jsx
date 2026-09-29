@@ -4599,10 +4599,46 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
 
   // Sign-out wrapper that force-clocks-out any active shift before
   // exiting. This prevents ghost shifts from cleaners who tap "Sign out"
-  // while still on the clock. Note we do NOT pop a confirm dialog here
-  // because the user already confirmed (by tapping Sign out); we just
-  // close out their work cleanly in the background.
+  // while still on the clock.
+  //
+  // It used to skip the confirm on the grounds that the cleaner had
+  // already confirmed by tapping Sign out. That held while Sign out was
+  // three taps deep in a menu. It is now a button in the top bar, next to
+  // the notification bell, on a phone — so a mis-tap at 11am ends the
+  // shift and writes the hours, and the cleaner cannot undo that
+  // themselves: clocking back in makes a second shift for the same day.
+  //
+  // So: with a shift or a work block open, ask, and name the property so
+  // they know what they are ending. With nothing open there is nothing to
+  // lose, and it stays one tap. The guard lives HERE rather than on the
+  // new button so all four ways out of the app -- top bar, More tab
+  // clocked in, More tab clocked out, menu sheet -- behave the same.
+  const [signOutConfirm, setSignOutConfirm] = useState(null); // { message } | null
   const signOutWithCleanup = async () => {
+    const hasShift = !!(shift && !shift.end_time);
+    const hasBlock = !!(activeBlock && !activeBlock.end_time);
+    if (hasShift || hasBlock) {
+      // No viewOnlyProperty fallback: a view-only session has no shift and
+      // no block, so this guard never fires for one — correctly, there are
+      // no hours to lose. Clocking in with "skip the property" leaves this
+      // blank and the message drops to "You are clocked in", which is
+      // accurate: there is no property to name.
+      const where = shift?.customer?.name || '';
+      const bedroom = hasBlock
+        ? unitPartyLabel(activeBlock.unit?.label, activeBlock.party?.label)
+        : '';
+      setSignOutConfirm({
+        message:
+          (where ? `You are clocked in at ${where}.` : 'You are clocked in.')
+          + (bedroom ? ` You have ${bedroom} open.` : '')
+          + '\n\nSigning out clocks you out and closes what you have open.',
+      });
+      return;
+    }
+    await doSignOutWithCleanup();
+  };
+  const doSignOutWithCleanup = async () => {
+    setSignOutConfirm(null);
     try {
       if (activeTask) {
         try { await stopTask(activeTask, false); } catch (e) { console.warn('[signOut] stopTask failed', e); }
@@ -6793,9 +6829,27 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   }
 
   // Reusable wrapper: overlays the idle warning + change-PIN modal regardless of view
+  const signOutConfirmEl = signOutConfirm ? (
+    <ConfirmModal
+      open
+      title="Sign out?"
+      message={signOutConfirm.message}
+      confirmLabel="Sign out"
+      cancelLabel="Stay signed in"
+      danger
+      busy={busy}
+      onCancel={() => setSignOutConfirm(null)}
+      onConfirm={doSignOutWithCleanup} />
+  ) : null;
+  // It also mounts JobVisibilityProvider, which is what makes who-a-cleaning-
+  // is-for apply on the cleaner screens. There are exactly TWO mount points
+  // for that provider: here, and the view-only branch below (which returns
+  // outside this wrapper). Anything rendered outside both — every owner,
+  // manager and portal screen — is deliberately unfiltered.
   const withIdleModal = (children) => (
-    <>
+    <JobVisibilityProvider employee={employee} workBlocks={workBlocks}>
       {children}
+      {signOutConfirmEl}
       {showIdleWarning && <IdleWarningModal onStillActive={dismissIdleWarning} />}
       {/* Move a closed work block to a different bedroom from the
          PropertyHub list. Mounted at AuthedShift level so the modal
@@ -6878,7 +6932,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
             });
           }} />
       )}
-    </>
+    </JobVisibilityProvider>
   );
 
   // Messages overlay — takes over the screen, regardless of where cleaner was
@@ -6886,16 +6940,22 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     return withIdleModal(<StaffMessagesTab employee={employee} onClose={() => { logViewOnlyAction('viewed_messages'); setShowMessages(false); }} />);
   }
 
-  // View-only mode: cleaner is browsing without a real shift
+  // View-only mode: cleaner is browsing without a real shift.
+  // This return sits OUTSIDE withIdleModal (it deliberately has no idle
+  // clock-out and no bedroom modals), so it mounts the visibility provider
+  // itself — the second and last of the two mount points.
   if (viewOnlySession) {
-    return <ViewOnlyDashboard
-      employee={employee}
-      property={viewOnlyProperty}
-      onSignOut={signOutWithCleanup}
-      onEndViewing={endViewOnly}
-      onOpenMessages={() => { logViewOnlyAction('opened_messages'); setShowMessages(true); }}
-      onOpenBedroomHistory={(params) => { logViewOnlyAction('opened_bedroom_history'); setBedroomHistory(params); }}
-      onSwitchProperty={async () => { await endViewOnly(); setClockInFlow({ step: 'view-only-property' }); }} />;
+    return <JobVisibilityProvider employee={employee} workBlocks={workBlocks}>
+      {signOutConfirmEl}
+      <ViewOnlyDashboard
+        employee={employee}
+        property={viewOnlyProperty}
+        onSignOut={signOutWithCleanup}
+        onEndViewing={endViewOnly}
+        onOpenMessages={() => { logViewOnlyAction('opened_messages'); setShowMessages(true); }}
+        onOpenBedroomHistory={(params) => { logViewOnlyAction('opened_bedroom_history'); setBedroomHistory(params); }}
+        onSwitchProperty={async () => { await endViewOnly(); setClockInFlow({ step: 'view-only-property' }); }} />
+    </JobVisibilityProvider>;
   }
 
   if (!shift && clockInFlow?.step === 'property') {
@@ -7720,7 +7780,9 @@ function ApartmentProgressList({ propertyId, workBlocks }) {
 //      building) so they're never left guessing.
 // It also surfaces a small "blocked" count so cleaners can see items that
 // were blocked (which otherwise count as done and disappear from view).
+// Not currently rendered either — see the note on YourJobsCard.
 function FloorFocusList({ propertyId, workBlocks, onGoToBedroom }) {
+  const { canSeeJob } = useJobVisibility();
   const [state, setState] = useState({ loading: true, anchorLabel: '', anchorBuilding: null, anchorFloor: null, anchorPartyId: null, currentBeds: [], floorApts: [], nextUp: null, blocked: [] });
   const [showBlocked, setShowBlocked] = useState(false);
 
@@ -7744,14 +7806,15 @@ function FloorFocusList({ propertyId, workBlocks, onGoToBedroom }) {
       // Paginated target load (1000-row chunks) so we never hit the row cap.
       const PAGE = 1000;
       let rows = [];
+      const SEL = 'status, unit_id, party_id, assignment:assignments!inner(id, customer_id, active, source, pm_status, deleted_at, audience)';
       for (let from = 0; ; from += PAGE) {
-        const { data: page, error } = await supabase.from('assignment_targets')
-          .select('status, unit_id, party_id, assignment:assignments!inner(customer_id, active, source, pm_status, deleted_at)')
+        const { data: page, error } = await audienceSelect(SEL, (sel) => supabase.from('assignment_targets')
+          .select(sel)
           .eq('assignment.customer_id', propertyId)
           .eq('assignment.active', true)
           .is('assignment.deleted_at', null)
           .order('id', { ascending: true })
-          .range(from, from + PAGE - 1);
+          .range(from, from + PAGE - 1));
         if (error) break;
         rows = rows.concat(page || []);
         if (!page || page.length < PAGE) break;
@@ -7760,7 +7823,8 @@ function FloorFocusList({ propertyId, workBlocks, onGoToBedroom }) {
       if (cancelled) return;
       const valid = rows.filter(t =>
         (t.assignment?.source !== 'pm' || t.assignment?.pm_status === 'approved') &&
-        t.unit_id && t.party_id
+        t.unit_id && t.party_id &&
+        canSeeJob(targetToJob(t))
       );
       const openTargets = valid.filter(t => t.status !== 'done' && t.status !== 'blocked');
       const blockedTargets = valid.filter(t => t.status === 'blocked');
@@ -7859,7 +7923,7 @@ function FloorFocusList({ propertyId, workBlocks, onGoToBedroom }) {
       });
     })();
     return () => { cancelled = true; };
-  }, [propertyId, blocksFingerprint]);
+  }, [propertyId, blocksFingerprint, canSeeJob]);
 
   const go = (c) => onGoToBedroom && onGoToBedroom({
     unit_id: c.unitId, party_id: c.partyId,
@@ -7977,7 +8041,9 @@ function FloorFocusList({ propertyId, workBlocks, onGoToBedroom }) {
 // apartments still due today at this property, so they can see what's
 // left for the day and jump to one.
 // =================================================================
+// Not currently rendered either — see the note on YourJobsCard.
 function TodayApartmentsCard({ propertyId, onGoToBedroom, full = false }) {
+  const { canSeeJob } = useJobVisibility();
   const [units, setUnits] = useState([]);
   const [loaded, setLoaded] = useState(false);
   useEffect(() => {
@@ -7989,11 +8055,13 @@ function TodayApartmentsCard({ propertyId, onGoToBedroom, full = false }) {
       const labelById = Object.fromEntries((propUnits || []).map(u => [u.id, u.label]));
       let rows = [];
       if (unitIds.length) {
-        const { data } = await supabase.from('assignment_targets')
-          .select('id, unit_id, party_id, status, assignment:assignments!inner(active, deleted_at, scheduled_date, title, assignment_type)')
-          .in('unit_id', unitIds)
-          .in('status', ['pending', 'in_progress', 'paused']);
-        rows = (data || []).filter(t => t.assignment && t.assignment.active !== false && !t.assignment.deleted_at && t.assignment.scheduled_date === todayKey);
+        const { data } = await audienceSelect(
+          'id, unit_id, party_id, status, assignment:assignments!inner(id, active, deleted_at, scheduled_date, title, assignment_type, audience)',
+          (sel) => supabase.from('assignment_targets')
+            .select(sel)
+            .in('unit_id', unitIds)
+            .in('status', ['pending', 'in_progress', 'paused']));
+        rows = (data || []).filter(t => t.assignment && t.assignment.active !== false && !t.assignment.deleted_at && t.assignment.scheduled_date === todayKey && canSeeJob(targetToJob(t)));
       }
       const byUnit = {};
       rows.forEach(t => {
@@ -8006,7 +8074,7 @@ function TodayApartmentsCard({ propertyId, onGoToBedroom, full = false }) {
       }
     })();
     return () => { cancelled = true; };
-  }, [propertyId]);
+  }, [propertyId, canSeeJob]);
 
   // Full list variant — used by the Home "Today" toggle.
   if (full) {
@@ -8060,15 +8128,35 @@ function TodayApartmentsCard({ propertyId, onGoToBedroom, full = false }) {
 // property they're clocked into. Surfaces on their Home so a job
 // assigned to them lands right in their queue.
 // =================================================================
+// NOTE: not currently rendered. PropertyHub's Home tab keeps this card,
+// TodayApartmentsCard, FloorFocusList and Today's activity behind a
+// `{false && ...}` gate, so today only CleanerWorkList shows there. It is
+// kept correct anyway: the filter has to be right in every renderer
+// BEFORE one gets switched back on, not after someone notices.
 function YourJobsCard({ propertyId, employeeId, onGoToBedroom }) {
   const [jobs, setJobs] = useState([]);
   const [loaded, setLoaded] = useState(false);
   useEffect(() => {
     let cancelled = false;
     (async () => {
+      // Reads the JOB-level assignee rows, not assignment_targets.assigned_to.
+      // This card was the single reader of assigned_to, which is why a
+      // cleaning assigned from a job card never appeared here and one
+      // assigned from the quick form never appeared under "Assigned to me".
+      // 'assigned' only. A 'requested' row means this cleaner ASKED for the
+      // cleaning and the owner has not decided — presenting that as work
+      // assigned to them is how a cleaner drives to an apartment that was
+      // never theirs.
+      const { data: mine } = await supabase.from('assignment_assignees')
+        .select('assignment_id').eq('employee_id', employeeId).eq('status', 'assigned');
+      const myIds = Array.from(new Set((mine || []).map(r => r.assignment_id)));
+      if (myIds.length === 0) {
+        if (!cancelled) { setJobs([]); setLoaded(true); }
+        return;
+      }
       const { data } = await supabase.from('assignment_targets')
-        .select('id, unit_id, party_id, status, unit:units(label), party:parties(label), assignment:assignments!inner(customer_id, active, deleted_at, assignment_type)')
-        .eq('assigned_to', employeeId)
+        .select('id, unit_id, party_id, status, unit:units(label), party:parties(label), assignment:assignments!inner(id, customer_id, active, deleted_at, assignment_type)')
+        .in('assignment_id', myIds.slice(0, 500))
         .not('status', 'in', '(done,blocked)');
       const rows = (data || []).filter(t => t.assignment?.customer_id === propertyId && t.assignment?.active !== false && !t.assignment?.deleted_at);
       const byBed = {};
@@ -8107,6 +8195,253 @@ function YourJobsCard({ propertyId, employeeId, onGoToBedroom }) {
 }
 
 // =================================================================
+// WHO A CLEANING IS FOR — one rule, one helper, every cleaner list.
+//
+// STORAGE. `assignments.audience` holds one of exactly two values:
+//
+//   'all'   — every active cleaner sees this cleaning.
+//   'named' — only the people with an `assignment_assignees` row see it.
+//             A 'named' cleaning with NO names on it is seen by nobody.
+//             That is the "this is scheduled but nobody has been put on
+//             it yet" state, and it stays hidden until someone is named.
+//
+// Zero rows in assignment_assignees used to be the only way to say
+// "everyone", which made "I chose everyone" and "nobody has decided
+// yet" the same state. Those two behave differently now, so the choice
+// is stored rather than inferred.
+//
+// The names and the audience are independent. Naming Matias on an 'all'
+// cleaning still labels it his and sorts it to the top of his list —
+// exactly as it does today — it just doesn't hide it from anyone else.
+//
+// WHAT THIS ACTUALLY DOES. It is a display filter. Every device in this
+// app reaches the database through the same anonymous key and there is
+// no per-cleaner database login anywhere, so the database cannot tell
+// one cleaner from another. This reliably keeps a cleaning off a
+// cleaner's screens. It does not make the row unreadable to someone who
+// knows how a browser works. Nothing here should be relied on to keep
+// data secret.
+// =================================================================
+const AUDIENCE_ALL = 'all';
+const AUDIENCE_NAMED = 'named';
+
+// A row whose audience is missing — the SQL has not been run yet, or the
+// query didn't ask for the column — reads as 'all', the state that hides
+// nothing. Visibility work must never make a cleaning vanish because a
+// column was absent.
+function audienceOf(assignmentRow) {
+  return assignmentRow?.audience === AUDIENCE_NAMED ? AUDIENCE_NAMED : AUDIENCE_ALL;
+}
+
+// PostgREST's wording when the column isn't there yet. Worth catching by
+// name: the owner runs SQL in a browser tab and deploys from another, and
+// "column assignments.audience does not exist" is not a sentence that
+// tells him which of the two he forgot.
+const AUDIENCE_SQL_HINT = 'The "audience" column is not in the database yet, so who-this-is-for could not be saved. Run the audience SQL in Supabase, then try again.';
+function isMissingAudienceColumn(error) {
+  const m = (error?.message || '') + ' ' + (error?.details || '');
+  return /audience/i.test(m) && /does not exist|could not find|schema cache|unknown column/i.test(m);
+}
+
+// =================================================================
+// SURVIVING THE COLUMN NOT BEING THERE
+//
+// Uploading App.jsx before running the SQL must not take the app down.
+// Fifteen reads name assignments.audience inside an embedded select; if
+// the column is absent PostgREST answers 42703 with data: null, and a
+// list that trusts that renders the cheerful "nothing to do" empty state
+// — which a cleaner reads as a finished day.
+//
+// So every one of those reads goes through audienceSelect(): try it with
+// the column, and on that one specific error run the identical query
+// without it. Everything then reads as 'all', which is exactly how the
+// app behaved before this feature existed. Same discipline as the
+// legacy_signin_enabled guard and SupplyChecklistGate's missing-table
+// fallback elsewhere in this file — it was applied to the audience VALUE
+// and needed applying to the audience QUERY too.
+//
+// Staff get one banner (see AudienceSetupBanner) so the degraded state is
+// visible rather than silent. Cleaners and property managers do not: the
+// app behaves exactly as it did yesterday for them, and "run some SQL" is
+// not their problem.
+// =================================================================
+function withoutAudienceColumn(select) {
+  return String(select)
+    .replace(/,\s*audience\b/g, '')
+    .replace(/\baudience\b\s*,\s*/g, '');
+}
+
+let AUDIENCE_COLUMN_MISSING = false;
+const audienceMissingSubscribers = new Set();
+function noteAudienceColumnMissing() {
+  if (AUDIENCE_COLUMN_MISSING) return;
+  AUDIENCE_COLUMN_MISSING = true;
+  audienceMissingSubscribers.forEach(fn => { try { fn(); } catch (e) { /* a dead subscriber must not stop the others */ } });
+}
+function useAudienceColumnMissing() {
+  const [missing, setMissing] = useState(AUDIENCE_COLUMN_MISSING);
+  useEffect(() => {
+    const fn = () => setMissing(true);
+    audienceMissingSubscribers.add(fn);
+    if (AUDIENCE_COLUMN_MISSING) setMissing(true);
+    return () => { audienceMissingSubscribers.delete(fn); };
+  }, []);
+  return missing;
+}
+
+// build(select) must return the finished PostgREST query, so the retry is
+// byte-for-byte the same request minus the one column.
+async function audienceSelect(select, build) {
+  if (AUDIENCE_COLUMN_MISSING) return await build(withoutAudienceColumn(select));
+  const res = await build(select);
+  if (!res?.error || !isMissingAudienceColumn(res.error)) return res;
+  noteAudienceColumnMissing();
+  return await build(withoutAudienceColumn(select));
+}
+
+// Insert/update path equivalent: drop the audience key and retry, so
+// creating a cleaning never depends on the SQL having been run. The
+// caller is told whether the audience actually landed.
+async function audienceWrite(row, run) {
+  if (!AUDIENCE_COLUMN_MISSING) {
+    const res = await run(row);
+    if (!res?.error || !isMissingAudienceColumn(res.error)) return { ...res, audienceSaved: true };
+    noteAudienceColumnMissing();
+  }
+  const { audience, ...rest } = row || {};
+  const res = await run(rest);
+  return { ...res, audienceSaved: false };
+}
+
+// Staff-only. Rendered from the shared Header for owners and managers, so
+// it follows them onto whichever screen they are on rather than living on
+// one board they might not open.
+function AudienceSetupBanner() {
+  const missing = useAudienceColumnMissing();
+  if (!missing) return null;
+  return (
+    <div className="px-5 pb-3">
+      <div className="px-3 py-2 rounded-xl bg-amber-100 border border-amber-400 text-[11px] text-amber-900 leading-snug">
+        <span className="font-semibold">Who-this-is-for is not switched on yet.</span>{' '}
+        The <span className="font-mono">audience</span> column is missing from the database, so every
+        cleaning is showing to every cleaner — exactly as it did before. Run the audience SQL in
+        Supabase and reload. Nothing is broken and nothing is lost until then.
+      </div>
+    </div>
+  );
+}
+
+// The cleaner shell (EmployeeApp) mounts the provider; nothing else does.
+// Owner, manager and portal screens render without it and are therefore
+// never filtered — which is how CleanerWorkList can be reused on the
+// owner Schedule tab without hiding rows from the owner.
+const JobVisibilityContext = React.createContext(null);
+const SHOW_EVERYTHING = { filtering: false, canSeeJob: () => true, reload: () => {} };
+function useJobVisibility() {
+  return React.useContext(JobVisibilityContext) || SHOW_EVERYTHING;
+}
+
+function JobVisibilityProvider({ employee, workBlocks, children }) {
+  const employeeId = employee?.id || null;
+  // Owners and managers see every cleaning, including while previewing the
+  // cleaner screens — same as every owner-side board already behaves.
+  const isStaff = employee?.role === 'owner' || employee?.role === 'manager';
+  // Held as a sorted fingerprint STRING, not a Set. canSeeJob ends up in the
+  // dependency list of half a dozen lists, and the read below re-runs on
+  // every realtime event — a fresh Set each time would change canSeeJob's
+  // identity and send all of them refetching in a loop. The string only
+  // changes when the answer actually changes.
+  // null = not loaded, or the read failed. Never filter on null.
+  const [myJobKey, setMyJobKey] = useState(null);
+  const myJobIds = React.useMemo(
+    () => (myJobKey === null ? null : new Set(myJobKey ? myJobKey.split(',') : [])),
+    [myJobKey]
+  );
+
+  const load = React.useCallback(async () => {
+    if (!employeeId || isStaff) { setMyJobKey(null); return; }
+    // Both 'assigned' and 'requested' rows count. A cleaner who asked for a
+    // cleaning keeps seeing it while the owner decides.
+    //
+    // Paginated. PostgREST stops at 1000 rows, and past that a cleaner
+    // would silently stop seeing cleanings they ARE named on — the same
+    // cap-crossing bug the comment in CleanerWorkList's load was written
+    // about, in the one read this whole rule depends on.
+    let rows = []; const PAGE = 1000;
+    for (let from = 0; ; from += PAGE) {
+      const { data, error } = await supabase.from('assignment_assignees')
+        .select('assignment_id').eq('employee_id', employeeId)
+        .order('assignment_id', { ascending: true })
+        .range(from, from + PAGE - 1);
+      if (error) {
+        console.warn('[visibility] could not load my cleanings', error);
+        setMyJobKey(null);
+        return;
+      }
+      rows = rows.concat(data || []);
+      if (!data || data.length < PAGE) break;
+      if (from > 100000) break;
+    }
+    const key = Array.from(new Set(rows.map(r => r.assignment_id).filter(Boolean))).sort().join(',');
+    setMyJobKey(prev => (prev === key ? prev : key));
+  }, [employeeId, isStaff]);
+  useEffect(() => { load(); }, [load]);
+  // Picked up when the owner assigns from his phone while the cleaner's
+  // screen is open, same as every other cleaner list refreshes.
+  useAssignmentSync(load, 'job-visibility');
+
+  // Bedrooms this cleaner has an open work block on. The filter never
+  // applies to one of these — see canSeeJob.
+  // Built off a fingerprint STRING, not the workBlocks array: the array is
+  // rebuilt on every reload, and lists downstream put canSeeJob in their
+  // effect dependencies. A new Set on every render would refetch them in a
+  // loop.
+  const openFingerprint = (workBlocks || [])
+    .filter(b => b && !b.end_time && b.unit_id)
+    .map(b => `${b.unit_id}::${b.party_id || ''}`)
+    .sort().join('|');
+  const openKeys = React.useMemo(
+    () => new Set(openFingerprint ? openFingerprint.split('|') : []),
+    [openFingerprint]
+  );
+
+  const canSeeJob = React.useCallback((job) => {
+    if (isStaff || !employeeId || !job) return true;
+    if (audienceOf(job) !== AUDIENCE_NAMED) return true;
+    // Still loading, or the read failed. Show it. A filter that has to
+    // guess should guess towards a cleaner seeing too much, never towards
+    // an apartment nobody knows about.
+    if (!myJobIds) return true;
+    if (job.id && myJobIds.has(job.id)) return true;
+    // Never pull the floor out from under someone mid-clean. A bedroom
+    // with one of this cleaner's open work blocks on it stays visible
+    // whatever the audience says, so if the owner narrows a cleaning while
+    // Matias is standing in it, his card, his timer and his way back into
+    // it all survive and his hours still land on the right job.
+    if (job.unitId && openKeys.has(`${job.unitId}::${job.partyId || ''}`)) return true;
+    return false;
+  }, [isStaff, employeeId, myJobIds, openKeys]);
+
+  const value = React.useMemo(
+    () => ({ filtering: !isStaff && !!employeeId, canSeeJob, reload: load }),
+    [isStaff, employeeId, canSeeJob, load]
+  );
+  return <JobVisibilityContext.Provider value={value}>{children}</JobVisibilityContext.Provider>;
+}
+
+// Convenience for the lists that hold assignment_targets rows rather than
+// job objects: reads the audience off the embedded assignment and the
+// bedroom off the target row.
+function targetToJob(t) {
+  return {
+    id: t?.assignment?.id || t?.assignment_id || null,
+    audience: t?.assignment?.audience,
+    unitId: t?.unit_id || null,
+    partyId: t?.party_id || null,
+  };
+}
+
+// =================================================================
 // ASSIGN PICKER — ONE shared picker for every "+ Assign" button in
 // the app (cleaner work list, assignment schedule, daily view, and
 // the assignments tab). There used to be four near-identical copies;
@@ -8116,33 +8451,131 @@ function YourJobsCard({ propertyId, employeeId, onGoToBedroom }) {
 // Nothing is written until Save is tapped. Taps only move a local
 // selection, so an accidental tap costs nothing and the owner can
 // back out with Cancel.
+//
+// It also holds the Everyone / Specific people choice. The picker reads
+// that off the cleaning itself, so all six assign buttons agree without
+// every board having to carry the column in its own query.
 // =================================================================
-function AssignPicker({ team, currentIds, busy, onSave, onCancel }) {
+function AssignPicker({ assignmentId = null, team, currentIds, busy, onSave, onCancel }) {
   const [sel, setSel] = useState(() => new Set(currentIds || []));
   const toggle = (id) => setSel(prev => {
     const next = new Set(prev);
     if (next.has(id)) next.delete(id); else next.add(id);
     return next;
   });
+  // null means UNKNOWN — still reading, or the read failed. It never
+  // means 'all'. Defaulting a failed read to 'all' looked harmless and
+  // was not: the next Save wrote 'all' over a cleaning that was really
+  // narrowed, and the helper text underneath stated "every cleaner sees
+  // this" as fact about a cleaning we had failed to read. Unknown now
+  // stays unknown, the audience is simply not written, and the names
+  // still save — the one thing the owner can change without knowing the
+  // current setting.
+  const [audience, setAudience] = useState(null);
+  const [baseAudience, setBaseAudience] = useState(null);
+  const [audienceErr, setAudienceErr] = useState(null);
+  // Separate from a transient failure: the column isn't there at all, so
+  // there is no choice to offer and nothing to write.
+  const [audienceOff, setAudienceOff] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    if (!assignmentId) { setAudience(AUDIENCE_ALL); setBaseAudience(AUDIENCE_ALL); return; }
+    (async () => {
+      const { data, error } = await supabase.from('assignments')
+        .select('audience').eq('id', assignmentId).maybeSingle();
+      if (cancelled) return;
+      if (error) {
+        if (isMissingAudienceColumn(error)) {
+          noteAudienceColumnMissing();
+          setAudienceOff(true);
+        } else {
+          setAudienceErr('Could not read who this cleaning is for: ' + error.message);
+        }
+        setAudience(null); setBaseAudience(null);
+        return;
+      }
+      const a = audienceOf(data);
+      setAudience(a); setBaseAudience(a);
+    })();
+    return () => { cancelled = true; };
+  }, [assignmentId]);
+
   const base = new Set(currentIds || []);
-  const dirty = sel.size !== base.size || Array.from(sel).some(id => !base.has(id));
+  const namesDirty = sel.size !== base.size || Array.from(sel).some(id => !base.has(id));
+  const dirty = namesDirty || (audience !== null && baseAudience !== null && audience !== baseAudience);
+  const known = audience !== null;
+  const named = audience === AUDIENCE_NAMED;
+  const nobodyCanSee = named && sel.size === 0;
+
+  const save = () => {
+    if (nobodyCanSee && !confirm(
+      'Nobody is named on this cleaning, so no cleaner will see it anywhere on their phone until you add someone. Save it that way?'
+    )) return;
+    // Unknown setting AND about to leave nobody on it. If it really is
+    // "only these people", this save hides it from everyone, so say so
+    // rather than letting a failed read swallow the warning.
+    if (!known && !audienceOff && sel.size === 0 && base.size > 0 && !confirm(
+      'Who this cleaning is for could not be read. If it is set to specific people, saving it with nobody named will hide it from every cleaner. Save anyway?'
+    )) return;
+    // audience stays null when it is unknown or switched off — saveAssignees
+    // then leaves the column alone rather than guessing at it.
+    onSave(Array.from(sel), audience);
+  };
+
   return (
     <div className="mt-2 p-2 rounded-xl bg-stone-50 border border-stone-200">
       <div className="flex items-center justify-between gap-2 mb-1.5">
         <span className="text-[10px] uppercase tracking-wider font-mono text-stone-400">
-          {dirty ? 'Unsaved — tap Save' : 'Tap to add or remove'}
+          {dirty ? 'Unsaved — tap Save' : (audienceOff ? 'Tap to add or remove' : 'Who can see this')}
         </span>
         <div className="flex items-center gap-1 flex-shrink-0">
           <button onClick={onCancel} disabled={busy}
             className="text-[10px] font-medium px-2.5 py-1 rounded-full bg-white border border-stone-300 text-stone-600 disabled:opacity-50">
             Cancel
           </button>
-          <button onClick={() => onSave(Array.from(sel))} disabled={busy || !dirty}
+          <button onClick={save} disabled={busy || !dirty}
             className={`text-[10px] font-medium px-2.5 py-1 rounded-full disabled:opacity-40 ${dirty ? 'bg-indigo-600 text-white' : 'bg-stone-900 text-white'}`}>
             {busy ? 'Saving…' : 'Save'}
           </button>
         </div>
       </div>
+      {/* Everyone vs. specific people. Explicit, because "no names on it"
+         no longer means "everyone" — it means nobody has decided yet.
+         Hidden entirely when the column isn't in the database: there is no
+         choice to offer, and the picker falls back to exactly what it did
+         before this feature existed. Neither button reads as selected while
+         the current setting is unknown. */}
+      {!audienceOff && (
+      <div className="grid grid-cols-2 gap-1 mb-1.5">
+        <button onClick={() => setAudience(AUDIENCE_ALL)} disabled={busy}
+          className={`px-2 py-1.5 rounded-lg text-[11px] font-medium disabled:opacity-50 ${known && !named ? 'bg-stone-900 text-white' : 'bg-white text-stone-600 border border-stone-200'}`}>
+          Everyone
+        </button>
+        <button onClick={() => setAudience(AUDIENCE_NAMED)} disabled={busy}
+          className={`px-2 py-1.5 rounded-lg text-[11px] font-medium disabled:opacity-50 ${named ? 'bg-stone-900 text-white' : 'bg-white text-stone-600 border border-stone-200'}`}>
+          Only these people
+        </button>
+      </div>
+      )}
+      {audienceErr && (
+        <div className="mb-1.5 px-2 py-1.5 rounded-lg bg-amber-50 border border-amber-200 text-[10px] text-amber-900">
+          {audienceErr} Saving now will change the names only and leave who-it-is-for exactly as it is.
+        </div>
+      )}
+      {/* Staff only — this picker sits behind the assign-cleaners
+         permission, so it can name the column and the fix. */}
+      {audienceOff && (
+        <div className="mb-1.5 px-2 py-1.5 rounded-lg bg-amber-50 border border-amber-200 text-[10px] text-amber-900">
+          The <span className="font-mono">audience</span> column is not in the database yet, so
+          every cleaner still sees every cleaning and there is nothing to choose here. Run the
+          audience SQL in Supabase. Names below work the way they always have.
+        </div>
+      )}
+      {nobodyCanSee && (
+        <div className="mb-1.5 px-2 py-1.5 rounded-lg bg-red-50 border border-red-200 text-[10px] text-red-800">
+          Nobody is named — no cleaner will see this cleaning.
+        </div>
+      )}
       <div className="max-h-40 overflow-y-auto grid grid-cols-2 gap-1">
         {(team || []).map(m => {
           const on = sel.has(m.id);
@@ -8154,6 +8587,17 @@ function AssignPicker({ team, currentIds, busy, onSave, onCancel }) {
           );
         })}
       </div>
+      {/* Says nothing at all while the setting is unknown. Stating the
+         wrong one as fact is worse than saying nothing. */}
+      <div className="mt-1.5 text-[10px] text-stone-500 leading-snug">
+        {!known
+          ? (audienceOff
+              ? 'Names mark a cleaning as someone’s and sort it to the top of their list.'
+              : 'Who this cleaning is for could not be read, so it will be left as it is.')
+          : named
+            ? 'Only the names above see this cleaning on their phone. You and your managers always see it.'
+            : 'Every cleaner sees this cleaning. Names above just mark it as theirs and sort it to the top of their list.'}
+      </div>
     </div>
   );
 }
@@ -8162,20 +8606,45 @@ function AssignPicker({ team, currentIds, busy, onSave, onCancel }) {
 // cleaner who ASKED for a job (status 'requested') and is left selected
 // keeps that status instead of being silently promoted to 'assigned'.
 // Returns an error object, or null on success.
-async function saveAssignees(assignmentId, currentIds, nextIds, actorId) {
+async function saveAssignees(assignmentId, currentIds, nextIds, actorId, audience = null) {
   const cur = new Set(currentIds || []);
   const next = new Set(nextIds || []);
   const toAdd = Array.from(next).filter(id => !cur.has(id));
   const toRemove = Array.from(cur).filter(id => !next.has(id));
-  if (toRemove.length) {
-    const { error } = await supabase.from('assignment_assignees')
-      .delete().eq('assignment_id', assignmentId).in('employee_id', toRemove);
-    if (error) return error;
-  }
+
+  // THE ORDER IS THE SAFETY. Names on first, audience second, names off
+  // last. Three writes, no transaction available from the browser, so
+  // the only question that matters is what a failure half-way leaves
+  // behind — and in this order every one of them leaves the cleaning
+  // visible to AT LEAST as many people as before, never fewer.
+  //
+  // Audience-first was the dangerous order and the comment here used to
+  // claim otherwise. It is safe if the AUDIENCE write fails; it is not
+  // safe if the NAME write fails, because by then 'named' has already
+  // committed. Switch a cleaning to "only these people", pick Matias,
+  // have the name write fail, and you have a cleaning set to 'named'
+  // with nobody on it — invisible to every cleaner — while the alert
+  // tells the owner the save failed, i.e. that nothing changed.
+
+  // 1. Names ON. Fails → nothing has been touched at all.
   if (toAdd.length) {
     const { error } = await supabase.from('assignment_assignees')
       .upsert(toAdd.map(id => ({ assignment_id: assignmentId, employee_id: id, status: 'assigned', created_by: actorId })),
         { onConflict: 'assignment_id,employee_id' });
+    if (error) return error;
+  }
+  // 2. Audience. Fails → the new names are on but who-it-is-for is
+  //    unchanged. Too wide for a moment, never too narrow.
+  if (audience === AUDIENCE_ALL || audience === AUDIENCE_NAMED) {
+    const { error } = await supabase.from('assignments')
+      .update({ audience }).eq('id', assignmentId);
+    if (error) return isMissingAudienceColumn(error) ? { message: AUDIENCE_SQL_HINT } : error;
+  }
+  // 3. Names OFF. Fails → people who were removed can still see it.
+  //    Again too wide, not too narrow.
+  if (toRemove.length) {
+    const { error } = await supabase.from('assignment_assignees')
+      .delete().eq('assignment_id', assignmentId).in('employee_id', toRemove);
     if (error) return error;
   }
   return null;
@@ -8190,6 +8659,7 @@ async function saveAssignees(assignmentId, currentIds, nextIds, actorId) {
 // client-side so a stale session never shows as active.
 // =================================================================
 function WhosWorkingNowModal({ employee, onClose }) {
+  const { canSeeJob } = useJobVisibility();
   const [rows, setRows] = useState([]);
   const [loaded, setLoaded] = useState(false);
   useTick(true);
@@ -8199,7 +8669,7 @@ function WhosWorkingNowModal({ employee, onClose }) {
       const cutoffMs = Date.now() - STALE_FORCE_MIN * 60 * 1000;
       const [blocksRes, shiftsRes] = await Promise.all([
         supabase.from('work_blocks')
-          .select('id, start_time, unit:units(label), party:parties(label), shift:shifts!inner(id, is_preview, employee:employees(id, name), customer:customers(id, name))')
+          .select('id, start_time, unit_id, party_id, unit:units(label), party:parties(label), shift:shifts!inner(id, is_preview, employee:employees(id, name), customer:customers(id, name))')
           .is('end_time', null).order('start_time', { ascending: true }),
         supabase.from('shifts')
           .select('id, start_time, is_preview, employee:employees(id, name), customer:customers(id, name)')
@@ -8208,13 +8678,43 @@ function WhosWorkingNowModal({ employee, onClose }) {
       const blocks = (blocksRes.data || []).filter(b => !b.shift?.is_preview);
       const blockedShiftIds = new Set(blocks.map(b => b.shift?.id).filter(Boolean));
       const standby = (shiftsRes.data || []).filter(s => !s.is_preview && !blockedShiftIds.has(s.id));
+      // This board names the apartment every teammate is standing in, which
+      // is a way to read an apartment number off a cleaning that was
+      // narrowed away from you. So the apartment is withheld when every
+      // open cleaning at that bedroom is somebody else's. The person and
+      // the property stay: they are on the clock, and erasing a teammate
+      // is the thing this app should not do to answer a question about a
+      // cleaning. A bedroom with no open cleaning on it is ad-hoc work and
+      // is shown as before.
+      const unitIds = Array.from(new Set(blocks.map(b => b.unit_id).filter(Boolean)));
+      const hiddenBeds = new Set();
+      if (unitIds.length) {
+        const { data: tRows } = await audienceSelect(
+          'unit_id, party_id, assignment:assignments!inner(id, active, deleted_at, audience)',
+          (sel) => supabase.from('assignment_targets')
+            .select(sel)
+            .in('unit_id', unitIds.slice(0, 500))
+            .not('status', 'in', '(done,blocked)'));
+        const byBed = new Map();
+        (tRows || []).forEach(t => {
+          const a = t.assignment;
+          if (!a || a.active === false || a.deleted_at) return;
+          const k = `${t.unit_id}::${t.party_id || ''}`;
+          if (!byBed.has(k)) byBed.set(k, []);
+          byBed.get(k).push(t);
+        });
+        byBed.forEach((list, k) => {
+          if (!list.some(t => canSeeJob(targetToJob(t)))) hiddenBeds.add(k);
+        });
+      }
       const out = [
         ...blocks.filter(b => new Date(b.start_time).getTime() > cutoffMs).map(b => ({
           kind: 'block', id: b.id,
           cleanerName: b.shift?.employee?.name || '?',
           isMe: b.shift?.employee?.id === employee?.id,
           propertyName: b.shift?.customer?.name || '',
-          where: unitPartyLabel(b.unit?.label, b.party?.label),
+          where: hiddenBeds.has(`${b.unit_id}::${b.party_id || ''}`)
+            ? '' : unitPartyLabel(b.unit?.label, b.party?.label),
           startTime: b.start_time,
         })),
         ...standby.filter(s => new Date(s.start_time).getTime() > cutoffMs).map(s => ({
@@ -8233,7 +8733,7 @@ function WhosWorkingNowModal({ employee, onClose }) {
     const onVis = () => { if (!document.hidden) load(); };
     document.addEventListener('visibilitychange', onVis);
     return () => { cancelled = true; clearInterval(iv); document.removeEventListener('visibilitychange', onVis); };
-  }, [employee?.id]);
+  }, [employee?.id, canSeeJob]);
 
   const working = rows.filter(r => r.kind === 'block');
   const standby = rows.filter(r => r.kind === 'standby');
@@ -8778,6 +9278,10 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
   onOpenAssignment = null, ownerMode = false }) {
   // Owners see everything by default; the mine/all toggle is a cleaner's tool.
   const [sub, setSub] = useState(ownerMode ? 'all' : 'mine'); // 'mine' | 'all'
+  // Who-this-is-for. Only has an effect under the cleaner shell; on the
+  // owner Schedule tab there is no provider and nothing is filtered.
+  const jobVis = useJobVisibility();
+  const audienceMissing = useAudienceColumnMissing();
   const [jobs, setJobs] = useState([]);
   const [team, setTeam] = useState([]);
   const [loaded, setLoaded] = useState(false);
@@ -8800,6 +9304,9 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
     return `${d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} · ${d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}`;
   };
   const [peekJob, setPeekJob] = useState(null); // read-only quick glance
+  // Owner mode only: which job the shared Edit button has opened. The
+  // cleaner side never sets this, because the controls never render there.
+  const [editJob, setEditJob] = useState(null); // { id, propertyId }
   const [collapsedDates, setCollapsedDates] = useState(new Set()); // date-group keys that are collapsed
   const [buildingFilter, setBuildingFilter] = useState(null); // 'B1' | null = all buildings
   // Scope: the property you're clocked into, or everything. Clocked in at
@@ -8831,13 +9338,14 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
     // Paginated — this query is unscoped (every property, every open target),
     // so a plain call stops at PostgREST's 1000-row cap and silently drops
     // jobs. That made freshly-assigned work never show up under "Mine".
+    const SEL = 'id, unit_id, party_id, status, priority, completed_at, unit:units(label, bedrooms, bathrooms), party:parties(label), assignment:assignments!inner(id, customer_id, active, deleted_at, assignment_type, scheduled_date, pm_status, approved_at, created_at, source, audience, customer:customers(name, address))';
     const fetchOpenTargets = async () => {
       let rows = []; const PAGE = 1000;
       for (let from = 0; ; from += PAGE) {
-        const { data: page, error } = await supabase.from('assignment_targets')
-          .select('id, unit_id, party_id, status, priority, completed_at, unit:units(label, bedrooms, bathrooms), party:parties(label), assignment:assignments!inner(id, customer_id, active, deleted_at, assignment_type, scheduled_date, pm_status, approved_at, created_at, source, customer:customers(name, address))')
+        const { data: page, error } = await audienceSelect(SEL, (sel) => supabase.from('assignment_targets')
+          .select(sel)
           .not('status', 'in', '(done,blocked)')
-          .range(from, from + PAGE - 1);
+          .range(from, from + PAGE - 1));
         if (error || !page) break;
         rows = rows.concat(page);
         if (page.length < PAGE) break;
@@ -8852,7 +9360,7 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
       if (!a || a.active === false || a.deleted_at) return;
       if (!allowed.has(a.customer_id)) return;
       if (!byJob[a.id]) {
-        byJob[a.id] = { id: a.id, customerId: a.customer_id, propName: a.customer?.name || 'Property', propAddress: a.customer?.address || '', type: a.assignment_type || '', scheduledDate: a.scheduled_date || null, unitLabel: t.unit?.label || '', partyLabel: t.party?.label || '', unitId: t.unit_id, partyId: t.party_id, bedrooms: t.unit?.bedrooms, bathrooms: t.unit?.bathrooms, priority: false, items: 0, hereNow: [], assignees: [], requested: [], pmStatus: a.pm_status || null, approvedAt: a.approved_at || null, submittedAt: a.created_at || null, doneAt: null };
+        byJob[a.id] = { id: a.id, customerId: a.customer_id, propName: a.customer?.name || 'Property', propAddress: a.customer?.address || '', type: a.assignment_type || '', scheduledDate: a.scheduled_date || null, unitLabel: t.unit?.label || '', partyLabel: t.party?.label || '', unitId: t.unit_id, partyId: t.party_id, bedrooms: t.unit?.bedrooms, bathrooms: t.unit?.bathrooms, priority: false, items: 0, hereNow: [], assignees: [], requested: [], pmStatus: a.pm_status || null, approvedAt: a.approved_at || null, submittedAt: a.created_at || null, doneAt: null, audience: a.audience };
       }
       byJob[a.id].items++;
       if (t.priority) byJob[a.id].priority = true;
@@ -8893,6 +9401,9 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
   const isMine = (j) => j.assignees.some(a => a.id === employee?.id);
   const iRequested = (j) => j.requested.some(a => a.id === employee?.id);
 
+  // Asking for a cleaning never changes who it is for — a cleaner can only
+  // ask for one they can already see, and the request row keeps it on their
+  // screen while the owner decides.
   const requestJob = async (j) => {
     setBusyId(j.id);
     const { error } = await supabase.from('assignment_assignees')
@@ -8910,15 +9421,21 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
     clearAssignmentBroadcast(j.id);
     load();
   };
-  const commitAssignees = async (j, ids) => {    setBusyId(j.id);
+  const commitAssignees = async (j, ids, audience) => {    setBusyId(j.id);
     const current = [...j.assignees.map(a => a.id), ...j.requested.map(a => a.id)];
-    const error = await saveAssignees(j.id, current, ids, employee.id);
+    const error = await saveAssignees(j.id, current, ids, employee.id, audience);
     setBusyId(null);
     if (error) { alert('Could not update who\u2019s assigned: ' + error.message); return; }
     if (ids.length > 0) clearAssignmentBroadcast(j.id); // now claimed
     setAssignOpen(null);
     load();
+    jobVis.reload();
   };
+  // Approving a request does NOT narrow the cleaning. Who it is for is the
+  // owner's choice and is made in the assign picker; approving only confirms
+  // the person. So an Everyone cleaning that a cleaner asked for and got
+  // stays visible to everyone, exactly as it does today — the broadcast
+  // clearing below is still what stops the others being nagged about it.
   const approveRequest = async (j, empId) => {
     setBusyId(j.id);
     await supabase.from('assignment_assignees').update({ status: 'assigned' }).eq('assignment_id', j.id).eq('employee_id', empId);
@@ -8968,7 +9485,7 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
             linkKind: 'assignment', linkId: j.id, createdBy: employee?.id,
           });
         });
-      } else {
+      } else if (audienceOf(j) !== AUDIENCE_NAMED) {
         // Unassigned priority job — broadcast to ALL cleaners. This single
         // row shows for everyone and is deleted the moment someone claims it.
         createNotification({
@@ -8977,6 +9494,10 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
           linkKind: 'assignment', linkId: j.id, createdBy: employee?.id,
         });
       }
+      // The remaining case — narrowed to specific people but nobody named
+      // yet — notifies nobody. The body of that broadcast carries the
+      // apartment and the property, so sending it would hand every cleaner
+      // the one cleaning none of them is supposed to see.
     } else {
       // Priority turned off — clear any open broadcast for this job.
       clearAssignmentBroadcast(j.id);
@@ -8993,23 +9514,29 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
     const t = new Date(); t.setDate(t.getDate() + 1);
     return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`;
   })();
+  // Who-this-is-for, applied ONCE, above everything this screen derives:
+  // the Mine / All lists, the per-property counts, the "work at other
+  // properties" line and the building pills all read from visibleJobs, so
+  // none of them can disagree about what this cleaner is allowed to see.
+  // No effect on the owner Schedule tab (no provider there).
+  const visibleJobs = jobs.filter(j => jobVis.canSeeJob(j));
   // propScope is 'current' | 'all' | a specific customerId. Not clocked in
   // there is no "current", so the row lists the properties themselves and
   // defaults to all of them.
   const scopedJobs = (() => {
-    if (propScope === 'all') return jobs;
+    if (propScope === 'all') return visibleJobs;
     if (propScope === 'current') {
-      return currentPropertyId ? jobs.filter(j => j.customerId === currentPropertyId) : jobs;
+      return currentPropertyId ? visibleJobs.filter(j => j.customerId === currentPropertyId) : visibleJobs;
     }
-    return jobs.filter(j => j.customerId === propScope);
+    return visibleJobs.filter(j => j.customerId === propScope);
   })();
   const otherPropCount = currentPropertyId
-    ? jobs.filter(j => j.customerId !== currentPropertyId).length
+    ? visibleJobs.filter(j => j.customerId !== currentPropertyId).length
     : 0;
   // Properties that actually have open work, for the not-clocked-in picker.
   const propsWithJobs = (() => {
     const m = new Map();
-    jobs.forEach(j => {
+    visibleJobs.forEach(j => {
       if (!j.customerId) return;
       if (!m.has(j.customerId)) m.set(j.customerId, { id: j.customerId, name: j.propName || 'Property', n: 0 });
       m.get(j.customerId).n += 1;
@@ -9151,10 +9678,10 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
 
                 {/* Assign picker — shared component; saves only on Save */}
                 {canAssign && assignOpen === j.id && (
-                  <AssignPicker key={j.id} team={team} busy={busyId === j.id}
+                  <AssignPicker key={j.id} assignmentId={j.id} team={team} busy={busyId === j.id}
                     currentIds={[...j.assignees.map(a => a.id), ...j.requested.map(a => a.id)]}
                     onCancel={() => setAssignOpen(null)}
-                    onSave={(ids) => commitAssignees(j, ids)} />
+                    onSave={(ids, audience) => commitAssignees(j, ids, audience)} />
                 )}
 
                 <div className="flex items-center justify-between mt-2 gap-2">
@@ -9253,6 +9780,20 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
                         <Check size={15} />
                       </button>
                     )}
+                    {/* Size / edit / delete — the shared piece, and ONLY in
+                       owner mode. This exact component also draws the
+                       cleaner's home screen, so the gate is the thing that
+                       keeps these buttons off it. */}
+                    {ownerMode && (
+                      <OwnerJobControls employee={employee}
+                        job={{
+                          assignmentId: j.id, unitId: j.unitId, partyId: j.partyId,
+                          unitLabel: j.unitLabel, partyLabel: j.partyLabel, type: j.type,
+                          bedrooms: j.bedrooms, bathrooms: j.bathrooms,
+                        }}
+                        onChanged={load}
+                        onEdit={() => setEditJob({ id: j.id, propertyId: j.customerId })} />
+                    )}
                     <button onClick={() => openJob(j)}
                       className="text-[11px] font-medium px-3 py-1.5 rounded-full bg-amber-600 hover:bg-amber-700 text-white flex items-center gap-1 active:scale-95 transition">
                       {ownerMode ? 'Open' : onStartJob ? 'Clock in & start' : here ? 'Start' : 'Switch'} <ChevronRight size={12} />
@@ -9299,11 +9840,25 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
     else onSwitchProperty && onSwitchProperty();     // fallback: generic picker
   };
 
+  // Editing takes over the screen, same as it does from a job's own page.
+  // Owner mode only — editJob can never be set otherwise.
+  if (ownerMode && editJob) {
+    return <AssignmentEditorHost assignmentId={editJob.id} propertyId={editJob.propertyId}
+      employee={employee}
+      onCancel={() => setEditJob(null)}
+      onSaved={() => { setEditJob(null); load(); }} />;
+  }
+
   return (
     <div className="px-4">
       <div className={`flex gap-1 bg-stone-100 p-1 rounded-xl mb-4 mt-4 ${ownerMode ? 'hidden' : ''}`}>
         <button onClick={() => setSub('mine')} className={`flex-1 py-2 rounded-lg text-xs font-medium ${sub === 'mine' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>Assigned to me</button>
-        <button onClick={() => setSub('all')} className={`flex-1 py-2 rounded-lg text-xs font-medium ${sub === 'all' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>All pending</button>
+        {/* Not "All pending" any more — that promised every open cleaning in
+           the company, and a cleaning narrowed to someone else is no longer
+           in this list. The label says what it now shows, and goes back to
+           the old wording when nothing is actually being narrowed: for the
+           owner, and while the audience column is absent. */}
+        <button onClick={() => setSub('all')} className={`flex-1 py-2 rounded-lg text-xs font-medium ${sub === 'all' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>{jobVis.filtering && !audienceMissing ? 'Open to me' : 'All pending'}</button>
       </div>
       {/* Not clocked in: no "current" property to compare against, so the row
          is the property list itself, defaulting to everything. */}
@@ -9311,7 +9866,7 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
         <div className="flex gap-1.5 overflow-x-auto pb-2 mb-2 -mx-1 px-1">
           <button onClick={() => setPropScope('all')}
             className={`text-[11px] font-mono px-2.5 py-1 rounded-full whitespace-nowrap flex-shrink-0 transition-colors ${propScope !== 'all' && propScope !== 'current' ? 'bg-stone-100 text-stone-600 hover:bg-stone-200' : 'bg-stone-900 text-stone-50'}`}>
-            All properties ({jobs.length})
+            All properties ({visibleJobs.length})
           </button>
           {propsWithJobs.map(p => (
             <button key={p.id} onClick={() => setPropScope(propScope === p.id ? 'all' : p.id)}
@@ -9331,7 +9886,7 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
           </button>
           <button onClick={() => setPropScope('all')}
             className={`text-[11px] font-mono px-2.5 py-1 rounded-full transition-colors ${propScope === 'all' ? 'bg-stone-900 text-stone-50' : 'bg-stone-100 text-stone-600 hover:bg-stone-200'}`}>
-            All properties ({jobs.length})
+            All properties ({visibleJobs.length})
           </button>
           {propScope === 'current' && (
             <span className="text-[11px] font-mono text-stone-400">
@@ -9447,8 +10002,9 @@ function PropertySwitcher({ currentPropertyId, currentName, employee, onSwitch, 
   onShowAllProperties = null, showingAll = false }) {
   const [open, setOpen] = useState(false);
   const [props, setProps] = useState([]);
-  const [counts, setCounts] = useState({});
+  const [rows, setRows] = useState([]);
   const [loaded, setLoaded] = useState(false);
+  const jobVis = useJobVisibility();
 
   useEffect(() => {
     if (!open || loaded) return;
@@ -9459,10 +10015,12 @@ function PropertySwitcher({ currentPropertyId, currentName, employee, onSwitch, 
       const fetchAllTargets = async () => {
         let rows = []; const PAGE = 1000;
         for (let from = 0; ; from += PAGE) {
-          const { data, error } = await supabase.from('assignment_targets')
-            .select('unit_id, party_id, status, assignment:assignments!inner(customer_id, active, deleted_at)')
-            .not('status', 'in', '(done,blocked)')
-            .range(from, from + PAGE - 1);
+          const { data, error } = await audienceSelect(
+            'unit_id, party_id, status, assignment:assignments!inner(id, customer_id, active, deleted_at, audience)',
+            (sel) => supabase.from('assignment_targets')
+              .select(sel)
+              .not('status', 'in', '(done,blocked)')
+              .range(from, from + PAGE - 1));
           if (error || !data) break;
           rows = rows.concat(data);
           if (data.length < PAGE) break;
@@ -9475,22 +10033,29 @@ function PropertySwitcher({ currentPropertyId, currentName, employee, onSwitch, 
         fetchAllTargets(),
       ]);
       if (cancelled) return;
-      const c = {}; const seen = new Set();
-      (allTargets || []).forEach(t => {
-        const a = t.assignment; if (!a || a.active === false || a.deleted_at) return;
-        const cid = a.customer_id; if (!cid) return;
-        const k = `${cid}:${t.unit_id || ''}:${t.party_id || ''}`;
-        if (seen.has(k)) return;
-        seen.add(k);
-        c[cid] = (c[cid] || 0) + 1;
-      });
-      setCounts(c);
+      setRows(allTargets || []);
       setProps(visibleProps(pRes.data || [], employee));
       setLoaded(true);
     })();
     return () => { cancelled = true; };
     /* eslint-disable-next-line */
   }, [open]);
+
+  // Counted in render so the number follows who-this-is-for, rather than
+  // being frozen at whatever the fetch saw.
+  const counts = (() => {
+    const c = {}; const seen = new Set();
+    rows.forEach(t => {
+      const a = t.assignment; if (!a || a.active === false || a.deleted_at) return;
+      const cid = a.customer_id; if (!cid) return;
+      if (!jobVis.canSeeJob(targetToJob(t))) return;
+      const k = `${cid}:${t.unit_id || ''}:${t.party_id || ''}`;
+      if (seen.has(k)) return;
+      seen.add(k);
+      c[cid] = (c[cid] || 0) + 1;
+    });
+    return c;
+  })();
 
   return (
     <div className="relative min-w-0">
@@ -9573,8 +10138,9 @@ function PropertySwitcher({ currentPropertyId, currentName, employee, onSwitch, 
 
 function CleanerPropertiesList({ currentPropertyId, employee, onOpenCurrent, onSwitch }) {
   const [props, setProps] = useState([]);
-  const [counts, setCounts] = useState({});
+  const [rows, setRows] = useState([]);
   const [loaded, setLoaded] = useState(false);
+  const jobVis = useJobVisibility();
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -9583,10 +10149,12 @@ function CleanerPropertiesList({ currentPropertyId, employee, onOpenCurrent, onS
       const fetchAllTargets = async () => {
         let rows = []; const PAGE = 1000;
         for (let from = 0; ; from += PAGE) {
-          const { data, error } = await supabase.from('assignment_targets')
-            .select('unit_id, party_id, status, assignment:assignments!inner(customer_id, active, deleted_at)')
-            .not('status', 'in', '(done,blocked)')
-            .range(from, from + PAGE - 1);
+          const { data, error } = await audienceSelect(
+            'unit_id, party_id, status, assignment:assignments!inner(id, customer_id, active, deleted_at, audience)',
+            (sel) => supabase.from('assignment_targets')
+              .select(sel)
+              .not('status', 'in', '(done,blocked)')
+              .range(from, from + PAGE - 1));
           if (error || !data) break;
           rows = rows.concat(data);
           if (data.length < PAGE) break;
@@ -9598,17 +10166,24 @@ function CleanerPropertiesList({ currentPropertyId, employee, onOpenCurrent, onS
         supabase.from('customers').select('*').eq('active', true).order('name'),
         fetchAllTargets(),
       ]);
-      const c = {}; const seen = new Set();
-      (allTargets || []).forEach(t => {
-        const a = t.assignment; if (!a || a.active === false || a.deleted_at) return;
-        const cid = a.customer_id; if (!cid) return;
-        const k = `${cid}:${t.unit_id || ''}:${t.party_id || ''}`;
-        if (!seen.has(k)) { seen.add(k); c[cid] = (c[cid] || 0) + 1; }
-      });
-      if (!cancelled) { setProps(visibleProps(pRes.data || [], employee)); setCounts(c); setLoaded(true); }
+      if (!cancelled) { setProps(visibleProps(pRes.data || [], employee)); setRows(allTargets || []); setLoaded(true); }
     })();
     return () => { cancelled = true; };
   }, []);
+  // Counted in render, not in the effect: the "which cleanings are mine"
+  // read finishes on its own schedule, and a count computed once inside
+  // the fetch would keep showing the pre-filter number.
+  const counts = (() => {
+    const c = {}; const seen = new Set();
+    rows.forEach(t => {
+      const a = t.assignment; if (!a || a.active === false || a.deleted_at) return;
+      const cid = a.customer_id; if (!cid) return;
+      if (!jobVis.canSeeJob(targetToJob(t))) return;
+      const k = `${cid}:${t.unit_id || ''}:${t.party_id || ''}`;
+      if (!seen.has(k)) { seen.add(k); c[cid] = (c[cid] || 0) + 1; }
+    });
+    return c;
+  })();
   if (!loaded) return <div className="text-center py-8 text-stone-400 text-sm">Loading…</div>;
   const sorted = [...props].sort((a, b) =>
     (a.id === currentPropertyId ? -1 : b.id === currentPropertyId ? 1 : 0)
@@ -10659,7 +11234,12 @@ function PreparingBlockView({ shift, pendingStart, employeeName, employee,
 
         {/* Assignment card for this bedroom, with "Start cleaning" attached
            to it (passed as onStartCleaning) so the primary action sits with
-           the job it starts. */}
+           the job it starts.
+           Who-this-is-for applies here (the default). Nothing is open yet —
+           this is the screen where the cleaner decides whether to start —
+           so a cleaning that is not theirs must not appear with a Start
+           button on it. The working screen's banner is the one that opts
+           out. */}
         <AssignmentBanner propertyId={shift.customer_id}
           unitId={pendingStart.unitId} partyId={pendingStart.partyId}
           employee={employee} workScreen onStartCleaning={onStart} />
@@ -11258,7 +11838,13 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
           onSwitch={onSwitchBedroom} />
       )}
 
-      <AssignmentBanner propertyId={shift.customer_id} unitId={block.unit_id} partyId={block.party_id} employee={employee} onOpenBedroomHistory={onOpenBedroomHistory} dark workScreen onExit={onExit}
+      {/* audienceUnfiltered — THE one deliberate opt-out. This is the
+         bedroom the cleaner has open right now: the cleaning whose timer is
+         running has to keep rendering whatever its audience says, and a
+         teammate's cleaning in the room you are both standing in should not
+         vanish. Reaching this screen already requires an open work block,
+         which the mid-clean exemption honours anyway. */}
+      <AssignmentBanner propertyId={shift.customer_id} unitId={block.unit_id} partyId={block.party_id} employee={employee} onOpenBedroomHistory={onOpenBedroomHistory} dark workScreen onExit={onExit} audienceUnfiltered
         propertyName={shift.customer?.name} elapsedMs={blockElapsed}
         undoSlot={(onUndo || canMoveBlock || lastActionLabel) ? (
           <UndoMoveMenu
@@ -12173,34 +12759,44 @@ function SimpleShiftView({ shift, tasks, activeTask, employeeName, employee, onS
 // =================================================================
 function PropertyPicker({ onPick, onCancel, busy, title, subtitle, viewOnly = false, employee }) {
   const [properties, setProperties] = useState([]);
-  const [assignmentCounts, setAssignmentCounts] = useState({}); // { customer_id: number }
-  const [dateCounts, setDateCounts] = useState({}); // { dateKey|'__none__': { customer_id: count } }
+  const [rawTargets, setRawTargets] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [showAllOthers, setShowAllOthers] = useState(false);
   const [search, setSearch] = useState('');
   const [skipOpen, setSkipOpen] = useState(false); // "clock in without a property" choice
+  const jobVis = useJobVisibility();
 
   useEffect(() => { (async () => {
     // Load active properties AND open assignment counts in parallel.
-    // The count is **unique bedrooms** with open work, not the raw
-    // assignment_target row count. One bedroom can have 20 items but
-    // it's still ONE bedroom that needs cleaning — that's the number
-    // the cleaner cares about ("which apartments have work?"), not
-    // the item-level total.
     const [propsRes, targetsRes] = await Promise.all([
       supabase.from('customers').select('*').eq('active', true).order('name'),
-      supabase.from('assignment_targets')
-        .select('unit_id, party_id, status, assignment:assignments!inner(customer_id, active, scheduled_date, deleted_at)')
-        .not('status', 'in', '(done,blocked)'),
+      audienceSelect(
+        'unit_id, party_id, status, assignment:assignments!inner(id, customer_id, active, scheduled_date, deleted_at, audience)',
+        (sel) => supabase.from('assignment_targets')
+          .select(sel)
+          .not('status', 'in', '(done,blocked)')),
     ]);
+    setProperties(visibleProps(propsRes.data || [], employee));
+    setRawTargets(targetsRes.data || []);
+    setLoaded(true);
+  })(); }, []);
+
+  // The count is **unique bedrooms** with open work, not the raw
+  // assignment_target row count. One bedroom can have 20 items but it's
+  // still ONE bedroom that needs cleaning — that's the number the cleaner
+  // cares about ("which apartments have work?"), not the item-level total.
+  // Counted in render so it follows who-this-is-for: a property whose only
+  // open work is narrowed to someone else shows no number to this cleaner.
+  const { assignmentCounts, dateCounts } = (() => {
     const counts = {};
     const seenBedrooms = new Set();
     const dateBedrooms = {}; // dateKey -> propId -> Set(bedroomKey)
-    (targetsRes.data || []).forEach(t => {
+    rawTargets.forEach(t => {
       const a = t.assignment;
       if (!a || a.active === false || a.deleted_at) return;
       const cid = a.customer_id;
       if (!cid) return;
+      if (!jobVis.canSeeJob(targetToJob(t))) return;
       const bKey = `${t.unit_id || ''}::${t.party_id || ''}`;
       const key = `${cid}::${bKey}`;
       if (!seenBedrooms.has(key)) { seenBedrooms.add(key); counts[cid] = (counts[cid] || 0) + 1; }
@@ -12215,11 +12811,8 @@ function PropertyPicker({ onPick, onCancel, busy, title, subtitle, viewOnly = fa
       dc[dk] = {};
       Object.entries(byProp).forEach(([cid, set]) => { dc[dk][cid] = set.size; });
     });
-    setProperties(visibleProps(propsRes.data || [], employee));
-    setAssignmentCounts(counts);
-    setDateCounts(dc);
-    setLoaded(true);
-  })(); }, []);
+    return { assignmentCounts: counts, dateCounts: dc };
+  })();
 
   // Split into two buckets: properties with open assignments (top) and
   // everything else (collapsed dropdown). Both lists are alphabetical
@@ -12483,7 +13076,8 @@ function ViewOnlyDashboard({ employee, property, onSignOut, onEndViewing, onOpen
 
 // View-only version of AssignmentsPanel — no start/done buttons, just info
 function ViewOnlyAssignmentsPanel({ propertyId, employee, onOpenBedroomHistory }) {
-  const [targets, setTargets] = useState([]);
+  const { canSeeJob } = useJobVisibility();
+  const [rawTargets, setRawTargets] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [opened, setOpened] = useState(null);
   const [filter, setFilter] = useState('open'); // 'open' | 'done'
@@ -12493,14 +13087,16 @@ function ViewOnlyAssignmentsPanel({ propertyId, employee, onOpenBedroomHistory }
     let data = [];
     let error = null;
     for (let from = 0; ; from += PAGE) {
-      const { data: page, error: pErr } = await supabase
-        .from('assignment_targets')
-        .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, deleted_at, assignment_type, scheduled_date), unit:units(id, label), party:parties(id, label), starter:employees!started_by(name), completer:employees!completed_by(name)')
-        .eq('assignment.customer_id', propertyId)
-        .eq('assignment.active', true)
+      const { data: page, error: pErr } = await audienceSelect(
+        '*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, deleted_at, assignment_type, scheduled_date, audience), unit:units(id, label), party:parties(id, label), starter:employees!started_by(name), completer:employees!completed_by(name)',
+        (sel) => supabase
+          .from('assignment_targets')
+          .select(sel)
+          .eq('assignment.customer_id', propertyId)
+          .eq('assignment.active', true)
           .is('assignment.deleted_at', null)
-        .order('id', { ascending: true })
-        .range(from, from + PAGE - 1);
+          .order('id', { ascending: true })
+          .range(from, from + PAGE - 1));
       if (pErr) { error = pErr; break; }
       data = data.concat(page || []);
       if (!page || page.length < PAGE) break;
@@ -12511,11 +13107,16 @@ function ViewOnlyAssignmentsPanel({ propertyId, employee, onOpenBedroomHistory }
       !t.assignment?.deleted_at &&
       (t.assignment?.source !== 'pm' || t.assignment?.pm_status === 'approved')
     );
-    setTargets(filtered);
+    setRawTargets(filtered);
     setLoaded(true);
   };
   useEffect(() => { load(); /* eslint-disable-next-line */ }, [propertyId]);
   useAssignmentSync(load, 'view-only-asgn');
+
+  // Looking around is still looking: a cleaning narrowed to somebody else
+  // is no more visible here than it is on the clocked-in screens. Applied
+  // in render so it follows the who-is-this-for read, not the fetch.
+  const targets = rawTargets.filter(t => canSeeJob(targetToJob(t)));
 
   const todayKey = (() => {
     const d = new Date();
@@ -12674,6 +13275,7 @@ function ViewOnlyAssignmentsPanel({ propertyId, employee, onOpenBedroomHistory }
 }
 
 function UnitPicker({ property, onPick, onBack, busy, title = "Pick a unit" }) {
+  const { canSeeJob } = useJobVisibility();
   const [units, setUnits] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [search, setSearch] = useState('');
@@ -12687,9 +13289,11 @@ function UnitPicker({ property, onPick, onBack, busy, title = "Pick a unit" }) {
       supabase.from('units').select('*')
         .eq('customer_id', property.id).eq('active', true)
         .order('sort_order').order('label'),
-      supabase.from('assignment_targets')
-        .select('unit_id, party_id, status, assignment:assignments!inner(customer_id, active)')
-        .not('status', 'in', '(done,blocked)'),
+      audienceSelect(
+        'unit_id, party_id, status, assignment:assignments!inner(id, customer_id, active, audience)',
+        (sel) => supabase.from('assignment_targets')
+          .select(sel)
+          .not('status', 'in', '(done,blocked)')),
     ]);
     // Apply natural sort client-side so '10-101' comes after '9-101'
     const sorted = (unitsRes.data || []).slice().sort((a, b) => naturalCompare(a.label, b.label));
@@ -12699,18 +13303,35 @@ function UnitPicker({ property, onPick, onBack, busy, title = "Pick a unit" }) {
     // unit so we skip them here.
     const counts = {};
     const seen = new Set();
+    // Suppressing the COUNT was not enough. The apartment stayed on screen
+    // as a tappable row, and tapping through to the bedroom landed on a
+    // screen that showed the other cleaner's job in full with a Start
+    // cleaning button — and starting it opened a work block, which the
+    // mid-clean exemption then honoured, so the cleaning reappeared on
+    // every one of their lists. The exemption is scoped right; the problem
+    // was that a cleaner could hand it to themselves. So the row goes too.
+    //
+    // Only for apartments that HAVE open work, all of it somebody else's.
+    // An apartment with no open cleaning at all is ad-hoc work and stays
+    // listed exactly as before — that route is not being closed.
+    const anyWork = new Set();
+    const visibleWork = new Set();
     (targetsRes.data || []).forEach(t => {
       const a = t.assignment;
       if (!a || a.active === false) return;
       if (a.customer_id !== property.id) return;
       if (!t.unit_id) return;
+      anyWork.add(t.unit_id);
+      if (!canSeeJob(targetToJob(t))) return;
+      visibleWork.add(t.unit_id);
       const key = `${t.unit_id}::${t.party_id || ''}`;
       if (seen.has(key)) return;
       seen.add(key);
       counts[t.unit_id] = (counts[t.unit_id] || 0) + 1;
     });
-    setUnits(sorted); setBedroomCounts(counts); setLoaded(true);
-  })(); }, [property.id]);
+    const listable = sorted.filter(u => !anyWork.has(u.id) || visibleWork.has(u.id));
+    setUnits(listable); setBedroomCounts(counts); setLoaded(true);
+  })(); }, [property.id, canSeeJob]);
 
   const q = search.trim().toLowerCase();
   const filtered = (q
@@ -12792,6 +13413,7 @@ function UnitPicker({ property, onPick, onBack, busy, title = "Pick a unit" }) {
 }
 
 function PartyPicker({ property, unit, onPick, onBack, busy }) {
+  const { canSeeJob } = useJobVisibility();
   const [parties, setParties] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [picked, setPicked] = useState(null);
@@ -12806,21 +13428,31 @@ function PartyPicker({ property, unit, onPick, onBack, busy }) {
       supabase.from('parties').select('*')
         .eq('unit_id', unit.id).eq('active', true)
         .order('sort_order').order('label'),
-      supabase.from('assignment_targets')
-        .select('party_id, template_section, template_item_key, status, assignment:assignments!inner(customer_id, active, source, pm_status, deleted_at)')
-        .eq('unit_id', unit.id)
-        .not('status', 'in', '(done,blocked)'),
+      audienceSelect(
+        'unit_id, party_id, template_section, template_item_key, status, assignment:assignments!inner(id, customer_id, active, source, pm_status, deleted_at, audience)',
+        (sel) => supabase.from('assignment_targets')
+          .select(sel)
+          .eq('unit_id', unit.id)
+          .not('status', 'in', '(done,blocked)')),
     ]);
     // Build the section-by-section counts per party. Only count
     // open targets on active, customer-matched assignments (so
     // legacy archived rows don't inflate the totals).
     const c = {};
+    // Same as UnitPicker: a bedroom whose open work is all somebody else's
+    // comes off the list, not just out of the count, or the cleaner walks
+    // into it anyway. A bedroom with no open cleaning stays listed.
+    const anyWork = new Set();
+    const visibleWork = new Set();
     (targetsRes.data || []).forEach(t => {
       const a = t.assignment;
       if (!a || a.active === false) return;
       if (a.customer_id !== property.id) return;
       if (a.source === 'pm' && a.pm_status !== 'approved') return;
       if (!t.party_id) return;
+      anyWork.add(t.party_id);
+      if (!canSeeJob(targetToJob(t))) return;
+      visibleWork.add(t.party_id);
       if (!c[t.party_id]) c[t.party_id] = { total: 0, bedroom: 0, vanity: 0, bathroom: 0, general: 0, bathTub: false, bathToilet: false, genHot: false, genFridge: false, genFreezer: false };
       c[t.party_id].total += 1;
       const sec = (t.template_section || '').toLowerCase();
@@ -12842,10 +13474,10 @@ function PartyPicker({ property, unit, onPick, onBack, busy }) {
         if (key.includes('freezer')) c[t.party_id].genFreezer = true;
       }
     });
-    setParties(partiesRes.data || []);
+    setParties((partiesRes.data || []).filter(p => !anyWork.has(p.id) || visibleWork.has(p.id)));
     setCounts(c);
     setLoaded(true);
-  })(); }, [unit.id, property.id]);
+  })(); }, [unit.id, property.id, canSeeJob]);
 
   const q = search.trim().toLowerCase();
   const filteredParties = q
@@ -14640,11 +15272,34 @@ function Header({ name, onSignOut, role, employee, onOpenMessages, onLogoClick, 
       </div>
       )}
       {isCleaner && employee && (
-        <div className="flex items-center" data-no-translate>
+        <div className="flex items-center gap-1.5" data-no-translate>
           <NotificationBell employee={employee} isOwner={false} onNavigate={onNotificationNavigate} />
+          {/* Sign out, in the bar rather than three taps down the More tab.
+             onSignOut is already passed in by all six cleaner screens
+             (clocked out, hub, preparing, working, single-unit, view-only),
+             so this one branch puts it on every one of them. The messages
+             screen also renders a Header with a do-nothing onSignOut, but
+             it passes no `employee`, so it never reaches this branch and
+             does not sprout a dead button.
+             The confirm is not here: it is in signOutWithCleanup, so this
+             button and the three older ways out behave identically. */}
+          {onSignOut && (
+            <button onClick={onSignOut}
+              className="px-2.5 py-2 rounded-full bg-red-600/90 hover:bg-red-600 text-stone-50 active:scale-95 transition flex items-center gap-1.5"
+              title="Sign out">
+              <LogOut size={16} />
+              <span className="text-xs font-mono">Sign out</span>
+            </button>
+          )}
         </div>
       )}
     </div>
+    {/* The audience column isn't in the database yet. Owners and managers
+       only: the app is running exactly as it did before, so a cleaner has
+       nothing to act on and a property manager should never be shown our
+       migrations. Keyed off role rather than !isCleaner so a PM portal
+       header can't pick it up. */}
+    {(role === 'owner' || role === 'manager') && <AudienceSetupBanner />}
     {/* Search sits on its own row under the logo. Sharing the top row would
        squeeze it to nothing on a phone, and this is meant to be tapped, not
        hunted for. Staff only — a cleaner's header stays bare. The explicit
@@ -17339,6 +17994,721 @@ function DeleteConfirmModal({ title, description, itemSummary, busy, onConfirm, 
       </div>
     </div>
   );
+}
+
+// =================================================================
+// OWNER JOB CONTROLS — the size box, the edit pencil and the delete
+// button that sit on a cleaning card.
+//
+// Written ONCE and dropped into every card that shows a cleaning: the
+// Schedule tab (CleanerWorkList in owner mode), Daily, Completed, and
+// the By-property cards. This file has a history of the same card being
+// written out four times and a fix landing in only one copy while the
+// other three quietly stayed broken; this is the piece that designs that
+// out. If a fifth card ever needs these buttons it is one line, not a
+// re-implementation.
+//
+// Nothing here reaches the cleaner side. Every control sits behind its
+// own capability, and the Schedule card — which is the SAME component
+// the cleaners see on their home screen — additionally only mounts this
+// when it is explicitly in owner mode.
+// =================================================================
+
+// How many finished cleanings at this apartment have not been invoiced
+// yet. Changing an apartment's size re-prices every one of them, because
+// the invoice draft looks the size up live and the price book is keyed
+// by it (`__apt__:2x2`). Invoices already sent keep their own frozen
+// copy and do not move.
+//
+// Returns null when we cannot tell — an old database without the
+// invoiced_on column, or a query that failed. The warning is a courtesy
+// and must never be the reason a save doesn't happen.
+async function countUnbilledCleaningsAtUnit(unitId) {
+  if (!unitId) return 0;
+  try {
+    const seen = new Set();
+    const PAGE = 1000;
+    for (let from = 0; ; from += PAGE) {
+      // .order('id') — unordered PostgREST paging can skip or repeat rows,
+      // which is why every other paged query in this file orders too.
+      const { data, error } = await supabase.from('assignment_targets')
+        .select('id, assignment_id, unit_id, assignment:assignments(deleted_at)')
+        .eq('unit_id', unitId)
+        .eq('status', 'done')
+        .is('invoiced_on', null)
+        .order('id')
+        .range(from, from + PAGE - 1);
+      if (error) return null;
+      (data || []).forEach(t => {
+        if (t.assignment && t.assignment.deleted_at) return;   // deleted jobs never bill
+        // No assignment_id means the row belongs to no cleaning at all.
+        // Counting it invented a phantom cleaning in the warning.
+        if (!t.assignment_id) return;
+        seen.add(t.assignment_id);                             // one entry per cleaning
+      });
+      if (!data || data.length < PAGE) break;
+      if (from > 100000) break;
+    }
+    return seen.size;
+  } catch (e) {
+    console.warn('[unbilled count] failed', e);
+    return null;
+  }
+}
+
+// Ask before a size change that moves money. Size is a property of the
+// APARTMENT, not of one cleaning — fixing a 2x2 that was really a 1x1
+// fixes it everywhere, past and future, which is the point. What should
+// never be a surprise is that it re-prices the cleanings at that
+// apartment you haven't billed yet. Returns true to go ahead.
+const sameNum = (a, b) => (a === '' || a == null ? null : Number(a)) === (b === '' || b == null ? null : Number(b));
+
+// Apartment labels are typed free-hand and then handed to ilike, where %
+// and _ are wildcards: typing "%" matched every apartment at the property
+// and .limit(1) picked an arbitrary one to move the job onto. Postgres
+// LIKE takes backslash as its escape character by default.
+const likeEscape = (s) => String(s || '').replace(/[\\%_]/g, m => '\\' + m);
+
+// Which bedroom a quick-form job lands on at a given apartment.
+//
+// Creating: the whole-apartment "Main", else the first bedroom — that is
+// what Bridges and Citifront want, and it is what this always did.
+//
+// Editing: STAY WHERE YOU ARE. The old rule was "Main, else the first",
+// applied on every save — so at a per-bedroom property (Carriage sets up
+// Bedroom 1..N and no Main) a job sitting on Bedroom 3 was silently
+// dragged to Bedroom 1 by an edit that only changed the due date. When
+// the job really is moving to another apartment, prefer the bedroom of
+// the same name there before falling back.
+const pickQuickParty = (parties, { keepPartyId = null, keepPartyLabel = '' } = {}) => {
+  const list = parties || [];
+  if (keepPartyId) {
+    const same = list.find(p => p.id === keepPartyId);
+    if (same) return same;
+  }
+  if (keepPartyLabel) {
+    const byLabel = list.find(p =>
+      (p.label || '').trim().toLowerCase() === String(keepPartyLabel).trim().toLowerCase());
+    if (byLabel) return byLabel;
+  }
+  return list.find(p => (p.label || '').toLowerCase() === 'main') || list[0] || null;
+};
+async function confirmSizeChange({ unitId, unitLabel, fromBr, fromBa, toBr, toBa }) {
+  if (sameNum(fromBr, toBr) && sameNum(fromBa, toBa)) return true; // nothing changed
+  const n = await countUnbilledCleaningsAtUnit(unitId);
+  if (n === null || n === 0) return true;
+  const where = unitLabel ? `Apt ${unitLabel}` : 'this apartment';
+  const sizeText = `${toBr === '' || toBr == null ? '—' : toBr}BR / ${toBa === '' || toBa == null ? '—' : toBa}BA`;
+  // Careful with the claim. The size tier only prices a cleaning where
+  // nothing was itemised; a cleaning with itemised failures prices off its
+  // items, and an hourly property prices off the clock. So the count is
+  // "cleanings this could touch", not "cleanings this will re-price".
+  return confirm(
+    `${n} finished cleaning${n === 1 ? '' : 's'} at ${where} ${n === 1 ? 'has' : 'have'} not been invoiced yet.\n\n`
+    + `Saving ${sizeText} changes what ${n === 1 ? 'it costs' : 'they cost'} wherever the price comes from the apartment size. `
+    + 'Cleanings billed by the hour, or priced off their own itemised list, are not affected.\n\n'
+    + 'Invoices you have already sent do not change.\n\nSave the new size?'
+  );
+}
+
+// Everything hanging off a cleaning, counted before a delete or a move.
+//
+// Work blocks come back in two piles. `linked` are the ones the app
+// recorded against THIS job (work_blocks.assignment_id) — those are
+// certain. `ambiguous` are blocks at the same apartment with no job on
+// them at all, on a day this job was worked; older work is like this
+// because the link is only filled in when the app can tell. Those are
+// never moved or counted on silently — they are shown with a checkbox.
+// `failed` is the important field. A read that FAILED must never be
+// mistaken for a job with nothing on it — that is how a worked, invoiced
+// cleaning gets offered as a one-tap delete, and how a move skips the
+// hours entirely. Every caller checks `failed` before doing anything
+// destructive.
+async function loadJobAttachments({ assignmentId, unitId, partyId }) {
+  const out = {
+    linked: [], ambiguous: [], photos: 0, ambiguousPhotos: 0,
+    doneItems: 0, startedItems: 0,
+    invoices: [], error: null, failed: false,
+  };
+  if (!assignmentId) return out;
+  const fail = (what, e) => {
+    out.failed = true;
+    out.error = out.error || `${what}: ${e?.message || e || 'read failed'}`;
+  };
+  try {
+    const { data: targets, error: te } = await supabase.from('assignment_targets')
+      .select('id, status, started_at, completed_at, invoiced_on, unit_id, party_id')
+      .eq('assignment_id', assignmentId);
+    if (te) fail("couldn't read this job's items", te);
+    const rows = targets || [];
+    out.doneItems = rows.filter(t => t.status === 'done').length;
+    out.startedItems = rows.filter(t => t.status === 'in_progress' || t.status === 'paused').length;
+
+    // Days this job was actually worked — the only window in which an
+    // unlinked block at this apartment could plausibly belong to it.
+    const { data: asgRow, error: ae } = await supabase.from('assignments')
+      .select('scheduled_date').eq('id', assignmentId).maybeSingle();
+    if (ae) fail("couldn't read the job", ae);
+    const dayKey = (ts) => {
+      if (!ts) return null;
+      const d = new Date(ts);
+      return isNaN(d) ? null : `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    };
+    const days = new Set();
+    rows.forEach(t => { [dayKey(t.started_at), dayKey(t.completed_at)].forEach(k => { if (k) days.add(k); }); });
+    if (asgRow?.scheduled_date) days.add(String(asgRow.scheduled_date).slice(0, 10));
+
+    const blockSelect = 'id, start_time, end_time, unit_id, party_id, assignment_id, shift_id, shift:shifts(id, customer_id, employee:employees(name)), party:parties(label), tasks(id, photos(id, deleted_at))';
+    const shape = (b) => {
+      // A block still running is measured to now, the same way every other
+      // screen measures one.
+      const ms = b.start_time
+        ? ((b.end_time ? new Date(b.end_time) : new Date()) - new Date(b.start_time))
+        : 0;
+      const photos = (b.tasks || []).reduce(
+        (n, t) => n + (t.photos || []).filter(p => !p.deleted_at).length, 0);
+      return {
+        id: b.id, ms, photos, open: !b.end_time,
+        startTime: b.start_time,
+        day: dayKey(b.start_time),
+        who: b.shift?.employee?.name || 'someone',
+        where: b.party?.label || '',
+        unitId: b.unit_id, partyId: b.party_id,
+      };
+    };
+
+    const { data: linked, error: le } = await supabase.from('work_blocks')
+      .select(blockSelect).eq('assignment_id', assignmentId)
+      .order('start_time').limit(500);
+    if (le) fail("couldn't read this job's hours", le);
+    out.linked = (linked || []).map(shape);
+
+    if (unitId && days.size > 0) {
+      // Bounded by the days this job was worked rather than pulling an
+      // arbitrary 500 rows of the apartment's whole history and filtering
+      // afterwards — same-day hours used to fall outside that window and
+      // were then neither offered nor counted.
+      const sorted = [...days].sort();
+      const { data: loose, error: lo } = await supabase.from('work_blocks')
+        .select(blockSelect)
+        .eq('unit_id', unitId)
+        .is('assignment_id', null)
+        .gte('start_time', `${sorted[0]}T00:00:00`)
+        .lte('start_time', `${sorted[sorted.length - 1]}T23:59:59.999`)
+        .order('start_time').limit(500);
+      if (lo) fail("couldn't read the other hours at this apartment", lo);
+      out.ambiguous = (loose || [])
+        .filter(b => (partyId ? b.party_id === partyId : true))
+        .map(shape)
+        .filter(b => b.day && days.has(b.day))
+        .sort((a, b) => String(a.startTime).localeCompare(String(b.startTime)));
+    }
+    out.photos = out.linked.reduce((n, b) => n + b.photos, 0);
+    out.ambiguousPhotos = out.ambiguous.reduce((n, b) => n + b.photos, 0);
+
+    // Already billed? The stamp lives on the targets.
+    const invIds = [...new Set(rows.map(t => t.invoiced_on).filter(Boolean))];
+    if (invIds.length) {
+      const { data: invs, error: ie } = await supabase.from('invoices')
+        .select('id, invoice_number, invoice_date, status').in('id', invIds);
+      if (ie) fail("couldn't read the invoice this is on", ie);
+      out.invoices = invs || [];
+    }
+  } catch (e) {
+    fail('checking what is attached', e);
+  }
+  return out;
+}
+
+// Move a job's hours to a new apartment/bedroom. Shared by BOTH editors —
+// the quick form and the checklist wizard — because a second copy of this
+// is exactly how one of them ended up moving a job without its hours.
+//
+// Returns { ok, cancelled, error, moved }. `moved` records where each
+// block came FROM, so a later write failure can put them back rather than
+// leaving the hours at the new apartment and the job at the old one.
+// Nothing else may be written until this returns ok.
+async function applyWorkBlockMove({ plan, checkedIds, toUnitId, toPartyId, toLabel }) {
+  const checked = checkedIds instanceof Set ? checkedIds : new Set(checkedIds || []);
+  const all = [...(plan?.linked || []), ...(plan?.ambiguous || [])];
+  const ids = [
+    ...(plan?.linked || []).map(b => b.id),
+    ...(plan?.ambiguous || []).filter(b => checked.has(b.id)).map(b => b.id),
+  ];
+  if (ids.length === 0) return { ok: true, moved: [] };
+  const idSet = new Set(ids);
+  const movedDays = new Set(all.filter(b => idSet.has(b.id)).map(b => b.day).filter(Boolean));
+  const dayOf = (ts) => {
+    const d = new Date(ts);
+    if (isNaN(d)) return null;
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  };
+  // Does the destination already have hours on one of those days? Bounded
+  // to those days rather than pulling an arbitrary slice of the
+  // apartment's history — this is the only guard against double-counted
+  // time, so it must not quietly fail to fire.
+  if (movedDays.size > 0) {
+    const sorted = [...movedDays].sort();
+    const { data: atDest, error: de } = await supabase.from('work_blocks')
+      .select('id, start_time, unit_id, party_id')
+      .eq('unit_id', toUnitId).eq('party_id', toPartyId)
+      .gte('start_time', `${sorted[0]}T00:00:00`)
+      .lte('start_time', `${sorted[sorted.length - 1]}T23:59:59.999`)
+      .order('start_time').limit(500);
+    if (de) {
+      return { ok: false, error: "Couldn't check whether the destination already has hours that day, so nothing was moved: " + de.message };
+    }
+    const clashes = (atDest || []).filter(b => !idSet.has(b.id) && movedDays.has(dayOf(b.start_time)));
+    if (clashes.length > 0 && !confirm(
+      `${toLabel || 'The destination'} already has ${clashes.length} block${clashes.length === 1 ? '' : 's'} of hours logged on the same day${movedDays.size === 1 ? '' : 's'}.\n\n`
+      + 'Moving these on top will show both, and the time counts twice until you tidy one up.\n\nMove anyway?'
+    )) return { ok: false, cancelled: true };
+  }
+  const { error: wbErr } = await supabase.from('work_blocks')
+    .update({ unit_id: toUnitId, party_id: toPartyId }).in('id', ids);
+  if (wbErr) return { ok: false, error: wbErr.message };
+  return {
+    ok: true,
+    moved: all.filter(b => idSet.has(b.id))
+      .map(b => ({ id: b.id, unitId: b.unitId, partyId: b.partyId })),
+  };
+}
+
+// Put the hours back where they were. The hours move FIRST so a failure
+// there leaves everything untouched — but a failure of one of the writes
+// AFTER it would otherwise leave the hours at the new apartment and the
+// job still at the old one, which is the same split state the ordering
+// was designed to prevent, just the other way round.
+async function revertWorkBlockMove(moved) {
+  if (!moved || moved.length === 0) return { ok: true };
+  // Group by where each block came from — ambiguous blocks can have come
+  // from different bedrooms of the same apartment.
+  const groups = new Map();
+  moved.forEach(b => {
+    const k = `${b.unitId || ''}:${b.partyId || ''}`;
+    if (!groups.has(k)) groups.set(k, { unitId: b.unitId, partyId: b.partyId, ids: [] });
+    groups.get(k).ids.push(b.id);
+  });
+  let failed = null;
+  for (const g of groups.values()) {
+    const { error } = await supabase.from('work_blocks')
+      .update({ unit_id: g.unitId, party_id: g.partyId }).in('id', g.ids);
+    if (error) failed = error.message;
+  }
+  return { ok: !failed, error: failed };
+}
+
+// What to add to a save error when the hours had already moved. Either
+// they went back and nothing changed, or they did not and someone has to
+// be told exactly what is where.
+function movedHoursNote(moved, revert, whereTo) {
+  if (!moved || moved.length === 0) return '';
+  if (revert.ok) return ' The hours that had already moved were put back, so nothing changed.';
+  return ` WORSE: the hours had already moved and could NOT be put back (${revert.error}).`
+    + ` ${moved.length} block${moved.length === 1 ? ' is' : 's are'} now at ${whereTo || 'the new apartment'}`
+    + ' while the job is still at the old one. Tell us — this needs fixing by hand.';
+}
+
+// The review screen for that move. Certain hours are listed as moving;
+// anything we can only match by "logged at that apartment that day" gets
+// a checkbox and starts unticked. Shared for the same reason as above.
+function MoveWorkPanel({ plan, checked, onToggle, fromLabel, toLabel, busy, onBack, onConfirm }) {
+  if (!plan) return null;
+  // The panel also stands in for "this is already on an invoice" when the
+  // cleaning has no logged hours at all — Mark done writes a finished
+  // cleaning with no work blocks, and those get billed like any other.
+  const hasHours = plan.linked.length > 0 || plan.ambiguous.length > 0;
+  return (
+    <div className="p-4 rounded-2xl bg-amber-50 border-2 border-amber-300 space-y-3">
+      <div className="font-serif text-lg text-amber-900">
+        {hasHours ? 'This job has work on it' : 'Before you move this'}
+      </div>
+      <p className="text-sm text-amber-900">
+        {hasHours
+          ? <>Moving it from {fromLabel || 'where it is'} to {toLabel || 'the new place'} takes
+              the work with it. Photos and tasks follow the hours on their own.</>
+          : <>Moving it from {fromLabel || 'where it is'} to {toLabel || 'the new place'}.
+              No hours are logged against it, so there is nothing to carry across.</>}
+      </p>
+      {plan.invoices.length > 0 && (
+        <div className="p-3 rounded-xl bg-white border border-red-300 text-sm text-red-800 space-y-1">
+          <div className="font-medium">This cleaning has already been billed.</div>
+          {plan.invoices.map(i => (
+            <div key={i.id}>
+              Invoice {i.invoice_number ? `#${i.invoice_number}` : '(no number)'}
+              {i.invoice_date ? ` · ${i.status === 'draft' ? 'drafted' : 'sent'} ${fmtInvoiceDate(i.invoice_date)}` : ''}
+            </div>
+          ))}
+          <div>
+            That invoice keeps its own copy and will not change. But if you reopen it later
+            it rebuilds from where the cleaning is now, so check the line before you re-send.
+          </div>
+        </div>
+      )}
+      {plan.linked.length > 0 && (
+        <div>
+          <div className="text-[10px] uppercase tracking-wider font-mono text-amber-700 mb-1">Moving automatically</div>
+          <ul className="space-y-1">
+            {plan.linked.map(b => (
+              <li key={b.id} className="text-sm text-stone-800 flex items-center gap-2">
+                <Check size={12} className="text-emerald-600 flex-shrink-0" />
+                {fmtTimeShort(b.ms)} by {b.who}{b.day ? ` on ${fmtDueDate(b.day)}` : ''}
+                {b.photos > 0 ? `, ${b.photos} ${b.photos === 1 ? 'photo' : 'photos'}` : ''}
+                {b.open ? ' · still running' : ''}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {plan.ambiguous.length > 0 && (
+        <div>
+          <div className="text-[10px] uppercase tracking-wider font-mono text-amber-700 mb-1">
+            Not sure these belong to this job — tick the ones that do
+          </div>
+          <ul className="space-y-1">
+            {plan.ambiguous.map(b => {
+              const on = checked.has(b.id);
+              return (
+                <li key={b.id}>
+                  <button onClick={() => onToggle(b.id)}
+                    className="w-full text-left text-sm text-stone-800 flex items-center gap-2 py-0.5">
+                    <span className={`w-4 h-4 rounded flex items-center justify-center flex-shrink-0 ${on ? 'bg-amber-600 text-white' : 'border-2 border-stone-300 bg-white'}`}>
+                      {on && <Check size={10} />}
+                    </span>
+                    {fmtTimeShort(b.ms)} by {b.who}{b.day ? ` on ${fmtDueDate(b.day)}` : ''}
+                    {b.where ? ` · ${b.where}` : ''}
+                    {b.photos > 0 ? `, ${b.photos} ${b.photos === 1 ? 'photo' : 'photos'}` : ''}
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+          <div className="text-[11px] text-stone-500 font-mono mt-1">
+            Unticked hours stay at {fromLabel || 'the old apartment'}.
+          </div>
+        </div>
+      )}
+      <div className="flex gap-2">
+        <button onClick={onBack} disabled={busy}
+          className="flex-1 py-2.5 rounded-xl bg-white border border-stone-300 text-stone-700 text-sm font-medium disabled:opacity-50">
+          Back
+        </button>
+        <button onClick={onConfirm} disabled={busy}
+          className="flex-1 py-2.5 rounded-xl bg-stone-900 text-stone-50 text-sm font-medium disabled:opacity-50">
+          {busy ? 'Moving…' : hasHours ? 'Move the work and save' : 'Move it and save'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// The delete confirm. A pending job nobody has touched is one tap and a
+// yes — that is the everyday case and it must not become a tax. The
+// moment anything is attached it stops and says what, including the
+// invoice it was billed on, and only then lets you through.
+function DeleteCleaningModal({ job, employee, onClose, onDeleted }) {
+  const [att, setAtt] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  useEffect(() => {
+    let live = true;
+    (async () => {
+      const a = await loadJobAttachments({
+        assignmentId: job.assignmentId, unitId: job.unitId, partyId: job.partyId,
+      });
+      if (live) setAtt(a);
+    })();
+    return () => { live = false; };
+    /* eslint-disable-next-line */
+  }, [job.assignmentId]);
+
+  const label = unitPartyLabel(job.unitLabel, job.partyLabel) || job.unitLabel || 'This cleaning';
+  const doDelete = async () => {
+    setBusy(true); setError('');
+    // SOFT delete, same as everywhere else — the row is flagged, not
+    // destroyed. Nothing in the app brings one back today, which is why
+    // the wording below says to ask rather than promising a button.
+    const { data, error: e } = await supabase.from('assignments')
+      .update({ deleted_at: new Date().toISOString(), deleted_by: employee?.id || null })
+      .eq('id', job.assignmentId).select('id');
+    setBusy(false);
+    if (e) { setError('Could not delete: ' + e.message); return; }
+    if (!data || data.length === 0) {
+      setError('Delete did not save — the database rejected it for this job.');
+      return;
+    }
+    onDeleted();
+  };
+
+  const hours = att ? [...att.linked].reduce((n, b) => n + b.ms, 0) : 0;
+  const hasWork = !!att && (att.linked.length > 0 || att.ambiguous.length > 0
+    || att.doneItems > 0 || att.startedItems > 0 || att.invoices.length > 0);
+  // A read that failed is NOT a job with nothing on it. Blocked, not warned:
+  // there is no restore screen, so a delete made on a blank check is
+  // unrecoverable.
+  const blocked = !!att && att.failed;
+
+  return (
+    <div className="fixed inset-0 bg-stone-900/80 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
+      <div className="bg-stone-50 w-full sm:max-w-md sm:rounded-3xl rounded-t-3xl max-h-[90vh] flex flex-col">
+        <div className="flex items-center justify-between p-5 border-b border-stone-200">
+          <div className="flex items-center gap-2 min-w-0">
+            <AlertCircle className="text-red-600 flex-shrink-0" size={20} />
+            <div className="font-serif text-xl text-stone-900 truncate">Delete this cleaning?</div>
+          </div>
+          <button onClick={onClose} className="p-2 rounded-full hover:bg-stone-100 flex-shrink-0">
+            <X size={20} className="text-stone-600" />
+          </button>
+        </div>
+        <div className="flex-1 overflow-y-auto p-5 space-y-4">
+          <div className="p-3 rounded-xl bg-stone-100 text-stone-800 text-sm font-mono">
+            {label}{job.type ? ` · ${assignmentTypeLabel(job.type)}` : ''}
+          </div>
+          {!att ? (
+            <div className="text-sm text-stone-500">Checking what's attached to it…</div>
+          ) : blocked ? (
+            <div className="p-3 rounded-xl bg-red-50 border-2 border-red-300 text-sm text-red-800 space-y-2">
+              <div className="font-medium">Couldn't check what's attached to this cleaning.</div>
+              <div className="font-mono text-[11px]">{att.error}</div>
+              <div>
+                Not deleting on a blank check — this job may have hours, photos or an
+                invoice on it. Try again in a moment; if it keeps failing, say so.
+              </div>
+            </div>
+          ) : (
+            <>
+              {!hasWork ? (
+                <p className="text-sm text-stone-700">
+                  Nothing has been logged against it — no hours, no photos, nothing marked done.
+                </p>
+              ) : (
+                <div className="space-y-2">
+                  <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">What's on it</div>
+                  <ul className="space-y-1.5 text-sm text-stone-800">
+                    {att.linked.length > 0 && (
+                      <li className="flex items-start gap-2">
+                        <Clock size={14} className="text-stone-500 mt-0.5 flex-shrink-0" />
+                        <span>{fmtTimeShort(hours)} logged across {att.linked.length} {att.linked.length === 1 ? 'session' : 'sessions'} by {[...new Set(att.linked.map(b => b.who))].join(', ')}</span>
+                      </li>
+                    )}
+                    {att.photos > 0 && (
+                      <li className="flex items-start gap-2">
+                        <Camera size={14} className="text-stone-500 mt-0.5 flex-shrink-0" />
+                        <span>{att.photos} {att.photos === 1 ? 'photo' : 'photos'}</span>
+                      </li>
+                    )}
+                    {att.doneItems > 0 && (
+                      <li className="flex items-start gap-2">
+                        <Check size={14} className="text-stone-500 mt-0.5 flex-shrink-0" />
+                        <span>{att.doneItems} {att.doneItems === 1 ? 'item' : 'items'} marked done</span>
+                      </li>
+                    )}
+                    {att.startedItems > 0 && (
+                      <li className="flex items-start gap-2">
+                        <Play size={14} className="text-stone-500 mt-0.5 flex-shrink-0" />
+                        <span>{att.startedItems} {att.startedItems === 1 ? 'item' : 'items'} started and not finished</span>
+                      </li>
+                    )}
+                    {att.ambiguous.length > 0 && (
+                      <li className="flex items-start gap-2">
+                        <HelpCircle size={14} className="text-stone-500 mt-0.5 flex-shrink-0" />
+                        <span>
+                          {att.ambiguous.length} more {att.ambiguous.length === 1 ? 'session' : 'sessions'}
+                          {att.ambiguousPhotos > 0 ? ` (${att.ambiguousPhotos} more ${att.ambiguousPhotos === 1 ? 'photo' : 'photos'})` : ''}
+                          {' '}logged at this apartment the same day, with no job recorded on {att.ambiguous.length === 1 ? 'it' : 'them'}. {att.ambiguous.length === 1 ? 'It stays' : 'They stay'} where {att.ambiguous.length === 1 ? 'it is' : 'they are'}.
+                        </span>
+                      </li>
+                    )}
+                  </ul>
+                  {att.invoices.length > 0 && (
+                    <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-sm text-amber-900">
+                      {att.invoices.map(i => (
+                        <div key={i.id}>
+                          Billed on invoice {i.invoice_number ? `#${i.invoice_number}` : '(no number)'}
+                          {i.invoice_date ? ` (${i.status === 'draft' ? 'drafted' : 'sent'} ${fmtInvoiceDate(i.invoice_date)})` : ''}.
+                        </div>
+                      ))}
+                      <div className="mt-1">That invoice keeps its own copy and will not change — but this cleaning disappears from history, so there is nothing to show if the property ever queries the line.</div>
+                    </div>
+                  )}
+                </div>
+              )}
+              <p className="text-xs text-stone-500">
+                {hasWork ? 'The hours and photos are not erased; they stay on the shift they were logged on. ' : ''}
+                This can be undone, but you'll need to ask — there's no restore screen in the app yet.
+              </p>
+            </>
+          )}
+          {error && <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-sm text-red-700">{error}</div>}
+        </div>
+        <div className="p-5 border-t border-stone-200 flex gap-2">
+          <button onClick={onClose} disabled={busy}
+            className="flex-1 py-3 rounded-2xl bg-stone-100 text-stone-700 font-medium disabled:opacity-50">
+            Cancel
+          </button>
+          <button onClick={doDelete} disabled={busy || !att || blocked}
+            className="flex-1 py-3 rounded-2xl bg-red-600 text-white font-medium disabled:opacity-40">
+            {busy ? 'Deleting…' : !att ? 'Checking…' : blocked ? "Can't check" : hasWork ? 'Delete anyway' : 'Delete'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// The controls themselves. Renders as a fragment so each card drops it
+// into whatever row it already has.
+//
+//   job = { assignmentId, unitId, partyId, unitLabel, partyLabel, type,
+//           bedrooms, bathrooms }
+//
+// assignmentId may be null (a Daily card for an apartment with no open
+// job) — then only the size box shows.
+function OwnerJobControls({ job, employee, onChanged, onEdit }) {
+  const canAdmin = can(employee, 'manage_assignments_admin');
+  // Size lives on the apartment, so it follows the units switch as well
+  // as the assignments one — either is enough. Owners pass both.
+  const canSize = canAdmin || can(employee, 'manage_units');
+  const [sizing, setSizing] = useState(false);
+  const [br, setBr] = useState('');
+  const [ba, setBa] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+
+  const openSize = () => {
+    setBr(job.bedrooms ?? '');
+    setBa(job.bathrooms ?? '');
+    setSizing(true);
+  };
+  const saveSize = async () => {
+    if (!job.unitId) { setSizing(false); return; }
+    // `min` on a number input is advisory — a typed -3 sails through and
+    // writes the price key `__apt__:-3x99`, which matches nothing. Clamp
+    // to the same 0-12 range the edit form's steppers enforce.
+    const clamp = (v) => Math.max(0, Math.min(12, v));
+    const rawBr = br === '' ? null : parseInt(br, 10);
+    // parseFloat on baths: 2.5 is a real size and parseInt would silently
+    // save it as 2.
+    const rawBa = ba === '' ? null : parseFloat(ba);
+    if ((rawBr != null && isNaN(rawBr)) || (rawBa != null && isNaN(rawBa))) {
+      alert('Bedrooms and bathrooms need to be numbers (or blank).');
+      return;
+    }
+    const toBr = rawBr == null ? null : clamp(rawBr);
+    const toBa = rawBa == null ? null : clamp(rawBa);
+    setBusy(true);
+    const ok = await confirmSizeChange({
+      unitId: job.unitId, unitLabel: job.unitLabel,
+      fromBr: job.bedrooms, fromBa: job.bathrooms, toBr, toBa,
+    });
+    if (!ok) { setBusy(false); return; }
+    // .select() so a silent 0-row update (RLS) is told apart from a save.
+    const { data, error } = await supabase.from('units')
+      .update({ bedrooms: toBr, bathrooms: toBa })
+      .eq('id', job.unitId).select('id, bedrooms, bathrooms');
+    setBusy(false);
+    if (error) { alert('Could not save size: ' + error.message); return; }
+    if (!data || data.length === 0) {
+      alert('Size did not save — the database rejected the update for this apartment.');
+      return;
+    }
+    setSizing(false);
+    if (onChanged) onChanged();
+  };
+
+  return (
+    <>
+      {canSize && job.unitId && (sizing ? (
+        <span className="inline-flex items-center gap-1">
+          <input type="number" min="0" autoFocus value={br} onChange={e => setBr(e.target.value)}
+            className="w-10 px-1 py-0.5 rounded border border-stone-300 text-[10px] font-mono" placeholder="BR" />
+          <span className="text-[9px] text-stone-400">BR</span>
+          <input type="number" min="0" step="0.5" value={ba} onChange={e => setBa(e.target.value)}
+            className="w-12 px-1 py-0.5 rounded border border-stone-300 text-[10px] font-mono" placeholder="BA" />
+          <span className="text-[9px] text-stone-400">BA</span>
+          <button onClick={saveSize} disabled={busy}
+            className="text-[10px] px-1.5 py-0.5 rounded bg-stone-900 text-white disabled:opacity-50">
+            {busy ? '…' : 'Save'}
+          </button>
+          <button onClick={() => setSizing(false)} disabled={busy} className="text-[10px] px-1 text-stone-500">×</button>
+        </span>
+      ) : (
+        <button onClick={openSize}
+          title="Change this apartment's size"
+          className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-stone-200 text-stone-700 hover:bg-stone-300">
+          {(job.bedrooms || job.bathrooms) ? `${job.bedrooms || 0}BR / ${job.bathrooms || 0}BA` : 'Set size'}
+        </button>
+      ))}
+
+      {canAdmin && job.assignmentId && onEdit && (
+        <button onClick={onEdit}
+          title="Edit the apartment number, date or clean type"
+          className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-white border border-stone-300 text-stone-600 hover:border-stone-900 hover:text-stone-900 inline-flex items-center gap-1">
+          <Edit2 size={9} /> Edit
+        </button>
+      )}
+
+      {canAdmin && job.assignmentId && (
+        <button onClick={() => setConfirming(true)}
+          title="Delete this cleaning"
+          className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-white border border-stone-300 text-stone-500 hover:border-red-400 hover:text-red-600 inline-flex items-center gap-1">
+          <Trash2 size={9} /> Delete
+        </button>
+      )}
+
+      {confirming && (
+        <DeleteCleaningModal job={job} employee={employee}
+          onClose={() => setConfirming(false)}
+          onDeleted={() => { setConfirming(false); if (onChanged) onChanged(); }} />
+      )}
+    </>
+  );
+}
+
+// Opens the right editor for a job id, whichever card asked for it.
+// The job's own detail page already picks between the checklist wizard
+// and the quick form; putting that choice here too would be a fifth copy
+// waiting to drift, so every card routes through this one host.
+function AssignmentEditorHost({ assignmentId, propertyId, employee, onCancel, onSaved }) {
+  const [state, setState] = useState(null); // { assignment, property } | { error }
+  useEffect(() => {
+    let live = true;
+    (async () => {
+      const [{ data: asg, error: ae }, { data: prop, error: pe }] = await Promise.all([
+        supabase.from('assignments').select('*').eq('id', assignmentId).maybeSingle(),
+        supabase.from('customers').select('*').eq('id', propertyId).maybeSingle(),
+      ]);
+      if (!live) return;
+      if (ae || pe || !asg || !prop) {
+        setState({ error: (ae || pe)?.message || 'That job could not be opened.' });
+        return;
+      }
+      setState({ assignment: asg, property: prop });
+    })();
+    return () => { live = false; };
+    /* eslint-disable-next-line */
+  }, [assignmentId, propertyId]);
+
+  if (!state) return <Splash text="Opening…" />;
+  if (state.error) {
+    return (
+      <div className="min-h-screen bg-stone-50 px-5 pt-6">
+        <button onClick={onCancel} className="p-2 -ml-2 rounded-full hover:bg-stone-100">
+          <ArrowLeft size={20} className="text-stone-700" />
+        </button>
+        <div className="mt-4 p-4 rounded-2xl bg-red-50 border border-red-200 text-sm text-red-700">
+          {state.error}
+        </div>
+      </div>
+    );
+  }
+  // Same rule as the job's detail page: edit on whichever form made it.
+  if (state.assignment.template_set_id) {
+    return <ChecklistAssignmentWizard property={state.property} employee={employee}
+      editAssignment={state.assignment} onCancel={onCancel} onSaved={onSaved} />;
+  }
+  return <QuickAssignmentForm property={state.property} employee={employee}
+    editAssignment={state.assignment} onCancel={onCancel} onSaved={onSaved} />;
 }
 
 // =================================================================
@@ -21077,6 +22447,7 @@ function CompletedAssignmentsView({ employee, propById }) {
   const [loaded, setLoaded] = useState(false);
   const [days, setDays] = useState(14); // how far back
   const [drill, setDrill] = useState(null); // { propertyId, propertyName, unitId, unitLabel, partyId, partyLabel }
+  const [editJob, setEditJob] = useState(null); // { id, propertyId }
 
   const load = async () => {
     setLoaded(false);
@@ -21088,7 +22459,9 @@ function CompletedAssignmentsView({ employee, propById }) {
     // eslint-disable-next-line no-constant-condition
     while (true) {
       const { data, error } = await supabase.from('assignment_targets')
-        .select('id, status, completed_at, unit_id, party_id, unit:units(label), party:parties(label), assignment:assignments!inner(id, title, customer_id, assignment_type, source, deleted_at)')
+        // bedrooms/bathrooms so the shared size box can show and change the
+        // apartment's size from here — this query never fetched them.
+        .select('id, status, completed_at, unit_id, party_id, unit:units(label, bedrooms, bathrooms), party:parties(label), assignment:assignments!inner(id, title, customer_id, assignment_type, source, deleted_at)')
         .eq('status', 'done')
         .not('completed_at', 'is', null)
         .gte('completed_at', sinceISO)
@@ -21115,6 +22488,7 @@ function CompletedAssignmentsView({ employee, propById }) {
           customerId: t.assignment.customer_id,
           unitId: t.unit_id, partyId: t.party_id,
           unitLabel: t.unit?.label || '', partyLabel: t.party?.label || '',
+          bedrooms: t.unit?.bedrooms, bathrooms: t.unit?.bathrooms,
           type: t.assignment.assignment_type || '',
           title: t.assignment.title || '',
           completedAt: t.completed_at,
@@ -21129,6 +22503,13 @@ function CompletedAssignmentsView({ employee, propById }) {
     setLoaded(true);
   };
   useEffect(() => { load(); /* eslint-disable-next-line */ }, [days]);
+
+  if (editJob) {
+    return <AssignmentEditorHost assignmentId={editJob.id} propertyId={editJob.propertyId}
+      employee={employee}
+      onCancel={() => setEditJob(null)}
+      onSaved={() => { setEditJob(null); load(); }} />;
+  }
 
   if (drill) {
     return <BedroomHistoryView
@@ -21180,27 +22561,42 @@ function CompletedAssignmentsView({ employee, propById }) {
                 <Check size={11} /> {fmtDay(dk)} <span className="text-stone-400">· {byDay[dk].length}</span>
               </div>
               <div className="space-y-2">
+                {/* The card used to be one big <button>. It now holds the
+                   shared owner controls, and a button can't contain
+                   buttons — so only the text drills into the history. */}
                 {byDay[dk].map(r => (
-                  <button key={r.key}
-                    onClick={() => setDrill(r)}
-                    className="w-full text-left p-4 rounded-2xl bg-white border border-stone-200 hover:border-stone-400 active:scale-[0.99] transition flex items-center justify-between gap-3">
-                    <div className="min-w-0">
-                      <div className="font-serif text-base text-stone-900 truncate">
-                        <span className="font-bold">{r.unitLabel}</span>
-                        {r.partyLabel ? <span className="text-stone-500"> · {r.partyLabel}</span> : null}
+                  <div key={r.key}
+                    className="p-4 rounded-2xl bg-white border border-stone-200">
+                    <button onClick={() => setDrill(r)}
+                      className="w-full text-left flex items-center justify-between gap-3 hover:opacity-80 active:scale-[0.99] transition">
+                      <div className="min-w-0">
+                        <div className="font-serif text-base text-stone-900 truncate">
+                          <span className="font-bold">{r.unitLabel}</span>
+                          {r.partyLabel ? <span className="text-stone-500"> · {r.partyLabel}</span> : null}
+                        </div>
+                        <div className="text-xs text-stone-500 font-mono mt-0.5 flex items-center gap-1.5 flex-wrap">
+                          <span>{propById[r.customerId]?.name || 'Property'}</span>
+                          <span>·</span>
+                          <span>{typeLabel(r.type)}</span>
+                          <span>·</span>
+                          <span>{r.items} item{r.items === 1 ? '' : 's'}</span>
+                          <span>·</span>
+                          <span>done {fmtTime(r.completedAt)}</span>
+                        </div>
                       </div>
-                      <div className="text-xs text-stone-500 font-mono mt-0.5 flex items-center gap-1.5 flex-wrap">
-                        <span>{propById[r.customerId]?.name || 'Property'}</span>
-                        <span>·</span>
-                        <span>{typeLabel(r.type)}</span>
-                        <span>·</span>
-                        <span>{r.items} item{r.items === 1 ? '' : 's'}</span>
-                        <span>·</span>
-                        <span>done {fmtTime(r.completedAt)}</span>
-                      </div>
+                      <ChevronRight size={16} className="text-stone-400 flex-shrink-0" />
+                    </button>
+                    <div className="flex items-center gap-1.5 flex-wrap mt-2">
+                      <OwnerJobControls employee={employee}
+                        job={{
+                          assignmentId: r.assignmentId, unitId: r.unitId, partyId: r.partyId,
+                          unitLabel: r.unitLabel, partyLabel: r.partyLabel, type: r.type,
+                          bedrooms: r.bedrooms, bathrooms: r.bathrooms,
+                        }}
+                        onChanged={load}
+                        onEdit={() => setEditJob({ id: r.assignmentId, propertyId: r.customerId })} />
                     </div>
-                    <ChevronRight size={16} className="text-stone-400 flex-shrink-0" />
-                  </button>
+                  </div>
                 ))}
               </div>
             </div>
@@ -21230,12 +22626,17 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick, init
   const [team, setTeam] = useState([]);
   const [editDueJob, setEditDueJob] = useState(null);
   const [assignJob, setAssignJob] = useState(null);
-  const [sizeJob, setSizeJob] = useState(null);
-  const [sizeBr, setSizeBr] = useState(''); const [sizeBa, setSizeBa] = useState('');
+  // Size and delete moved to the shared OwnerJobControls — this card kept
+  // its own copies, which is exactly how the four renderers drifted apart.
+  const [editJob, setEditJob] = useState(null); // { id, propertyId }
   const [loaded, setLoaded] = useState(false);
   const [picked, setPicked] = useState(null); // selected property
   const [view, setView] = useState('open');   // 'open' | 'upload' | 'detail'
   const [detail, setDetail] = useState(null);  // selected assignment when view === 'detail'
+  // True when the detail page was opened straight off the Schedule board,
+  // so Back returns to the board instead of stranding you on the
+  // property's assignment list.
+  const [detailFromBoard, setDetailFromBoard] = useState(false);
   const [propSearch, setPropSearch] = useState('');
 
   const load = async () => {
@@ -21244,10 +22645,12 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick, init
     const fetchOpenTargets = async () => {
       let rows = []; const PAGE = 1000;
       for (let from = 0; ; from += PAGE) {
-        const { data, error } = await supabase.from('assignment_targets')
-          .select('id, status, priority, started_at, unit_id, party_id, template_section, unit:units(label, bedrooms, bathrooms), party:parties(label), assignment:assignments!inner(id, title, customer_id, active, deleted_at, scheduled_date, assignment_type, took_longer, approved_at, created_at)')
-          .not('status', 'in', '(done,blocked)')
-          .range(from, from + PAGE - 1);
+        const { data, error } = await audienceSelect(
+          'id, status, priority, started_at, unit_id, party_id, template_section, unit:units(label, bedrooms, bathrooms), party:parties(label), assignment:assignments!inner(id, title, customer_id, active, deleted_at, scheduled_date, assignment_type, took_longer, approved_at, created_at, audience)',
+          (sel) => supabase.from('assignment_targets')
+            .select(sel)
+            .not('status', 'in', '(done,blocked)')
+            .range(from, from + PAGE - 1));
         if (error || !data) break;
         rows = rows.concat(data);
         if (data.length < PAGE) break;
@@ -21270,7 +22673,7 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick, init
       const key = `${cid}::${t.unit_id || ''}::${t.party_id || ''}`;
       if (!seenBedrooms.has(key)) { seenBedrooms.add(key); counts[cid] = (counts[cid] || 0) + 1; }
       if (!jobsByAsg[a.id]) {
-        jobsByAsg[a.id] = { id: a.id, customerId: cid, title: a.title || '', scheduledDate: a.scheduled_date || null, type: a.assignment_type || '', unitLabel: t.unit?.label || '', partyLabel: t.party?.label || '', unitId: t.unit_id, partyId: t.party_id, bedrooms: t.unit?.bedrooms, bathrooms: t.unit?.bathrooms, tookLonger: !!a.took_longer, priority: false, stale: false, targetIds: [], assignees: [], hereNow: [], count: 0, sections: { bedroom: 0, vanity: 0, bathroom: 0, general: 0, other: 0 } };
+        jobsByAsg[a.id] = { id: a.id, customerId: cid, title: a.title || '', scheduledDate: a.scheduled_date || null, type: a.assignment_type || '', unitLabel: t.unit?.label || '', partyLabel: t.party?.label || '', unitId: t.unit_id, partyId: t.party_id, bedrooms: t.unit?.bedrooms, bathrooms: t.unit?.bathrooms, tookLonger: !!a.took_longer, audience: a.audience, priority: false, stale: false, targetIds: [], assignees: [], hereNow: [], count: 0, sections: { bedroom: 0, vanity: 0, bathroom: 0, general: 0, other: 0 } };
       }
       if (t.priority) jobsByAsg[a.id].priority = true;
       // Unfinished: began on an earlier day and never closed out, past its
@@ -21315,10 +22718,23 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick, init
   };
   useEffect(() => { load(); }, []);
 
+  // Editing a job straight off a card — the shared host picks the right
+  // editor, the same way the job's own detail page does.
+  if (editJob) {
+    return <AssignmentEditorHost assignmentId={editJob.id} propertyId={editJob.propertyId}
+      employee={employee}
+      onCancel={() => setEditJob(null)}
+      onSaved={() => { setEditJob(null); load(); }} />;
+  }
+
   // Detail view: show a single assignment's status / targets
   if (picked && view === 'detail' && detail) {
     return <AssignmentDetail property={picked} assignment={detail} employee={employee}
-      onBack={() => { setDetail(null); setView('open'); load(); }} />;
+      onBack={() => {
+        setDetail(null); setView('open');
+        if (detailFromBoard) { setDetailFromBoard(false); setPicked(null); }
+        load();
+      }} />;
   }
 
   // Picked property + Upload sub-view → render form
@@ -21378,15 +22794,9 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick, init
     setActioning(null);
     load();
   };
-  const deleteJob = async (job) => {
-    if (!confirm(`Delete this assignment (${job.unitLabel || ''})? It can be restored later.`)) return;
-    setActioning(job.id);
-    await supabase.from('assignments')
-      .update({ deleted_at: new Date().toISOString(), deleted_by: employee.id })
-      .eq('id', job.id);
-    setActioning(null);
-    load();
-  };
+  // Delete lives in OwnerJobControls now. Its old confirm here promised
+  // "It can be restored later" — the delete is soft, but nothing in the
+  // app restores one, so that promise was not true.
   const canAssignJobs = can(employee, 'assign_cleaners');
   const canEditJobDates = can(employee, 'edit_due_dates');
   const todayK = localTodayKey();
@@ -21395,30 +22805,13 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick, init
     await supabase.from('assignments').update({ scheduled_date: date || null }).eq('id', job.id);
     setActioning(null); load();
   };
-  const commitJobAssignees = async (job, ids) => {
+  const commitJobAssignees = async (job, ids, audience) => {
     setActioning(job.id);
-    const error = await saveAssignees(job.id, job.assignees.map(a => a.id), ids, employee.id);
+    const error = await saveAssignees(job.id, job.assignees.map(a => a.id), ids, employee.id, audience);
     setActioning(null);
     if (error) { alert('Could not update who\u2019s assigned: ' + error.message); return; }
     setAssignJob(null);
     load();
-  };
-  const saveJobSize = async (job, br, ba) => {
-    if (!job.unitId) { setSizeJob(null); return; }
-    setActioning(job.id);
-    const { data: updated, error } = await supabase.from('units').update({
-      // parseFloat on baths: 2.5 is a real size and parseInt would silently
-      // save it as 2.
-      bedrooms: br === '' ? null : parseInt(br, 10),
-      bathrooms: ba === '' ? null : parseFloat(ba),
-    }).eq('id', job.unitId).select('id, bedrooms, bathrooms');
-    setActioning(null);
-    if (error) { alert('Could not save size: ' + error.message); return; }
-    if (!updated || updated.length === 0) {
-      alert('Size did not save — the database rejected the update for this apartment.');
-      return;
-    }
-    setSizeJob(null); load();
   };
   const toggleTookLonger = async (job) => {
     setActioning(job.id);
@@ -21435,23 +22828,34 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick, init
     const turningOn = !job.priority;
     await supabase.from('assignment_targets').update({ priority: turningOn }).in('id', ids);
     if (turningOn) {
-      // Announce the priority job to all cleaners; the row clears when someone
-      // claims it. (assignees aren't tracked in this owner view, so we always
-      // broadcast — if it's already assigned, the assigned cleaner still sees
-      // the alert, which is fine.)
-      createNotification({
-        to: { scope: 'all_cleaners' }, kind: 'priority_assignment',
-        title: 'Priority job available',
-        body: `${job.unitLabel || 'A job'}${job.partyLabel ? ' · ' + job.partyLabel : ''} at ${propById[job.customerId]?.name || 'a property'}`,
-        linkKind: 'assignment', linkId: job.id, createdBy: employee?.id,
-      });
+      const body = `${job.unitLabel || 'A job'}${job.partyLabel ? ' · ' + job.partyLabel : ''} at ${propById[job.customerId]?.name || 'a property'}`;
+      if (audienceOf(job) === AUDIENCE_NAMED) {
+        // Narrowed to specific people — tell only them. The body names the
+        // apartment and the property, so the all-cleaners broadcast below
+        // would hand it to everyone this cleaning was kept from. Nobody
+        // named yet means nobody is told.
+        (job.assignees || []).forEach(a => {
+          if (a.id && a.id !== employee?.id) createNotification({
+            to: { employeeId: a.id }, kind: 'priority_assignment',
+            title: 'A job was marked priority', body,
+            linkKind: 'assignment', linkId: job.id, createdBy: employee?.id,
+          });
+        });
+      } else {
+        // Open to everyone — announce it to all cleaners; the row clears
+        // when someone claims it.
+        createNotification({
+          to: { scope: 'all_cleaners' }, kind: 'priority_assignment',
+          title: 'Priority job available', body,
+          linkKind: 'assignment', linkId: job.id, createdBy: employee?.id,
+        });
+      }
     } else {
       clearAssignmentBroadcast(job.id);
     }
     setActioning(null); load();
   };
 
-  const canDelete = can(employee, 'manage_assignments_admin');
   const canDone = can(employee, 'mark_assignments_done');
   const fmtSched = (key) => {
     const today = localTodayKey();
@@ -21547,24 +22951,17 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick, init
                     </button>
                   ) : null}
 
-                  {/* Size (BR/BA) — editable, e.g. after a 1x1 turns out to be 2x2 */}
-                  {sizeJob === j.id ? (
-                    <span className="inline-flex items-center gap-1">
-                      <input type="number" min="0" autoFocus value={sizeBr} onChange={e => setSizeBr(e.target.value)}
-                        className="w-10 px-1 py-0.5 rounded border border-stone-300 text-[10px] font-mono" placeholder="BR" />
-                      <span className="text-[9px] text-stone-400">BR</span>
-                      <input type="number" min="0" step="0.5" value={sizeBa} onChange={e => setSizeBa(e.target.value)}
-                        className="w-12 px-1 py-0.5 rounded border border-stone-300 text-[10px] font-mono" placeholder="BA" />
-                      <span className="text-[9px] text-stone-400">BA</span>
-                      <button onClick={() => saveJobSize(j, sizeBr, sizeBa)} className="text-[10px] px-1.5 py-0.5 rounded bg-stone-900 text-white">Save</button>
-                      <button onClick={() => setSizeJob(null)} className="text-[10px] px-1 text-stone-500">×</button>
-                    </span>
-                  ) : j.unitId ? (
-                    <button onClick={() => { setSizeJob(j.id); setSizeBr(j.bedrooms ?? ''); setSizeBa(j.bathrooms ?? ''); }}
-                      className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-stone-200 text-stone-700 inline-flex items-center gap-1">
-                      {(j.bedrooms || j.bathrooms) ? `${j.bedrooms || 0}BR / ${j.bathrooms || 0}BA` : 'Set size'}
-                    </button>
-                  ) : null}
+                  {/* Size / edit / delete — the shared piece. This card used
+                     to hand-roll its own size box and delete button, and it
+                     was the only one of the four that had either. */}
+                  <OwnerJobControls employee={employee}
+                    job={{
+                      assignmentId: j.id, unitId: j.unitId, partyId: j.partyId,
+                      unitLabel: j.unitLabel, partyLabel: j.partyLabel, type: j.type,
+                      bedrooms: j.bedrooms, bathrooms: j.bathrooms,
+                    }}
+                    onChanged={load}
+                    onEdit={() => setEditJob({ id: j.id, propertyId: j.customerId })} />
 
                   {/* Who's physically in there RIGHT NOW — distinct from the
                      indigo "assigned to" pills, which are only a plan. */}
@@ -21604,22 +23001,16 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick, init
                 </div>
 
                 {canAssignJobs && assignJob === j.id && (
-                  <AssignPicker key={j.id} team={team} busy={actioning === j.id}
+                  <AssignPicker key={j.id} assignmentId={j.id} team={team} busy={actioning === j.id}
                     currentIds={j.assignees.map(a => a.id)}
                     onCancel={() => setAssignJob(null)}
-                    onSave={(ids) => commitJobAssignees(j, ids)} />
+                    onSave={(ids, audience) => commitJobAssignees(j, ids, audience)} />
                 )}
                 <div className="flex items-center gap-1 flex-shrink-0">
                   {canDone && (
                     <button onClick={() => markJobDone(j)} disabled={actioning === j.id}
                       title="Mark completed" className="p-1.5 rounded-lg text-emerald-600 hover:bg-emerald-50 disabled:opacity-40">
                       <Check size={16} />
-                    </button>
-                  )}
-                  {canDelete && (
-                    <button onClick={() => deleteJob(j)} disabled={actioning === j.id}
-                      title="Delete assignment" className="p-1.5 rounded-lg text-stone-400 hover:text-red-600 hover:bg-red-50 disabled:opacity-40">
-                      <Trash2 size={15} />
                     </button>
                   )}
                 </div>
@@ -21756,9 +23147,17 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick, init
                   employee={employee}
                   currentPropertyId={null}
                   ownerMode
-                  onOpenAssignment={(j) => {
+                  onOpenAssignment={async (j) => {
+                    // "Open" now opens THE JOB. It used to drop you on the
+                    // property's assignment list, which is three more taps
+                    // from the thing you tapped and looks like a bug.
                     const prop = propById[j.customerId];
-                    if (prop) { setPicked(prop); setView('open'); }
+                    if (!prop) return;
+                    const { data: asg } = await supabase.from('assignments')
+                      .select('*').eq('id', j.id).maybeSingle();
+                    setPicked(prop);
+                    if (asg) { setDetail(asg); setDetailFromBoard(true); setView('detail'); }
+                    else { setView('open'); }   // job vanished under us — fall back to the list
                   }} />
               </div>
             ) : (
@@ -23194,8 +24593,24 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
         const savedSubs = Array.isArray(sl.subsections) ? sl.subsections : [];
         const subByKey = {};
         savedSubs.forEach(s => { subByKey[s.key] = s; });
+        // A whole-apartment line's key carries the apartment SIZE
+        // (`__apt__:2x2`). Correct a wrong size afterwards and the key no
+        // longer matches, the saved amount is dropped, and the line comes
+        // back priced at the new tier — a silent change to a bill that was
+        // already sent.
+        //
+        // Both shapes count as "the whole-apartment line": `__apt__:2x2`
+        // when the new size has a tier in the price book, and
+        // `__flat__:clean` when it does not (see useKey above, and the
+        // cleared-size case where there is no size at all). Matching only
+        // `__apt__` meant correcting an apartment INTO a size the property
+        // has never priced returned the line at $0. There is exactly one
+        // such subsection per line, so matching them to each other is safe.
+        const isWholeApt = (k) => /^__(apt|flat)__:/.test(String(k || ''));
+        const savedWhole = savedSubs.find(s => isWholeApt(s.key)) || null;
         const mergedSubs = l.subsections.map(s => {
-          const ss = subByKey[s.key];
+          const ss = subByKey[s.key]
+            || (isWholeApt(s.key) ? savedWhole : null);
           if (!ss) return s;
           return { ...s, mode: ss.mode || s.mode, amount: ss.amount != null ? ss.amount : s.amount, rate: ss.rate != null ? ss.rate : s.rate, minutes: ss.minutes != null ? ss.minutes : s.minutes, included: true };
         });
@@ -23222,8 +24637,33 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
     // the whole line from what was saved so nothing is lost.
     if (seedInvoice?.lines?.length) {
       const builtKeys = new Set(builtSeeded.map(l => `${l.unitId || ''}:${l.partyId || ''}`));
-      const missing = seedInvoice.lines.filter(sl =>
-        !builtKeys.has(`${sl.unit_id || ''}:${sl.party_id || ''}`));
+      // A saved line can be absent for two very different reasons, and
+      // rebuilding both is how one cleaning ended up on the bill twice:
+      //   • its cleaning fell out of the date window  → rebuild it;
+      //   • its cleaning was RE-POINTED to another apartment since it was
+      //     billed, so it regenerated under the new one → do NOT rebuild,
+      //     or you get the old apartment's line plus the new one.
+      // editDraft hands over the targets it freed. Any freed target that
+      // reappears in a regenerated line is accounted for; only the ones
+      // that did not come back justify rebuilding their saved line.
+      const freed = seedInvoice.__freedTargets;
+      let rebuildable = null;   // null = no information, old behaviour
+      if (Array.isArray(freed) && freed.length) {
+        const regenerated = new Set();
+        builtSeeded.forEach(l => (l.sourceTargetIds || []).forEach(id => regenerated.add(id)));
+        rebuildable = new Set(
+          freed.filter(t => !regenerated.has(t.id))
+               .map(t => `${t.unit_id || ''}:${t.party_id || ''}`)
+        );
+      }
+      const missing = seedInvoice.lines.filter(sl => {
+        const k = `${sl.unit_id || ''}:${sl.party_id || ''}`;
+        if (builtKeys.has(k)) return false;
+        // Hand-written lines aren't tied to a cleaning at all — always keep.
+        if (sl.service_type === '__custom__' || !sl.unit_id) return true;
+        if (rebuildable && !rebuildable.has(k)) return false;
+        return true;
+      });
       if (missing.length) {
         const rebuilt = missing.map(sl => {
           if (sl.service_type === '__custom__') {
@@ -26017,6 +27457,59 @@ function InvoiceView({ employee, onSignOut, onOpenMessages, onLogoClick, topTogg
     // The old code deleted first and rebuilt blank — wiping all of it.
     const { data: full } = await supabase.from('invoices').select('*').eq('id', inv.id).single();
     const { data: savedLines } = await supabase.from('invoice_lines').select('*').eq('invoice_id', inv.id);
+    // Has an apartment on this invoice changed size since it was billed?
+    // Reopening rebuilds the draft from scratch against the CURRENT size,
+    // and the price book is keyed by it — so this is the one way a number
+    // on a bill already sent can move without anyone touching it. The
+    // rebuild now carries the sent amount across, but say so plainly
+    // rather than leaving it to be noticed.
+    try {
+      const billedSize = {};   // unit_id -> "2x2" as billed
+      (savedLines || []).forEach(sl => {
+        const subs = Array.isArray(sl.subsections) ? sl.subsections : [];
+        const apt = subs.find(s => String(s?.key || '').startsWith('__apt__:'));
+        if (apt && sl.unit_id) billedSize[sl.unit_id] = String(apt.key).slice('__apt__:'.length);
+      });
+      const ids = Object.keys(billedSize);
+      if (ids.length) {
+        const { data: nowUnits } = await supabase.from('units')
+          .select('id, label, bedrooms, bathrooms').in('id', ids);
+        // A size CLEARED to blank counts as changed too — that path used to
+        // return early here and say nothing at all.
+        const sizeNow = (u) => (u.bedrooms == null || u.bathrooms == null)
+          ? null : `${u.bedrooms}x${u.bathrooms}`;
+        const changed = (nowUnits || []).filter(u => sizeNow(u) !== billedSize[u.id]);
+        if (changed.length > 0) {
+          const lines = changed.map(u => {
+            const now = sizeNow(u);
+            return `  • ${u.label}: billed as a ${billedSize[u.id]}, ${now ? `now recorded as a ${now}` : 'now has no size recorded'}`;
+          }).join('\n');
+          if (!confirm(
+            `${changed.length} apartment${changed.length === 1 ? '' : 's'} on this invoice changed size since it was billed:\n\n${lines}\n\n`
+            + 'Reopening rebuilds the draft from the current sizes. The amounts you sent are carried onto the rebuilt lines, but check them before you save.\n\nReopen anyway?'
+          )) return;
+        }
+      }
+    } catch (e) {
+      console.warn('[reopen] size-change check failed, continuing', e);
+    }
+    // Which targets this invoice is holding, captured BEFORE they are
+    // freed. The rebuild needs them to tell "this cleaning fell out of the
+    // window" from "this cleaning was moved to another apartment and has
+    // already come back under it" — rebuilding the second kind billed one
+    // cleaning twice.
+    // This read decides money: without it the rebuild cannot tell a
+    // cleaning that fell out of the window from one that was moved, and
+    // bills the moved one twice. A silent failure here would quietly put
+    // the $220 bug back, so it stops the reopen instead.
+    const { data: heldTargets, error: heldErr } = await supabase.from('assignment_targets')
+      .select('id, unit_id, party_id').eq('invoiced_on', inv.id);
+    if (heldErr) {
+      alert('Could not reopen: the cleanings this invoice is holding could not be read ('
+        + heldErr.message + '). Nothing has been changed — reopening without them risks '
+        + 'billing a cleaning twice.');
+      return;
+    }
     // Free this invoice's targets so they (plus any newer cleanings) flow
     // back into the draft. Await it fully before reopening so the editor's
     // regeneration query sees them as un-invoiced.
@@ -26034,7 +27527,10 @@ function InvoiceView({ employee, onSignOut, onOpenMessages, onLogoClick, topTogg
       // leaving it as-is is still safer than deleting it.
       console.warn('[reopen] could not mark superseded, leaving original untouched', parkErr);
     }
-    setSeedInvoice({ ...(full || inv), lines: savedLines || [], __supersedes: inv.id });
+    setSeedInvoice({
+      ...(full || inv), lines: savedLines || [], __supersedes: inv.id,
+      __freedTargets: heldTargets || null,
+    });
     setSelectedId(inv.customer_id);
     setStart(inv.period_start || twoWeeksAgo);
     setEnd(inv.period_end || today);
@@ -31913,20 +33409,27 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit, onShift
   const [dBusy, setDBusy] = useState(null);
   const [dAssignFor, setDAssignFor] = useState(null);
   const [dDueFor, setDDueFor] = useState(null);
-  const [dSizeFor, setDSizeFor] = useState(null);
-  const [dBr, setDBr] = useState(''); const [dBa, setDBa] = useState('');
+  // Size, edit and delete all live in the shared OwnerJobControls now —
+  // this screen used to carry its own size box and no delete at all.
+  const [dEditJob, setDEditJob] = useState(null); // { id, propertyId }
   const dToday = localTodayKey();
   const canDailyAssign = can(employee, 'assign_cleaners');
   const canDailyDates = can(employee, 'edit_due_dates');
   const canDailyDone = can(employee, 'mark_assignments_done');
 
   const [unitSize, setUnitSize] = useState({}); // unitId -> {bedrooms, bathrooms} (always available)
+  // Every assignment at the day's units, by id, and which of them belong to
+  // THIS date. Delete and Edit are irreversible, so they only ever act on a
+  // job that can be pinned to the day on screen — never on "whatever is
+  // open at that apartment", which is typically a future booking.
+  const [asgById, setAsgById] = useState({});
+  const [dayAsgIds, setDayAsgIds] = useState({}); // unitId -> [assignmentId]
   const loadUnitAsg = async (unitIds) => {
     // Scope to the units on this day. A global query hits PostgREST's
     // 1000-row cap once there are thousands of done items, which silently
     // drops assignments (units then look like they have none).
     const ids = (unitIds || []).filter(Boolean);
-    if (!ids.length) { setUnitAsg({}); setUnitSize({}); setUnitAsgKey(''); return; }
+    if (!ids.length) { setUnitAsg({}); setUnitSize({}); setAsgById({}); setDayAsgIds({}); setUnitAsgKey(''); return; }
     // Page through. Scoping to the day's units reduces the row count but
     // doesn't bound it — 35 apartments with a year of history each still
     // crosses PostgREST's 1000-row default, and a truncated response
@@ -31938,7 +33441,9 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit, onShift
     let rowsComplete = true;
     for (let from = 0; ; from += PAGE) {
       const { data: page, error: pageErr } = await supabase.from('assignment_targets')
-        .select('id, unit_id, status, completed_at, unit:units(id, bedrooms, bathrooms), assignment:assignments!inner(id, active, deleted_at, scheduled_date, took_longer, assignment_type, created_at)')
+        // party_id so the shared controls can tell which bedroom's hours
+        // belong to this job when it is deleted or re-pointed.
+        .select('id, unit_id, party_id, status, completed_at, unit:units(id, bedrooms, bathrooms), assignment:assignments!inner(id, active, deleted_at, scheduled_date, took_longer, assignment_type, created_at)')
         .in('unit_id', ids)
         .not('status', 'eq', 'blocked')
         .order('id')
@@ -31951,36 +33456,70 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit, onShift
     // units with no assignment at all.
     const { data: unitRows } = await supabase.from('units').select('id, bedrooms, bathrooms').in('id', ids);
     const m = {}; const sizes = {};
+    // Every candidate by id, plus which of them actually belong to THE DAY
+    // on screen. The query above has no date filter — it cannot have one,
+    // because the same map feeds the "current job" controls — so the day's
+    // job is narrowed here instead. See the card render.
+    const byId = {};
+    const onThisDay = {};   // unitId -> Set(assignmentId)
+    const dayOf = (ts) => {
+      if (!ts) return null;
+      const d = new Date(ts);
+      return isNaN(d) ? null : `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    };
     (unitRows || []).forEach(u => { sizes[u.id] = { bedrooms: u.bedrooms, bathrooms: u.bathrooms }; });
     rows.forEach(t => {
       const a = t.assignment;
       if (!a || a.active === false || a.deleted_at || !t.unit_id) return;
-      const cand = {
-        id: a.id, scheduledDate: a.scheduled_date || null, tookLonger: !!a.took_longer,
-        open: t.status !== 'done', assignmentType: a.assignment_type || null,
-        createdAt: a.created_at || null, assignees: [],
-      };
-      if (unitAssignmentWins(cand, m[t.unit_id])) m[t.unit_id] = cand;
+      // ONE record per assignment, shared by both maps. m[unitId] points at
+      // the same object as byId[id], so the assignee names attached below
+      // land on whichever record the card ends up rendering.
+      if (!byId[a.id]) {
+        byId[a.id] = {
+          id: a.id, scheduledDate: a.scheduled_date || null, tookLonger: !!a.took_longer,
+          open: false, assignmentType: a.assignment_type || null,
+          createdAt: a.created_at || null, assignees: [],
+          unitId: t.unit_id, partyId: t.party_id || null,
+        };
+      }
+      const rec = byId[a.id];
+      if (t.status !== 'done') rec.open = true;   // open if anything on it is
+      // Finished on this date, or due on this date — either makes it a
+      // candidate for "the cleaning this card is showing".
+      if (dayOf(t.completed_at) === date
+        || String(a.scheduled_date || '').slice(0, 10) === date) {
+        (onThisDay[t.unit_id] = onThisDay[t.unit_id] || new Set()).add(a.id);
+      }
+      if (unitAssignmentWins(rec, m[t.unit_id])) m[t.unit_id] = rec;
     });
     setUnitSize(sizes);
     // Roster first, so assignee names resolve without a PostgREST embed.
     const { data: emps } = await supabase.from('employees').select('id, name, role').eq('active', true).order('name');
     const nameById = Object.fromEntries((emps || []).map(e => [e.id, e.name]));
-    const asgIds = Object.values(m).map(v => v.id);
+    // The current pick per unit PLUS whatever can be pinned to this day \u2014
+    // either can end up on a card, so both need their assignee names.
+    const asgIds = [...new Set([
+      ...Object.values(m).map(v => v.id),
+      ...Object.values(onThisDay).flatMap(s => Array.from(s)),
+    ])];
     if (asgIds.length) {
       const { data: asg, error: asgErr } = await supabase.from('assignment_assignees')
         .select('assignment_id, employee_id, status').in('assignment_id', asgIds);
       if (asgErr) alert('Could not load who\u2019s assigned: ' + asgErr.message);
       (asg || []).forEach(r => {
-        Object.values(m).forEach(v => {
-          if (v.id === r.assignment_id) v.assignees.push({ id: r.employee_id, name: nameById[r.employee_id] || '', requested: r.status === 'requested' });
-        });
+        const rec = byId[r.assignment_id];
+        if (rec) rec.assignees.push({ id: r.employee_id, name: nameById[r.employee_id] || '', requested: r.status === 'requested' });
       });
     }
     setUnitAsg(m);
-    // Only claim this map describes these units if we actually got all of
-    // it. A failed page leaves the chips hidden rather than guessing.
-    setUnitAsgKey(rowsComplete ? ids.join(',') : null);
+    setAsgById(byId);
+    setDayAsgIds(Object.fromEntries(Object.entries(onThisDay).map(([k, v]) => [k, Array.from(v)])));
+    // Only claim this map describes these units ON THIS DAY if we actually
+    // got all of it. A failed page leaves the chips hidden rather than
+    // guessing. The date is part of the key because which cleaning belongs
+    // to a card depends on it — two consecutive days can have the identical
+    // set of apartments, and the old key could not tell them apart.
+    setUnitAsgKey(rowsComplete ? `${date}|${ids.join(',')}` : null);
     setDTeam((emps || []).filter(e => e.role !== 'owner'));
   };
   // Unit ids present on this day (from the loaded work blocks).
@@ -31992,45 +33531,26 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit, onShift
     return Array.from(set);
   }, [data]);
   const refreshUnitAsg = () => loadUnitAsg(dayUnitIds);
-  useEffect(() => { if (dayUnitIds.length) loadUnitAsg(dayUnitIds); /* eslint-disable-next-line */ }, [dayUnitIds.join(',')]);
-  // True only when unitAsg was built for the units on screen right now.
-  // Goes false by itself the instant the day changes, because dayUnitIds
-  // changes in the same render.
-  const unitAsgFresh = unitAsgKey === dayUnitIds.join(',');
+  // `date` is a dependency too: stepping to the next day can land on the
+  // identical set of apartments, and which cleaning belongs to a card
+  // depends on the date. Without it the day-matching went stale silently.
+  useEffect(() => { if (dayUnitIds.length) loadUnitAsg(dayUnitIds); /* eslint-disable-next-line */ }, [dayUnitIds.join(','), date]);
+  // True only when unitAsg was built for the units on screen right now, on
+  // the day on screen right now. Goes false by itself the instant either
+  // changes, because both are recomputed in the same render.
+  const unitAsgFresh = unitAsgKey === `${date}|${dayUnitIds.join(',')}`;
 
   const dSaveDue = async (asgId, val) => {
     setDDueFor(null); setDBusy(asgId);
     await supabase.from('assignments').update({ scheduled_date: val || null }).eq('id', asgId);
     setDBusy(null); refreshUnitAsg();
   };
-  const dCommitAssignees = async (ua, ids) => {
+  const dCommitAssignees = async (ua, ids, audience) => {
     setDBusy(ua.id);
-    const error = await saveAssignees(ua.id, ua.assignees.map(a => a.id), ids, employee.id);
+    const error = await saveAssignees(ua.id, ua.assignees.map(a => a.id), ids, employee.id, audience);
     setDBusy(null);
     if (error) { alert('Could not update who\u2019s assigned: ' + error.message); return; }
     setDAssignFor(null);
-    refreshUnitAsg();
-  };
-  const dSaveSize = async (unitId, br, ba) => {
-    setDBusy(unitId);
-    const payload = {
-      // parseFloat on baths: 2.5 is a real size and parseInt would silently
-      // save it as 2.
-      bedrooms: br === '' ? null : parseInt(br, 10),
-      bathrooms: ba === '' ? null : parseFloat(ba),
-    };
-    // .select() so we can tell a silent 0-row update (RLS) from a real save.
-    const { data: updated, error } = await supabase.from('units')
-      .update(payload).eq('id', unitId).select('id, bedrooms, bathrooms');
-    setDBusy(null);
-    if (error) { alert('Could not save size: ' + error.message); return; }
-    if (!updated || updated.length === 0) {
-      alert('Size did not save — the database rejected the update for this apartment.');
-      return;
-    }
-    // Optimistic: reflect the saved values right away.
-    setUnitSize(prev => ({ ...prev, [unitId]: { bedrooms: updated[0].bedrooms, bathrooms: updated[0].bathrooms } }));
-    setDSizeFor(null);
     refreshUnitAsg();
   };
   const dToggleExtra = async (asgId, current) => {
@@ -32067,7 +33587,10 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit, onShift
     // Exclude preview-mode shifts (owner using "Preview as cleaner").
     const { data: shifts } = await supabase
       .from('shifts')
-      .select('id, start_time, end_time, customer_id, idle_seconds, employee:employees(id,name), customer:customers(id,name,property_type,bill_rate_hourly), work_blocks(id, start_time, end_time, bill_rate_at_work, unit:units(id, label), party:parties(id, label, full_name), tasks(*, photos(*, taken_by_employee:employees!taken_by(name))))')
+      // assignment_id on the blocks: it is the only hard link between the
+      // work shown on a card and the cleaning it belongs to. Without it the
+      // card's buttons had to guess from "what's open at this apartment".
+      .select('id, start_time, end_time, customer_id, idle_seconds, employee:employees(id,name), customer:customers(id,name,property_type,bill_rate_hourly), work_blocks(id, start_time, end_time, bill_rate_at_work, assignment_id, unit:units(id, label), party:parties(id, label, full_name), tasks(*, photos(*, taken_by_employee:employees!taken_by(name))))')
       .gte('start_time', dayStart)
       .lte('start_time', dayEnd)
       .or('is_preview.is.null,is_preview.eq.false')
@@ -32116,10 +33639,15 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit, onShift
           if (!propGroup.units[uId]) {
             propGroup.units[uId] = {
               unitId: uId, unitLabel: b.unit.label,
-              employees: new Set(), totalMs: 0, hasDamage: false, hasCannot: false, photoCount: 0, blocks: []
+              employees: new Set(), totalMs: 0, hasDamage: false, hasCannot: false, photoCount: 0, blocks: [],
+              // Which cleaning(s) this day's work at this apartment was
+              // logged against. One is a certain answer; none or several
+              // means the card cannot name its job.
+              assignmentIds: new Set(),
             };
           }
           const ug = propGroup.units[uId];
+          if (b.assignment_id) ug.assignmentIds.add(b.assignment_id);
           ug.employees.add(s.employee?.name || '?');
           ug.blocks.push({ block: b, employee: s.employee, rate: s.customer.bill_rate_hourly });
           const blockMs = b.end_time
@@ -32147,6 +33675,14 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit, onShift
 
     setData({ groups, shifts: shifts || [], byCleaner });
   })(); }, [date]);
+
+  // Editing a cleaning takes over the screen, same as everywhere else.
+  if (dEditJob) {
+    return <AssignmentEditorHost assignmentId={dEditJob.id} propertyId={dEditJob.propertyId}
+      employee={employee}
+      onCancel={() => setDEditJob(null)}
+      onSaved={() => { setDEditJob(null); refreshUnitAsg(); }} />;
+  }
 
   if (!data) return <Splash text="Loading…" />;
 
@@ -32386,7 +33922,42 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit, onShift
                   {sortedUnits.length > 0 && (
                     <div className="space-y-2">
                       {sortedUnits.map(u => {
-                        const ua = unitAsg[u.unitId];
+                        // WHICH CLEANING IS THIS CARD SHOWING? The card is
+                        // drawn from work blocks logged on this date, so its
+                        // buttons must act on the cleaning that work belongs
+                        // to — not on "whatever is currently open at this
+                        // apartment", which is usually a future booking.
+                        //
+                        //   1. the assignment the day's blocks were logged
+                        //      against — a hard link, and certain;
+                        //   2. failing that, an assignment finished on this
+                        //      date or due on it, if there is exactly one;
+                        //   3. failing that, nothing. Delete and Edit are
+                        //      irreversible, so an unresolved card gets no
+                        //      buttons rather than the wrong ones.
+                        //
+                        // Gated on unitAsgFresh: until the assignment query
+                        // has landed FOR THIS DAY, asgById and dayAsgIds
+                        // still describe the previous one, and a stale match
+                        // is the very thing being fixed here.
+                        //
+                        // NO FALLING THROUGH. If the day's hours name a job,
+                        // that job is the answer or there isn't one — an
+                        // archived job (active:false) or one whose items are
+                        // all 'blocked' is filtered out of asgById, and
+                        // `undefined ||` used to slide straight on to the
+                        // date guess and act on a different cleaning.
+                        const fromBlocks = Array.from(u.assignmentIds || []);
+                        const fromDay = dayAsgIds[u.unitId] || [];
+                        const dayAsg = !unitAsgFresh ? null
+                          : fromBlocks.length > 0
+                            ? (fromBlocks.length === 1 ? (asgById[fromBlocks[0]] || null) : null)
+                            : (fromDay.length === 1 ? (asgById[fromDay[0]] || null) : null);
+                        // When the day's job is known, everything on the card
+                        // points at it, so the chip and the buttons agree.
+                        // When it isn't, the reversible controls fall back to
+                        // the old behaviour rather than vanishing.
+                        const ua = dayAsg || unitAsg[u.unitId];
                         // Size lives on the unit, NOT on the assignment. Read it
                         // from unitSize so the pill is right even when this unit
                         // has no open assignment (ua would be undefined).
@@ -32436,22 +34007,26 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit, onShift
 
                           {/* Inline controls for this unit's open assignment */}
                           <div className="flex items-center gap-1.5 flex-wrap mt-2">
-                            {dSizeFor === u.unitId ? (
-                              <span className="inline-flex items-center gap-1">
-                                <input type="number" min="0" autoFocus value={dBr} onChange={e => setDBr(e.target.value)}
-                                  className="w-10 px-1 py-0.5 rounded border border-stone-300 text-[10px] font-mono" placeholder="BR" />
-                                <span className="text-[9px] text-stone-400">BR</span>
-                                <input type="number" min="0" step="0.5" value={dBa} onChange={e => setDBa(e.target.value)}
-                                  className="w-12 px-1 py-0.5 rounded border border-stone-300 text-[10px] font-mono" placeholder="BA" />
-                                <span className="text-[9px] text-stone-400">BA</span>
-                                <button onClick={() => dSaveSize(u.unitId, dBr, dBa)} className="text-[10px] px-1.5 py-0.5 rounded bg-stone-900 text-white">Save</button>
-                                <button onClick={() => setDSizeFor(null)} className="text-[10px] px-1 text-stone-500">×</button>
+                            {/* Size / edit / delete — the shared piece. Size is
+                               the apartment's, so it shows regardless. Edit
+                               and delete are passed dayAsg, NOT ua: they only
+                               appear when the day's cleaning is known for
+                               certain. */}
+                            <OwnerJobControls employee={employee}
+                              job={{
+                                assignmentId: dayAsg?.id || null,
+                                unitId: u.unitId, partyId: dayAsg?.partyId || null,
+                                unitLabel: u.unitLabel, partyLabel: '',
+                                type: dayAsg?.assignmentType || '',
+                                bedrooms: us?.bedrooms, bathrooms: us?.bathrooms,
+                              }}
+                              onChanged={refreshUnitAsg}
+                              onEdit={() => setDEditJob({ id: dayAsg.id, propertyId: propId })} />
+                            {unitAsgFresh && !dayAsg && (
+                              <span className="text-[10px] font-mono text-stone-400"
+                                title="More than one cleaning, or none, can be matched to this day at this apartment — open the apartment to edit the right one.">
+                                open the apartment to edit
                               </span>
-                            ) : (
-                              <button onClick={() => { setDSizeFor(u.unitId); setDBr(us?.bedrooms ?? ''); setDBa(us?.bathrooms ?? ''); }}
-                                className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-stone-200 text-stone-700">
-                                {(us?.bedrooms || us?.bathrooms) ? `${us.bedrooms || 0}BR / ${us.bathrooms || 0}BA` : 'Set size'}
-                              </button>
                             )}
 
                             {ua ? (<>
@@ -32503,10 +34078,10 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit, onShift
                           </div>
 
                           {ua && canDailyAssign && dAssignFor === ua.id && (
-                            <AssignPicker key={ua.id} team={dTeam} busy={dBusy === ua.id}
+                            <AssignPicker key={ua.id} assignmentId={ua.id} team={dTeam} busy={dBusy === ua.id}
                               currentIds={ua.assignees.map(a => a.id)}
                               onCancel={() => setDAssignFor(null)}
-                              onSave={(ids) => dCommitAssignees(ua, ids)} />
+                              onSave={(ids, audience) => dCommitAssignees(ua, ids, audience)} />
                           )}
                         </div>
                         );
@@ -33681,10 +35256,10 @@ function AssignmentList({ property, employee, onBack, onNew, onNewChecklist, onN
     })();
   }, []);
   const [assignBusy, setAssignBusy] = useState(null);
-  const commitAssign = async (asgId, ids) => {
+  const commitAssign = async (asgId, ids, audience) => {
     setAssignBusy(asgId);
     const current = (assigneeMap[asgId] || []).map(a => a.id);
-    const error = await saveAssignees(asgId, current, ids, employee.id);
+    const error = await saveAssignees(asgId, current, ids, employee.id, audience);
     setAssignBusy(null);
     if (error) { alert('Could not update who\u2019s assigned: ' + error.message); return; }
     setAssignFor(null);
@@ -33936,10 +35511,10 @@ function AssignmentList({ property, employee, onBack, onNew, onNewChecklist, onN
             </div>
             {canAssignHere && assignFor === a.id && (
               <div onClick={(e) => e.stopPropagation()}>
-                <AssignPicker key={a.id} team={teamList} busy={assignBusy === a.id}
+                <AssignPicker key={a.id} assignmentId={a.id} team={teamList} busy={assignBusy === a.id}
                   currentIds={(assigneeMap[a.id] || []).map(x => x.id)}
                   onCancel={() => setAssignFor(null)}
-                  onSave={(ids) => commitAssign(a.id, ids)} />
+                  onSave={(ids, audience) => commitAssign(a.id, ids, audience)} />
               </div>
             )}
             {a.notes && <div className="text-xs text-stone-600 mt-1 line-clamp-1">{a.notes}</div>}
@@ -34328,21 +35903,38 @@ function QuickAssignmentForm({ property, employee, portalUser = null, portalKind
   );
   const [priority, setPriority] = useState(false);
   const [notes, setNotes] = useState(editAssignment?.notes || '');
+  // Did the person actually touch the size steppers? In edit mode the
+  // steppers are pre-filled from the apartment the job is on NOW. Writing
+  // them back unconditionally means re-pointing a job from a 1x1 to a 3x2
+  // stamps "1x1" onto the 3x2 — and silently re-prices every unbilled
+  // cleaning there. So in edit mode the size is only written when it was
+  // deliberately changed. Creating is unchanged: the steppers are the
+  // source of truth there.
+  const [sizeTouched, setSizeTouched] = useState(false);
+  const touchSize = (setter) => (v) => { setSizeTouched(true); setter(v); };
   // Where the assignment currently sits, so a move can be detected on save.
   const [editTargets, setEditTargets] = useState([]);
+  const [loadedUnitLabel, setLoadedUnitLabel] = useState('');
+  // Set once the hours that would travel with a move have been reviewed.
+  // { linked: [...], ambiguous: [...] }
+  const [movePlan, setMovePlan] = useState(null);
+  const [moveChecked, setMoveChecked] = useState(() => new Set());
   useEffect(() => {
     if (!isEditMode) return;
     (async () => {
       const { data } = await supabase.from('assignment_targets')
-        .select('id, unit_id, party_id, status, priority, unit:units(label, bedrooms, bathrooms)')
+        // party label too — an edit must leave the job on the bedroom it is
+        // already on, and carry that bedroom's name across a real move.
+        .select('id, unit_id, party_id, status, priority, unit:units(label, bedrooms, bathrooms), party:parties(label)')
         .eq('assignment_id', editAssignment.id);
       const rows = data || [];
       setEditTargets(rows);
       const u = rows[0]?.unit;
-      if (u?.label) setApt(u.label);
+      if (u?.label) { setApt(u.label); setLoadedUnitLabel(u.label); }
       if (u?.bedrooms != null) setBedrooms(u.bedrooms);
       if (u?.bathrooms != null) setBathrooms(u.bathrooms);
       setPriority(rows.some(t => t.priority));
+      setSizeTouched(false);
     })();
     /* eslint-disable-next-line */
   }, [isEditMode]);
@@ -34359,8 +35951,15 @@ function QuickAssignmentForm({ property, employee, portalUser = null, portalKind
     })();
   }, [isPM]);
 
-  const step = (setter, val, delta, min = 0, max = 12) =>
-    setter(Math.max(min, Math.min(max, (parseInt(val, 10) || 0) + delta)));
+  // Half-baths are first class here — the bed/bath picker elsewhere in the
+  // app offers 1.5, 2.5, 3.5 and labels them "(.5 = half bath)". This
+  // stepper used to be integer-only and parseInt'd the value, so nudging
+  // any stepper on an apartment recorded as 1.5BA silently rewrote it to 1.
+  const step = (setter, val, delta, min = 0, max = 12) => {
+    const cur = parseFloat(val);
+    const next = (isNaN(cur) ? 0 : cur) + delta;
+    setter(Math.round(Math.max(min, Math.min(max, next)) * 10) / 10);
+  };
 
   const submit = async () => {
     const label = apt.trim();
@@ -34370,10 +35969,105 @@ function QuickAssignmentForm({ property, employee, portalUser = null, portalKind
     setBusy(true); setError('');
     try {
       const br = parseInt(bedrooms, 10) || 0;
-      const ba = parseInt(bathrooms, 10) || 0;
+      // parseFloat, not parseInt — the shared size pill already writes this
+      // column with parseFloat, and two paths writing one field by
+      // different rules is the drift this whole branch exists to end.
+      const ba = parseFloat(bathrooms) || 0;
+      // Set by the destination resolution below, and checked again against
+      // the ids actually resolved before anything is written. The two must
+      // agree: if they ever disagree the save stops rather than moving a
+      // job whose hours were never looked at.
+      let willMove = false;
+      // EDIT GUARD — one place only. The patch below writes EVERY target
+      // on the job, while the old code decided "did this move?" from just
+      // the first one. A job spanning several apartments (or several
+      // bedrooms) would have all of them collapsed onto whichever one is
+      // in the box. Multi-apartment jobs are routed to the checklist
+      // editor today, which is the only reason this has never bitten; it
+      // is one routing change away from being able to.
+      if (isEditMode) {
+        const distinctPlaces = new Set(editTargets.map(t => `${t.unit_id || ''}:${t.party_id || ''}`));
+        if (distinctPlaces.size > 1) {
+          setBusy(false);
+          setError(`This job covers ${distinctPlaces.size} different apartments or bedrooms. Saving from here would move all of them onto one. Open the job itself to change where its items point.`);
+          return;
+        }
+        // RESOLVE THE WHOLE DESTINATION — apartment AND bedroom — before
+        // deciding anything, and read-only: nothing is created yet.
+        //
+        // This used to decide "is a move about to happen?" from the
+        // apartment alone, while the write that actually re-points the job
+        // compared apartment OR bedroom. At a per-bedroom property the
+        // bedroom changed on its own (see pickQuickParty), so `moved` was
+        // true, no plan had been built, and the job jumped bedrooms with
+        // its hours left behind — on an edit that only touched the date.
+        // One definition of "moved" now, used by both.
+        const fromUnitId = editTargets[0]?.unit_id || null;
+        const fromPartyId = editTargets[0]?.party_id || null;
+        const fromPartyLabel = editTargets[0]?.party?.label || '';
+        const { data: destPeek, error: dpErr } = await supabase.from('units').select('id')
+          .eq('customer_id', property.id).ilike('label', likeEscape(label)).limit(1);
+        if (dpErr) {
+          setBusy(false);
+          setError("Couldn't look that apartment up, so nothing was saved: " + dpErr.message);
+          return;
+        }
+        const destUnitId = (destPeek && destPeek[0]?.id) || null;
+        let destPartyId = null;
+        if (destUnitId) {
+          const { data: destParties, error: dpe } = await supabase.from('parties')
+            .select('id, label').eq('unit_id', destUnitId).eq('active', true).order('sort_order');
+          if (dpe) {
+            setBusy(false);
+            setError("Couldn't look up that apartment's bedrooms, so nothing was saved: " + dpe.message);
+            return;
+          }
+          destPartyId = pickQuickParty(destParties, {
+            keepPartyId: fromPartyId, keepPartyLabel: fromPartyLabel,
+          })?.id || null;
+        }
+        willMove = destUnitId !== fromUnitId || destPartyId !== fromPartyId;
+        // A PM must never re-point a job. The hours live on a cleaner's
+        // shift, and everything that moves them — the attachment read, the
+        // cleaner's name in the review list, the work_blocks write — is
+        // staff-only. They can still fix the date, type and notes.
+        if (willMove && isPM) {
+          setBusy(false);
+          setError('Ask us to move this to a different apartment or bedroom — the cleaner’s hours have to move with it, and we do that from our side.');
+          return;
+        }
+        if (willMove && !movePlan) {
+          const plan = await loadJobAttachments({
+            assignmentId: editAssignment.id,
+            unitId: fromUnitId, partyId: fromPartyId,
+          });
+          // A read that failed is not a job with no hours. Moving on that
+          // basis strands every hour and photo silently.
+          if (plan.failed) {
+            setBusy(false);
+            setError('Couldn’t check what work is on this job, so it has not been moved — moving it blind would leave its hours behind. ' + (plan.error || ''));
+            return;
+          }
+          // Hours to review, OR an invoice to warn about. A cleaning marked
+          // done from a board has no work blocks at all and can still be
+          // sitting on a sent invoice.
+          if (plan.linked.length > 0 || plan.ambiguous.length > 0 || plan.invoices.length > 0) {
+            setBusy(false);
+            setMovePlan(plan);
+            setMoveChecked(new Set());   // nothing ambiguous is ticked for you
+            return;
+          }
+        }
+        // A typo in a free-text box should not quietly invent an apartment
+        // and move billed work into it. "302" fat-fingered as "30" was
+        // creating a new apartment with no warning at all.
+        if (willMove && !destUnitId && !confirm(
+          `There is no apartment "${label}" at ${property.name}.\n\nCreate it and move this cleaning there?`
+        )) { setBusy(false); return; }
+      }
       // Find the apartment (unit), else create it.
       const { data: existing } = await supabase.from('units').select('*')
-        .eq('customer_id', property.id).ilike('label', label).limit(1);
+        .eq('customer_id', property.id).ilike('label', likeEscape(label)).limit(1);
       let unit = (existing && existing[0]) || null;
       if (!unit) {
         const { data: created, error: ue } = await supabase.from('units').insert({
@@ -34382,13 +36076,28 @@ function QuickAssignmentForm({ property, employee, portalUser = null, portalKind
         }).select().single();
         if (ue) throw ue;
         unit = created;
-      } else {
-        if (!isPM) await supabase.from('units').update({ bedrooms: br, bathrooms: ba }).eq('id', unit.id);
+      } else if (!isPM && (!isEditMode || sizeTouched)) {
+        // Size is a property of the APARTMENT — correcting it fixes every
+        // cleaning it has ever had, past and future. Say so when that
+        // re-prices work you have not invoiced yet.
+        const ok = await confirmSizeChange({
+          unitId: unit.id, unitLabel: unit.label,
+          fromBr: unit.bedrooms, fromBa: unit.bathrooms, toBr: br, toBa: ba,
+        });
+        if (!ok) { setBusy(false); return; }
+        const { error: se } = await supabase.from('units')
+          .update({ bedrooms: br, bathrooms: ba }).eq('id', unit.id);
+        if (se) throw se;
+        unit = { ...unit, bedrooms: br, bathrooms: ba };
       }
-      // Ensure a party to attach the job to (whole-apartment "Main").
+      // Ensure a party to attach the job to. Creating: the whole-apartment
+      // "Main". Editing: wherever it already is — see pickQuickParty.
       const { data: parties } = await supabase.from('parties').select('*')
         .eq('unit_id', unit.id).eq('active', true).order('sort_order');
-      let party = (parties || []).find(p => (p.label || '').toLowerCase() === 'main') || (parties || [])[0] || null;
+      let party = pickQuickParty(parties, isEditMode ? {
+        keepPartyId: editTargets[0]?.party_id || null,
+        keepPartyLabel: editTargets[0]?.party?.label || '',
+      } : {});
       if (!party) {
         const { data: cp, error: pe } = await supabase.from('parties').insert({
           unit_id: unit.id, label: 'Main', sort_order: 1, active: true,
@@ -34398,7 +36107,12 @@ function QuickAssignmentForm({ property, employee, portalUser = null, portalKind
       }
       // Create the assignment + one target.
       const typeLabel = (QUICK_TYPES.find(t => t.key === cleanType) || {}).label || cleanType;
-      const title = `Apt ${label} · ${br}BR/${ba}BA · ${typeLabel}`;
+      // When the size boxes were left alone on an edit, the title has to
+      // read the DESTINATION apartment's real size, not the one the form
+      // happened to be pre-filled with from where the job used to be.
+      const titleBr = (isEditMode && !sizeTouched && unit.bedrooms != null) ? unit.bedrooms : br;
+      const titleBa = (isEditMode && !sizeTouched && unit.bathrooms != null) ? unit.bathrooms : ba;
+      const title = `Apt ${label} · ${titleBr}BR/${titleBa}BA · ${typeLabel}`;
       // Route this property through the multi-unit cleaner flow (property →
       // pick apartment → clean), like Carriage — otherwise a cleaner
       // clocking in jumps straight into one clean with no apartment shown.
@@ -34410,29 +36124,81 @@ function QuickAssignmentForm({ property, employee, portalUser = null, portalKind
       // job; and moving the rows keeps completion status and photos, which
       // delete-and-recreate would throw away.
       if (isEditMode) {
+        // "Did this move?" — the SAME comparison the plan was gated on
+        // above, now against the ids actually resolved.
+        const fromUnitId = editTargets[0]?.unit_id || null;
+        const fromPartyId = editTargets[0]?.party_id || null;
+        const moved = editTargets.length > 0 && (fromUnitId !== unit.id || fromPartyId !== party.id);
+        // Belt and braces. If these two ever disagree again, the save stops
+        // instead of moving a job whose hours were never looked at.
+        if (moved && !willMove) {
+          setBusy(false);
+          setError('This edit would move the job somewhere its hours were not checked, so nothing was saved. Open it again and try once more.');
+          return;
+        }
+        let movedBlocks = [];
+        if (moved) {
+          // THE HOURS MOVE FIRST. If they fail, nothing else has been
+          // written and the job is still where it was — half-moved is
+          // worse than not moved. Shared with the checklist wizard so the
+          // two editors cannot move a job by different rules.
+          const res = await applyWorkBlockMove({
+            plan: movePlan, checkedIds: moveChecked,
+            toUnitId: unit.id, toPartyId: party.id, toLabel: label,
+          });
+          if (!res.ok) {
+            setBusy(false);
+            if (!res.cancelled) {
+              setError('The hours could not be moved, so the job has NOT been moved either — everything is still where it was. ' + (res.error || ''));
+            }
+            return;
+          }
+          movedBlocks = res.moved || [];
+        }
+        // From here the hours may already have moved, so a failure has to
+        // put them back — otherwise the hours sit at the new apartment
+        // with the job still at the old one, which is the same split state
+        // the ordering above exists to prevent.
         const { error: ue2 } = await supabase.from('assignments').update({
           title, notes: notes.trim() || null,
           assignment_type: cleanType,
           scheduled_date: scheduledDate || null,
         }).eq('id', editAssignment.id);
-        if (ue2) throw ue2;
-        const moved = editTargets[0] && (editTargets[0].unit_id !== unit.id || editTargets[0].party_id !== party.id);
+        if (ue2) {
+          const back = await revertWorkBlockMove(movedBlocks);
+          setBusy(false);
+          setError('Could not save the job: ' + ue2.message + movedHoursNote(movedBlocks, back, label));
+          return;
+        }
         const patch = { priority: isPM ? false : !!priority };
         if (moved) { patch.unit_id = unit.id; patch.party_id = party.id; }
         const { error: te2 } = await supabase.from('assignment_targets')
           .update(patch).eq('assignment_id', editAssignment.id);
-        if (te2) throw te2;
+        if (te2) {
+          const back = await revertWorkBlockMove(movedBlocks);
+          setBusy(false);
+          setError('Could not move the job’s items: ' + te2.message + movedHoursNote(movedBlocks, back, label));
+          return;
+        }
         setBusy(false);
         onSaved({ id: editAssignment.id });
         return;
       }
 
-      const { data: asg, error: ae } = await supabase.from('assignments').insert({
+      // Created OPEN TO EVERYONE, always — even when a name was picked.
+      // Narrowing happens further down, only once that name is safely on
+      // the cleaning. Doing it the other way round means a failure in
+      // between commits a cleaning set to "only these people" with nobody
+      // on it, which no cleaner can see, while the owner is told the save
+      // failed. Same reasoning as the ordering in saveAssignees.
+      const narrowTo = (!isPM && assignedTo) ? assignedTo : null;
+      const { data: asg, error: ae, audienceSaved } = await audienceWrite({
         customer_id: property.id, title, notes: notes.trim() || null,
         uploaded_by: isPM ? null : employee.id, active: true, assignment_type: cleanType,
         scheduled_date: scheduledDate || null,
+        audience: AUDIENCE_ALL,
         ...(isPM ? { source: 'pm', pm_status: 'pending' } : {}),
-      }).select().single();
+      }, (row) => supabase.from('assignments').insert(row).select().single());
       if (ae) throw ae;
       // FOUR auto items, one per section, each called "Entire".
       // Bridges and Citifront are billed flat by apartment, so these uploads
@@ -34452,6 +36218,44 @@ function QuickAssignmentForm({ property, employee, portalUser = null, portalKind
         }))
       );
       if (te) throw te;
+      // THE TWO-SYSTEMS FIX. Assigning here used to write only
+      // assignment_targets.assigned_to, which nothing about "who is this
+      // for" reads: the cleaner saw it on their hub card but not under
+      // "Assigned to me", and the owner's Schedule board showed it with
+      // nobody on it. The job-level row below is the one every screen
+      // reads. assigned_to is still written above, as a per-bedroom note,
+      // and it no longer governs anything.
+      //
+      // Name first, narrow second. Every way this can stop part-way leaves
+      // the cleaning visible to everyone — which is wrong but obvious, and
+      // fixable from its card — rather than visible to nobody.
+      if (narrowTo) {
+        const { error: aaErr } = await supabase.from('assignment_assignees')
+          .upsert({ assignment_id: asg.id, employee_id: narrowTo, status: 'assigned', created_by: employee.id },
+            { onConflict: 'assignment_id,employee_id' });
+        // The cleaning exists and is correct apart from the name. Say so
+        // rather than throwing, or the owner retries and creates a second.
+        if (aaErr) {
+          setBusy(false);
+          setError('The cleaning was created and every cleaner can see it, but ' + (cleaners.find(c => c.id === narrowTo)?.name || 'that cleaner') + ' could not be put on it: ' + aaErr.message + ' Open the cleaning and use Assign.');
+          return;
+        }
+        if (audienceSaved) {
+          const { error: audErr } = await supabase.from('assignments')
+            .update({ audience: AUDIENCE_NAMED }).eq('id', asg.id);
+          if (audErr) {
+            setBusy(false);
+            setError('The cleaning was created and assigned, but it could not be narrowed to that cleaner, so every cleaner can still see it: ' + audErr.message + ' Open the cleaning and set it from its card.');
+            return;
+          }
+        } else {
+          // The column is not in the database yet, so there is nothing to
+          // narrow to. Staff only — a PM never reaches this branch.
+          setBusy(false);
+          setError(AUDIENCE_SQL_HINT + ' The cleaning was created and assigned, but every cleaner can see it for now.');
+          return;
+        }
+      }
       // Notify owners for approval when a PM created this (the fuller
       // PortalAssignmentForm already does this; the Quick form must too, or
       // PM quick-adds never hit the bell).
@@ -34471,13 +36275,13 @@ function QuickAssignmentForm({ property, employee, portalUser = null, portalKind
     }
   };
 
-  const Stepper = ({ label, value, setter }) => (
+  const Stepper = ({ label, value, setter, by = 1 }) => (
     <div className="flex-1">
       <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">{label}</label>
       <div className="flex items-center gap-2">
-        <button onClick={() => step(setter, value, -1)} className="w-10 h-10 rounded-xl border border-stone-300 bg-white text-stone-700 text-lg font-medium active:scale-95">–</button>
+        <button onClick={() => step(setter, value, -by)} className="w-10 h-10 rounded-xl border border-stone-300 bg-white text-stone-700 text-lg font-medium active:scale-95">–</button>
         <div className="flex-1 text-center text-lg font-mono text-stone-900 py-2 rounded-xl bg-stone-100">{value}</div>
-        <button onClick={() => step(setter, value, 1)} className="w-10 h-10 rounded-xl border border-stone-300 bg-white text-stone-700 text-lg font-medium active:scale-95">+</button>
+        <button onClick={() => step(setter, value, by)} className="w-10 h-10 rounded-xl border border-stone-300 bg-white text-stone-700 text-lg font-medium active:scale-95">+</button>
       </div>
     </div>
   );
@@ -34506,12 +36310,27 @@ function QuickAssignmentForm({ property, employee, portalUser = null, portalKind
           <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Apartment number</label>
           <input value={apt} onChange={e => setApt(e.target.value)} placeholder="e.g. 302"
             className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white text-stone-900" />
+          {isEditMode && (
+            <div className="text-[11px] text-stone-500 font-mono mt-1">
+              Apartments at {property.name} only. To move this to a different property, delete it and
+              add it there — the hours sit on a shift that belongs to this property and can't follow.
+            </div>
+          )}
         </div>
 
         <div className="flex gap-3">
-          <Stepper label="Bedrooms" value={bedrooms} setter={setBedrooms} />
-          <Stepper label="Bathrooms" value={bathrooms} setter={setBathrooms} />
+          <Stepper label="Bedrooms" value={bedrooms} setter={touchSize(setBedrooms)} />
+          {/* Half steps — .5 is a half bath, and the price book has tiers
+             for 2x1.5 as well as 2x1. */}
+          <Stepper label="Bathrooms" value={bathrooms} setter={touchSize(setBathrooms)} by={0.5} />
         </div>
+        {isEditMode && (
+          <p className="text-[11px] text-stone-500 font-mono -mt-3">
+            {sizeTouched
+              ? 'Size is a property of the apartment — saving corrects it everywhere, past and future.'
+              : "Leave the size alone and it won't be touched, whichever apartment this ends up on."}
+          </p>
+        )}
 
         <div>
           <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Clean type</label>
@@ -34531,15 +36350,25 @@ function QuickAssignmentForm({ property, employee, portalUser = null, portalKind
             className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white text-stone-900" />
         </div>
 
-        {!isPM && (
+        {/* New cleanings only. This form's edit path has never written the
+           assignee, and now that the choice decides who can SEE the
+           cleaning, showing it here would read as "everyone" for a
+           cleaning that is narrowed to one person, and widen it on save.
+           Changing who an existing cleaning is for belongs on its card,
+           where the picker shows the real current setting. */}
+        {!isPM && !isEditMode && (
         <div>
-          <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Assign to (optional)</label>
+          <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Who is this for</label>
           <select value={assignedTo} onChange={e => setAssignedTo(e.target.value)}
             className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white text-stone-900 text-sm">
-            <option value="">Anyone (unassigned)</option>
-            {cleaners.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+            <option value="">Everyone — every cleaner sees this</option>
+            {cleaners.map(c => <option key={c.id} value={c.id}>Only {c.name}</option>)}
           </select>
-          <div className="text-[11px] text-stone-500 mt-1 font-mono">Assign it to a specific cleaner — it shows up in their list.</div>
+          <div className="text-[11px] text-stone-500 mt-1 font-mono">
+            {assignedTo
+              ? 'Only this cleaner sees it. You and your managers always do. Add more people later from the cleaning’s card.'
+              : 'Every cleaner sees it, the same as today.'}
+          </div>
         </div>
         )}
 
@@ -34560,14 +36389,31 @@ function QuickAssignmentForm({ property, employee, portalUser = null, portalKind
             className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white text-stone-900 text-sm" />
         </div>
 
+        {/* MOVING THE WORK. Shared panel — the checklist wizard shows the
+           exact same screen, so a job cannot be moved one way here and
+           another way there. */}
+        {movePlan && (
+          <MoveWorkPanel plan={movePlan} checked={moveChecked}
+            onToggle={(id) => setMoveChecked(prev => {
+              const next = new Set(prev);
+              if (next.has(id)) next.delete(id); else next.add(id);
+              return next;
+            })}
+            fromLabel={loadedUnitLabel} toLabel={apt.trim()} busy={busy}
+            onBack={() => { setMovePlan(null); setMoveChecked(new Set()); }}
+            onConfirm={submit} />
+        )}
+
         {error && <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-sm text-red-700">{error}</div>}
 
+        {!movePlan && (
         <button onClick={submit} disabled={busy || !apt.trim() || !cleanType}
           className="w-full py-4 rounded-2xl bg-stone-900 text-stone-50 font-medium active:scale-98 disabled:opacity-50 flex items-center justify-center gap-2">
           {isEditMode
             ? <>{busy ? 'Saving…' : 'Save changes'}</>
             : <><Plus size={18} /> {busy ? 'Creating…' : 'Create assignment'}</>}
         </button>
+        )}
       </div>
     </div>
   );
@@ -34781,6 +36627,10 @@ function AssignmentForm({ property, employee, onCancel, onSaved }) {
     setBusy(true);
     try {
       let totalCreated = 0;
+      // Cleanings that were created fine but could not be put on a cleaner
+      // or narrowed to them. Collected rather than thrown, so one bad row
+      // does not abandon the rest of the batch.
+      const assignWarnings = [];
       for (let i = 0; i < rows.length; i++) {
         const r = rows[i];
         setProgress(`Uploading file ${i + 1} of ${rows.length}…`);
@@ -34818,8 +36668,11 @@ function AssignmentForm({ property, employee, onCancel, onSaved }) {
           if (targets.length > 1) {
             setProgress(`Creating assignment ${t + 1} of ${targets.length} for file ${i + 1}…`);
           }
-          const { data: created, error: e } = await supabase.from('assignments')
-            .insert({
+          // Created open to everyone even when a name was picked; narrowed
+          // below, after that name is on it. Same ordering as the quick
+          // form and saveAssignees: a stop part-way through leaves a
+          // cleaning everyone can see, never one nobody can.
+          const { data: created, error: e, audienceSaved } = await audienceWrite({
               customer_id: r.propertyId,
               title: target.title,
               notes: r.notes.trim() || null,
@@ -34830,7 +36683,8 @@ function AssignmentForm({ property, employee, onCancel, onSaved }) {
               active: true,
               assignment_type: r.assignmentType,
               scheduled_date: r.scheduledDate || null,
-            }).select().single();
+              audience: AUDIENCE_ALL,
+            }, (row) => supabase.from('assignments').insert(row).select().single());
           if (e) throw e;
 
           // Fire-and-forget auto-translation for the first one only; siblings
@@ -34849,10 +36703,48 @@ function AssignmentForm({ property, employee, onCancel, onSaved }) {
             assigned_to: r.assignedTo || null,
           });
           if (te) throw te;
+          // The job-level row — the one "Assigned to me" and every owner
+          // board actually read. Written alongside assigned_to so the
+          // wizard and the assign buttons cannot disagree.
+          //
+          // It does NOT throw. The assignment and its targets are already
+          // committed, so throwing here left a cleaning behind, abandoned
+          // the rest of the batch, and showed a raw PostgREST string — and
+          // if the cause was systemic, every retry made another one. The
+          // cleaning is fine and visible to everyone; collect the problem
+          // and keep going.
+          if (r.assignedTo) {
+            const who = (employees.find(x => x.id === r.assignedTo)?.name) || 'that cleaner';
+            const { error: aaErr } = await supabase.from('assignment_assignees')
+              .upsert({ assignment_id: created.id, employee_id: r.assignedTo, status: 'assigned', created_by: employee.id },
+                { onConflict: 'assignment_id,employee_id' });
+            if (aaErr) {
+              assignWarnings.push(`${target.title || 'A cleaning'}: could not put ${who} on it (${aaErr.message})`);
+            } else if (!audienceSaved) {
+              assignWarnings.push(`${target.title || 'A cleaning'}: assigned to ${who}, but who-this-is-for is not switched on in the database, so every cleaner can see it.`);
+            } else {
+              const { error: audErr } = await supabase.from('assignments')
+                .update({ audience: AUDIENCE_NAMED }).eq('id', created.id);
+              if (audErr) {
+                assignWarnings.push(`${target.title || 'A cleaning'}: assigned to ${who}, but could not be narrowed to them, so every cleaner can still see it (${audErr.message})`);
+              }
+            }
+          }
           totalCreated++;
         }
       }
       setProgress(`Done — ${totalCreated} assignment${totalCreated === 1 ? '' : 's'} created.`);
+      if (assignWarnings.length) {
+        // Everything was created. Don't close the form on top of this —
+        // the owner needs to read which ones still need a cleaner on them.
+        setError(
+          `All ${totalCreated} cleaning${totalCreated === 1 ? ' was' : 's were'} created and every cleaner can see ${totalCreated === 1 ? 'it' : 'them'}. `
+          + `${assignWarnings.length} could not be given to the cleaner you picked — open ${assignWarnings.length === 1 ? 'it' : 'them'} and use Assign:\n\n`
+          + assignWarnings.join('\n')
+        );
+        setBusy(false);
+        return;
+      }
       setTimeout(() => onSaved(), 400);
     } catch (err) {
       setError(err.message || String(err));
@@ -34962,12 +36854,12 @@ function AssignmentForm({ property, employee, onCancel, onSaved }) {
                     </div>
                     <div>
                       <label className="text-[10px] uppercase tracking-wider text-stone-500 font-mono mb-1 block">
-                        Assign to <span className="text-stone-400 normal-case">(optional)</span>
+                        Who is this for
                       </label>
                       <select value={row.assignedTo}
                         onChange={(e) => updateRow(row.id, { assignedTo: e.target.value })}
                         className="w-full px-3 py-2 rounded-lg border border-stone-300 bg-white text-sm">
-                        <option value="">Anyone</option>
+                        <option value="">Everyone</option>
                         {employees.map(e => (
                           <option key={e.id} value={e.id}>{e.name}{e.role === 'manager' ? ' (manager)' : ''}</option>
                         ))}
@@ -35237,6 +37129,13 @@ function ChecklistAssignmentWizard({ property, employee, actorKind = null, porta
   const [step, setStep] = useState(isEditMode ? 3 : 0);
   // Targets already on this assignment, so save can diff instead of replace.
   const [existingTargets, setExistingTargets] = useState([]);
+  // Re-pointing a checklist job to a different bedroom used to update
+  // assignment_targets and nothing else — the hours, tasks and photos all
+  // stayed at the old bedroom, silently. This is the same review-then-move
+  // flow the quick form uses, running off the same shared helpers, so the
+  // two editors cannot move a job by different rules.
+  const [movePlan, setMovePlan] = useState(null);
+  const [moveChecked, setMoveChecked] = useState(() => new Set());
   // When invoked from the PM portal, every created assignment is
   // marked source='pm' + pm_status='pending' so it flows through the
   // owner-approval queue. When invoked from staff (no actorKind),
@@ -35963,14 +37862,6 @@ function ChecklistAssignmentWizard({ property, employee, actorKind = null, porta
       if (checkedKeys.length === 0) throw new Error('Pick at least one item, or delete the assignment instead.');
       if (!pid) throw new Error('Pick an apartment and bedroom.');
 
-      const { error: aErr } = await supabase.from('assignments').update({
-        assignment_type: c.cleaningType || editAssignment.assignment_type || null,
-        sheet_type: sheetType || editAssignment.sheet_type || null,
-        bathroom_variant: c.bathroomVariant || null,
-        general_variant: c.generalVariant || null,
-      }).eq('id', editAssignment.id);
-      if (aErr) throw new Error('Could not update the assignment: ' + aErr.message);
-
       // Moved to a different apartment/bedroom? Repoint every target on the
       // assignment, including ones already worked. Photos hang off tasks, and
       // completion lives on the target row, so moving rows keeps both — which
@@ -35979,15 +37870,84 @@ function ChecklistAssignmentWizard({ property, employee, actorKind = null, porta
       const oldPartyId = existingTargets[0]?.party_id || null;
       const moved = newPartyId && oldPartyId && newPartyId !== oldPartyId;
       let movedUnitId = existingTargets[0]?.unit_id || null;
+      const newParty = moved ? parties.find(p => p.id === newPartyId) : null;
+      if (moved) movedUnitId = newParty?.unit_id || movedUnitId;
+      const newUnit = moved ? units.find(u => u.id === movedUnitId) : null;
+      const destLabel = moved
+        ? `${newUnit?.label || 'the new apartment'}${newParty?.label ? ' · ' + newParty.label : ''}`
+        : '';
+
+      // A PM must never re-point a job. The hours live on a cleaner's
+      // shift; moving them reads that cleaner's name and rewrites their
+      // work blocks, and none of that belongs on a property manager's
+      // screen. They can still change the cleaning type and the items.
+      if (moved && isPmActor) {
+        throw new Error('Ask us to move this to a different apartment or bedroom — the cleaner’s hours have to move with it, and we do that from our side.');
+      }
+
+      // WORK OUT WHAT MOVES BEFORE ANYTHING IS WRITTEN.
+      if (moved && !movePlan) {
+        const plan = await loadJobAttachments({
+          assignmentId: editAssignment.id,
+          unitId: existingTargets[0]?.unit_id || null,
+          partyId: oldPartyId,
+        });
+        // A read that failed is not a job with no hours. Moving on that
+        // basis strands every hour and photo silently.
+        if (plan.failed) {
+          throw new Error('Couldn’t check what work is on this job, so nothing has been changed — moving it blind would leave its hours behind. ' + (plan.error || ''));
+        }
+        // Hours to review, OR an invoice to warn about. A cleaning marked
+        // done from a board has no work blocks at all and can still be
+        // sitting on a sent invoice.
+        if (plan.linked.length > 0 || plan.ambiguous.length > 0 || plan.invoices.length > 0) {
+          setMovePlan(plan);
+          setMoveChecked(new Set());   // nothing ambiguous is ticked for you
+          return;                      // the panel asks; Save runs again after
+        }
+      }
+
+      // THE HOURS MOVE FIRST, so a failure leaves everything where it
+      // started rather than half-moved.
+      let movedBlocks = [];
       if (moved) {
-        const newParty = parties.find(p => p.id === newPartyId);
-        movedUnitId = newParty?.unit_id || movedUnitId;
+        const res = await applyWorkBlockMove({
+          plan: movePlan, checkedIds: moveChecked,
+          toUnitId: movedUnitId, toPartyId: newPartyId, toLabel: destLabel,
+        });
+        if (!res.ok) {
+          if (res.cancelled) return;
+          throw new Error('The hours could not be moved, so nothing else was changed either — everything is still where it was. ' + (res.error || ''));
+        }
+        movedBlocks = res.moved || [];
+      }
+
+      // From here the hours may already have moved, so a failure has to put
+      // them back — otherwise they sit at the new bedroom with the job
+      // still at the old one, which is the split state the ordering above
+      // exists to prevent, just the other way round.
+      const { error: aErr } = await supabase.from('assignments').update({
+        assignment_type: c.cleaningType || editAssignment.assignment_type || null,
+        sheet_type: sheetType || editAssignment.sheet_type || null,
+        bathroom_variant: c.bathroomVariant || null,
+        general_variant: c.generalVariant || null,
+      }).eq('id', editAssignment.id);
+      if (aErr) {
+        const back = await revertWorkBlockMove(movedBlocks);
+        throw new Error('Could not update the assignment: ' + aErr.message
+          + movedHoursNote(movedBlocks, back, destLabel));
+      }
+
+      if (moved) {
         const { error: mErr } = await supabase.from('assignment_targets')
           .update({ unit_id: movedUnitId, party_id: newPartyId })
           .eq('assignment_id', editAssignment.id);
-        if (mErr) throw new Error('Could not move the assignment: ' + mErr.message);
+        if (mErr) {
+          const back = await revertWorkBlockMove(movedBlocks);
+          throw new Error('Could not move the assignment: ' + mErr.message
+            + movedHoursNote(movedBlocks, back, destLabel));
+        }
         // Keep the title honest — it prints the apartment and bedroom.
-        const newUnit = units.find(u => u.id === movedUnitId);
         const base = String(editAssignment.title || '').split(' · ')[0];
         await supabase.from('assignments').update({
           title: `${base} · ${newUnit?.label || ''}${newParty?.label ? ' · ' + newParty.label : ''}`.trim(),
@@ -36662,12 +38622,25 @@ function ChecklistAssignmentWizard({ property, employee, actorKind = null, porta
         {isEditMode ? (
           <>
             <div className="text-xs uppercase tracking-wider font-mono text-stone-500 mb-1">Edit this assignment</div>
-            <div className="text-sm text-stone-600 mb-3">Change which apartment and bedroom it's for, the cleaning type, or the items on it.</div>
-            {/* Moving the job. Reassign was removed from the boards, so this
+            <div className="text-sm text-stone-600 mb-3">
+              {isPmActor
+                ? "Change the cleaning type or the items on it."
+                : "Change which apartment and bedroom it's for, the cleaning type, or the items on it."}
+            </div>
+            {/* PMs don't get the apartment picker — moving a job moves a
+               cleaner's logged hours with it, and that is ours to do. */}
+            {isPmActor ? (
+              <div className="mb-4 p-3 rounded-2xl bg-stone-100 border border-stone-200 text-[11px] text-stone-600">
+                Wrong apartment or bedroom? Tell us and we'll move it — the cleaner's hours
+                and photos have to move with it.
+              </div>
+            ) : (
+            /* Moving the job. Reassign was removed from the boards, so this
                is the only way to correct an assignment uploaded against the
                wrong apartment. It repoints every target on the assignment,
                which keeps completion history and photos intact — deleting and
-               re-creating would lose both. */}
+               re-creating would lose both. The hours now travel with it; see
+               submitEdit. */
             <div className="mb-4 p-3 rounded-2xl bg-white border border-stone-200 space-y-2">
               <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500">Apartment &amp; bedroom</div>
               <select
@@ -36709,11 +38682,13 @@ function ChecklistAssignmentWizard({ property, employee, actorKind = null, porta
                 if (!orig || !pid || pid === orig) return null;
                 return (
                   <div className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5">
-                    This will move the whole assignment — items, photos and any work already done — to the new bedroom.
+                    This will move the whole assignment — items, photos and any work already
+                    done — to the new bedroom. Save will show you which hours travel with it.
                   </div>
                 );
               })()}
             </div>
+            )}
           </>
         ) : (
           <>
@@ -37356,6 +39331,32 @@ function ChecklistAssignmentWizard({ property, employee, actorKind = null, porta
                 }).join(', ')
               } />
             </div>
+            {/* Same shared panel the quick form shows — one screen, one set
+               of rules, for both editors. */}
+            {movePlan && (
+              <div className="mb-3">
+                <MoveWorkPanel plan={movePlan} checked={moveChecked}
+                  onToggle={(id) => setMoveChecked(prev => {
+                    const next = new Set(prev);
+                    if (next.has(id)) next.delete(id); else next.add(id);
+                    return next;
+                  })}
+                  fromLabel={(() => {
+                    const ou = units.find(u => u.id === existingTargets[0]?.unit_id);
+                    const op = parties.find(p => p.id === existingTargets[0]?.party_id);
+                    return `${ou?.label || 'where it is'}${op?.label ? ' · ' + op.label : ''}`;
+                  })()}
+                  toLabel={(() => {
+                    const pid = Object.keys(selectedParties).find(k => selectedParties[k]);
+                    const np = parties.find(p => p.id === pid);
+                    const nu = units.find(u => u.id === np?.unit_id);
+                    return `${nu?.label || 'the new apartment'}${np?.label ? ' · ' + np.label : ''}`;
+                  })()}
+                  busy={busy}
+                  onBack={() => { setMovePlan(null); setMoveChecked(new Set()); }}
+                  onConfirm={submit} />
+              </div>
+            )}
             {error && (
               <div className="mb-3 p-3 rounded-xl bg-red-50 border border-red-200 text-red-700 text-sm flex items-start gap-2">
                 <AlertCircle size={16} className="flex-shrink-0 mt-0.5" /><span>{error}</span>
@@ -37392,7 +39393,9 @@ function ChecklistAssignmentWizard({ property, employee, actorKind = null, porta
         </button>
         {/* Editing has no Next — the configure step IS the whole thing, so
            it gets a Save straight away. */}
-        {isEditMode && !submitted && (
+        {/* While the move panel is up it owns the confirm, so there is only
+           ever one button that commits. */}
+        {isEditMode && !submitted && !movePlan && (
           <button onClick={submit} disabled={busy}
             className="flex-1 py-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-medium disabled:opacity-50">
             {busy ? 'Saving…' : 'Save changes'}
@@ -37458,8 +39461,7 @@ function AssignmentDetail({ property, assignment: assignmentInit, employee, onBa
   const [targets, setTargets] = useState([]);
   const [employees, setEmployees] = useState([]);
   const [loaded, setLoaded] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false); // shared DeleteCleaningModal
 
   const reload = async () => {
     const { data: a } = await supabase.from('assignments').select('*').eq('id', assignmentInit.id).maybeSingle();
@@ -37502,24 +39504,28 @@ function AssignmentDetail({ property, assignment: assignmentInit, employee, onBa
     if (error) {
       alert('Could not update assignee: ' + error.message);
       reload(); // rollback by reloading
+      return;
+    }
+    // Put them on the cleaning itself too, or this dropdown would be the
+    // third writer of assigned_to that nothing about visibility reads —
+    // the exact split this work exists to close. Clearing it does NOT
+    // take them off the cleaning: who it is for is set in the assign
+    // picker, and a per-bedroom note should not quietly revoke access.
+    if (newAssigneeId) {
+      const { error: aaErr } = await supabase.from('assignment_assignees')
+        .upsert({ assignment_id: target.assignment_id, employee_id: newAssigneeId, status: 'assigned', created_by: employee?.id || null },
+          { onConflict: 'assignment_id,employee_id' });
+      if (aaErr) alert('Set on this bedroom, but not on the cleaning: ' + aaErr.message);
     }
   };
   useEffect(() => { reload(); /* eslint-disable-next-line */ }, []);
   useAssignmentSync(reload, 'asgn-detail');
 
-  const deleteAssignment = async () => {
-    setBusy(true);
-    // SOFT delete — stamp deleted_at/deleted_by instead of removing the
-    // row, so a mistaken delete can be undone. We intentionally do NOT
-    // remove the storage file or the target rows; a restore just clears
-    // deleted_at. A future purge job hard-deletes old soft-deleted ones.
-    const { error } = await supabase.from('assignments')
-      .update({ deleted_at: new Date().toISOString(), deleted_by: employee?.id || null })
-      .eq('id', assignment.id);
-    setBusy(false);
-    if (error) { alert('Could not delete: ' + error.message); return; }
-    onBack();
-  };
+  // Delete lives in the shared DeleteCleaningModal now — the same one the
+  // four cards use. This page had its own: no attachment count, no invoice
+  // named, and no zero-row check, so an RLS-blocked delete reported
+  // success. It is also where the Schedule board's "Open" now lands, which
+  // made it the most direct route past every guard this work added.
 
   const sortedTargets = (targets || []).slice().sort((a, b) => {
     const ua = a.unit?.label || ''; const ub = b.unit?.label || '';
@@ -37685,20 +39691,30 @@ function AssignmentDetail({ property, assignment: assignmentInit, employee, onBa
            in their permissions. Soft delete, so it's recoverable. */}
         {can(employee, 'manage_assignments_admin') && (
         <div className="pt-4 border-t border-stone-200">
-          {!confirmingDelete ? (
-            <button onClick={() => setConfirmingDelete(true)}
-              className="w-full py-3 rounded-2xl border-2 border-red-200 text-red-700 text-sm font-medium flex items-center justify-center gap-2">
-              <Trash2 size={14} /> Delete this assignment
-            </button>
-          ) : (
-            <DeleteConfirmModal
-              title="Delete this assignment?"
-              description="This hides the assignment from cleaners and the assignments list. It's recoverable — nothing is permanently erased, so you can restore it later if this was a mistake."
-              itemSummary={assignment.title}
-              busy={busy}
-              onConfirm={deleteAssignment}
-              onClose={() => setConfirmingDelete(false)} />
-          )}
+          <button onClick={() => setConfirmingDelete(true)}
+            className="w-full py-3 rounded-2xl border-2 border-red-200 text-red-700 text-sm font-medium flex items-center justify-center gap-2">
+            <Trash2 size={14} /> Delete this assignment
+          </button>
+          {confirmingDelete && (() => {
+            // One apartment on the job means its hours can be found; more
+            // than one and the modal counts only what is linked by job id,
+            // which is still right, just narrower.
+            const places = new Set((targets || []).map(t => `${t.unit_id || ''}:${t.party_id || ''}`));
+            const only = places.size === 1 ? (targets || [])[0] : null;
+            return (
+              <DeleteCleaningModal employee={employee}
+                job={{
+                  assignmentId: assignment.id,
+                  unitId: only?.unit_id || null,
+                  partyId: only?.party_id || null,
+                  unitLabel: only?.unit?.label || assignment.title || '',
+                  partyLabel: only?.party?.label || '',
+                  type: assignment.assignment_type || '',
+                }}
+                onClose={() => setConfirmingDelete(false)}
+                onDeleted={() => { setConfirmingDelete(false); onBack(); }} />
+            );
+          })()}
         </div>
         )}
       </div>
@@ -37717,7 +39733,17 @@ function AssignmentDetail({ property, assignment: assignmentInit, employee, onBa
 //   employee — current user
 //   showDone — if true, includes done assignments
 //   onUpdate — called after any status change so parent can refresh
-function AssignmentBanner({ propertyId, property = null, unitId, partyId, employee, showDone = false, onUpdate, onOpenBedroomHistory, dark = false, undoSlot = null, propertyName = null, elapsedMs = null, workScreen = false, onStartCleaning = null, onExit = null }) {
+// audienceUnfiltered: OFF by default, i.e. who-this-is-for DOES apply
+// here unless a call site deliberately opts out. It started the other way
+// round and that was the wrong default: a banner that forgets the flag
+// shows a cleaner somebody else's cleaning with a Start button on it, and
+// the failure is invisible until someone goes looking. Exactly one call
+// site opts out today — the open work block's own banner, where the
+// cleaner is standing in the bedroom, the mid-clean exemption applies, and
+// the cleaning whose timer is running must keep rendering whatever the
+// audience says.
+function AssignmentBanner({ propertyId, property = null, unitId, partyId, employee, showDone = false, onUpdate, onOpenBedroomHistory, dark = false, undoSlot = null, propertyName = null, elapsedMs = null, workScreen = false, onStartCleaning = null, onExit = null, audienceUnfiltered = false }) {
+  const { canSeeJob } = useJobVisibility();
   const [targets, setTargets] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [opened, setOpened] = useState(null);
@@ -37744,22 +39770,22 @@ function AssignmentBanner({ propertyId, property = null, unitId, partyId, employ
     if (id) { await supabase.from('assignments').update({ scheduled_date: date || null }).eq('id', id); load(); }
   };
 
+  const SEL = '*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, approved_at, deleted_at, extracted_text, spanish_translation, translation_status, template_set_id, sheet_type, bathroom_variant, general_variant, assignment_type, scheduled_date, created_at, audience), unit:units(id, label), party:parties(id, label), starter:employees!started_by(name), completer:employees!completed_by(name), assignedTo:employees!assigned_to(id, name)';
   const load = async () => {
-    let q = supabase
-      .from('assignment_targets')
-      .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, approved_at, deleted_at, extracted_text, spanish_translation, translation_status, template_set_id, sheet_type, bathroom_variant, general_variant, assignment_type, scheduled_date, created_at), unit:units(id, label), party:parties(id, label), starter:employees!started_by(name), completer:employees!completed_by(name), assignedTo:employees!assigned_to(id, name)');
+    const buildQuery = (sel) => {
+      let q = supabase.from('assignment_targets').select(sel);
+      if (!showDone) q = q.not('status', 'in', '(done,blocked)');
+      if (unitId && partyId) {
+        q = q.or(`and(unit_id.eq.${unitId},party_id.eq.${partyId}),and(unit_id.is.null,party_id.is.null)`);
+      } else if (unitId) {
+        q = q.or(`unit_id.eq.${unitId},and(unit_id.is.null,party_id.is.null)`);
+      } else {
+        q = q.is('unit_id', null).is('party_id', null);
+      }
+      return q;
+    };
 
-    if (!showDone) q = q.not('status', 'in', '(done,blocked)');
-
-    if (unitId && partyId) {
-      q = q.or(`and(unit_id.eq.${unitId},party_id.eq.${partyId}),and(unit_id.is.null,party_id.is.null)`);
-    } else if (unitId) {
-      q = q.or(`unit_id.eq.${unitId},and(unit_id.is.null,party_id.is.null)`);
-    } else {
-      q = q.is('unit_id', null).is('party_id', null);
-    }
-
-    const { data, error } = await q;
+    const { data, error } = await audienceSelect(SEL, buildQuery);
     if (error) {
       console.error('[AssignmentBanner] load error:', error);
     }
@@ -37768,7 +39794,8 @@ function AssignmentBanner({ propertyId, property = null, unitId, partyId, employ
       t.assignment?.customer_id === propertyId &&
       t.assignment?.active &&
       !t.assignment?.deleted_at &&
-      (t.assignment?.source !== 'pm' || t.assignment?.pm_status === 'approved')
+      (t.assignment?.source !== 'pm' || t.assignment?.pm_status === 'approved') &&
+      (audienceUnfiltered || canSeeJob(targetToJob(t)))
     );
     // Priority items first, then by status (pending/in_progress before done)
     filtered.sort((a, b) => {
@@ -37780,7 +39807,7 @@ function AssignmentBanner({ propertyId, property = null, unitId, partyId, employ
     setTargets(filtered);
     setLoaded(true);
   };
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [propertyId, unitId, partyId, showDone]);
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, [propertyId, unitId, partyId, showDone, canSeeJob]);
 
   // Is anyone in an OPEN work block at this bedroom right now? Starting a
   // block runs the timer but deliberately doesn't flip item status to
@@ -38694,10 +40721,11 @@ function AssignmentCard({ target, property = null, busy, onView, onStart, onPaus
           </div>
           {assignOpen && (
             <div onClick={(e) => e.stopPropagation()}>
-              <AssignPicker team={teamList || []} busy={assignBusy}
+              <AssignPicker assignmentId={t.assignment?.id || t.assignment_id || null}
+                team={teamList || []} busy={assignBusy}
                 currentIds={(assignees || []).map(a => a.id)}
                 onCancel={() => onToggleAssign()}
-                onSave={(ids) => onSaveAssign(ids)} />
+                onSave={(ids, audience) => onSaveAssign(ids, audience)} />
             </div>
           )}
         </div>
@@ -38904,6 +40932,7 @@ function AssignmentsPanel({ propertyId, property = null, employee, refreshKey, o
 // other building starting on floor 3. If no anchor exists, defaults to
 // floor-3 first across the property.
 function SuggestedTabContent({ propertyId, employee, onGoToBedroom, onOpenBedroomHistory, onJoinBlock }) {
+  const { canSeeJob } = useJobVisibility();
   const [loaded, setLoaded] = useState(false);
   const [anchor, setAnchor] = useState(null);
   const [groups, setGroups] = useState({ sameApt: [], sameFloor: [], sameBuilding: [], otherBuilding: [] });
@@ -38978,9 +41007,11 @@ function SuggestedTabContent({ propertyId, employee, onGoToBedroom, onOpenBedroo
       const [unitsRes, partiesRes, targetsRes, blocksRes] = await Promise.all([
         supabase.from('units').select('id, label, active').eq('customer_id', propertyId).eq('active', true),
         supabase.from('parties').select('id, label, unit_id, sort_order, active'),
-        supabase.from('assignment_targets')
-          .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, deleted_at, assignment_type, template_set_id, sheet_type, general_variant, bathroom_variant, scheduled_date, created_at), unit:units(id, label), party:parties(id, label), starter:employees!started_by(name), completer:employees!completed_by(name), assignedTo:employees!assigned_to(id, name)')
-          .not('status', 'in', '(done,blocked)'),
+        audienceSelect(
+          '*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, deleted_at, assignment_type, template_set_id, sheet_type, general_variant, bathroom_variant, scheduled_date, created_at, audience), unit:units(id, label), party:parties(id, label), starter:employees!started_by(name), completer:employees!completed_by(name), assignedTo:employees!assigned_to(id, name)',
+          (sel) => supabase.from('assignment_targets')
+            .select(sel)
+            .not('status', 'in', '(done,blocked)')),
         // Open work blocks property-wide for the "who's here" chips.
         // main_section is pulled so each chip can label which section
         // the cleaner is working — relevant once cleaners split a
@@ -39000,6 +41031,10 @@ function SuggestedTabContent({ propertyId, employee, onGoToBedroom, onOpenBedroo
         if (!a || a.customer_id !== propertyId) return false;
         if (a.active === false) return false;
         if (a.source === 'pm' && a.pm_status !== 'approved') return false;
+        // Who this cleaning is for. Everything downstream — the "go here
+        // next" groups, the counts, the priority flags — is built from
+        // openTargets, so one test here covers all of them.
+        if (!canSeeJob(targetToJob(t))) return false;
         return true;
       });
       const openBlocks = (blocksRes.data || []).filter(b =>
@@ -39094,7 +41129,10 @@ function SuggestedTabContent({ propertyId, employee, onGoToBedroom, onOpenBedroo
       setGroups({ sameApt, sameFloor, sameBuilding, otherBuilding });
       setLoaded(true);
     })();
-  }, [propertyId, employee?.id, reloadKey]);
+    // canSeeJob is in here on purpose: the "which cleanings are mine" read
+    // lands after the first render, and without it this tab would keep
+    // showing the groups it built before that answer arrived.
+  }, [propertyId, employee?.id, reloadKey, canSeeJob]);
 
   // Bulk handlers — operate on a single bedroom's items. Mirror of the
   // helpers in AssignmentBanner/AssignmentTabContent. Optimistic + single
@@ -39476,6 +41514,7 @@ function SuggestedTabContent({ propertyId, employee, onGoToBedroom, onOpenBedroo
 }
 
 function AssignmentTabContent({ propertyId, property = null, employee, statusFilter, onUpdate, onCounts, onGoToBedroom, onOpenBedroomHistory, onJoinBlock }) {
+  const { canSeeJob } = useJobVisibility();
   const [allTargets, setAllTargets] = useState([]); // every row at this property
   // Optimistic local edits write through to the raw set; the tab view is
   // derived from it, so a status change moves the card to the right tab
@@ -39515,14 +41554,15 @@ function AssignmentTabContent({ propertyId, property = null, employee, statusFil
   const refreshAssignees = () => loadAssignees(
     Array.from(new Set((allTargets || []).map(t => t.assignment?.id).filter(Boolean)))
   );
-  const commitAssign = async (asgId, ids) => {
+  const commitAssign = async (asgId, ids, audience) => {
     setAssignBusy(asgId);
     const current = (assigneeMap[asgId] || []).map(a => a.id);
-    const error = await saveAssignees(asgId, current, ids, employee?.id);
+    const error = await saveAssignees(asgId, current, ids, employee?.id, audience);
     setAssignBusy(null);
     if (error) { alert('Could not update who\u2019s assigned: ' + error.message); return; }
     setAssignFor(null);
     refreshAssignees();
+    load();
   };
   const [busy, setBusy] = useState(false);
   const [filterBuildings, setFilterBuildings] = useState(new Set()); // multi-select building keys; empty = all
@@ -39714,18 +41754,20 @@ function AssignmentTabContent({ propertyId, property = null, employee, statusFil
     let data = [];
     let error = null;
     for (let from = 0; ; from += PAGE) {
-      const { data: page, error: pErr } = await supabase
-        .from('assignment_targets')
-        // extracted_text / spanish_translation are full OCR dumps repeated on
-        // every target row of an assignment — megabytes across a busy
-        // property, for something only the peek modal ever reads. Fetched on
-        // demand in openTarget() instead.
-        .select('*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, approved_at, deleted_at, translation_status, assignment_type, scheduled_date, sheet_type, template_set_id, bathroom_variant, general_variant, created_at), unit:units(id, label), party:parties(id, label), starter:employees!started_by(id, name), completer:employees!completed_by(id, name), assignedTo:employees!assigned_to(id, name)')
-        .eq('assignment.customer_id', propertyId)
-        .eq('assignment.active', true)
+      // extracted_text / spanish_translation are full OCR dumps repeated on
+      // every target row of an assignment — megabytes across a busy
+      // property, for something only the peek modal ever reads. Fetched on
+      // demand in openTarget() instead.
+      const { data: page, error: pErr } = await audienceSelect(
+        '*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, approved_at, deleted_at, translation_status, assignment_type, scheduled_date, sheet_type, template_set_id, bathroom_variant, general_variant, created_at, audience), unit:units(id, label), party:parties(id, label), starter:employees!started_by(id, name), completer:employees!completed_by(id, name), assignedTo:employees!assigned_to(id, name)',
+        (sel) => supabase
+          .from('assignment_targets')
+          .select(sel)
+          .eq('assignment.customer_id', propertyId)
+          .eq('assignment.active', true)
           .is('assignment.deleted_at', null)
-        .order('id', { ascending: true })
-        .range(from, from + PAGE - 1);
+          .order('id', { ascending: true })
+          .range(from, from + PAGE - 1));
       if (pErr) { error = pErr; break; }
       data = data.concat(page || []);
       // Last page reached when fewer than a full page returned.
@@ -39755,9 +41797,17 @@ function AssignmentTabContent({ propertyId, property = null, employee, statusFil
     setLoaded(true);
   };
 
+  // Who this cleaning is for, applied ONCE for this whole panel. Both the
+  // tab lists and the tab COUNTS read from here, so a badge can never
+  // disagree with the list underneath it. No effect for owners/managers.
+  const visibleTargets = React.useMemo(
+    () => allTargets.filter(t => canSeeJob(targetToJob(t))),
+    [allTargets, canSeeJob]
+  );
+
   // Derive the current tab's rows from the raw set. No network, no refetch.
   const targets = React.useMemo(() => {
-    const allRelevant = allTargets;
+    const allRelevant = visibleTargets;
     const isMineOrRecheck = statusFilter === 'mine' || statusFilter === 'recheck_passed';
     const isDoneTab = statusFilter === 'done' || isMineOrRecheck;
 
@@ -39891,7 +41941,7 @@ function AssignmentTabContent({ propertyId, property = null, employee, statusFil
       });
     }
     return filtered;
-  }, [allTargets, statusFilter, employee?.id]);
+  }, [visibleTargets, statusFilter, employee?.id]);
 
   // Tab counts, computed from the same raw rows and the same dominant-status
   // rule the list uses — and counted the same way the list counts (unique
@@ -39902,14 +41952,14 @@ function AssignmentTabContent({ propertyId, property = null, employee, statusFil
     const dominantOrder = ['in_progress', 'paused', 'blocked', 'pending', 'done'];
     const key = (t) => t.assignment_id || `${t.unit_id || ''}::${t.party_id || ''}`;
     const statusesByAsgn = new Map();
-    allTargets.forEach(t => {
+    visibleTargets.forEach(t => {
       const k = key(t);
       if (!statusesByAsgn.has(k)) statusesByAsgn.set(k, new Set());
       statusesByAsgn.get(k).add(t.status);
     });
     const out = { pending: 0, paused: 0, in_progress: 0, done: 0, blocked: 0, mine: 0, recheck_passed: 0, unfinished: 0 };
     const doneKeys = new Set(), blockedKeys = new Set();
-    allTargets.forEach(t => {
+    visibleTargets.forEach(t => {
       if (t.status === 'done') {
         // Same 3-month floor the Done list applies.
         const cd = t.completed_at
@@ -39931,7 +41981,7 @@ function AssignmentTabContent({ propertyId, property = null, employee, statusFil
     const todayKeyC = `${startOfTodayC.getFullYear()}-${String(startOfTodayC.getMonth() + 1).padStart(2, '0')}-${String(startOfTodayC.getDate()).padStart(2, '0')}`;
     const undatedCutC = Date.now() - 14 * 86400000;
     const staleSet = new Set();
-    allTargets.forEach(t => {
+    visibleTargets.forEach(t => {
       if (t.status === 'done' || t.status === 'blocked') return;
       let stale = false;
       if (t.started_at && new Date(t.started_at) < startOfTodayC) stale = true;
@@ -39950,7 +42000,7 @@ function AssignmentTabContent({ propertyId, property = null, employee, statusFil
     out.blocked = blockedKeys.size;
     const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
     const mineKeys = new Set(), recheckKeys = new Set();
-    allTargets.forEach(t => {
+    visibleTargets.forEach(t => {
       if (t.recheck_passed_at) recheckKeys.add(key(t));
       if (t.completed_by && employee?.id && t.completed_by === employee.id && t.completed_at
           && new Date(t.completed_at) >= todayStart) mineKeys.add(key(t));
@@ -39958,7 +42008,7 @@ function AssignmentTabContent({ propertyId, property = null, employee, statusFil
     out.mine = mineKeys.size;
     out.recheck_passed = recheckKeys.size;
     return out;
-  }, [allTargets, employee?.id, minHistoryDay]);
+  }, [visibleTargets, employee?.id, minHistoryDay]);
   useEffect(() => { if (onCounts) onCounts(tabCounts); }, [tabCounts]);
   useEffect(() => { refreshAssignees(); /* eslint-disable-next-line */ }, [allTargets.length]);
   // Load ONCE per property. The query has no status condition in it — every
@@ -40423,7 +42473,7 @@ function AssignmentTabContent({ propertyId, property = null, employee, statusFil
                 assignees={assigneeMap[t.assignment?.id] || []} teamList={teamList}
                 assignOpen={assignFor === t.assignment?.id} assignBusy={assignBusy === t.assignment?.id}
                 onToggleAssign={t.assignment?.id ? () => setAssignFor(assignFor === t.assignment.id ? null : t.assignment.id) : null}
-                onSaveAssign={(ids) => commitAssign(t.assignment.id, ids)}
+                onSaveAssign={(ids, audience) => commitAssign(t.assignment.id, ids, audience)}
                 onView={() => openTarget(t)}
                 onStart={() => startAndGo(t)}
                 onPause={() => updateStatus(t, 'paused')}
@@ -40812,10 +42862,11 @@ function AssignmentTabContent({ propertyId, property = null, employee, statusFil
                                         bedroom in the new model anyway. */}
                           {assignFor && firstTarget?.assignment?.id === assignFor && (
                             <div onClick={(e) => e.stopPropagation()} className="mb-2">
-                              <AssignPicker team={teamList} busy={assignBusy === firstTarget.assignment.id}
+                              <AssignPicker assignmentId={firstTarget.assignment.id}
+                                team={teamList} busy={assignBusy === firstTarget.assignment.id}
                                 currentIds={(assigneeMap[firstTarget.assignment.id] || []).map(a => a.id)}
                                 onCancel={() => setAssignFor(null)}
-                                onSave={(ids) => commitAssign(firstTarget.assignment.id, ids)} />
+                                onSave={(ids, audience) => commitAssign(firstTarget.assignment.id, ids, audience)} />
                             </div>
                           )}
 
@@ -41060,7 +43111,7 @@ function AssignmentTabContent({ propertyId, property = null, employee, statusFil
                             assignees={assigneeMap[t.assignment?.id] || []} teamList={teamList}
                             assignOpen={assignFor === t.assignment?.id} assignBusy={assignBusy === t.assignment?.id}
                             onToggleAssign={t.assignment?.id ? () => setAssignFor(assignFor === t.assignment.id ? null : t.assignment.id) : null}
-                            onSaveAssign={(ids) => commitAssign(t.assignment.id, ids)}
+                            onSaveAssign={(ids, audience) => commitAssign(t.assignment.id, ids, audience)}
                             onView={() => openTarget(t)}
                             onStart={() => startAndGo(t)}
                             onPause={() => updateStatus(t, 'paused')}
@@ -41506,6 +43557,7 @@ function AssignmentTabContent({ propertyId, property = null, employee, statusFil
 // "Who's here" — also surfaces other cleaners working at the same
 // apartment so the cleaner can walk over and help.
 function NextUpModal({ from, employeeId, onPick, onClose, onSeeAssignments }) {
+  const { canSeeJob } = useJobVisibility();
   const [data, setData] = useState({ loading: true, sameApt: [], sameFloor: [], sameBuilding: [], otherBuilding: [], otherCleaners: [] });
   const [pickIdx, setPickIdx] = useState(0); // which of the ranked bedrooms is on offer
 
@@ -41542,9 +43594,11 @@ function NextUpModal({ from, employeeId, onPick, onClose, onSeeAssignments }) {
           .eq('customer_id', from.propertyId).eq('active', true),
         supabase.from('parties')
           .select('id, label, unit_id, sort_order, active'),
-        supabase.from('assignment_targets')
-          .select('unit_id, party_id, status, assignment:assignments!inner(customer_id, active, source, pm_status, deleted_at, scheduled_date)')
-          .not('status', 'in', '(done,blocked)'),
+        audienceSelect(
+          'unit_id, party_id, status, assignment:assignments!inner(id, customer_id, active, source, pm_status, deleted_at, scheduled_date, audience)',
+          (sel) => supabase.from('assignment_targets')
+            .select(sel)
+            .not('status', 'in', '(done,blocked)')),
         // Open work blocks at this property so we can show "who's here"
         supabase.from('work_blocks')
           .select('unit_id, party_id, shift:shifts!inner(customer_id, employee:employees(id, name))')
@@ -41558,6 +43612,8 @@ function NextUpModal({ from, employeeId, onPick, onClose, onSeeAssignments }) {
         if (!a || a.customer_id !== from.propertyId) return false;
         if (a.active === false) return false;
         if (a.source === 'pm' && a.pm_status !== 'approved') return false;
+        // Never suggest walking to a cleaning that isn't this cleaner's.
+        if (!canSeeJob(targetToJob(t))) return false;
         return true;
       });
       // Bedrooms with open work (party_id set) + their soonest due date.
@@ -41642,7 +43698,7 @@ function NextUpModal({ from, employeeId, onPick, onClose, onSeeAssignments }) {
 
       setData({ loading: false, sameApt, sameFloor, sameBuilding, otherBuilding, otherCleaners });
     })();
-  }, [from?.propertyId, from?.unitId, from?.partyId, employeeId]);
+  }, [from?.propertyId, from?.unitId, from?.partyId, employeeId, canSeeJob]);
 
   // Everything the buckets used to show, flattened into one ranked list:
   // same apartment first, then same floor, same building, other buildings.

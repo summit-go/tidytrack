@@ -1290,6 +1290,10 @@ function StaffApp() {
     if (SUPABASE_URL.includes('PASTE_') || SUPABASE_ANON_KEY.includes('PASTE_')) {
       setConfigError(true); setLoaded(true); return;
     }
+    // Warm the invoice company details now, so the first Print paints the
+    // real ones rather than the built-in fallback for a tick. Fire and
+    // forget — it can only ever resolve, never throw.
+    loadCompanySettings();
     (async () => {
       const s = await sessionStore.get();
       if (s?.employeeId) {
@@ -24168,6 +24172,11 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
   const [verifyOpen, setVerifyOpen] = useState(false);
   const [defaultRate, setDefaultRate] = useState(0);
   const [previewing, setPreviewing] = useState(false);
+  // Keeps the company details warm so the preview and the freeze below
+  // read the real ones rather than the built-in fallback. The value itself
+  // is not needed here — freezeCompanyOnInvoice reads the module global,
+  // which is always fresher than anything threaded through a component.
+  useCompanySettings();
 
   useEffect(() => { (async () => {
     setLoading(true);
@@ -24888,6 +24897,36 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
       const chunk = allTargetIds.slice(i, i + 200);
       if (chunk.length) await supabase.from('assignment_targets').update({ invoiced_on: inv.id }).in('id', chunk);
     }
+    // FREEZE POINT 1 of 5, doing two jobs.
+    //
+    // (a) Saved straight as sent or paid: freeze today's details onto it.
+    //
+    // (b) REOPEN CARRY-FORWARD. Reopening inserts a brand new invoice row
+    //     and deletes the old one, keeping the same invoice number. The new
+    //     row's company_snapshot starts null, so without this an invoice
+    //     that was already sent would quietly start printing today's
+    //     address under a number the property manager already has on a
+    //     sheet in their hand. seedInvoice carries the frozen copy across —
+    //     including while the replacement is still a draft, because this
+    //     bill left the building once already.
+    //
+    // A draft that was never sent carries no snapshot, so nothing is
+    // written and it keeps following your current details. That is the one
+    // case this deliberately skips.
+    //
+    // DELIBERATELY AFTER THE invoiced_on STAMPING ABOVE, NOT BEFORE IT.
+    // This is one more network round trip, and every await in save() is a
+    // place the owner can be left on a spinner by a stalled request. If
+    // that happens before the stamping loop, the invoice is saved but its
+    // cleanings were never stamped as invoiced — so they are billable
+    // again and land on the next invoice. That is the double-bill the
+    // comments around the stamping loop exist to prevent. A snapshot that
+    // never got written is recoverable (the column stays null, so the next
+    // "Mark sent" still freezes it); a cleaning billed twice is money.
+    // Nothing below this point touches money.
+    const carried = hasCompanySnapshot(seedInvoice) ? seedInvoice.company_snapshot : null;
+    if (carried) await carryCompanySnapshot(inv.id, carried);
+    else if (status && status !== 'draft') await freezeCompanyOnInvoice(inv.id);
     // Learn: any item priced inline that wasn't already in the price book
     // gets remembered for next time (fixed amount or time rate+minutes).
     const learnMap = {};
@@ -24924,6 +24963,12 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
       invoice_number: invoiceNumber, title, invoice_date: invoiceDate, due_date: dueDate, status: 'draft',
       bill_to_org: billTo.org, bill_to_contact: billTo.contact, bill_to_email: billTo.email,
       bill_to_phone: billTo.phone, bill_to_address: billTo.address,
+      // Carried on the same rule save() uses below, for the same reason as
+      // the line items: the preview must not lie about the sheet. Reopening
+      // an invoice that was already sent keeps its original company details,
+      // so the preview has to show those and not today's. A fresh draft has
+      // no snapshot here and follows your current details, live.
+      company_snapshot: hasCompanySnapshot(seedInvoice) ? seedInvoice.company_snapshot : null,
     };
     // Must mirror what save() writes, or the preview lies about the bill.
     // InvoiceDocument reads the DB column names (extra_amount etc.), and
@@ -25618,9 +25663,211 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
   );
 }
 
-// Brand constants for the printable invoice.
+// Brand constants for the printable invoice. The logo stays compiled in
+// on purpose — it is a file in storage, not a line of text to type.
 const SUMMIT_LOGO_URL = 'https://bbaynvqnbkjyqhzhhypr.supabase.co/storage/v1/object/public/brand/unnamed%20(2).png';
-const SUMMIT_COMPANY = { name: 'Summit Clean LLC', lines: ['1391 North 380 West', 'Provo, Utah 84604', 'United States'], url: 'www.gosummitclean.com' };
+
+// =================================================================
+// COMPANY DETAILS — the name, address, phone, email, website and
+// payment / remit-to block printed on an invoice. These used to be the
+// hardcoded SUMMIT_COMPANY constant; they are now owner-editable at
+// Money -> Invoices -> "Edit company details on invoices".
+//
+// COMPANY_FALLBACK is NOT dead code. It is what every invoice prints
+// when company_settings is missing, blocked by RLS, or has no row —
+// i.e. when App.jsx has been uploaded but v70_company_settings.sql has
+// not been run yet. Its values are exactly what was hardcoded here, and
+// exactly what v70 seeds the table with, so the day this deploys every
+// invoice looks identical either way. Same discipline as
+// SupplyChecklistGate's DEFAULT_SUPPLY_ITEMS and the
+// legacy_signin_enabled guard: the SQL running is never a precondition
+// for the app working.
+//
+// phone, email and payment_instructions are blank here because they
+// never existed on the invoice before. They print only once typed.
+// =================================================================
+const COMPANY_FALLBACK = {
+  name: 'Summit Clean LLC',
+  address_lines: '1391 North 380 West\nProvo, Utah 84604\nUnited States',
+  phone: '',
+  email: '',
+  website: 'www.gosummitclean.com',
+  payment_instructions: '',
+};
+
+// Whatever came back from the database, shaped into what the invoice
+// renders: nulls become '' so no sheet prints the word "null", and a
+// name blanked out in the editor falls back rather than printing a
+// nameless invoice.
+function normalizeCompany(row) {
+  const s = (v) => (v == null ? '' : String(v));
+  return {
+    name: s(row?.name).trim() || COMPANY_FALLBACK.name,
+    address_lines: s(row?.address_lines),
+    phone: s(row?.phone).trim(),
+    email: s(row?.email).trim(),
+    website: s(row?.website).trim(),
+    payment_instructions: s(row?.payment_instructions),
+  };
+}
+
+// Module-global + subscriber set, same shape as the audience machinery
+// above, so the editor's save pushes the new values into every screen
+// that is already open instead of needing a reload.
+let COMPANY_SETTINGS = COMPANY_FALLBACK;
+let COMPANY_SETTINGS_PROMISE = null;
+// Three states, not a boolean, because they need different words on the
+// editor screen and one of them is not a problem at all:
+//   'unloaded'    — nothing read yet
+//   'ok'          — a real row came back; COMPANY_SETTINGS is his
+//   'empty'       — the table is THERE but has no row. Invoices print the
+//                   built-in values, and saving WILL stick (the upsert
+//                   creates the row). Not a fault.
+//   'unavailable' — the table is missing, blocked by RLS, or the request
+//                   failed. We do not know his details.
+let COMPANY_SETTINGS_STATE = 'unloaded';
+const companySettingsSubscribers = new Set();
+function notifyCompanySettings() {
+  companySettingsSubscribers.forEach(fn => { try { fn(COMPANY_SETTINGS); } catch (e) { /* a dead subscriber must not stop the others */ } });
+}
+
+// Memoized: the first caller does the fetch, everyone else awaits it.
+// Every failure path lands on COMPANY_FALLBACK and says so in the
+// console only — nothing a cleaner or a property manager can see.
+//
+// A FAILED read is deliberately NOT memoized. This is the app's first
+// request of its life (StaffApp's mount), which is the moment most likely
+// to be flaky, and one memoized failure would pin the built-in values for
+// the whole life of the tab — with no retry and no visible sign. Anything
+// frozen onto an invoice after that would carry the wrong address
+// permanently, because `.is(null)` refuses every correction. So on
+// failure the promise is cleared and the next caller tries again.
+function loadCompanySettings() {
+  if (COMPANY_SETTINGS_PROMISE) return COMPANY_SETTINGS_PROMISE;
+  COMPANY_SETTINGS_PROMISE = (async () => {
+    let failed = false;
+    try {
+      const { data, error } = await supabase.from('company_settings')
+        .select('*').limit(1).maybeSingle();
+      if (error) {
+        console.warn('[company] settings unavailable, printing the built-in details', error);
+        COMPANY_SETTINGS_STATE = 'unavailable';
+        failed = true;
+      } else if (!data) {
+        // Table present, no row. The built-in values are the honest
+        // answer and the editor's save will create the row.
+        COMPANY_SETTINGS_STATE = 'empty';
+      } else {
+        COMPANY_SETTINGS = normalizeCompany(data);
+        COMPANY_SETTINGS_STATE = 'ok';
+      }
+    } catch (e) {
+      console.warn('[company] settings load failed, printing the built-in details', e);
+      COMPANY_SETTINGS_STATE = 'unavailable';
+      failed = true;
+    }
+    if (failed) COMPANY_SETTINGS_PROMISE = null;   // let the next caller retry
+    notifyCompanySettings();
+    return COMPANY_SETTINGS;
+  })();
+  return COMPANY_SETTINGS_PROMISE;
+}
+
+// The editor calls this after a successful save.
+function setCompanySettings(row) {
+  COMPANY_SETTINGS = normalizeCompany(row);
+  COMPANY_SETTINGS_STATE = 'ok';
+  COMPANY_SETTINGS_PROMISE = Promise.resolve(COMPANY_SETTINGS);
+  notifyCompanySettings();
+}
+
+// Starts from whatever is already in hand — the fallback at worst — so
+// an invoice header never paints blank while the fetch is in flight.
+function useCompanySettings() {
+  const [company, setCompany] = useState(COMPANY_SETTINGS);
+  useEffect(() => {
+    const fn = (next) => setCompany(next);
+    companySettingsSubscribers.add(fn);
+    loadCompanySettings().then(next => { if (next) setCompany(next); }, () => {});
+    return () => { companySettingsSubscribers.delete(fn); };
+  }, []);
+  return company;
+}
+
+// Is there a real frozen copy on this invoice, or just an empty column?
+// `{}` is treated as absent so a stray empty object can't blank a sheet.
+function hasCompanySnapshot(inv) {
+  const snap = inv?.company_snapshot;
+  return !!snap && typeof snap === 'object' && !Array.isArray(snap) && Object.keys(snap).length > 0;
+}
+
+// A bill that has left your hands prints the details it left with, not
+// today's. The frozen copy wins whenever there is one; a draft, or any
+// invoice from before v70 ran, falls through to the live values.
+function resolveInvoiceCompany(inv, live) {
+  if (hasCompanySnapshot(inv)) return normalizeCompany(inv.company_snapshot);
+  return live || COMPANY_SETTINGS;
+}
+
+// The ONE writer of company_snapshot. Everything funnels through here so
+// that the filter below lives in exactly one place.
+//
+// `.is('company_snapshot', null)` is the whole promise of this feature.
+// It makes the write land exactly once: every later attempt — from any
+// of the five screens that change a status, in any order, including
+// re-marking a paid invoice paid — matches no rows and changes nothing.
+// "An already-sent bill cannot change" is therefore a condition the
+// database enforces, not something five call sites each have to
+// remember. DO NOT REMOVE THAT FILTER.
+//
+// Never throws and never alerts: if company_snapshot doesn't exist yet
+// (v70 not run) this errors into the console and nothing else notices.
+async function writeCompanySnapshot(invoiceId, company) {
+  try {
+    const { error } = await supabase.from('invoices')
+      .update({ company_snapshot: normalizeCompany(company) })
+      .eq('id', invoiceId)
+      .is('company_snapshot', null);
+    if (error) console.warn('[company] could not freeze the details on invoice ' + invoiceId, error);
+  } catch (e) {
+    console.warn('[company] could not freeze the details on invoice ' + invoiceId, e);
+  }
+}
+
+// Freeze the CURRENT details onto an invoice the first time it stops
+// being a draft. Reads the module global rather than a value threaded in
+// from a component, because the global is always the freshest copy.
+//
+// Refuses to write when the details could not be read. That is the
+// important bit: the built-in fallback is fine to PRINT (it is what the
+// invoice showed yesterday) but writing it onto a customer document is
+// permanent, and `.is(null)` then refuses every correction. Writing
+// nothing leaves the column null, so a later attempt from a healthy tab
+// still lands. One retry first, since the usual cause is a single flaky
+// request.
+async function freezeCompanyOnInvoice(invoiceId) {
+  if (!invoiceId) return;
+  if (COMPANY_SETTINGS_STATE === 'unloaded' || COMPANY_SETTINGS_STATE === 'unavailable') {
+    await loadCompanySettings();
+  }
+  if (COMPANY_SETTINGS_STATE === 'unavailable') {
+    console.warn('[company] NOT freezing invoice ' + invoiceId
+      + ': the company details could not be read, and writing the built-in values would be permanent.'
+      + ' Left unfrozen so a later attempt can still land.');
+    return;
+  }
+  await writeCompanySnapshot(invoiceId, COMPANY_SETTINGS);
+}
+
+// Carry a frozen copy that already exists onto the replacement row a
+// reopen creates. Never refuses: this is the invoice's own history, not a
+// guess about what the details are today, so an unreadable settings table
+// is irrelevant to it.
+async function carryCompanySnapshot(invoiceId, snapshot) {
+  if (!invoiceId || !snapshot) return;
+  await writeCompanySnapshot(invoiceId, snapshot);
+}
+
 const INVOICE_TYPE_LABEL = {
   cleaning_check: 'Cleaning Checks Cleaning',
   move_out_check: 'Move Out Cleaning',
@@ -25686,6 +25933,9 @@ function InvoiceDocument({ invoiceId, data, preview, onBack, onChanged, onEditDr
   const [lines, setLines] = useState([]);
   const [loading, setLoading] = useState(true);
   const [working, setWorking] = useState(false);
+  // Your details as they are RIGHT NOW. Only used when this invoice has no
+  // frozen copy of its own — see resolveInvoiceCompany below.
+  const liveCompany = useCompanySettings();
 
   const load = async () => {
     setLoading(true);
@@ -25706,7 +25956,20 @@ function InvoiceDocument({ invoiceId, data, preview, onBack, onChanged, onEditDr
     const patch = { status };
     if (status === 'sent') patch.sent_at = new Date().toISOString();
     if (status === 'paid') patch.paid_at = new Date().toISOString();
-    await supabase.from('invoices').update(patch).eq('id', invoiceId);
+    const { error: statusErr } = await supabase.from('invoices').update(patch).eq('id', invoiceId);
+    // FREEZE POINT 2 of 5. Leaving draft is the moment a draft becomes a
+    // bill, so the company details on it stop moving here. Only lands if
+    // nothing is frozen yet, so "Back to draft" -> "Mark sent" again keeps
+    // the copy the property manager already has.
+    //
+    // Gated on the status write having actually succeeded. A failed "Mark
+    // sent" must not leave a permanent snapshot on something that is still
+    // a draft — it would print the address from the moment of the failed
+    // click, for ever, and `.is(null)` would refuse to correct it. (The
+    // status error itself has always been swallowed here; that is
+    // pre-existing and not changed, only logged.)
+    if (statusErr) console.warn('[invoice] status change failed, not freezing the company details', statusErr);
+    else if (status === 'sent' || status === 'paid') await freezeCompanyOnInvoice(invoiceId);
     setWorking(false);
     await load();
     onChanged && onChanged();
@@ -25730,6 +25993,16 @@ function InvoiceDocument({ invoiceId, data, preview, onBack, onChanged, onEditDr
   // for. Non-billable lines (comps/redos the owner ate) are tracked in the
   // data but never appear on the document or in its totals.
   const billableLines = lines.filter(l => !l.non_billable);
+  // Whose details print on this sheet: the frozen copy if this invoice has
+  // one, otherwise yours as they stand today. This is the ONLY place in the
+  // file that prints company details, and all five call sites reach it.
+  const company = resolveInvoiceCompany(inv, liveCompany);
+  // Typed as one box, printed a line at a time — same as the "Bill to"
+  // address below. Splitting (rather than whitespace-pre-line) keeps the
+  // per-line <div>s the header already had, so the seeded values print
+  // exactly as the hardcoded ones did.
+  const companyAddressLines = String(company.address_lines || '')
+    .split(/\r?\n/).map(l => l.trim()).filter(Boolean);
   const total = billableLines.reduce((s, l) => s + (parseFloat(l.amount) || 0), 0);
   const extraTotal = billableLines.reduce((s, l) => s + (parseFloat(l.extra_amount) || 0), 0);
   const baseTotal = billableLines.reduce((s, l) => {
@@ -25817,10 +26090,21 @@ function InvoiceDocument({ invoiceId, data, preview, onBack, onChanged, onEditDr
           <div className="text-right">
             <div className="text-3xl font-light tracking-tight text-stone-900">INVOICE</div>
             {inv.title && <div className="text-sm text-stone-500 mt-0.5">{inv.title}</div>}
-            <div className="mt-3 text-xs text-stone-600 leading-relaxed">
-              <div className="font-semibold text-stone-800">{SUMMIT_COMPANY.name}</div>
-              {SUMMIT_COMPANY.lines.map((l, i) => <div key={i}>{l}</div>)}
-              <div className="mt-2">{SUMMIT_COMPANY.url}</div>
+            {/* break-words so a long unbroken company name or URL wraps
+               instead of running off the right edge of the 800px sheet —
+               this block is typed now, not compiled in. */}
+            <div className="mt-3 text-xs text-stone-600 leading-relaxed break-words">
+              <div className="font-semibold text-stone-800">{company.name}</div>
+              {companyAddressLines.map((l, i) => <div key={i}>{l}</div>)}
+              {/* New on the invoice. Blank until typed, so nothing moves on
+                 the day this deploys. */}
+              {(company.phone || company.email) && (
+                <div className="mt-1">
+                  {company.phone && <div>{company.phone}</div>}
+                  {company.email && <div>{company.email}</div>}
+                </div>
+              )}
+              {company.website && <div className="mt-2">{company.website}</div>}
             </div>
           </div>
         </div>
@@ -25922,6 +26206,20 @@ function InvoiceDocument({ invoiceId, data, preview, onBack, onChanged, onEditDr
             <div className="flex justify-between py-2 px-2 bg-stone-100 rounded"><span className="text-stone-700 font-medium">Amount Due (USD):</span><span className="font-bold text-stone-900">${total.toFixed(2)}</span></div>
           </div>
         </div>
+
+        {/* Payment / remit-to block. Appears only once there is something to
+           say — an empty box at the foot of every invoice would be worse
+           than no box. Inside print-page so it prints, and full width so a
+           bank line or a mailing address isn't squeezed into a column. The
+           property manager sees this in the portal too; that is the point
+           of a remit-to block. */}
+        {company.payment_instructions.trim() && (
+          <div className="mt-6 pt-4 border-t border-stone-200 text-xs text-stone-600 leading-relaxed break-words"
+            style={{ breakInside: 'avoid' }}>
+            <div className="text-stone-400 uppercase tracking-wider text-[10px] mb-1">Payment</div>
+            <div className="whitespace-pre-line">{company.payment_instructions.trim()}</div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -27028,6 +27326,11 @@ function InvoicePaymentsReport({ employee, onSignOut, onOpenMessages, onLogoClic
   const [viewId, setViewId] = useState(null); // invoice being viewed full-screen
   const [glanceId, setGlanceId] = useState(null); // invoice in the quick-glance popup
   const [draft, setDraft] = useState({ paid_at: '', amount_paid: '', payment_note: '' });
+  // This screen writes status:'paid' straight to the database, bypassing
+  // InvoiceDocument's setStatus, so it has to freeze the company details
+  // itself (both mark-paid paths below). The hook is here only to keep the
+  // details warm; the freeze reads the module global.
+  useCompanySettings();
 
   const load = async () => {
     const { data, error } = await supabase.from('invoices')
@@ -27065,6 +27368,10 @@ function InvoicePaymentsReport({ employee, onSignOut, onOpenMessages, onLogoClic
     }).eq('id', inv.id);
     setBusyId(null); setEditing(null);
     if (error) { alert('Could not save: ' + error.message + (/amount_paid|payment_note/.test(error.message || '') ? '\n\nRun v51_invoice_payments.sql in Supabase first.' : '')); return; }
+    // FREEZE POINT 3 of 5. Only after the status change actually landed.
+    // An invoice already marked sent keeps the copy it was sent with —
+    // that is the .is(null) filter inside, not a check here.
+    await freezeCompanyOnInvoice(inv.id);
     load();
   };
 
@@ -27076,9 +27383,17 @@ function InvoicePaymentsReport({ employee, onSignOut, onOpenMessages, onLogoClic
     }).eq('id', inv.id);
     setBusyId(null);
     if (error) { alert('Could not mark paid: ' + error.message); return; }
+    // FREEZE POINT 4 of 5. Same as above — this path skips setStatus too.
+    await freezeCompanyOnInvoice(inv.id);
     load();
   };
 
+  // FREEZE POINT 5 of 5, and the one that does nothing on purpose. Going
+  // back to unpaid must NOT re-freeze: the details were already frozen
+  // when it was first sent or paid, and that frozen copy is what the
+  // property manager is holding. Deliberately no freezeCompanyOnInvoice
+  // call here — the .is(null) filter would refuse it anyway, and this
+  // comment is so nobody "fixes" the omission.
   const markUnpaid = async (inv) => {
     if (!confirm('Mark this invoice unpaid again? It clears the paid date and amount.')) return;
     setBusyId(inv.id);
@@ -27384,6 +27699,284 @@ function DateRangePicker({ start, end, onChange }) {
   );
 }
 
+// One labelled box on the company-details screen. At module scope on
+// purpose: declared inside the component it would be a brand new
+// component type on every render, so React would unmount and remount the
+// input after every keystroke and the field would lose focus after one
+// character.
+function CompanyField({ label, hint, value, onChange, rows }) {
+  return (
+    <div>
+      <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">{label}</label>
+      {rows ? (
+        <textarea value={value} onChange={e => onChange(e.target.value)} rows={rows}
+          className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white focus:outline-none focus:border-stone-900 text-stone-900 text-sm" />
+      ) : (
+        <input type="text" value={value} onChange={e => onChange(e.target.value)}
+          className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white focus:outline-none focus:border-stone-900 text-stone-900 text-sm" />
+      )}
+      {hint && <div className="text-[11px] text-stone-400 mt-1 leading-snug">{hint}</div>}
+    </div>
+  );
+}
+
+// =================================================================
+// COMPANY DETAILS EDITOR — the name, address, phone, email, website and
+// payment / remit-to block printed at the top (and foot) of every
+// invoice. Owner only; reached from Money -> Invoices.
+//
+// Company-wide, so unlike the price book it does NOT need a property
+// picked first. Changing it moves your drafts and every invoice you
+// print from now on. It does not move an invoice already sent — each of
+// those keeps its own frozen copy of what it went out with.
+//
+// This is the one screen in the feature that speaks up when
+// v70_company_settings.sql hasn't been run, in the same spirit as
+// "Run v51_invoice_payments.sql in Supabase first." Everywhere else
+// quietly prints the built-in values.
+//
+// It checks THREE things, not one, because they fail independently and
+// the dangerous one is the quietest:
+//   1. the company_settings table (does the editor have anything to edit)
+//   2. the invoices.company_snapshot COLUMN (can an invoice be frozen at
+//      all — if not, changing anything here rewrites the address on every
+//      invoice ever sent)
+//   3. whether the BACKFILL ran (how many invoices that have already gone
+//      out still have no frozen copy — same consequence, scoped to them)
+// 2 and 3 are only visible from this screen. Everywhere else they are a
+// console warning, which the owner will never see.
+// =================================================================
+function CompanyDetailsEditor({ onBack }) {
+  const [form, setForm] = useState(COMPANY_SETTINGS);
+  const [loaded, setLoaded] = useState(false);
+  const [settingsState, setSettingsState] = useState('ok');
+  // 'checking' | 'ok' | 'no-column' | 'unfrozen' | 'unknown'
+  const [snapState, setSnapState] = useState('checking');
+  const [unfrozenCount, setUnfrozenCount] = useState(0);
+  const [saving, setSaving] = useState(false);
+  const [savedMsg, setSavedMsg] = useState('');
+
+  // How many invoices have already left his hands with no frozen copy of
+  // the details they went out with. Every one of those will reprint with
+  // whatever he types on this screen.
+  //
+  // Three counts rather than one `.or()`: the `or` filter in this codebase
+  // is only ever used without negation, and `not.is.null` inside one is
+  // exactly the kind of syntax that fails quietly. These three use only
+  // plain filters, and they are mutually exclusive, so the total is real:
+  //
+  //   A  status is not 'draft'                        — sent / paid / superseded
+  //   B  status is 'draft' but it HAS a sent date     — "Back to draft"
+  //   C  status is 'draft', no sent date, but paid    — paid, then back to draft
+  //
+  // B and C are the ones a status check alone misses. setStatus patches
+  // {status} only, so sent_at and paid_at survive "Back to draft" — an
+  // invoice the property manager is holding can sit there saying "draft".
+  //
+  // Together these match v70 step 4's predicate for every row the app can
+  // create. The one row they do not cover is a legacy invoice with a NULL
+  // status that also carries a sent date; v70's own verification query
+  // uses coalesce() and does cover it.
+  const checkSnapshots = async () => {
+    const head = { count: 'exact', head: true };
+    const notDraft = await supabase.from('invoices')
+      .select('id', head).is('company_snapshot', null).neq('status', 'draft');
+    if (notDraft.error) {
+      const m = (notDraft.error.message || '') + ' ' + (notDraft.error.details || '');
+      // The column itself is missing — nothing can be frozen at all.
+      if (/company_snapshot/i.test(m)) return { state: 'no-column', count: 0 };
+      console.warn('[company] could not check the frozen copies on invoices', notDraft.error);
+      return { state: 'unknown', count: 0 };
+    }
+    const sentBackToDraft = await supabase.from('invoices')
+      .select('id', head).is('company_snapshot', null).eq('status', 'draft')
+      .not('sent_at', 'is', null);
+    const paidBackToDraft = await supabase.from('invoices')
+      .select('id', head).is('company_snapshot', null).eq('status', 'draft')
+      .is('sent_at', null).not('paid_at', 'is', null);
+    if (sentBackToDraft.error || paidBackToDraft.error) {
+      console.warn('[company] could not check the back-to-draft invoices',
+        sentBackToDraft.error || paidBackToDraft.error);
+      return { state: 'unknown', count: 0 };
+    }
+    const total = (notDraft.count || 0) + (sentBackToDraft.count || 0) + (paidBackToDraft.count || 0);
+    return { state: total > 0 ? 'unfrozen' : 'ok', count: total };
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      // Both checks finish BEFORE the form paints. If the warning arrived
+      // after the boxes did, he could already be typing into them — and the
+      // whole point of the warning is that he reads it first.
+      const [, res] = await Promise.all([
+        loadCompanySettings().then(() => {}, () => {}),
+        checkSnapshots(),
+      ]);
+      if (cancelled) return;
+      setForm(COMPANY_SETTINGS);
+      setSettingsState(COMPANY_SETTINGS_STATE);
+      setSnapState(res.state);
+      setUnfrozenCount(res.count);
+      setLoaded(true);
+    })();
+    return () => { cancelled = true; };
+    /* eslint-disable-next-line */
+  }, []);
+
+  const set = (k, v) => { setSavedMsg(''); setForm(f => ({ ...f, [k]: v })); };
+
+  const save = async () => {
+    setSaving(true); setSavedMsg('');
+    // Upsert on the single id=1 row, and .select() so an update that
+    // silently touched nothing (RLS, or the seed row never inserted) is
+    // told apart from a save — same discipline as the apartment-size
+    // editor. A "saved" message over a database that refused the write is
+    // the worst outcome available here.
+    const { data, error } = await supabase.from('company_settings').upsert({
+      id: 1,
+      name: form.name.trim() || null,
+      address_lines: form.address_lines.trim() || null,
+      phone: form.phone.trim() || null,
+      email: form.email.trim() || null,
+      website: form.website.trim() || null,
+      payment_instructions: form.payment_instructions.trim() || null,
+      updated_at: new Date().toISOString(),
+    }, { onConflict: 'id' }).select();
+    setSaving(false);
+    if (error) {
+      alert('Could not save your company details: ' + error.message
+        + (/company_settings|schema cache|does not exist/i.test(error.message || '')
+          ? '\n\nRun v70_company_settings.sql in Supabase first.' : ''));
+      return;
+    }
+    if (!data || data.length === 0) {
+      alert('Your company details did not save — the database accepted the request but changed nothing. Nothing on your invoices has moved.');
+      return;
+    }
+    // Push the new values into every screen that is already open, so a
+    // draft sitting behind this one repaints instead of needing a reload.
+    setCompanySettings(data[0]);
+    setForm(COMPANY_SETTINGS);
+    setSettingsState('ok');
+    setSavedMsg('Saved. New invoices and open drafts will print these.');
+    // Re-check after saving: if the freeze is not working, saying so once
+    // before he changed anything is not enough — he needs to know it is
+    // still not working now that he has.
+    const res = await checkSnapshots();
+    setSnapState(res.state);
+    setUnfrozenCount(res.count);
+  };
+
+  if (!loaded) return <Splash text="Loading company details…" />;
+
+  return (
+    <div className="pb-28">
+      <div className="flex items-center justify-between gap-3 px-5 py-4 border-b border-stone-200 bg-white sticky top-0 z-10">
+        <button onClick={onBack} className="flex items-center gap-2 text-stone-700 text-sm">
+          <ArrowLeft size={16} /> Back
+        </button>
+        <button onClick={save} disabled={saving}
+          className="px-4 py-2 rounded-xl bg-stone-900 text-stone-50 text-sm font-medium disabled:opacity-50">
+          {saving ? 'Saving…' : 'Save details'}
+        </button>
+      </div>
+
+      <div className="px-5 pt-6">
+        <div className="text-xs uppercase tracking-widest text-stone-400 font-mono mb-3">Billing</div>
+        <h1 className="text-3xl font-light text-stone-900 tracking-tight mb-2">
+          Company details on <span className="font-serif italic text-amber-700">invoices</span>
+        </h1>
+        <p className="text-xs text-stone-500 leading-relaxed mb-5">
+          What prints at the top of every invoice. Changing it updates your drafts and
+          everything you print from now on. Invoices you have already marked sent or paid
+          keep the details they went out with, so reprinting an old one still matches the
+          copy the property manager has.
+        </p>
+
+        {/* The settings table itself. 'empty' is NOT a fault — the table is
+           there, saving creates the row — so it does not get the alarming
+           wording the missing table gets. */}
+        {settingsState === 'unavailable' && (
+          <div className="mb-5 px-3 py-2.5 rounded-xl bg-amber-100 border border-amber-400 text-[11px] text-amber-900 leading-snug">
+            <span className="font-semibold">Not switched on in the database yet.</span>{' '}
+            Run <span className="font-mono">v70_company_settings.sql</span> in Supabase, then
+            reload this page. Until then your invoices print the built-in details below and
+            saving here will not stick. Nothing is broken and nothing is lost.
+          </div>
+        )}
+        {settingsState === 'empty' && (
+          <div className="mb-5 px-3 py-2.5 rounded-xl bg-stone-100 border border-stone-300 text-[11px] text-stone-700 leading-snug">
+            Your invoices are printing the built-in details below because nothing has been
+            saved here yet. Saving will stick — you do not need to run anything.
+          </div>
+        )}
+
+        {/* The dangerous one. Without the per-invoice frozen copy, changing
+           anything on this screen rewrites the company details on invoices
+           property managers are already holding, and there is no way to put
+           them back. This is the only screen that can say so. */}
+        {snapState === 'no-column' && (
+          <div className="mb-5 px-3 py-3 rounded-xl bg-red-50 border-2 border-red-400 text-[11px] text-red-900 leading-snug">
+            <span className="font-semibold">Stop — don’t change anything below yet.</span>{' '}
+            Invoices cannot keep their own copy of the details they were sent with, because
+            the <span className="font-mono">company_snapshot</span> column is missing from the
+            database. If you change your address now, <span className="font-semibold">every
+            invoice you have ever sent will reprint with the new one</span>, including ones a
+            property manager is holding on paper — and there is no way to undo it.
+            Run <span className="font-mono">v70_company_settings.sql</span> in Supabase (the
+            whole file, top to bottom), reload this page, and this message will go away.
+          </div>
+        )}
+        {snapState === 'unfrozen' && (
+          <div className="mb-5 px-3 py-3 rounded-xl bg-red-50 border-2 border-red-400 text-[11px] text-red-900 leading-snug">
+            <span className="font-semibold">Stop — {unfrozenCount} invoice{unfrozenCount === 1 ? '' : 's'} {unfrozenCount === 1 ? 'is' : 'are'} not protected yet.</span>{' '}
+            {unfrozenCount === 1 ? 'It has' : 'They have'} already gone out, but {unfrozenCount === 1 ? 'it has' : 'they have'} no
+            frozen copy of the details {unfrozenCount === 1 ? 'it was' : 'they were'} sent with. If you change anything below,
+            {' '}{unfrozenCount === 1 ? 'it' : 'they'} will reprint with the new details and there is no way to put the old
+            ones back. This usually means the backfill — step 4 of{' '}
+            <span className="font-mono">v70_company_settings.sql</span> — was not run. Run the
+            whole file again in Supabase (it is safe to run twice), reload this page, and this
+            message will go away.
+          </div>
+        )}
+        {snapState === 'unknown' && (
+          <div className="mb-5 px-3 py-2.5 rounded-xl bg-amber-100 border border-amber-400 text-[11px] text-amber-900 leading-snug">
+            <span className="font-semibold">Could not check whether your old invoices are protected.</span>{' '}
+            The database did not answer that question, so I cannot promise that changing
+            things below leaves invoices you have already sent alone. Reload this page and
+            look again before you change anything.
+          </div>
+        )}
+
+        <div className="space-y-4">
+          <CompanyField label="Company name" value={form.name} onChange={v => set('name', v)}
+            hint="Left blank, invoices fall back to “Summit Clean LLC” rather than printing with no company on them." />
+          <CompanyField label="Address" value={form.address_lines} onChange={v => set('address_lines', v)} rows={3}
+            hint="One line per line, exactly as you want it printed." />
+          <CompanyField label="Phone" value={form.phone} onChange={v => set('phone', v)}
+            hint="New on the invoice — prints under the address only once you fill it in." />
+          <CompanyField label="Email" value={form.email} onChange={v => set('email', v)}
+            hint="Also new. Prints under the phone number." />
+          <CompanyField label="Website" value={form.website} onChange={v => set('website', v)} />
+          <CompanyField label="Payment instructions / remit to" value={form.payment_instructions}
+            onChange={v => set('payment_instructions', v)} rows={4}
+            hint="Prints full width at the foot of the invoice, under the totals, and only when there is something here. Where to post a cheque, who to make it payable to, a reference to quote. Anyone who can open this app can read this box, so keep account numbers out of it — put nothing here you would not be happy printing on a bill." />
+        </div>
+
+        {savedMsg && (
+          <div className="mt-4 px-3 py-2.5 rounded-xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-800">{savedMsg}</div>
+        )}
+
+        <div className="mt-6 text-[11px] text-stone-400 leading-relaxed">
+          The logo is not editable here — it is a file, not a line of text. Ask for it to be
+          changed if you need a new one.
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function InvoiceView({ employee, onSignOut, onOpenMessages, onLogoClick, topToggle }) {
   const today = new Date().toISOString().split('T')[0];
   const twoWeeksAgo = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
@@ -27395,6 +27988,9 @@ function InvoiceView({ employee, onSignOut, onOpenMessages, onLogoClick, topTogg
   const [busy, setBusy] = useState(false);
   const [showZeros, setShowZeros] = useState(true);
   const [showPriceBook, setShowPriceBook] = useState(false);
+  // Company-wide, so unlike the price book this one does not care which
+  // property is picked.
+  const [showCompanyDetails, setShowCompanyDetails] = useState(false);
   const [draftOn, setDraftOn] = useState(false);
   const [savedMsg, setSavedMsg] = useState('');
   const [viewingInvoiceId, setViewingInvoiceId] = useState(null);
@@ -27541,6 +28137,13 @@ function InvoiceView({ employee, onSignOut, onOpenMessages, onLogoClick, topTogg
     const property = properties.find(p => p.id === selectedId);
     return <PriceBookEditor property={property} onBack={() => setShowPriceBook(false)} />;
   }
+  // Owner only, checked again here and not just on the button: the Money
+  // tab is gated by canSeeMoney, which lets in a manager with "View pay
+  // info", and a manager must not be able to change the company address
+  // printed on a bill.
+  if (showCompanyDetails && isOwner(employee)) {
+    return <CompanyDetailsEditor onBack={() => setShowCompanyDetails(false)} />;
+  }
   if (viewingInvoiceId) {
     return <InvoiceDocument invoiceId={viewingInvoiceId}
       onBack={() => { setViewingInvoiceId(null); setMode('saved'); }}
@@ -27607,6 +28210,15 @@ function InvoiceView({ employee, onSignOut, onOpenMessages, onLogoClick, topTogg
                 <button onClick={() => setShowPriceBook(true)}
                   className="w-full py-3 rounded-2xl bg-white border border-stone-300 text-stone-700 text-sm font-medium active:scale-98 flex items-center justify-center gap-2 hover:border-stone-400">
                   <DollarSign size={16} /> Edit subsection prices for this property
+                </button>
+              )}
+              {/* Not gated on a property being picked — these details are
+                 company-wide. Owner only: a manager with "View pay info"
+                 can reach this screen. */}
+              {isOwner(employee) && (
+                <button onClick={() => setShowCompanyDetails(true)}
+                  className="w-full py-3 rounded-2xl bg-white border border-stone-300 text-stone-700 text-sm font-medium active:scale-98 flex items-center justify-center gap-2 hover:border-stone-400">
+                  <FileText size={16} /> Edit company details on invoices
                 </button>
               )}
               {selectedId && (
@@ -28738,6 +29350,11 @@ function PortalApp({ previewMode = false, previewEmployee = null, onExitPreview 
   };
 
   useEffect(() => {
+    // The portal is a separate app shell with its own mount, so it needs
+    // the same warm-up as StaffApp — otherwise the property manager's copy
+    // of an invoice is the one that flickers from the fallback details to
+    // the real ones. Before the previewMode branch so both paths get it.
+    loadCompanySettings();
     // Owner "Preview as PM": synthetic PM user + all multi-unit properties.
     if (previewMode) {
       (async () => {

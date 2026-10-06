@@ -24987,6 +24987,9 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
       extra_minutes: (l.extraOn && l.extraMode === 'time') ? (parseFloat(l.extraMinutes) || 0) : null,
       extra_rate: (l.extraOn && l.extraMode === 'time') ? (parseFloat(l.extraRate) || 0) : null,
     }));
+    // No `employee` here: this is a preview of a draft, not a saved invoice,
+    // so the owner's "Update company details" button has nothing to act on.
+    // The component gates on !preview as well.
     return <InvoiceDocument data={{ inv: previewInv, lines: previewLines }} preview
       saving={saving}
       onSaveDraft={() => save('draft')}
@@ -25868,6 +25871,139 @@ async function carryCompanySnapshot(invoiceId, snapshot) {
   await writeCompanySnapshot(invoiceId, snapshot);
 }
 
+// =================================================================
+// THE ONE DELIBERATE EXCEPTION TO THE FREEZE
+//
+// writeCompanySnapshot above carries `.is('company_snapshot', null)`, and
+// that filter is what makes "an invoice that has already gone out cannot
+// change" a condition the database enforces rather than a rule five screens
+// have to remember. Every AUTOMATIC path still goes through it and is still
+// bound by it: marking sent, marking paid, the two Payments-screen writes,
+// and a reopen's carry-forward. Nothing here relaxes any of that.
+//
+// This writer has no such filter. It OVERWRITES an existing frozen copy, on
+// purpose, and it exists for exactly one thing: the owner has real invoices
+// out there printing a company address that is wrong, and he needs to
+// correct the document. One invoice at a time, by hand.
+//
+// It is reachable from one place only — the owner-only "Update company
+// details" button in InvoiceDocument, behind a confirm box that shows him
+// what it is about to change from and to.
+//
+// DO NOT call this from a status change, from an invoice save, from a
+// reopen, from a backfill or from any loop. Those are the automatic paths,
+// and the entire value of this feature is that an automatic path cannot
+// move a bill that has already left. New code almost certainly wants
+// freezeCompanyOnInvoice (first time an invoice stops being a draft) or
+// carryCompanySnapshot (a reopen keeping its own history) instead.
+//
+// One column, one row: `company_snapshot`, on `.eq('id', invoiceId)`. No
+// line item, amount, total, date, invoice number or status is read or
+// written here. `.select('id')` so a write the database quietly refused —
+// RLS, a missing column, an id that is no longer there — is told apart from
+// one that landed, instead of reporting success over nothing. Same
+// discipline as the company-details editor's save.
+// =================================================================
+async function overwriteCompanySnapshotByOwner(invoiceId, company) {
+  if (!invoiceId) return { ok: false, reason: 'no-invoice' };
+  try {
+    const { data, error } = await supabase.from('invoices')
+      .update({ company_snapshot: normalizeCompany(company) })
+      .eq('id', invoiceId)
+      .select('id');
+    if (error) {
+      console.warn('[company] owner refresh refused by the database on invoice ' + invoiceId, error);
+      return { ok: false, reason: 'error', message: error.message || String(error) };
+    }
+    if (!data || data.length === 0) return { ok: false, reason: 'no-rows' };
+    return { ok: true };
+  } catch (e) {
+    console.warn('[company] owner refresh failed on invoice ' + invoiceId, e);
+    return { ok: false, reason: 'error', message: (e && e.message) || String(e) };
+  }
+}
+
+// Force a FRESH read of the company settings, throwing away the memoized
+// copy, and report which of the three states we landed in.
+//
+// Only the owner refresh uses this, and it has to. Every automatic writer is
+// protected by `.is('company_snapshot', null)`, so a stale value in one tab
+// is harmless — the write simply matches no rows. The owner refresh has no
+// such filter, so a stale value is not refused, it LANDS, on a document a
+// property manager may be holding. Two ways it goes stale and both were
+// reproduced: he fixes the address in a second tab and this tab still thinks
+// the invoice is fine, or this tab writes the copy it read half an hour ago
+// over a newer one.
+//
+// loadCompanySettings() on its own is NOT enough: it hands back its memoized
+// promise whenever there is one, so on the happy path it reads nothing at
+// all. Clearing the promise first is what sends it back to the database.
+//
+// Side benefit: the fresh values go out through notifyCompanySettings, so
+// every screen already open repaints with them.
+async function reloadCompanySettings() {
+  COMPANY_SETTINGS_PROMISE = null;
+  await loadCompanySettings();
+  return COMPANY_SETTINGS_STATE;
+}
+
+// Did this invoice definitely leave the building? Only what the data can
+// actually prove: a sent or paid status, or a sent or paid date.
+//
+// Deliberately NARROWER than the company-details editor's three counts. A
+// `superseded` row parked by an abandoned reopen, or a `void` one, cannot be
+// told apart from one that genuinely went out — "Save & mark sent" writes no
+// sent_at. The editor's counts err towards freezing, because there the cost
+// of being wrong is an unprotected bill.
+//
+// This one does exactly one thing: decide whether the owner-only note about an
+// invoice with no frozen copy is worth showing. It never decides whether to
+// write, and it is deliberately not used for the confirm box's wording — see
+// the comment there. So here the cheaper error is to claim less.
+function invoiceDefinitelyWentOut(inv) {
+  return !!(inv && (inv.sent_at || inv.paid_at || inv.status === 'sent' || inv.status === 'paid'));
+}
+
+// The six fields, in the order they are typed on the editor screen and
+// printed on the sheet.
+const COMPANY_FIELDS = [
+  ['name', 'Company name'],
+  ['address_lines', 'Address'],
+  ['phone', 'Phone'],
+  ['email', 'Email'],
+  ['website', 'Website'],
+  ['payment_instructions', 'Payment instructions'],
+];
+
+// The from/to lines for the confirm box — only the fields that actually
+// differ, and no others. Multi-line values are joined with " / " so a
+// three-line address reads on one line in a dialog, and a blank one says
+// "(blank)" out loud, because an empty string against an empty string in a
+// confirm box tells him nothing.
+//
+// Which fields are listed is decided on the STORED values, not on the
+// readable form below, so nothing that would change the printed sheet can be
+// filtered out by the way it is displayed. The cost of that is a pair of
+// lines that read identically when the only difference is a trailing space,
+// an interior blank line, or CRLF against LF — so when that happens the line
+// says so instead of leaving him to guess which is which.
+function companyChangeLines(fromCompany, toCompany) {
+  const a = normalizeCompany(fromCompany);
+  const b = normalizeCompany(toCompany);
+  const show = (v) => {
+    const parts = String(v == null ? '' : v).split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+    return parts.length ? parts.join(' / ') : '(blank)';
+  };
+  return COMPANY_FIELDS
+    .filter(([k]) => a[k] !== b[k])
+    .map(([k, label]) => {
+      const now = show(a[k]);
+      const next = show(b[k]);
+      const same = now === next ? '  (line breaks or spacing only \u2014 this one reads the same)' : '';
+      return label + same + '\n    now:  ' + now + '\n    new:  ' + next;
+    });
+}
+
 const INVOICE_TYPE_LABEL = {
   cleaning_check: 'Cleaning Checks Cleaning',
   move_out_check: 'Move Out Cleaning',
@@ -25927,12 +26063,23 @@ function fmtInvoiceDate(d) {
 // INVOICE DOCUMENT (Phase 1c) — the printable invoice. Loads a saved
 // invoice + its lines and renders the polished layout matching the
 // company's PDF, with print / status / delete actions.
+//
+// `employee` is here for one reason: the owner-only "Update company
+// details" button, which is the single deliberate exception to the freeze.
+// It DEFAULTS TO NULL, so any call site that does not pass it gets no
+// button at all — the property-manager portal being the one that matters,
+// which renders this component `readOnly` and has no staff employee in
+// scope to pass even by accident. Do not thread it in there.
 // =================================================================
-function InvoiceDocument({ invoiceId, data, preview, onBack, onChanged, onEditDraft, saving = false, onSaveDraft, onSaveSent, onSavePaid, readOnly = false }) {
+function InvoiceDocument({ invoiceId, data, preview, onBack, onChanged, onEditDraft, saving = false, onSaveDraft, onSaveSent, onSavePaid, readOnly = false, employee = null }) {
   const [inv, setInv] = useState(null);
   const [lines, setLines] = useState([]);
   const [loading, setLoading] = useState(true);
   const [working, setWorking] = useState(false);
+  // Only the label on the owner's "Update company details" button; `working`
+  // is what actually disables the toolbar while it runs.
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshNote, setRefreshNote] = useState('');
   // Your details as they are RIGHT NOW. Only used when this invoice has no
   // frozen copy of its own — see resolveInvoiceCompany below.
   const liveCompany = useCompanySettings();
@@ -25946,6 +26093,10 @@ function InvoiceDocument({ invoiceId, data, preview, onBack, onChanged, onEditDr
     setLoading(false);
   };
   useEffect(() => {
+    // A note left over from updating one invoice must not follow you onto
+    // the next one: these call sites keep the same component instance and
+    // just change invoiceId.
+    setRefreshNote('');
     if (data) { setInv(data.inv); setLines(data.lines || []); setLoading(false); return; }
     load();
     /* eslint-disable-next-line */
@@ -25974,6 +26125,162 @@ function InvoiceDocument({ invoiceId, data, preview, onBack, onChanged, onEditDr
     await load();
     onChanged && onChanged();
   };
+
+  // =================================================================
+  // THE ONE DELIBERATE EXCEPTION TO THE FREEZE — owner only.
+  //
+  // Everything else in this feature exists to stop a bill that has already
+  // gone out from changing. This is the owner saying, explicitly, on one
+  // invoice at a time: that one went out with the wrong address, make it
+  // match my settings now.
+  //
+  // It is the only caller of overwriteCompanySnapshotByOwner, which is the
+  // only writer of company_snapshot without `.is('company_snapshot', null)`.
+  // Everything automatic still goes through freezeCompanyOnInvoice or
+  // carryCompanySnapshot and still cannot move a sent invoice.
+  //
+  // BOTH sides are read fresh before anything is shown or written: the
+  // settings, because a cached copy from another tab's lifetime would be
+  // written rather than refused, and the invoice row, because the "now:" line
+  // in the dialog has to describe the copy actually about to be overwritten.
+  // The row is checked once more after he presses OK, so a change made
+  // somewhere else while the dialog sat open stops the write instead of being
+  // silently flattened.
+  //
+  // It would rather do nothing and say so than write a guess onto a document
+  // a property manager is holding, so it refuses — with words, having
+  // written nothing — when:
+  //   - this is not the owner, or it is a preview, or readOnly, or there is
+  //     no saved invoice id (belt and braces; the button is gated too)
+  //   - it is already running
+  //   - the invoice has no frozen copy, so it is already printing today's
+  //     details and there is nothing to update
+  //   - the current details could not be read at all: the settings table or
+  //     the request failed. Same rule freezeCompanyOnInvoice follows, and it
+  //     matters more here, because the copy this would overwrite cannot be
+  //     got back
+  //   - nothing has ever been saved on the settings screen, so there is no
+  //     "current" to update to
+  //   - the invoice cannot be re-read, or is no longer there
+  //   - the frozen copy already matches the current details
+  //   - the row moved while the confirm box was open
+  //   - the database takes the write and changes no rows
+  //
+  // It writes company_snapshot and nothing else: no line item, amount,
+  // total, date, invoice number or status is touched.
+  // =================================================================
+  const refreshCompanyDetails = async () => {
+    // Gated on the button and again here, exactly like the company-details
+    // editor: the Money tab admits a manager holding "View pay info", and a
+    // manager must not be able to alter a document a customer is holding.
+    if (!isOwner(employee) || readOnly || preview || !invoiceId || !inv) return;
+    // Re-entrancy, doubled like every other guard in this feature. disabled={working}
+    // and the blocking confirm() already stop a second tap; this makes the
+    // handler say it itself instead of trusting the button to.
+    if (working || refreshing) return;
+    if (!hasCompanySnapshot(inv)) {
+      alert('This invoice has no frozen copy of your company details, so it already prints your current ones. Nothing was changed.');
+      return;
+    }
+    setWorking(true); setRefreshing(true);
+    try {
+      // A fresh read, not this tab's cached copy — see reloadCompanySettings.
+      const state = await reloadCompanySettings();
+      if (state === 'unavailable') {
+        alert('Could not read your current company details, so nothing on this invoice was changed.\n\n'
+          + 'Reload the page and try again. If it keeps happening, your company details are not readable '
+          + 'from the database — ask for it to be looked at rather than retyping them, and this invoice '
+          + 'stays exactly as it is in the meantime.');
+        return;
+      }
+      if (state !== 'ok') {
+        alert('You have not saved any company details yet, so there is nothing to update this invoice to. Nothing was changed.\n\n'
+          + 'Go to Money \u2192 Invoices \u2192 "Edit company details on invoices", save them there, then come back here.');
+        return;
+      }
+      const current = COMPANY_SETTINGS;
+      // The row as it stands right now, not as this screen loaded it. Without
+      // this the "now:" line can describe a value the invoice no longer holds,
+      // and he would be agreeing to a change against a sheet that has already
+      // moved.
+      const { data: fresh, error: freshErr } = await supabase.from('invoices')
+        .select('id, invoice_number, company_snapshot').eq('id', invoiceId).maybeSingle();
+      if (freshErr) {
+        alert('Could not re-read this invoice, so nothing on it was changed: '
+          + (freshErr.message || 'unknown error'));
+        return;
+      }
+      if (!fresh) {
+        alert('This invoice is not in the database any more, so nothing was changed. It may have been deleted somewhere else.');
+        return;
+      }
+      if (!hasCompanySnapshot(fresh)) {
+        alert('This invoice no longer has a frozen copy of your company details, so it already prints your current ones. Nothing was changed.');
+        return;
+      }
+      const frozen = normalizeCompany(fresh.company_snapshot);
+      const frozenKey = JSON.stringify(frozen);
+      const changes = companyChangeLines(frozen, current);
+      if (changes.length === 0) {
+        alert('This invoice already prints your current company details. Nothing was changed.');
+        return;
+      }
+      const number = fresh.invoice_number || inv.invoice_number;
+      const which = number ? 'invoice ' + number : 'this invoice';
+      // Stated flatly, with no hedge, and that is deliberate.
+      //
+      // This box is only ever reached for an invoice that HAS a frozen copy —
+      // that is what gates the button — and the only things that write one are
+      // marking sent, marking paid, a reopen carrying an existing copy forward,
+      // and v70's backfill of rows that were no longer live drafts. A live
+      // draft never has one. So by the time he is reading this, the invoice has
+      // been out, whatever its status column happens to say now: "Save & mark
+      // sent" writes no sent_at, and "Back to draft" patches {status} only, so
+      // an invoice a property manager is holding can sit there reading "draft".
+      //
+      // An earlier version hedged on those columns and produced "is marked
+      // 'draft' rather than draft, so it may already have gone out" — a
+      // sentence that argues with itself, and "may" about invoices that
+      // certainly did. This is the only warning on the only permanent overwrite
+      // of a customer's document in this app. It should read like it.
+      const ok = confirm('Update the company details on ' + which + '?\n\n'
+        + 'This invoice has already gone out, so a property manager may be holding a copy of it. '
+        + 'It will reprint with your current details instead of the ones it was sent with.\n\n'
+        + changes.join('\n\n') + '\n\n'
+        + 'Nothing else changes: no items, no amounts, no totals, no dates, no invoice number, no status.');
+      if (!ok) return;
+      // He may have sat on that dialog for a minute. Check the row has not
+      // moved underneath it rather than flattening a change he was never
+      // shown — this writer has no .is(null) to do it for us.
+      const { data: again, error: againErr } = await supabase.from('invoices')
+        .select('id, company_snapshot').eq('id', invoiceId).maybeSingle();
+      if (againErr || !again) {
+        alert('Could not check this invoice again before writing, so nothing was changed. Try once more.');
+        return;
+      }
+      if (JSON.stringify(normalizeCompany(again.company_snapshot)) !== frozenKey) {
+        alert('Nothing was changed — this invoice was updated somewhere else while that message was open.\n\n'
+          + 'Go back and open it again to see what it says now.');
+        return;
+      }
+      const res = await overwriteCompanySnapshotByOwner(invoiceId, current);
+      if (!res.ok) {
+        alert(res.reason === 'no-rows'
+          ? 'Nothing was changed. The database accepted the request but updated no rows — this invoice may have been deleted, or the database is refusing the write.'
+          : 'Could not update the company details on this invoice: ' + (res.message || 'unknown error')
+            + '\n\nNothing on the invoice was changed.');
+        return;
+      }
+      await load();
+      setRefreshNote('Updated. This invoice now prints your current company details. Nothing else on it was changed.');
+      // Deliberately no onChanged() — no list in the app shows company
+      // details, so there is nothing for a parent screen to refresh, and
+      // load() above has already repainted this sheet.
+    } finally {
+      setWorking(false); setRefreshing(false);
+    }
+  };
+
   const del = async () => {
     if (!confirm('Delete this invoice? Its items become billable again.')) return;
     setWorking(true);
@@ -26003,6 +26310,19 @@ function InvoiceDocument({ invoiceId, data, preview, onBack, onChanged, onEditDr
   // exactly as the hardcoded ones did.
   const companyAddressLines = String(company.address_lines || '')
     .split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+  // Who may update the company details on this sheet. Owner only, never in
+  // the property-manager portal (readOnly), never on a draft preview (not a
+  // saved row at all), and never without a saved invoice id.
+  const ownerMayRefreshCompany = !readOnly && !preview && !!invoiceId && isOwner(employee);
+  // Has this invoice got a frozen copy to correct? That is the only state
+  // where the action means anything — without one the sheet is already
+  // printing today's details.
+  const invoiceHasFrozenCompany = hasCompanySnapshot(inv);
+  // Only used to decide whether the note below is worth showing. Never gates
+  // a write: the button is gated on there being a frozen copy to correct,
+  // which is a different and deliberately separate question — an invoice can
+  // have a frozen copy without the data proving it went out, and the reverse.
+  const invoiceDidGoOut = invoiceDefinitelyWentOut(inv);
   const total = billableLines.reduce((s, l) => s + (parseFloat(l.amount) || 0), 0);
   const extraTotal = billableLines.reduce((s, l) => s + (parseFloat(l.extra_amount) || 0), 0);
   const baseTotal = billableLines.reduce((s, l) => {
@@ -26063,6 +26383,15 @@ function InvoiceDocument({ invoiceId, data, preview, onBack, onChanged, onEditDr
           {!readOnly && !preview && inv.status !== 'sent' && <button onClick={() => setStatus('sent')} disabled={working} className="px-3 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-medium disabled:opacity-50">Mark sent</button>}
           {!readOnly && !preview && inv.status !== 'paid' && <button onClick={() => setStatus('paid')} disabled={working} className="px-3 py-1.5 rounded-lg bg-emerald-600 text-white text-xs font-medium disabled:opacity-50">Mark paid</button>}
           {!readOnly && !preview && inv.status !== 'draft' && <button onClick={() => setStatus('draft')} disabled={working} className="px-3 py-1.5 rounded-lg bg-white border border-stone-300 text-stone-600 text-xs">Back to draft</button>}
+          {/* The deliberate exception to the freeze. Owner only, and only on
+             an invoice that has a frozen copy to correct. Outline rather than
+             filled: this is a repair, not something to reach for by habit. */}
+          {ownerMayRefreshCompany && invoiceHasFrozenCompany && (
+            <button onClick={refreshCompanyDetails} disabled={working}
+              className="px-3 py-1.5 rounded-lg bg-white border border-stone-300 text-stone-600 text-xs flex items-center gap-1.5 disabled:opacity-50">
+              <RotateCcw size={13} /> {refreshing ? 'Updating\u2026' : 'Update company details'}
+            </button>
+          )}
           {/* The saved PDF is named after the document title, and browsers
              that still print a header use it too. "Summit Clean App" is our
              internal name; a customer should get "Invoice 490 - Carriage
@@ -26080,6 +26409,24 @@ function InvoiceDocument({ invoiceId, data, preview, onBack, onChanged, onEditDr
           {!readOnly && !preview && <button onClick={del} disabled={working} className="p-1.5 rounded-lg text-stone-400 hover:text-red-600 hover:bg-red-50"><Trash2 size={15} /></button>}
         </div>
       </div>
+
+      {/* Owner-only, print:hidden, and below the action bar so it can never
+         push the buttons around. Two jobs: confirm an update landed, and
+         explain the absence of the button on an invoice that went out before
+         the frozen copies existed — rather than leaving him hunting for a
+         button that is deliberately not there. */}
+      {ownerMayRefreshCompany && (refreshNote || (invoiceDidGoOut && !invoiceHasFrozenCompany)) && (
+        <div className="print:hidden px-5 py-2 bg-white border-b border-stone-200">
+          {refreshNote ? (
+            <div className="rounded-lg bg-emerald-50 border border-emerald-200 px-3 py-2 text-[11px] text-emerald-800 leading-snug">{refreshNote}</div>
+          ) : (
+            <div className="rounded-lg bg-stone-50 border border-stone-200 px-3 py-2 text-[11px] text-stone-500 leading-snug">
+              This invoice has no frozen copy of your company details, so it already prints your
+              current ones and there is nothing to update on it.
+            </div>
+          )}
+        </div>
+      )}
 
       {/* The sheet */}
       <div className="print-page max-w-[800px] mx-auto bg-white my-4 print:my-0 shadow-sm print:shadow-none px-8 py-8 text-stone-800"
@@ -27407,7 +27754,7 @@ function InvoicePaymentsReport({ employee, onSignOut, onOpenMessages, onLogoClic
 
   // Open the full invoice document (with its own print / mark-sent toolbar).
   if (viewId) {
-    return <InvoiceDocument invoiceId={viewId}
+    return <InvoiceDocument invoiceId={viewId} employee={employee}
       onBack={() => { setViewId(null); load(); }}
       onChanged={load} onEditDraft={null} />;
   }
@@ -27552,7 +27899,7 @@ function InvoicePaymentsReport({ employee, onSignOut, onOpenMessages, onLogoClic
               <button onClick={() => setGlanceId(null)} className="w-8 h-8 rounded-lg hover:bg-stone-100 flex items-center justify-center text-stone-500"><X size={16} /></button>
             </div>
             <div className="overflow-y-auto flex-1">
-              <InvoiceDocument invoiceId={glanceId} onBack={() => setGlanceId(null)} onChanged={load} onEditDraft={null} />
+              <InvoiceDocument invoiceId={glanceId} employee={employee} onBack={() => setGlanceId(null)} onChanged={load} onEditDraft={null} />
             </div>
           </div>
         </div>
@@ -28145,7 +28492,7 @@ function InvoiceView({ employee, onSignOut, onOpenMessages, onLogoClick, topTogg
     return <CompanyDetailsEditor onBack={() => setShowCompanyDetails(false)} />;
   }
   if (viewingInvoiceId) {
-    return <InvoiceDocument invoiceId={viewingInvoiceId}
+    return <InvoiceDocument invoiceId={viewingInvoiceId} employee={employee}
       onBack={() => { setViewingInvoiceId(null); setMode('saved'); }}
       onChanged={() => {}}
       onEditDraft={editDraft} />;

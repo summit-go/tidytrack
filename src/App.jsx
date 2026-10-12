@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "aug6-tap237";
+const BUILD_TAG = "oct12-tap239";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -4347,9 +4347,24 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   // know which block the cleaner is standing in right now.
   const activeBlockIdRef = useRef(null);
   useEffect(() => { activeBlockIdRef.current = activeBlock?.id || null; }, [activeBlock?.id]);
+  // Same reason as activeBlockIdRef: reload() must not reset the task the
+  // cleaner has running just because a teammate's task came back newer in
+  // the same block.
+  const activeTaskIdRef = useRef(null);
+  useEffect(() => { activeTaskIdRef.current = activeTask || null; }, [activeTask]);
   useEffect(() => { reload(); /* eslint-disable-next-line */ }, []);
 
-  const reload = async () => {
+  // reload({ adopt }) — `adopt` decides whether reload is allowed to put a
+  // block on screen that the cleaner isn't already in.
+  //
+  //   adopt: true  (mount) — re-attach the session. The app gets discarded
+  //     by the phone OS all the time; coming back into the block you were
+  //     in is the whole reason reload exists.
+  //   adopt: false (realtime refresh) — refresh what is on screen and
+  //     never change WHICH screen that is. Without this, every photo any
+  //     cleaner takes anywhere would yank a cleaner who had deliberately
+  //     paused back into a block.
+  const reload = async ({ adopt = true } = {}) => {
     // Only re-attach to shifts matching the current mode. Without this,
     // an owner who left a preview shift open and then opened the app
     // normally would resume the preview shift as a real one (or vice
@@ -4385,12 +4400,24 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
           // should come back with its photos, not just today's blocks.
           const dayStart = new Date(); dayStart.setHours(0, 0, 0, 0);
           dayStart.setDate(dayStart.getDate() - 6);
-          const { data: mine } = await supabase
+          let mineQ = supabase
             .from('work_blocks')
             .select('*, unit:units(*), party:parties(*), shift:shifts!inner(id, employee_id, customer_id), tasks(*, photos(*, taken_by_employee:employees!taken_by(name)))')
             .eq('shift.employee_id', employee.id)
             .eq('shift.customer_id', activeShift.customer_id)
-            .gte('start_time', dayStart.toISOString())
+            .gte('start_time', dayStart.toISOString());
+          // Match the mode, the same way the shift query above does. This
+          // query is keyed on employee + property, not on the shift, so
+          // without it an owner working a REAL shift merged in the
+          // preview blocks from their own look around the cleaner
+          // screens — and those blocks then showed up under Active as
+          // work that nobody had done. Null is treated as not-preview so
+          // blocks that predate the column still come back with their
+          // photos.
+          mineQ = previewMode
+            ? mineQ.eq('is_preview', true)
+            : mineQ.or('is_preview.is.null,is_preview.eq.false');
+          const { data: mine } = await mineQ
             .order('start_time', { ascending: true });
           if (mine && mine.length) {
             const have = new Set(allBlocks.map(b => b.id));
@@ -4412,9 +4439,36 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
         // deleted. Prefer the block they're actually in; failing that, the
         // one most recently started.
         const openBlocks = allBlocks.filter(b => !b.end_time);
+        // Only a block from the CURRENT shift may be adopted as the
+        // screen you land on. allBlocks deliberately reaches back seven
+        // days so a cleaner's photos come back with them — but a block
+        // left open last Tuesday was then handed straight back as "your
+        // current work", and because the screen chooser only tests
+        // `activeBlock` and not `activeBlock.end_time`, tapping a
+        // different bedroom dropped the cleaner inside Tuesday's block
+        // instead of the ready-to-start screen. That is the owner's bug
+        // 4. Earlier blocks stay LOADED — they just can't take the
+        // screen.
+        //
+        // Deliberately NOT filtered by staleness: a genuine three-hour
+        // move-out is still the block the cleaner is standing in, and
+        // sending her to the hub instead would strand her work.
+        //
+        // Do NOT justify this by saying the shift bounds it — an earlier
+        // version of this comment did and it was wrong both ways. The
+        // automatic clock-out is one hour of INACTIVITY (IDLE_LIMIT_MS),
+        // not elapsed time, and the 2h shift force-close only runs when
+        // someone opens the owner's "Who's where" panel. So a shift can
+        // genuinely stay open for a long time and this filter is doing
+        // the work on its own. It is still the right filter — unbounded
+        // in the safe direction, since a current-shift block is one the
+        // cleaner is plausibly in — but nothing else is backing it up.
+        const adoptable = openBlocks.filter(b => b.shift_id === activeShift.id);
         const live =
           openBlocks.find(b => b.id === activeBlockIdRef.current) ||
-          openBlocks[openBlocks.length - 1] ||
+          // On a refresh, never pick a block for someone who isn't in
+          // one. They either paused on purpose or are on the hub.
+          (adopt ? adoptable[adoptable.length - 1] : null) ||
           null;
         if (live) {
           setActiveBlock(live);
@@ -4431,9 +4485,40 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
           sameSpotOpen.forEach(b => (b.tasks || []).forEach(t => {
             if (!seen.has(t.id)) { seen.add(t.id); mergedTasks.push(t); }
           }));
-          setTasks(mergedTasks.length ? mergedTasks : (live.tasks || []));
-          const liveTask = mergedTasks.find(t => !t.end_time) || (live.tasks || []).find(t => !t.end_time);
-          if (liveTask) setActiveTask(liveTask.id);
+          const nextTasks = mergedTasks.length ? mergedTasks : (live.tasks || []);
+          setTasks(nextTasks);
+          // Whose task is this? A task carries the shift_id of whoever
+          // started it and a shift belongs to exactly one person, so this
+          // is an exact test, not a guess. Teammates who joined this block
+          // write their tasks against their OWN shift.
+          const isMyTask = (t) => !!t && t.shift_id === activeShift.id;
+          const stillRunning = nextTasks.find(t => t.id === activeTaskIdRef.current && !t.end_time);
+          if (stillRunning) {
+            // Her task is still going. Nothing to change.
+            setActiveTask(stillRunning.id);
+          } else if (adopt) {
+            // Mount only. Prefer her own running task; the old unfiltered
+            // fallback stays last so nothing that used to resume stops
+            // resuming.
+            const liveTask = nextTasks.find(t => !t.end_time && isMyTask(t))
+              || mergedTasks.find(t => !t.end_time)
+              || (live.tasks || []).find(t => !t.end_time);
+            if (liveTask) setActiveTask(liveTask.id);
+          }
+          // A REALTIME REFRESH ADOPTS NOTHING. This is deliberate and it
+          // is load-bearing. activeTask is the only dependency of the
+          // effect in BlockView that moves the cleaner to the Active tab,
+          // so setting it from a sync unmounts the New tab — and with it
+          // TaskCategoryPicker, whose ticked items and half-typed custom
+          // task name are all local state. A teammate starting a task in
+          // her block would have thrown her off the picker and discarded
+          // her selection. She would report that as "the app lost my
+          // items", not as a refresh bug.
+          //
+          // So on a refresh we leave activeTask exactly as it is. If it
+          // points at a task that has since finished, effectiveActiveId in
+          // BlockView already degrades gracefully without a state change,
+          // which means no tab jump.
         }
       } else {
         const { data: ts } = await supabase
@@ -4448,6 +4533,22 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     }
     setLoaded(true);
   };
+
+  // Make the cleaner's own screen re-read. Until now reload() had exactly
+  // ONE call site in the whole cleaner app — the mount effect above. No
+  // realtime, no refresh-on-focus, no timer. So a workblock opened on
+  // another phone never appeared, and a photo a teammate took in the
+  // cleaner's OWN workblock never appeared either. Both halves of the
+  // owner's bug 6, one cause.
+  //
+  // useAssignmentSync is the existing hook for this: it already listens
+  // on work_blocks, work_block_participants, tasks and photos, debounces
+  // bursts into one fetch, and is used by thirteen other screens. The
+  // cleaner's main screen was simply never wired to it.
+  //
+  // adopt: false — a refresh updates what is on screen without changing
+  // which screen it is. See reload's own note.
+  useAssignmentSync(() => reload({ adopt: false }), 'cleaner-shell');
 
   // Clock-in
   const startClockIn = () => setClockInFlow({ step: 'property' });
@@ -5700,7 +5801,16 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     // (the old version assumed success and updated local state even if
     // the DB write was rejected, which looked like "reopen does
     // nothing").
-    const { error: reErr } = await supabase.from('work_blocks').update({ end_time: null }).eq('id', block.id);
+    // auto_closed cleared on the way back open. If the sweep had closed
+    // this block, the flag told the profit report "the app made this end
+    // time up". Whoever closes it next — the cleaner, or the sweep again
+    // — decides that fresh, and a stale true would have excluded a
+    // properly finished block from every money number for good. Through
+    // autoClosedWrite so reopening still works with v73 not run.
+    const { error: reErr } = await autoClosedWrite(
+      { end_time: null, auto_closed: false },
+      (row) => supabase.from('work_blocks').update(row).eq('id', block.id),
+    );
     if (reErr) {
       console.error('[reopenBlock] reopen failed', reErr);
       alert('Could not reopen this work block: ' + reErr.message);
@@ -7158,7 +7268,20 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       onFinishHere={finishHere}
       onSwitchBedroom={switchBedroomWithinUnit}
       onReopen={reopenBlock}
-      myOpenBlocks={(workBlocks || []).filter(b => !b.end_time)}
+      myOpenBlocks={/* My other open blocks, scoped to the bedroom I am
+         standing in. workBlocks holds SEVEN DAYS of my own blocks (see
+         reload), so this used to list every bedroom I had ever left open
+         — a week of them — under "Active" at whichever bedroom I
+         happened to be in. That is the owner's bug 5: active blocks that
+         shouldn't exist. Nothing is hidden, only placed: each block now
+         appears at the bedroom it belongs to. Preview rows are filtered
+         in reload() itself, at the one query that could merge them in.
+         Stale ones DO stay — this card is the only place in the cleaner
+         app that can close them. */
+        (workBlocks || []).filter(b =>
+          !b.end_time
+          && b.unit_id === activeBlock.unit_id
+          && b.party_id === activeBlock.party_id)}
       onRequestItems={requestItemsIntoActiveBlock}
       onCloseBlock={closeOpenBlock}
       onGoToOpenBlock={async (b) => {
@@ -7249,23 +7372,45 @@ function WhosHerePopup({ propertyId, myEmployeeId, propertyName, onClose, onJoin
     // Open work_blocks for cleaners on shifts at THIS property.
     // main_section pulled so the popup can show which section each
     // cleaner is working (e.g. "Maria · Bathroom").
+    // unit_id/party_id are selected, not just the labels: presence is
+    // decided per BEDROOM and presentOpenBlockIds needs the ids to tell
+    // one bedroom from another.
     const { data: blocks } = await supabase.from('work_blocks')
-      .select('id, start_time, main_section, unit:units(label), party:parties(label), shift:shifts!inner(id, customer_id, employee:employees(id, name))')
+      .select('id, start_time, main_section, is_preview, unit_id, party_id, unit:units(label), party:parties(label), shift:shifts!inner(id, customer_id, is_preview, employee:employees(id, name))')
       .is('end_time', null)
       .order('start_time', { ascending: true });
     // Also include cleaners clocked in at this property without an
     // open work block ("standby" — at property but between bedrooms).
+    // is_preview selected so a preview SHIFT can be excluded too — see
+    // the standby note below.
     const { data: shifts } = await supabase.from('shifts')
-      .select('id, start_time, customer_id, employee:employees(id, name)')
+      .select('id, start_time, customer_id, is_preview, employee:employees(id, name)')
       .is('end_time', null)
       .eq('customer_id', propertyId);
-    const propertyBlocks = (blocks || []).filter(b => b.shift?.customer_id === propertyId);
-    const blockedShiftIds = new Set(propertyBlocks.map(b => b.shift?.id).filter(Boolean));
-    const standby = (shifts || []).filter(s => !blockedShiftIds.has(s.id));
+    // This popup is titled "Who's here" and had NO preview filter and NO
+    // staleness filter of any kind: a cleaner tapping it saw the owner's
+    // preview session, and anyone's forgotten block from days ago, listed
+    // under "In bedrooms" with a pulsing green dot and a Join button.
+    // The query above is app-wide, so the newest-per-cleaner rule is
+    // decided here before narrowing to this property.
+    const liveBlocks = (blocks || []).filter(b => !blockIsPreview(b));
+    const present = await presentOpenBlockIds(liveBlocks);
+    const propertyBlocks = liveBlocks.filter(b => b.shift?.customer_id === propertyId);
+    // blockedShiftIds comes off the RAW block list, and standby excludes
+    // preview shifts outright. Dropping the preview BLOCK without doing
+    // both relocated the phantom instead of removing it: the owner's
+    // preview shift was no longer "blocked" by a block, and the shifts
+    // query has no preview filter of its own, so the owner reappeared on
+    // every cleaner's popup under "On standby". Two guards because either
+    // one alone leaves a hole — a preview shift with no block yet is only
+    // caught by the is_preview test.
+    const blockedShiftIds = new Set((blocks || []).map(b => b.shift?.id).filter(Boolean));
+    const standby = (shifts || []).filter(s => !s.is_preview && !blockedShiftIds.has(s.id));
     setRows([
       ...propertyBlocks.map(b => ({
         kind: 'block',
         id: b.id,
+        present: present.has(b.id),
         employeeId: b.shift?.employee?.id,
         name: b.shift?.employee?.name || '?',
         unitLabel: b.unit?.label,
@@ -7294,7 +7439,10 @@ function WhosHerePopup({ propertyId, myEmployeeId, propertyName, onClose, onJoin
 
   // Exclude self — the cleaner already knows where THEY are
   const others = rows.filter(r => r.employeeId !== myEmployeeId);
-  const inBedrooms = others.filter(r => r.kind === 'block');
+  // "In bedrooms" means people in bedrooms. Blocks left open behind
+  // somebody are listed below, under their own heading, still joinable.
+  const inBedrooms = others.filter(r => r.kind === 'block' && r.present);
+  const leftOpen = others.filter(r => r.kind === 'block' && !r.present);
   const onStandby = others.filter(r => r.kind === 'standby');
 
   return (
@@ -7365,6 +7513,48 @@ function WhosHerePopup({ propertyId, myEmployeeId, propertyName, onClose, onJoin
                         </div>
                       );
                     })}
+                  </div>
+                </div>
+              )}
+              {/* Work left open at this property — nobody standing in it,
+                 but the block is real, it still needs closing, and Join
+                 still works. Named separately so a cleaner reading
+                 "In bedrooms" gets people, not rows. */}
+              {leftOpen.length > 0 && (
+                <div>
+                  <div className="text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1.5">
+                    Left open ({leftOpen.length})
+                  </div>
+                  <div className="space-y-1.5">
+                    {leftOpen.map(r => (
+                      <div key={r.id} className="flex items-center gap-2 px-3 py-2.5 rounded-xl bg-white border border-stone-200">
+                        <span className="w-2 h-2 rounded-full bg-stone-400 flex-shrink-0" />
+                        <div className="flex-1 min-w-0">
+                          <div className="text-sm text-stone-900">
+                            <span className="font-bold">{r.name}</span>
+                            {r.unitLabel && (
+                              <>
+                                <span className="text-stone-400"> · </span>
+                                <span className="font-mono text-xs text-stone-700">{r.unitLabel}</span>
+                              </>
+                            )}
+                            {r.partyLabel && (
+                              <>
+                                <span className="text-stone-400"> · </span>
+                                <span className="italic text-stone-500 text-xs">{r.partyLabel}</span>
+                              </>
+                            )}
+                          </div>
+                          <div className="text-[11px] font-mono text-stone-500">{openSinceNote({ start_time: r.startTime })}</div>
+                        </div>
+                        {onJoinBlock && (
+                          <button onClick={() => { onJoinBlock({ id: r.id }); onClose(); }}
+                            className="text-[10px] uppercase tracking-wider font-mono px-2 py-1 rounded-full bg-stone-900 hover:bg-stone-800 text-stone-50 font-bold flex items-center gap-1 active:scale-95 flex-shrink-0">
+                            <Plus size={10} /> Join
+                          </button>
+                        )}
+                      </div>
+                    ))}
                   </div>
                 </div>
               )}
@@ -7514,13 +7704,26 @@ function OthersActivityToday({ propertyId, myEmployeeId, onOpenBedroomHistory })
   useEffect(() => {
     (async () => {
       const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
-      const { data } = await supabase.from('work_blocks')
-        .select('id, start_time, end_time, work_notes, unit:units(id, label), party:parties(id, label), shift:shifts!inner(customer_id, employee:employees(id, name)), tasks(id, photos(id))')
-        .eq('shift.customer_id', propertyId)
-        .gte('start_time', todayStart.toISOString())
-        .order('start_time', { ascending: false });
+      const [{ data }, present] = await Promise.all([
+        supabase.from('work_blocks')
+          .select('id, start_time, end_time, work_notes, is_preview, unit:units(id, label), party:parties(id, label), shift:shifts!inner(customer_id, is_preview, employee:employees(id, name)), tasks(id, photos(id))')
+          .eq('shift.customer_id', propertyId)
+          .gte('start_time', todayStart.toISOString())
+          .order('start_time', { ascending: false }),
+        // Property-scoped query, so presence is answered app-wide.
+        fetchPresentBlockIds(),
+      ]);
       const mine = myEmployeeId;
-      setBlocks((data || []).filter(b => b.shift?.employee?.id !== mine));
+      // Preview rows dropped: the owner looking around the cleaner
+      // screens is not another cleaner who worked here today. `attended`
+      // separates "someone is in this block" from "this block is open",
+      // which is what the pulsing dot and "working now" used to claim
+      // off end_time alone.
+      setBlocks((data || [])
+        .filter(b => b.shift?.employee?.id !== mine)
+        .filter(b => !blockIsPreview(b))
+        .filter(b => !blockIsEmptyShell(b))
+        .map(b => ({ ...b, attended: present.has(b.id) })));
       setLoaded(true);
     })();
   }, [propertyId, myEmployeeId]);
@@ -7539,13 +7742,16 @@ function OthersActivityToday({ propertyId, myEmployeeId, onOpenBedroomHistory })
         const photoCount = (b.tasks || []).reduce((sum, t) => sum + (t.photos?.length || 0), 0);
         const isDone = !!b.end_time;
         const name = b.shift?.employee?.name || 'A cleaner';
+        // "Working now" only for a block somebody is actually in. An open
+        // block they walked away from says so instead.
+        const live = !isDone && b.attended;
         return (
-          <div key={b.id} className={`rounded-2xl p-4 border ${isDone ? 'bg-white border-stone-200' : 'bg-blue-50 border-blue-200'}`}>
+          <div key={b.id} className={`rounded-2xl p-4 border ${live ? 'bg-blue-50 border-blue-200' : 'bg-white border-stone-200'}`}>
             <div className="flex items-start gap-2">
-              <div className={`w-2 h-2 rounded-full mt-2 flex-shrink-0 ${isDone ? 'bg-stone-300' : 'bg-blue-500 animate-pulse'}`} />
+              <div className={`w-2 h-2 rounded-full mt-2 flex-shrink-0 ${live ? 'bg-blue-500 animate-pulse' : 'bg-stone-300'}`} />
               <div className="flex-1 min-w-0">
-                <div className="text-xs font-mono uppercase tracking-wider text-blue-700 mb-0.5">
-                  {name}{isDone ? '' : ' · working now'}
+                <div className={`text-xs font-mono uppercase tracking-wider mb-0.5 ${live ? 'text-blue-700' : 'text-stone-500'}`}>
+                  {name}{isDone ? '' : (live ? ' · working now' : ' · left open')}
                 </div>
                 <div className="font-serif text-base text-stone-900 truncate">
                   {unitPartyLabel(b.unit?.label, b.party?.label)}
@@ -7857,7 +8063,17 @@ function FloorFocusList({ propertyId, workBlocks, onGoToBedroom }) {
         .filter(Boolean);
 
       // Anchor = the apartment the cleaner is currently/most-recently in.
-      const myActive = (workBlocks || []).find(b => !b.end_time);
+      // `workBlocks` is sorted start_time ASCENDING and holds SEVEN DAYS
+      // (see reload), so a plain `.find(b => !b.end_time)` handed back the
+      // OLDEST open block — last Tuesday's — as "where the cleaner is now",
+      // and anchored this whole "where to clean next" list on it. Same
+      // defect step 4 just fixed in reload's block adoption. This screen is
+      // behind a {false && …} gate today, so it is dead; fixed anyway, per
+      // the convention stated at YourJobsCard — the filter has to be right
+      // in every renderer BEFORE one gets switched back on.
+      const myActive = (workBlocks || []).slice()
+        .sort((a, b) => new Date(b.start_time) - new Date(a.start_time))
+        .find(b => !b.end_time);
       const myRecent = (workBlocks || []).slice()
         .sort((a, b) => new Date(b.start_time) - new Date(a.start_time))[0];
       const anchorBlock = myActive || myRecent;
@@ -8659,8 +8875,10 @@ async function saveAssignees(assignmentId, currentIds, nextIds, actorId, audienc
 // show to cleaners. Deliberately NOT WhosWherePanel: that one is the
 // owner widget and force-closes stale shifts as a side effect of
 // loading. A cleaner peeking at the board must never write to anyone
-// else's shift, so this one only reads. It applies the same 2h cutoff
-// client-side so a stale session never shows as active.
+// else's shift, so this one only reads. It applies the same
+// per-property bedroom time limit client-side, so a stale session
+// never shows as active and this board never disagrees with the
+// owner's panel about who is on the clock.
 // =================================================================
 function WhosWorkingNowModal({ employee, onClose }) {
   const { canSeeJob } = useJobVisibility();
@@ -8670,17 +8888,27 @@ function WhosWorkingNowModal({ employee, onClose }) {
   useEffect(() => {
     let cancelled = false;
     const load = async () => {
-      const cutoffMs = Date.now() - STALE_FORCE_MIN * 60 * 1000;
       const [blocksRes, shiftsRes] = await Promise.all([
         supabase.from('work_blocks')
-          .select('id, start_time, unit_id, party_id, unit:units(label), party:parties(label), shift:shifts!inner(id, is_preview, employee:employees(id, name), customer:customers(id, name))')
+          .select('id, start_time, unit_id, party_id, is_preview, unit:units(label), party:parties(label), shift:shifts!inner(id, customer_id, is_preview, employee:employees(id, name), customer:customers(id, name))')
           .is('end_time', null).order('start_time', { ascending: true }),
         supabase.from('shifts')
-          .select('id, start_time, is_preview, employee:employees(id, name), customer:customers(id, name)')
+          .select('id, start_time, customer_id, is_preview, employee:employees(id, name), customer:customers(id, name)')
           .is('end_time', null),
       ]);
-      const blocks = (blocksRes.data || []).filter(b => !b.shift?.is_preview);
-      const blockedShiftIds = new Set(blocks.map(b => b.shift?.id).filter(Boolean));
+      // This query is app-wide, so the newest-per-cleaner rule can be
+      // decided from these rows directly. It replaces the old
+      // preview-plus-2h-cutoff pair: those dropped stale and preview
+      // rows but still listed a cleaner once per open block, so one
+      // person who had walked through three bedrooms appeared three
+      // times on a board titled "Who's working".
+      const allOpen = blocksRes.data || [];
+      const present = await presentOpenBlockIds(allOpen);
+      const blocks = allOpen.filter(b => present.has(b.id));
+      // Shift-level standby still keys off EVERY open block, not just
+      // the present ones — a cleaner with an open block is at a bedroom,
+      // not on standby, whichever block we picked as her current one.
+      const blockedShiftIds = new Set(allOpen.map(b => b.shift?.id).filter(Boolean));
       const standby = (shiftsRes.data || []).filter(s => !s.is_preview && !blockedShiftIds.has(s.id));
       // This board names the apartment every teammate is standing in, which
       // is a way to read an apartment number off a cleaning that was
@@ -8712,7 +8940,7 @@ function WhosWorkingNowModal({ employee, onClose }) {
         });
       }
       const out = [
-        ...blocks.filter(b => new Date(b.start_time).getTime() > cutoffMs).map(b => ({
+        ...blocks.map(b => ({
           kind: 'block', id: b.id,
           cleanerName: b.shift?.employee?.name || '?',
           isMe: b.shift?.employee?.id === employee?.id,
@@ -8721,7 +8949,14 @@ function WhosWorkingNowModal({ employee, onClose }) {
             ? '' : unitPartyLabel(b.unit?.label, b.party?.label),
           startTime: b.start_time,
         })),
-        ...standby.filter(s => new Date(s.start_time).getTime() > cutoffMs).map(s => ({
+        // Standby rows are shifts, not blocks, but the rule has to be the
+        // same rule as everywhere else: blockIsStale needs a start_time
+        // and a property, and blockPropertyId reads a shift row's own
+        // customer_id — selected above for exactly this reason. A flat
+        // two-hour cutoff here said a cleaner clocked in at a five-hour
+        // property was no longer on the clock at two hours, while the
+        // owner's panel said something else.
+        ...standby.filter(s => !blockIsStale(s)).map(s => ({
           kind: 'standby', id: s.id,
           cleanerName: s.employee?.name || '?',
           isMe: s.employee?.id === employee?.id,
@@ -8802,39 +9037,418 @@ function WhosWorkingNowModal({ employee, onClose }) {
 }
 
 // =================================================================
-// LIVE PRESENCE — who is physically in a bedroom RIGHT NOW, keyed
-// "unitId:partyId". Work blocks carry unit_id/party_id, not
-// assignment_id, so that pair is the only thing that lines a live
-// block up with a job card.
+// PRESENCE vs OPEN-NESS — two different facts, one stored column.
 //
-// Shared on purpose: the "X is here" chip was previously reinvented at
-// each call site, which is why it showed on some cards and not others.
-// Stale blocks are dropped using the same 2h rule the rest of the app
-// uses — someone who forgot to clock out three days ago is not "here".
+// `work_blocks.end_time IS NULL` gets read all over this app as "a
+// person is standing in this bedroom right now." It isn't. A work block
+// is left open DELIBERATELY when a cleaner walks from one bedroom to the
+// next: switchBedroomWithinUnit does it on purpose so 101-1 keeps
+// showing under Active for whoever picks it up, and four separate
+// comments in this file record force-closing being tried and reverted.
+// So one cleaner walking 101-1 → 101-2 → 101-3 leaves three open rows,
+// and every "who's here" screen used to report her in all three.
+//
+// The app stores open-ness. It does not store presence. Presence is
+// derived here instead, from one rule:
+//
+//   A cleaner is IN exactly one bedroom — their NEWEST open block, if it
+//   started inside the staleness window and isn't a preview session.
+//   Every other open block of theirs is UNFINISHED WORK: still listed,
+//   still findable, still joinable, never described as a person being
+//   present.
+//
+// One shared set of helpers on purpose. The "X is here" chip was
+// reinvented at ten call sites, which is why two of them filtered the
+// owner's preview sessions out and three applied the 2h rule.
 // =================================================================
-async function fetchLivePresence() {
+
+// ─────────────────────────────────────────────────────────────────────
+// THE PRESENCE WINDOW. How long a work block may stay open before the
+// app stops treating it as a person standing in a bedroom.
+//
+// Still exactly ONE place answers "is someone here" — it just takes the
+// property into account now. The number is PER PROPERTY, stored on
+// customers.presence_window_minutes, and set either by the owner on the
+// Edit Property screen ("How long can a cleaner be in one bedroom
+// before we assume they've moved on?") or by v72_presence_window.sql.
+//
+// Why per property: a Carriage Cove bedroom is a two-hour job and a
+// Bridges / Citifront / Legends one can run five. One number made a real
+// cleaner at the bigger properties read as "may be finished" while she
+// was standing in the room.
+//
+// The default is 120 and it is load-bearing: every property the owner has
+// not deliberately set keeps exactly the behaviour it had before this
+// existed. Raising a property's number is the safe direction — it makes
+// the app more willing to say a cleaner is present.
+//
+// What this is NOT: the automatic clock-out is one hour of INACTIVITY
+// (IDLE_LIMIT_MS), not elapsed time, and the shift force-close in
+// cleanupStale only runs when someone opens the owner's "Who's where"
+// panel.
+//
+// THIS NUMBER IS A DISPLAY SETTING. IT IS NOT A BILLING MULTIPLIER.
+//
+// It was made into one for exactly one release and it moved recorded
+// hours in both directions, so the rule is written down here. TWO
+// numbers, never again the same number:
+//
+//   1. WHETHER cleanupStale's hard pass may force-close an abandoned
+//      row — STALE_FORCE_MIN (120) floored against that row's own
+//      property's window, i.e. Math.max(120, window). The FLOOR means
+//      lowering a window can never close anything earlier than the app
+//      would have closed it anyway, so a live cleaner cannot be clocked
+//      out by someone editing a property. PER PROPERTY rather than the
+//      longest window in use, so a 120-minute property's forgotten rows
+//      are not held open three extra hours because a different property
+//      is set to 300.
+//
+//   2. WHAT end_time an abandoned work block records — the last moment
+//      anyone can show work actually happened: the latest end_time
+//      among that block's OWN completed tasks, or its start_time if it
+//      has none. Never this window, never NOW(). A block with no
+//      finished task records zero hours, which is the honest answer
+//      because nobody can attest to any work in it.
+//
+// Why (2) must not be derived from the window: InvoiceView.generate()
+// bills hourly work straight off end_time - start_time with no ceiling
+// of any kind (MAX_BLOCK_HOURS only ever reaches the profit report), the
+// owner also pays hourly at the flat-rate properties sometimes, and pay
+// method is chosen per shift at pay time rather than by the property. So
+// block duration is money at EVERY property. Deriving it from the window
+// billed 90 minutes of real work as 0.2500 h when a window was set to
+// 15, and would have billed 24 hours on one bedroom at the field's 1440
+// ceiling.
+//
+// The derived stamp is also stable: the same abandoned block records the
+// same hours whenever the sweep runs, so an invoice cannot change amount
+// because someone opened a panel. NOW() never managed that.
+//
+// Shifts still get end_time = NOW(), exactly as on main — what a shift
+// is worth is the owner's call and not this code's. Only their cutoff
+// moved, from the longest window in use to rule 1. That leaves one real
+// consequence the owner has to be told, and the Edit Property help text
+// tells him: raising a window above 120 leaves a shift nobody clocked
+// out of open that much longer before the safety net closes it, and a
+// shift counts time right up to when it is closed. Lowering one changes
+// nobody's hours at all.
+// ─────────────────────────────────────────────────────────────────────
+const PRESENCE_WINDOW_DEFAULT_MIN = 120;
+// Guard rails for the owner-editable field and for anything read back out
+// of the database, so one fat-fingered value can't make every cleaner
+// permanently present or permanently absent.
+const PRESENCE_WINDOW_MIN_MIN = 15;
+const PRESENCE_WINDOW_MAX_MIN = 1440; // 24h
+const clampPresenceWindow = (n) => {
+  const v = Math.round(Number(n));
+  if (!Number.isFinite(v)) return PRESENCE_WINDOW_DEFAULT_MIN;
+  return Math.min(PRESENCE_WINDOW_MAX_MIN, Math.max(PRESENCE_WINDOW_MIN_MIN, v));
+};
+
+// SURVIVING THE COLUMN NOT BEING THERE — same discipline as
+// audienceSelect/audienceWrite above, for the same reason: the owner
+// uploads App.jsx through the GitHub web editor and may well not have run
+// v72 yet. If presence_window_minutes is absent we note it once, stop
+// asking for it, and every property falls back to 120 — which is the
+// behaviour the app had yesterday. Nothing breaks and no screen blanks.
+function isMissingPresenceWindowColumn(error) {
+  const m = (error?.message || '') + ' ' + (error?.details || '');
+  return /presence_window_minutes/i.test(m) && /does not exist|could not find|schema cache|unknown column/i.test(m);
+}
+let PRESENCE_WINDOW_COLUMN_MISSING = false;
+
+// propertyId → minutes. null means "not loaded yet", which reads as the
+// default rather than as "no properties have a window".
+let presenceWindowCache = null;
+let presenceWindowLoadedAt = 0;
+let presenceWindowInFlight = null;
+// Re-read occasionally so a cleaner's long-lived session picks up a change
+// the owner made mid-shift without needing a reload.
+const PRESENCE_WINDOW_TTL_MS = 5 * 60 * 1000;
+
+// Called after the owner saves a property so the new number takes effect
+// on the next presence read instead of up to the TTL later.
+//
+// EXPIRES the cache rather than erasing it. If the refresh that follows
+// fails, the last known windows are still better than falling back to 120
+// for every property — that is the shorter window, so it would make a real
+// cleaner at Bridges read as "may be finished" because of a network blip.
+function invalidatePresenceWindows() {
+  presenceWindowLoadedAt = 0;
+  presenceWindowInFlight = null;
+}
+
+// Idempotent and cheap to call: concurrent callers share one request, and
+// a warm cache costs nothing. Every async presence entry point awaits it,
+// so no screen can compute presence against an unloaded cache.
+async function ensurePresenceWindows() {
+  if (PRESENCE_WINDOW_COLUMN_MISSING) return;
+  const fresh = presenceWindowCache && (Date.now() - presenceWindowLoadedAt) < PRESENCE_WINDOW_TTL_MS;
+  if (fresh) return;
+  if (presenceWindowInFlight) return await presenceWindowInFlight;
+  presenceWindowInFlight = (async () => {
+    const { data, error } = await supabase.from('customers')
+      .select('id, presence_window_minutes');
+    if (error) {
+      if (isMissingPresenceWindowColumn(error)) {
+        // v72 hasn't been run. Stop asking; everything is 120.
+        PRESENCE_WINDOW_COLUMN_MISSING = true;
+        console.warn('[presence] customers.presence_window_minutes is missing — every property falls back to '
+          + PRESENCE_WINDOW_DEFAULT_MIN + ' minutes. Run v72_presence_window.sql.');
+      } else {
+        console.warn('[presence] could not read per-property windows; using the default', error);
+      }
+      // Leave the cache as it was. A failed read must not mean "no
+      // windows" — that would silently shorten every property to 120.
+      presenceWindowInFlight = null;
+      return;
+    }
+    const m = new Map();
+    (data || []).forEach(c => {
+      if (c?.id == null) return;
+      // null/absent → default. Only a real number overrides it.
+      if (c.presence_window_minutes != null) m.set(c.id, clampPresenceWindow(c.presence_window_minutes));
+    });
+    presenceWindowCache = m;
+    presenceWindowLoadedAt = Date.now();
+    presenceWindowInFlight = null;
+  })();
+  return await presenceWindowInFlight;
+}
+
+// Sync lookup. Safe before the cache loads and safe if it never does.
+const presenceWindowFor = (propertyId) => {
+  if (!propertyId || !presenceWindowCache) return PRESENCE_WINDOW_DEFAULT_MIN;
+  const v = presenceWindowCache.get(propertyId);
+  return v == null ? PRESENCE_WINDOW_DEFAULT_MIN : v;
+};
+
+// presenceWindowMinMin() used to live here: the shortest window in use,
+// which is how far back cleanupStale's hard pass had to look when a
+// lowered window could shorten the force-close. It cannot any more —
+// every row's cutoff is at least STALE_FORCE_MIN — so the net is that
+// floor and nothing here is read to compute it. Deleted rather than left
+// behind: a helper whose comment says it is the net cleanupStale casts,
+// when it is not, is how the two numbers got merged in the first place.
+
+// Which property a block belongs to. Work blocks carry no customer_id of
+// their own, so it comes off the shift — which is why every presence query
+// selects shift.customer_id.
+const blockPropertyId = (b) =>
+  b?.shift?.customer_id || b?.shift?.customer?.id || b?.customer_id || null;
+
+// The owner's preview sessions write real work_blocks rows — is_preview
+// is stamped on the block AND on its shift by every creation path. Both
+// are checked because a screen's query may embed only one of them, and
+// rows that predate preview mode carry null on both.
+const blockIsPreview = (b) => !!(b?.is_preview || b?.shift?.is_preview);
+
+// Open for longer than its own property's presence window.
+//
+// A missing start_time counts as stale (nothing to measure, so don't
+// claim presence). An unparseable one also counts as stale: NaN fails
+// every comparison, so without this a corrupt row would read as present
+// forever AND would lose every "is this newer" test, letting it mask a
+// real newer block.
+//
+// windowMin is resolved from the block's property by default. Callers
+// that have already awaited ensurePresenceWindows() get the property's
+// real number; anything running before that gets the 120 default, which
+// is the pre-existing behaviour rather than a new failure.
+const blockIsStale = (b, now = Date.now(), windowMin = presenceWindowFor(blockPropertyId(b))) => {
+  const t = b?.start_time ? new Date(b.start_time).getTime() : NaN;
+  if (!Number.isFinite(t)) return true;
+  return (now - t) >= clampPresenceWindow(windowMin) * 60 * 1000;
+};
+
+// Which cleaner an open block belongs to. Falls back to the shift and
+// then the block itself, so a row whose employee embed didn't resolve
+// counts as one person of its own instead of merging with every other
+// unresolved row — which would wrongly suppress all but one of them.
+const blockCleanerKey = (b) =>
+  b?.shift?.employee?.id || b?.employee_id || b?.shift?.id || b?.shift_id || `b:${b?.id}`;
+
+// Which bedroom a block is at. The unit alone isn't enough — presence is
+// per bedroom, and two bedrooms in one apartment are different places.
+const blockBedroomKey = (b) => `${b?.unit_id || ''}:${b?.party_id || ''}`;
+
+// Given open work blocks, return the Set of ids that represent a person
+// actually present.
+//
+// Presence is per BEDROOM, not per block, and that distinction is the
+// whole correctness of this function. ensureActiveBlockForSection opens
+// a new block per section and deliberately leaves the previous one open
+// — its own comment says so — so a cleaner doing a normal full bedroom
+// (bedroom → vanity → bathroom) routinely has THREE open blocks at the
+// one bedroom she is standing in. Keying presence on her newest *block*
+// made the other two read "open since … — may be finished" while she was
+// in the room, which is the inverse of the bug this release fixes and
+// worse than it.
+//
+// So: her newest qualifying block decides WHERE she is, and then every
+// qualifying block of hers AT THAT BEDROOM counts as present.
+//
+// IMPORTANT: pass blocks from a scope WIDE ENOUGH to contain the
+// cleaner's newest one. A bedroom-scoped list can't answer this — her
+// newer block may be in a bedroom the query never asked for, and she'd
+// read as present in the old one. Bedroom-scoped screens call
+// fetchPresentBlockIds() instead of computing this locally.
+//
+// Rows must carry unit_id and party_id (bedroom keying) and
+// shift.customer_id (per-property window). Omitting the bedroom pair
+// collapses every block to one key and omitting the property falls back
+// to 120 — both the safe direction, both still wrong, so every caller
+// selects all three.
+//
+// The pure core is split out so the per-property window can be injected
+// and tested without a database. Callers use the async presentOpenBlockIds
+// below, which cannot run before the windows are loaded.
+function presentOpenBlockIdsWith(openBlocks, now, windowFor) {
+  const qualifying = (openBlocks || []).filter(b =>
+    b && !b.end_time && !blockIsPreview(b)
+    && !blockIsStale(b, now, windowFor(blockPropertyId(b))));
+  // Newest qualifying block per cleaner — this only decides where she is.
+  const newestByCleaner = new Map();
+  qualifying.forEach(b => {
+    const k = blockCleanerKey(b);
+    const prev = newestByCleaner.get(k);
+    if (!prev || new Date(b.start_time) > new Date(prev.start_time)) newestByCleaner.set(k, b);
+  });
+  const bedroomByCleaner = new Map();
+  newestByCleaner.forEach((b, k) => bedroomByCleaner.set(k, blockBedroomKey(b)));
+  // Then every qualifying block she has at that bedroom is her being here.
+  const out = new Set();
+  qualifying.forEach(b => {
+    if (blockBedroomKey(b) === bedroomByCleaner.get(blockCleanerKey(b))) out.add(b.id);
+  });
+  return out;
+}
+
+// The one everyone calls. Async specifically so it cannot be used before
+// the per-property windows are loaded — this file's documented failure
+// mode is a rule landing in one copy and not its siblings, and "remember
+// to await ensurePresenceWindows() first" is exactly that trap. Here it
+// is impossible to forget.
+async function presentOpenBlockIds(openBlocks, now = Date.now()) {
+  await ensurePresenceWindows();
+  return presentOpenBlockIdsWith(openBlocks, now, presenceWindowFor);
+}
+
+// Fail-open answer for "is this block present". Used when the app-wide
+// read that decides presence did not complete — see fetchPresentBlockIds.
+const PRESENCE_UNKNOWN = { has: () => true, unknown: true };
+
+// What to say about an open block nobody is standing in. Never "Maria
+// here" — it is her work, left open, and the Join button still works on
+// it. The owner needs to find and close these, so they stay visible;
+// only the false claim goes.
+const openSinceNote = (b) => `open since ${fmtClock(b?.start_time)} — may be finished`;
+
+// A work block with no items, no photos and no notes represents no work.
+// It is the mis-tap the owner reported as a duplicate: two cleaners tap
+// Start on the same bedroom, the second finds every item greyed out in
+// the picker, takes nothing and wanders off.
+//
+// Age is part of the test on purpose. Every creation path makes the row
+// BEFORE the cleaner picks anything ("Targets stay pending until the
+// cleaner explicitly picks them"), so a legitimate brand-new block is
+// empty too — hiding those would make a block unjoinable in the first
+// minutes of its life, exactly when a second cleaner wants to join it.
+// Past the staleness window an empty block is abandoned, not new.
+const blockIsEmptyShell = (b, now = Date.now()) =>
+  !!b
+  && !b.end_time
+  && blockIsStale(b, now)
+  && !String(b.work_notes || '').trim()
+  && (b.tasks || []).length === 0;
+
+// One app-wide read of every open work block, with just the columns the
+// presence rules need. fetchLivePresence and fetchPresentBlockIds are
+// both built on it so the "who is actually here" answer is computed from
+// the same rows either way.
+//
+// Returns { rows, complete }. `complete` is false if ANY page failed or
+// the page cap was hit, because a partial list is worse than no list
+// here: newest-per-cleaner computed over half the open blocks will
+// confidently pick the wrong one. Callers must not treat an incomplete
+// read as an answer.
+async function fetchOpenBlockRows() {
+  // Load the per-property windows here, at the single app-wide read both
+  // fetchLivePresence and fetchPresentBlockIds go through. Doing it here
+  // rather than only inside presentOpenBlockIds matters because
+  // fetchLivePresence calls blockIsStale directly, including on the
+  // incomplete-read path where presentOpenBlockIds is never reached.
+  await ensurePresenceWindows();
   let rows = []; const PAGE = 1000;
   for (let from = 0; ; from += PAGE) {
     const { data, error } = await supabase.from('work_blocks')
-      .select('id, unit_id, party_id, start_time, shift:shifts!inner(is_preview, employee:employees(id, name))')
+      .select('id, unit_id, party_id, start_time, is_preview, shift:shifts!inner(customer_id, is_preview, employee:employees(id, name))')
       .is('end_time', null)
       .range(from, from + PAGE - 1);
-    if (error || !data) break;
+    if (error || !data) {
+      console.warn('[presence] open-block read failed; presence unknown', error);
+      return { rows, complete: false };
+    }
     rows = rows.concat(data);
     if (data.length < PAGE) break;
-    if (from > 100000) break;
+    if (from > 100000) return { rows, complete: false };
   }
-  const cutoff = Date.now() - STALE_FORCE_MIN * 60 * 1000;
+  return { rows, complete: true };
+}
+
+// The present-block membership test, computed app-wide. For screens whose
+// own query is scoped to one bedroom or one property.
+//
+// FAILS OPEN, on purpose. Every caller uses this only to decide whether
+// to say "Maria here" about a row IT already fetched successfully. If
+// this read fails, returning an empty Set would quietly turn every chip
+// on ten screens grey and read "may be finished" app-wide — the exact
+// inverse of the bug being fixed, with nothing shown to the cleaner and
+// no error to see. Before this helper existed each screen computed
+// presence from rows it already had, so a failure was confined to one
+// screen and showed the chip. PRESENCE_UNKNOWN restores that: we fall
+// back to the caller's own successful query and say somebody is here.
+async function fetchPresentBlockIds() {
+  const { rows, complete } = await fetchOpenBlockRows();
+  if (!complete) return PRESENCE_UNKNOWN;
+  return await presentOpenBlockIds(rows);
+}
+
+// LIVE PRESENCE — who is physically in a bedroom RIGHT NOW, keyed
+// "unitId:partyId". Work blocks carry unit_id/party_id, not
+// assignment_id, so that pair is the only thing that lines a live block
+// up with a job card. Same return shape as before; the change is that a
+// cleaner's older open blocks no longer put her in two bedrooms at once.
+// Also fails open: on an incomplete read it falls back to the rule this
+// function used before the shared helper existed — every non-preview,
+// non-stale open block counts — rather than reporting an empty property.
+// The preview and staleness tests are repeated here rather than left to
+// presentOpenBlockIds precisely so that fallback is still filtered.
+async function fetchLivePresence() {
+  const { rows, complete } = await fetchOpenBlockRows();
+  const present = complete ? await presentOpenBlockIds(rows) : PRESENCE_UNKNOWN;
   const m = {};
   rows.forEach(b => {
-    if (b.shift?.is_preview) return;
+    if (blockIsPreview(b)) return;
+    if (blockIsStale(b)) return;
+    if (!present.has(b.id)) return;
     if (!b.unit_id) return;
-    if (new Date(b.start_time).getTime() <= cutoff) return;
     const k = `${b.unit_id}:${b.party_id || ''}`;
     (m[k] = m[k] || []).push({
       id: b.shift?.employee?.id,
       name: b.shift?.employee?.name || '?',
       since: b.start_time,
+    });
+  });
+  // One entry per cleaner per bedroom. Presence is now per bedroom, so a
+  // cleaner with three section blocks at one bedroom would otherwise be
+  // named three times in the same chip ("Maria, Maria, Maria here").
+  Object.keys(m).forEach(k => {
+    const seen = new Set();
+    m[k] = m[k].filter(p => {
+      const id = p.id || `n:${p.name}`;
+      if (seen.has(id)) return false;
+      seen.add(id); return true;
     });
   });
   return m;
@@ -9043,18 +9657,32 @@ function AssignmentWorkHistory({ propertyId, unitId, partyId, employee, defaultO
     if (!show || !unitId) return;
     let cancelled = false;
     (async () => {
-      const [tRes, bRes] = await Promise.all([
+      // This panel is on the ready-to-start screen, which is exactly where
+      // the bug-4 fix now routes a cleaner who taps a bedroom — so it is
+      // the most-read "what has happened here" surface in the app, and it
+      // had none of the presence rules. is_preview is selected and
+      // presence is fetched app-wide, same as every other sibling.
+      const [tRes, bRes, present] = await Promise.all([
         supabase.from('assignment_targets')
           .select('id, status, completed_at, assignment_id, assignment:assignments(id, assignment_type, title, created_at, deleted_at)')
           .eq('unit_id', unitId).eq('party_id', partyId),
         supabase.from('work_blocks')
-          .select('id, start_time, end_time, unit_id, party_id, assignment_id, shift:shifts!inner(customer_id, employee:employees(id, name)), tasks(*, photos(*))')
+          .select('id, start_time, end_time, unit_id, party_id, assignment_id, is_preview, shift:shifts!inner(customer_id, is_preview, employee:employees(id, name)), tasks(*, photos(*))')
           .eq('unit_id', unitId).eq('party_id', partyId)
           .order('start_time', { ascending: false }),
+        fetchPresentBlockIds(),
       ]);
       if (cancelled) return;
       const targets = (tRes.data || []).filter(t => t.assignment && !t.assignment.deleted_at);
-      const blocks = (bRes.data || []).filter(b => b.shift?.customer_id === propertyId);
+      // Preview sessions dropped outright — the owner poking around the
+      // cleaner screens is not a cleaner who worked this bedroom, and this
+      // panel names people. `attended` is stamped per block so the
+      // rendering can tell "someone is in this block" from "this block is
+      // open", which is the distinction the whole release turns on.
+      const blocks = (bRes.data || [])
+        .filter(b => b.shift?.customer_id === propertyId)
+        .filter(b => !blockIsPreview(b))
+        .map(b => ({ ...b, attended: !b.end_time && present.has(b.id) }));
 
       // One row per assignment.
       const byAsg = new Map();
@@ -9143,31 +9771,49 @@ function AssignmentWorkHistory({ propertyId, unitId, partyId, employee, defaultO
       </div>
     ));
   };
-  const peopleOf = (r) => [...new Set(r.blocks.map(b => b.shift?.employee?.name).filter(Boolean))];
+  // Who is in this bedroom NOW, and who merely has work recorded here.
+  // These were one list, so a name on a week-old forgotten block read
+  // exactly like a name on a live one.
+  const peopleHereNow = (r) =>
+    [...new Set(r.blocks.filter(b => b.attended).map(b => b.shift?.employee?.name).filter(Boolean))];
+  const peopleEver = (r) =>
+    [...new Set(r.blocks.map(b => b.shift?.employee?.name).filter(Boolean))];
 
   const renderBlocks = (blocks) => blocks.map(b => {
     const pics = photosOf(b);
     const running = !b.end_time;
+    // Only a block somebody is standing in gets the pulsing green dot and
+    // the word "running". An open block they walked away from reads
+    // "open since …", the same wording every other surface uses.
+    const attended = !!b.attended;
     const ms = b.end_time ? (new Date(b.end_time) - new Date(b.start_time)) : (Date.now() - new Date(b.start_time));
     return (
       <div key={b.id} className="mt-2 p-3 rounded-xl bg-stone-50 border border-stone-200">
         <div className="flex items-center justify-between gap-2 flex-wrap">
           <span className="text-xs font-mono text-stone-700 flex items-center gap-1.5">
-            {running && <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />}
+            {running && <span className={`w-1.5 h-1.5 rounded-full ${attended ? 'bg-emerald-500 animate-pulse' : 'bg-stone-400'}`} />}
             {b.shift?.employee?.name || '?'}
           </span>
           <span className="flex items-center gap-2">
             <span className="text-[10px] font-mono text-stone-400">
               {fmtDateWithDay(b.start_time)} · {fmtClock(b.start_time)}
-              {b.end_time ? `–${fmtClock(b.end_time)}` : ' · running'} · {fmtTimeShort(ms)}
+              {b.end_time ? `–${fmtClock(b.end_time)}`
+                : attended ? ' · running'
+                : ' · left open'} · {fmtTimeShort(ms)}
             </span>
             {/* Reopen this exact session. Closed blocks (incl. ones the app
                force-closed on sign-out) can be reopened one by one — the
-               cleaner picks which, nothing is guessed. A running block
-               shows a live dot instead of a button. */}
+               cleaner picks which, nothing is guessed.
+               Which CONTROL renders is still decided by `running` alone,
+               deliberately: Reopen writes, and an already-open block has
+               never reached that path. Only the badge's wording changes,
+               so an unattended open block stops claiming someone is in it
+               without opening a write path it couldn't reach before. */}
             {onReopen && (running ? (
-              <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 inline-flex items-center gap-1">
-                <Pause size={9} /> Open now
+              <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full inline-flex items-center gap-1 ${attended
+                ? 'bg-emerald-100 text-emerald-800'
+                : 'bg-stone-200 text-stone-600'}`}>
+                <Pause size={9} /> {attended ? 'Open now' : 'Left open'}
               </span>
             ) : (
               <button onClick={() => { setReopening(b.id); onReopen(b); }} disabled={reopening === b.id}
@@ -9219,30 +9865,52 @@ function AssignmentWorkHistory({ propertyId, unitId, partyId, employee, defaultO
           ) : (<>
             {rows.map(r => {
               const open = openId === r.id;
-              const people = peopleOf(r);
+              const hereNow = peopleHereNow(r);
+              const people = peopleEver(r);
               const pics = r.blocks.flatMap(photosOf).length;
-              const running = r.blocks.some(b => !b.end_time);
+              // "Being cleaned right now" requires somebody to actually be
+              // in it. This was `r.blocks.some(b => !b.end_time)` — any
+              // open block at all, including a week-old forgotten one and
+              // the owner's preview session.
+              const beingCleaned = r.blocks.some(b => b.attended);
+              // Open but unattended. Still worth saying — it is why the
+              // items read as started — but it is not a person.
+              const leftOpen = !beingCleaned && r.blocks.some(b => !b.end_time);
               const isDone = r.total > 0 && r.done >= r.total;
+              // THE DATE SHOWS NO MATTER WHAT. This line used to be a
+              // three-way where "Being cleaned right now" replaced the
+              // date entirely, so a single forgotten open block stripped
+              // the date off its row — and two bathroom checks at one
+              // bedroom then rendered as two identical undated rows. That
+              // is the owner's "two bathroom, two vanity", on a live
+              // screen. The state is now a suffix, never a substitute.
+              const when = isDone && r.lastDone
+                ? `Completed ${fmtDateWithDay(r.lastDone)}`
+                : `Started ${fmtDateWithDay(r.createdAt)}`;
               return (
                 <div key={r.id} className="rounded-2xl bg-white border border-stone-200 overflow-hidden">
                   <button onClick={() => setOpenId(open ? null : r.id)} className="w-full text-left p-3.5 hover:bg-stone-50">
                     <div className="flex items-center justify-between gap-2 flex-wrap">
                       <span className="flex items-center gap-1.5 flex-wrap">
                         <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full ${
-                          running ? 'bg-emerald-100 text-emerald-800'
+                          beingCleaned ? 'bg-emerald-100 text-emerald-800'
                           : isDone ? 'bg-stone-900 text-white'
                           : 'bg-amber-100 text-amber-800'}`}>
-                          {running ? 'In progress' : isDone ? 'Done' : 'Not finished'}
+                          {beingCleaned ? 'In progress' : isDone ? 'Done' : 'Not finished'}
                         </span>
                         {r.type && <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-stone-100 text-stone-600">{assignmentTypeLabel(r.type)}</span>}
                       </span>
                       <ChevronRight size={14} className={`text-stone-400 transition-transform ${open ? 'rotate-90' : ''}`} />
                     </div>
                     <div className="text-xs font-mono text-stone-600 mt-1.5">
-                      {isDone && r.lastDone ? `Completed ${fmtDateWithDay(r.lastDone)}` : running ? 'Being cleaned right now' : `Started ${fmtDateWithDay(r.createdAt)}`}
+                      {when}
+                      {beingCleaned && <span className="text-emerald-700"> · being cleaned right now</span>}
+                      {leftOpen && <span className="text-stone-400"> · left open</span>}
                     </div>
                     <div className="text-[10px] font-mono text-stone-400 mt-0.5">
-                      {people.length > 0 ? people.join(', ') : 'Nobody clocked in'} · {r.done}/{r.total} items · {pics} {pics === 1 ? 'photo' : 'photos'}
+                      {hereNow.length > 0
+                        ? `${hereNow.join(', ')} here now`
+                        : people.length > 0 ? people.join(', ') : 'Nobody clocked in'} · {r.done}/{r.total} items · {pics} {pics === 1 ? 'photo' : 'photos'}
                     </div>
                   </button>
                   {open && (
@@ -10238,6 +10906,34 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
   useTick(true);
   const elapsed = Date.now() - new Date(shift.start_time).getTime();
 
+  // `workBlocks` is SEVEN DAYS of this cleaner's own blocks, finished and
+  // unfinished alike — see reload(), which widened the window so their
+  // photos come back with them. Every "today" number on this screen read
+  // straight off that list, so a counter labelled today counted a week,
+  // and counted blocks still running as cleaned. That is the arithmetic
+  // half of the owner's bug 7.
+  //
+  // Computed once, here, because there are TWO of these counters on this
+  // one screen and the pair has already drifted apart: the header one
+  // never filtered out unfinished blocks and the big one did.
+  //
+  // THIS SHIFT, not today. The owner runs evening turnovers, so a count
+  // scoped to the calendar day reset to 0 at midnight with the shift still
+  // running and the clocked-in timer still climbing — and a block started
+  // 11:50pm and finished 12:30am counted on neither day. Scoping it to the
+  // shift makes it monotonic for as long as the cleaner is on the clock,
+  // which is what someone reading a number next to "3h clocked in"
+  // expects. The label says "this shift" so the number and the word agree.
+  const cleanedThisShiftCount = (workBlocks || [])
+    .filter(b => b.end_time && b.shift_id === shift.id).length;
+
+  // Still calendar-day based, and correctly so: this one decides whether a
+  // ROW in the recent-work list needs its date printed. "Is this from
+  // today" is the right question for that, and it is a different question
+  // from "did I do this on this shift".
+  const startOfToday = new Date(); startOfToday.setHours(0, 0, 0, 0);
+  const startedToday = (b) => new Date(b.start_time) >= startOfToday;
+
   // If this cleaner has the upload_assignments capability and tapped the
   // upload button, render the AssignmentForm as a full-screen overlay.
   if (showAssignmentForm) {
@@ -10343,7 +11039,7 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
           <span className="text-stone-600">·</span>
           <span>Started {fmtClock(shift.start_time)}</span>
           <span className="text-stone-600">·</span>
-          <span>{workBlocks.length} {workBlocks.length === 1 ? 'apartment cleaned' : 'apartments cleaned'}</span>
+          <span>{cleanedThisShiftCount} {cleanedThisShiftCount === 1 ? 'apartment' : 'apartments'} this shift</span>
         </div>
       </div>
 
@@ -10392,10 +11088,10 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
           {/* Today's stats card — quick summary of what the cleaner
              has accomplished so far this shift. Always on Home. */}
           <div className="mx-4 mt-4 p-4 rounded-2xl bg-white border border-stone-200">
-            <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2">Today so far</div>
+            <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2">This shift so far</div>
             <div className="grid grid-cols-2 gap-3">
               <div>
-                <div className="text-3xl font-mono font-light text-stone-900">{workBlocks.filter(b => b.end_time).length}</div>
+                <div className="text-3xl font-mono font-light text-stone-900">{cleanedThisShiftCount}</div>
                 <div className="text-xs text-stone-500">apartments cleaned</div>
               </div>
               <div>
@@ -10410,11 +11106,19 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
              get finished. Replaces the flat apartment list. */}
           <FloorFocusList propertyId={shift.customer_id} workBlocks={workBlocks} onGoToBedroom={onGoToBedroom} />
 
-          {/* Today's activity — Mine / Others toggle */}
+          {/* Your recent work — Mine / Others toggle.
+             This heading used to read "Today's activity" over a list that
+             is seven days long (workBlocks; see reload), with no date on
+             any row. Monday's bathroom and Thursday's bathroom therefore
+             sat here as two identical-looking entries, which is what the
+             owner reported as duplicate workblocks. The list is kept —
+             a cleaner continuing earlier work needs to reach it — but it
+             is no longer called today, and every row that isn't from
+             today now carries its date (below). */}
           <div className="px-4 pt-6">
             <div className="flex items-center justify-between mb-3">
               <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">
-                Today's activity
+                Your recent work
               </div>
               <div className="inline-flex bg-stone-100 rounded-full p-0.5">
                 <button onClick={() => setActivityFilter('mine')}
@@ -10434,10 +11138,28 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
                 </div>
               ) : (
                 <div className="space-y-2">
-                  {workBlocks.map(b => {
+                  {workBlocks
+                    // De-dupe by id. workBlocks can hold two copies of the
+                    // same block after a switch or a realtime update, and a
+                    // duplicate card is indistinguishable from a real second
+                    // block. The Active tab has had this guard for a while
+                    // (see otherBlocks in BlockView); this list, its sibling,
+                    // did not.
+                    .filter((b, i, arr) => arr.findIndex(x => x.id === b.id) === i)
+                    // An abandoned empty shell — no items, no photos, no
+                    // notes, past the staleness window — gets no card. It is
+                    // the mis-tap that reads as a second block on the same
+                    // section. The row stays in the database.
+                    .filter(b => !blockIsEmptyShell(b))
+                    .map(b => {
                     const dur = (b.end_time ? new Date(b.end_time) : new Date()) - new Date(b.start_time);
                     const photoCount = (b.tasks || []).reduce((sum, t) => sum + (t.photos?.length || 0), 0);
                     const isDone = !!b.end_time;
+                    // Prefix the day when this block isn't from today, so a
+                    // bedroom cleaned on Monday can never be mistaken for a
+                    // second one cleaned today. Same pattern the Done tab
+                    // already uses.
+                    const dayLabel = startedToday(b) ? '' : `${fmtDateWithDay(b.start_time)} · `;
                     return (
                       <div key={b.id} className={`rounded-2xl p-4 border ${isDone ? 'bg-white border-stone-200' : 'bg-amber-50 border-amber-200'}`}>
                         <div className="flex items-start justify-between mb-2">
@@ -10449,7 +11171,7 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
                               </span>
                             </div>
                             <div className="text-xs text-stone-500 font-mono">
-                              {fmtClock(b.start_time)}{b.end_time && ` — ${fmtClock(b.end_time)}`} · {fmtTimeShort(dur)}
+                              {dayLabel}{fmtClock(b.start_time)}{b.end_time && ` — ${fmtClock(b.end_time)}`} · {fmtTimeShort(dur)}
                               {(b.tasks?.length > 0 || photoCount > 0) && (
                                 <span> · {b.tasks?.length || 0} tasks{photoCount > 0 && `, ${photoCount} photos`}</span>
                               )}
@@ -10645,7 +11367,7 @@ function CleanerMenuSheet({ employee, shift, onClose, onSwitchProperty, onAttach
 // since each cleaner's own work_block is scoped to their own shift.
 // =================================================================
 function OtherCleanersActivity({ block, myEmployeeId }) {
-  const [data, setData] = useState({ activeNow: [], pastBlocks: [], allPhotos: [], loading: true });
+  const [data, setData] = useState({ activeNow: [], leftOpen: [], pastBlocks: [], allPhotos: [], loading: true });
 
   const load = async () => {
     if (!block?.unit_id || !block?.party_id) return;
@@ -10656,16 +11378,29 @@ function OtherCleanersActivity({ block, myEmployeeId }) {
       const startIso = start.toISOString();
 
       // Fetch all work_blocks at this bedroom started today, with their tasks/photos and the cleaner who did them
-      const { data: blocks } = await supabase
-        .from('work_blocks')
-        .select('id, start_time, end_time, shift:shifts!inner(id, employee:employees!inner(id, name)), tasks(*, photos(*, taken_by_employee:employees!taken_by(name)))')
-        .eq('unit_id', block.unit_id)
-        .eq('party_id', block.party_id)
-        .gte('start_time', startIso)
-        .neq('id', block.id);
+      // This query is scoped to ONE bedroom, so presence can't be
+      // decided from its rows — fetchPresentBlockIds answers it app-wide.
+      const [{ data: blocks }, present] = await Promise.all([
+        supabase
+          .from('work_blocks')
+          .select('id, start_time, end_time, is_preview, shift:shifts!inner(id, is_preview, employee:employees!inner(id, name)), tasks(*, photos(*, taken_by_employee:employees!taken_by(name)))')
+          .eq('unit_id', block.unit_id)
+          .eq('party_id', block.party_id)
+          .gte('start_time', startIso)
+          .neq('id', block.id),
+        fetchPresentBlockIds(),
+      ]);
 
-      const all = blocks || [];
-      const activeNow = all.filter(b => !b.end_time);
+      // Preview sessions are the owner looking around the cleaner
+      // screens. They are not another cleaner's work, so they are
+      // dropped here entirely — not just from the "here right now"
+      // line, but from the photo strip and the task counts too.
+      const all = (blocks || []).filter(b => !blockIsPreview(b));
+      // "Here right now" is the newest open block per cleaner, not every
+      // open block. A cleaner who walked on to the next bedroom leaving
+      // this one open belongs under leftOpen, which says so.
+      const activeNow = all.filter(b => !b.end_time && present.has(b.id));
+      const leftOpen = all.filter(b => !b.end_time && !present.has(b.id));
       const pastBlocks = all.filter(b => b.end_time);
 
       // Flatten photos from all OTHER blocks, with attribution. We
@@ -10700,7 +11435,7 @@ function OtherCleanersActivity({ block, myEmployeeId }) {
         return new Date(a.created_at || 0) - new Date(b.created_at || 0);
       });
 
-      setData({ activeNow, pastBlocks, allPhotos: photos, loading: false });
+      setData({ activeNow, leftOpen, pastBlocks, allPhotos: photos, loading: false });
     } catch (e) {
       console.warn('[other cleaners] failed', e);
       setData(d => ({ ...d, loading: false }));
@@ -10711,7 +11446,7 @@ function OtherCleanersActivity({ block, myEmployeeId }) {
 
   if (data.loading) return null;
 
-  const totalOthers = data.activeNow.length + data.pastBlocks.length;
+  const totalOthers = data.activeNow.length + data.leftOpen.length + data.pastBlocks.length;
   if (totalOthers === 0) return null;
 
   return (
@@ -10735,6 +11470,21 @@ function OtherCleanersActivity({ block, myEmployeeId }) {
             </div>
           </div>
         )}
+        {/* Open, but nobody standing in it — the cleaner moved on and
+           left the block running. Named, because whoever picks this
+           bedroom up needs to know whose work it is, but never claimed
+           as a person being present. */}
+        {data.leftOpen.map(b => (
+          <div key={b.id} className="flex items-start gap-2 text-sm">
+            <span className="w-2 h-2 rounded-full bg-stone-400 mt-1.5 flex-shrink-0" />
+            <div>
+              <span className="text-stone-800 font-medium">
+                {b.shift?.employee?.name || 'Someone'}
+              </span>
+              <span className="text-stone-600"> · {openSinceNote(b)}</span>
+            </div>
+          </div>
+        ))}
         {data.pastBlocks.length > 0 && (
           <div className="flex items-start gap-2 text-sm">
             <Clock size={12} className="text-stone-500 mt-1 flex-shrink-0" />
@@ -10798,26 +11548,37 @@ function OtherCleanersTasksPanel({ block }) {
       start.setHours(0, 0, 0, 0);
       const startIso = start.toISOString();
 
-      const { data: blocks } = await supabase
-        .from('work_blocks')
-        .select('id, start_time, end_time, shift:shifts!inner(id, employee:employees!inner(id, name)), tasks(id, name, start_time, end_time)')
-        .eq('unit_id', block.unit_id)
-        .eq('party_id', block.party_id)
-        .gte('start_time', startIso)
-        .neq('id', block.id);
+      // Bedroom-scoped query, so presence comes from the app-wide helper.
+      const [{ data: blocks }, present] = await Promise.all([
+        supabase
+          .from('work_blocks')
+          .select('id, start_time, end_time, is_preview, shift:shifts!inner(id, is_preview, employee:employees!inner(id, name)), tasks(id, name, start_time, end_time)')
+          .eq('unit_id', block.unit_id)
+          .eq('party_id', block.party_id)
+          .gte('start_time', startIso)
+          .neq('id', block.id),
+        fetchPresentBlockIds(),
+      ]);
 
-      // Group tasks by cleaner
+      // Group tasks by cleaner. Preview sessions dropped — the owner
+      // walking the cleaner screens is not a cleaner who did tasks here.
       const byCleanerMap = new Map();
-      (blocks || []).forEach(b => {
+      (blocks || []).filter(b => !blockIsPreview(b)).forEach(b => {
         const cleanerId = b.shift?.employee?.id;
         const cleanerName = b.shift?.employee?.name || 'A cleaner';
         if (!cleanerId) return;
         if (!byCleanerMap.has(cleanerId)) {
           byCleanerMap.set(cleanerId, { id: cleanerId, name: cleanerName, tasks: [] });
         }
+        // An unfinished task only reads as "in progress" when someone is
+        // actually in its block. In a block the cleaner walked away from
+        // it reads "started" — true, and it doesn't tell the viewer a
+        // teammate is working something they aren't.
+        const blockIsAttended = present.has(b.id);
         const tasks = (b.tasks || []).map(t => ({
           ...t,
           completed: !!t.end_time,
+          attended: blockIsAttended,
         }));
         byCleanerMap.get(cleanerId).tasks.push(...tasks);
       });
@@ -10873,7 +11634,10 @@ function OtherCleanersTasksPanel({ block }) {
                     {t.completed ? (
                       <Check size={12} className="text-emerald-600 mt-1 flex-shrink-0" />
                     ) : (
-                      <span className="w-1.5 h-1.5 rounded-full bg-amber-600 mt-2 flex-shrink-0 animate-pulse" />
+                      // Only a task in an attended block pulses. A pulsing
+                      // dot on work nobody is doing is the same false
+                      // claim as the "X here" chip, in smaller type.
+                      <span className={`w-1.5 h-1.5 rounded-full mt-2 flex-shrink-0 ${t.attended ? 'bg-amber-600 animate-pulse' : 'bg-stone-400'}`} />
                     )}
                     <div className="flex-1 min-w-0">
                       <span className={t.completed ? 'text-stone-700' : 'text-stone-900 font-medium'}>
@@ -10885,7 +11649,9 @@ function OtherCleanersTasksPanel({ block }) {
                         </span>
                       )}
                       {!t.completed && (
-                        <span className="text-[10px] text-amber-700 font-mono ml-1.5">in progress</span>
+                        <span className={`text-[10px] font-mono ml-1.5 ${t.attended ? 'text-amber-700' : 'text-stone-500'}`}>
+                          {t.attended ? 'in progress' : 'started'}
+                        </span>
                       )}
                     </div>
                   </li>
@@ -10919,14 +11685,26 @@ function OtherWorkblocksHere({ unitId, partyId, currentBlockId, currentEmployeeI
   useTick(true); // tick so the elapsed-time labels update each second
   const load = async () => {
     if (!unitId || !partyId) return;
-    const { data } = await supabase.from('work_blocks')
-      .select('id, start_time, main_section, shift:shifts!inner(customer_id, employee:employees(id, name)), tasks(id, name, category, subcategory, end_time, photos(id))')
-      .eq('unit_id', unitId).eq('party_id', partyId)
-      .is('end_time', null);
+    // Bedroom-scoped query, so presence comes from the app-wide helper:
+    // a cleaner who walked on to 101-2 must not still read as "here" on
+    // the 101-1 card, and this query can't see 101-2.
+    const [{ data }, present] = await Promise.all([
+      supabase.from('work_blocks')
+        .select('id, start_time, main_section, is_preview, work_notes, shift:shifts!inner(customer_id, is_preview, employee:employees(id, name)), tasks(id, name, category, subcategory, end_time, photos(id))')
+        .eq('unit_id', unitId).eq('party_id', partyId)
+        .is('end_time', null),
+      fetchPresentBlockIds(),
+    ]);
     const filtered = (data || []).filter(b =>
       b.id !== currentBlockId && // exclude the viewer's own active block
-      b.shift?.employee?.id !== currentEmployeeId // exclude any block owned by the viewer
-    );
+      b.shift?.employee?.id !== currentEmployeeId && // exclude any block owned by the viewer
+      !blockIsPreview(b) && // the owner's preview session is not a cleaner
+      // Abandoned empty shells get no card. They are the mis-tap that
+      // reads as a second block on the same section with nothing in it.
+      // Fresh empty blocks DO get a card — that is how a second cleaner
+      // joins one in its first minutes.
+      !blockIsEmptyShell(b)
+    ).map(b => ({ ...b, present: present.has(b.id) }));
     setBlocks(filtered);
   };
   useEffect(() => { load(); /* eslint-disable-next-line */ }, [unitId, partyId, currentBlockId]);
@@ -10953,13 +11731,21 @@ function OtherWorkblocksHere({ unitId, partyId, currentBlockId, currentEmployeeI
         const cleanerName = b.shift?.employee?.name || 'Another cleaner';
         const photoCount = (b.tasks || []).reduce((sum, t) => sum + (t.photos?.length || 0), 0);
         return (
-          <div key={b.id} className="rounded-2xl border-2 border-amber-300 bg-amber-50 p-4">
-            {/* Header: "[Name] here" + section, with Join button on right */}
+          // A block nobody is standing in is still here, still joinable,
+          // and still needs closing — it just reads in the muted style
+          // instead of the live amber one.
+          <div key={b.id} className={b.present
+            ? 'rounded-2xl border-2 border-amber-300 bg-amber-50 p-4'
+            : 'rounded-2xl border border-stone-300 bg-white p-4'}>
+            {/* Header: who/what, with Join button on right. "[Name] here"
+               only when the block is the newest one that cleaner has
+               open — otherwise it says what is actually true, which is
+               that work was left open at a time. */}
             <div className="flex items-start justify-between gap-3 mb-3">
               <div className="flex-1 min-w-0">
-                <div className="text-[10px] uppercase tracking-wider text-amber-900 font-mono font-bold mb-1 flex items-center gap-1.5">
-                  <span className="w-2 h-2 rounded-full bg-amber-600 animate-pulse" />
-                  {cleanerName} here
+                <div className={`text-[10px] uppercase tracking-wider font-mono font-bold mb-1 flex items-center gap-1.5 ${b.present ? 'text-amber-900' : 'text-stone-500'}`}>
+                  <span className={`w-2 h-2 rounded-full ${b.present ? 'bg-amber-600 animate-pulse' : 'bg-stone-400'}`} />
+                  {b.present ? `${cleanerName} here` : `${cleanerName} · ${openSinceNote(b)}`}
                 </div>
                 {sectionLabel && (
                   <div className="font-serif text-lg text-stone-900 leading-tight">
@@ -15890,8 +16676,66 @@ function ManagerDashboard({ employee, onSignOut, onOpenMessages, onLogoClick }) 
   );
 }
 
-// Plain shift list (existing behavior, just extracted)
+// The three facts that live on the WORK a shift contains, rather than on the
+// shift row itself: which apartment(s), how big they are, and what kind of
+// clean it was. The fourth fact the owner asks a shifts list for — the shift —
+// is the start/end/duration already on the row.
+//
+// Each comes back as a deduped LIST, not a single value, because one shift can
+// cover several apartments: an hourly property is cleaned by the hour, not by
+// the door. Collapsing that to "the" size or "the" clean type would pair one
+// apartment's facts with another's and read as confident and wrong.
+//
+// Reads nothing new. ManagerDashboard's load() already fetches each work
+// block's unit label, bedrooms, bathrooms and assignment_type, so this only
+// reshapes what is already in hand — no extra query, and no change to the
+// existing one.
+function shiftFacts(s) {
+  const apts = [];
+  const sizes = [];
+  const types = [];
+  (s.work_blocks || []).forEach(b => {
+    const apt = b.unit?.label;
+    if (apt && !apts.includes(apt)) apts.push(apt);
+    const size = unitSizeLabel(b.unit);
+    if (size && !sizes.includes(size)) sizes.push(size);
+    const type = b.assignment?.assignment_type;
+    if (type && !types.includes(type)) types.push(type);
+  });
+  apts.sort(naturalCompare);
+  sizes.sort(naturalCompare);
+  // Sorted into the canonical ASSIGNMENT_TYPES order, not the order the work
+  // blocks happened to come back in. The query puts no ORDER BY on the
+  // work_blocks embed, so insertion order can differ between two loads of the
+  // same shift — which would shuffle the chips under the owner on a refresh.
+  // Unknown values (an older type no longer in the list) sort to the end.
+  types.sort((a, b) => {
+    const ia = ASSIGNMENT_TYPES.findIndex(t => t.value === a);
+    const ib = ASSIGNMENT_TYPES.findIndex(t => t.value === b);
+    return (ia < 0 ? ASSIGNMENT_TYPES.length : ia) - (ib < 0 ? ASSIGNMENT_TYPES.length : ib)
+      || naturalCompare(a, b);
+  });
+  return { apts, sizes, types };
+}
+
+// Plain shift list, restructured to lead with the four facts the owner reads a
+// shifts list for: apartment number, apartment size, kind of cleaning, then the
+// shift. It used to open on the cleaner's name and never named the apartment,
+// its size or the type of clean at all.
+//
+// Nothing was dropped. The cleaner, property, block count, times, duration and
+// billable amount all still show, one step further down the card. Browsing by
+// cleaner is what the "By cleaner" sub-view is for.
+//
+// The apartment lives in the HEADING and the size and clean type live in the
+// pill row — each fact in exactly one place, so the row never restates the
+// heading. The pill row wraps and no pill breaks mid-label, so a shift with
+// three clean types drops to a second line on a phone with pinch-zoom disabled
+// rather than squashing.
 function ShiftList({ shifts, showMoney, onOpen }) {
+  // More apartments than this in one heading and it stops being scannable,
+  // which is the only reason the apartment is up there.
+  const APT_SHOWN = 3;
   return (
     <div className="px-5">
       <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-3">Shifts ({shifts.length})</div>
@@ -15904,6 +16748,18 @@ function ShiftList({ shifts, showMoney, onOpen }) {
             const rawDur = (s.end_time ? new Date(s.end_time) : new Date()) - new Date(s.start_time);
             const hasAdjustment = (s.idle_seconds || 0) > 0 || (s.manual_adjustment_seconds || 0) !== 0 || s.auto_clocked_out;
             const blockCount = s.work_blocks?.length || 0;
+            const { apts, sizes, types } = shiftFacts(s);
+            // Apartment number first. A shift with no apartment behind it — a
+            // clock-in with no work blocks, or a single-site property with no
+            // units at all — still needs a name on its card, so it falls back
+            // to the property and then to the cleaner.
+            const aptsTruncated = apts.length > APT_SHOWN;
+            const heading = apts.length
+              ? apts.slice(0, APT_SHOWN).join(' · ') + (aptsTruncated ? ` +${apts.length - APT_SHOWN}` : '')
+              : (s.customer?.name || s.employee?.name || 'Shift');
+            // When the property IS the heading, the line below must not say it
+            // a second time.
+            const headingIsProperty = apts.length === 0 && !!s.customer?.name;
             // Per-shift billable
             let billable = 0;
             if (showMoney && s.end_time) {
@@ -15920,27 +16776,60 @@ function ShiftList({ shifts, showMoney, onOpen }) {
             return (
               <button key={s.id} onClick={() => onOpen(s)}
                 className="w-full text-left p-4 rounded-2xl bg-white border border-stone-200 hover:border-stone-400 transition-colors">
-                <div className="flex items-center justify-between mb-2">
-                  <div className="flex items-center gap-2">
-                    {!s.end_time && <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />}
-                    <span className="font-serif text-lg text-stone-900">{s.employee?.name}</span>
+                {/* Apartment number leads; the date stays on the right where
+                   it has always been. */}
+                <div className="flex items-start justify-between gap-2 mb-1">
+                  <div className="flex items-center gap-2 min-w-0">
+                    {!s.end_time && <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse flex-shrink-0" />}
+                    <span className="font-serif text-lg text-stone-900"
+                      title={aptsTruncated ? apts.join(' · ') : undefined}>
+                      {heading}
+                    </span>
                   </div>
-                  <span className="text-xs text-stone-500 font-mono">{fmtDate(s.start_time)}</span>
+                  <span className="text-xs text-stone-500 font-mono flex-shrink-0">{fmtDate(s.start_time)}</span>
                 </div>
-                {s.customer && (
-                  <div className="text-xs text-amber-700 font-mono mb-2 flex items-center gap-1.5">
-                    <Building2 size={11} /> {s.customer.name}
-                    {blockCount > 0 && <span className="text-stone-500">· {blockCount} {blockCount === 1 ? 'block' : 'blocks'}</span>}
+                {/* Size and kind of cleaning. The heading owns the apartment,
+                   so the apartment is deliberately absent from this row. */}
+                {(sizes.length > 0 || types.length > 0) && (
+                  <div className="flex items-center gap-1.5 flex-wrap mb-1.5">
+                    {sizes.map(sz => (
+                      <span key={sz} className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-stone-200 text-stone-700 whitespace-nowrap">
+                        {sz}
+                      </span>
+                    ))}
+                    {types.map(t => <AssignmentTypeChip key={t} type={t} />)}
                   </div>
                 )}
-                <div className="flex items-center justify-between text-xs text-stone-500 font-mono">
-                  <span>
+                {/* Who, where, how many visits. Each separator belongs to the
+                   item AFTER it, so a shift with no property or no blocks
+                   cannot leave a dangling dot. */}
+                <div className="text-xs font-mono mb-2 flex items-center gap-1.5 flex-wrap">
+                  <span className="text-stone-700 whitespace-nowrap">{s.employee?.name || '—'}</span>
+                  {s.customer && !headingIsProperty && (
+                    <>
+                      <span className="text-stone-300">·</span>
+                      <span className="text-amber-700 inline-flex items-center gap-1 whitespace-nowrap">
+                        <Building2 size={11} /> {s.customer.name}
+                      </span>
+                    </>
+                  )}
+                  {blockCount > 0 && (
+                    <>
+                      <span className="text-stone-300">·</span>
+                      <span className="text-stone-500 whitespace-nowrap">{blockCount} {blockCount === 1 ? 'block' : 'blocks'}</span>
+                    </>
+                  )}
+                </div>
+                {/* The shift itself — same numbers, same adjustment marker,
+                   same billable rule as before. */}
+                <div className="flex items-center justify-between text-xs text-stone-500 font-mono gap-2 flex-wrap">
+                  <span className="whitespace-nowrap">
                     {fmtClock(s.start_time)} {s.end_time ? `— ${fmtClock(s.end_time)}` : '— active'} · {fmtTimeShort(dur)}
                     {hasAdjustment && s.end_time && (
                       <span className="ml-1 text-amber-700" title={`Raw: ${fmtTimeShort(rawDur)}, billable shown after idle/adjustments`}>•</span>
                     )}
                   </span>
-                  <span className="flex items-center gap-2">
+                  <span className="flex items-center gap-2 flex-shrink-0">
                     {showMoney && billable > 0 && <span className="text-emerald-700 font-medium">{fmtMoney(billable)}</span>}
                     <ChevronRight size={14} />
                   </span>
@@ -17621,11 +18510,18 @@ function ShiftDetail({ shiftId, viewerRole, viewerEmployee, onBack }) {
     onBack();
   };
 
+  // auto_closed cleared: a person has just typed these times in, so the
+  // end_time is no longer something the app made up and the profit report
+  // must stop calling it a forgotten clock-out. Its banner says "fix them
+  // in the timesheet and re-run" — this is what makes re-running answer
+  // differently. Through autoClosedWrite so saving still works with v73
+  // not run.
   const saveBlockTimes = async (block, startISO, endISO) => {
     setBusy(true);
-    const { error } = await supabase.from('work_blocks')
-      .update({ start_time: startISO, end_time: endISO || null })
-      .eq('id', block.id);
+    const { error } = await autoClosedWrite(
+      { start_time: startISO, end_time: endISO || null, auto_closed: false },
+      (row) => supabase.from('work_blocks').update(row).eq('id', block.id),
+    );
     setBusy(false);
     if (error) { alert('Could not save: ' + error.message); return; }
     setEditingBlock(null);
@@ -21001,6 +21897,23 @@ function PropertyForm({ property, currentUserRole, onCancel, onSaved, onManageAs
   const [active, setActive] = useState(property?.active ?? true);
   const [bedrooms, setBedrooms] = useState(property?.bedrooms ?? null);
   const [bathrooms, setBathrooms] = useState(property?.bathrooms ?? null);
+  // How long a cleaner can be in one bedroom at THIS property before the
+  // app stops saying she is there. Blank means "use the default" — it is
+  // not the same as 0. Clearing a box that had a number in it is a real
+  // change and writes the default; a box that was blank all along is not
+  // a change at all and writes nothing.
+  //
+  // presenceWindowAtOpen is what the field held when this form opened,
+  // captured once (useRef ignores its argument after the first render).
+  // The payload only carries presence_window_minutes when the field
+  // moved away from it, and that is what stops an unrelated save —
+  // fixing a typo in the address — from writing over the stored number.
+  // A `property` handed in WITHOUT the key, which is what a Properties
+  // list loaded before v72 ran gives you, therefore leaves the stored
+  // value exactly as it is instead of resetting it to the default.
+  const presenceWindowAtOpen = useRef(
+    property?.presence_window_minutes != null ? String(property.presence_window_minutes) : '').current;
+  const [presenceWindow, setPresenceWindow] = useState(presenceWindowAtOpen);
   // Which assignment-upload styles THIS property's PM can see in their portal.
   const [pmMethods, setPmMethods] = useState(property?.pm_upload_methods || { quick: false, checklist: true, legacy: false });
   const togglePmMethod = (k) => setPmMethods(m => ({ ...(m || {}), [k]: !(m || {})[k] }));
@@ -21133,6 +22046,17 @@ function PropertyForm({ property, currentUserRole, onCancel, onSaved, onManageAs
       setError('PM code and staff code must be different.');
       return;
     }
+    const windowRaw = String(presenceWindow).trim();
+    // Did the owner actually touch this field? Only then is it written.
+    // Compared after the same trim, so whitespace is not a change.
+    const windowChanged = windowRaw !== String(presenceWindowAtOpen).trim();
+    if (windowRaw !== '') {
+      const n = Number(windowRaw);
+      if (!Number.isFinite(n) || n < PRESENCE_WINDOW_MIN_MIN || n > PRESENCE_WINDOW_MAX_MIN) {
+        setError(`The bedroom time limit must be a number between ${PRESENCE_WINDOW_MIN_MIN} and ${PRESENCE_WINDOW_MAX_MIN} minutes. Leave it empty to use the default of ${PRESENCE_WINDOW_DEFAULT_MIN}.`);
+        return;
+      }
+    }
     setBusy(true);
     const payload = {
       name: name.trim(), address: address.trim() || null, notes: notes.trim() || null,
@@ -21147,28 +22071,61 @@ function PropertyForm({ property, currentUserRole, onCancel, onSaved, onManageAs
       pm_upload_methods: pmMethods,
       active
     };
-    let savedRow = null;
-    if (isNew) {
-      const { data, error: e } = await supabase.from('customers').insert(payload).select().single();
-      if (e) {
-        setBusy(false);
-        setError(e.message.includes('duplicate') && (e.message.includes('portal_code') || e.message.includes('staff_portal_code'))
-          ? 'That code is already in use by another property — pick another.'
-          : e.message);
-        return;
-      }
-      savedRow = data;
-    } else {
-      const { error: e } = await supabase.from('customers').update(payload).eq('id', property.id);
-      if (e) {
-        setBusy(false);
-        setError(e.message.includes('duplicate') && (e.message.includes('portal_code') || e.message.includes('staff_portal_code'))
-          ? 'That code is already in use by another property — pick another.'
-          : e.message);
-        return;
-      }
-      savedRow = { ...property, ...payload };
+    // The bedroom time limit is written ONLY when the owner changed the
+    // field. Leaving the key out of the payload leaves the stored value
+    // exactly as it is, which is the whole point: this form cannot be
+    // trusted to know the current value — a Properties list loaded
+    // before v72 ran has no value at all — so "no change" has to mean
+    // "do not write". Otherwise saving a corrected address silently put
+    // a 300-minute property back to 120, successfully and with no alert.
+    //
+    // Clearing a box that had a number in it IS a change and writes the
+    // default: blank means the default, not 0. Round-tripped through the
+    // same clamp the presence rules use, so the stored value and the
+    // value the app acts on can never disagree.
+    if (windowChanged) {
+      payload.presence_window_minutes =
+        windowRaw === '' ? PRESENCE_WINDOW_DEFAULT_MIN : clampPresenceWindow(windowRaw);
     }
+    let savedRow = null;
+    // Tolerant write, exactly the audienceWrite pattern: if
+    // presence_window_minutes isn't there yet, drop that one key and retry
+    // the identical save. Saving a property must never depend on v72 having
+    // been run — this file has twice been bitten by code deploying ahead of
+    // its SQL, and a failed property save is a bad way to find out.
+    // `windowSaved` tells the UI whether the number actually landed.
+    let windowSaved = true;
+    const runSave = async (row) => isNew
+      ? await supabase.from('customers').insert(row).select().single()
+      : await supabase.from('customers').update(row).eq('id', property.id);
+    let res = await runSave(payload);
+    // What actually reached the database. When the retry below drops the
+    // one key, the row handed back to the caller has to drop it too —
+    // otherwise the list and a re-opened form show a number that is not
+    // stored anywhere, contradicting the alert at the end of this
+    // function.
+    let written = payload;
+    if (res?.error && isMissingPresenceWindowColumn(res.error)) {
+      PRESENCE_WINDOW_COLUMN_MISSING = true;
+      windowSaved = false;
+      const { presence_window_minutes, ...rest } = payload;
+      written = rest;
+      res = await runSave(rest);
+    }
+    {
+      const e = res?.error;
+      if (e) {
+        setBusy(false);
+        setError(e.message.includes('duplicate') && (e.message.includes('portal_code') || e.message.includes('staff_portal_code'))
+          ? 'That code is already in use by another property — pick another.'
+          : e.message);
+        return;
+      }
+      savedRow = isNew ? res.data : { ...property, ...written };
+    }
+    // The presence rules read the window from a cache; drop it so the new
+    // number takes effect on the next read instead of up to the TTL later.
+    invalidatePresenceWindows();
 
     // Portal access. Only written when we actually know what's there now:
     // saving before the list arrives, or after the read failed, leaves
@@ -21181,6 +22138,11 @@ function PropertyForm({ property, currentUserRole, onCancel, onSaved, onManageAs
     }
 
     setBusy(false);
+    // Everything else saved. Say so plainly rather than letting the owner
+    // think a number landed when it didn't.
+    if (!windowSaved && windowChanged) {
+      alert(`Saved — but the bedroom time limit was not stored, because that column doesn't exist in the database yet.\n\nRun v72_presence_window.sql in Supabase, then set it again. Until then every property uses ${PRESENCE_WINDOW_DEFAULT_MIN} minutes.`);
+    }
     onSaved(savedRow);
   };
   const remove = async () => {
@@ -21295,6 +22257,81 @@ function PropertyForm({ property, currentUserRole, onCancel, onSaved, onManageAs
           <textarea value={notes} onChange={(e) => setNotes(e.target.value)}
             placeholder="Gate code, contact info…" rows={3}
             className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white focus:outline-none focus:border-stone-900 text-stone-900 resize-none" />
+        </div>
+
+        {/* The presence window, per property. Deliberately worded as the
+           question it answers rather than as the column it writes — the
+           owner is deciding how long a bedroom takes here, not configuring
+           a timeout. Blank means the default, which is why the field is a
+           string and not a number in state. */}
+        <div className="p-4 rounded-2xl bg-stone-50 border border-stone-200">
+          <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">
+            Bedroom time limit
+          </label>
+          <p className="text-xs text-stone-600 mb-2.5">
+            How long can a cleaner be in one bedroom before we assume they&rsquo;ve moved on?
+          </p>
+          <div className="flex items-center gap-2">
+            <input type="text" inputMode="numeric" value={presenceWindow}
+              onChange={(e) => setPresenceWindow(e.target.value.replace(/[^0-9]/g, ''))}
+              placeholder={String(PRESENCE_WINDOW_DEFAULT_MIN)}
+              className="w-28 px-4 py-3 rounded-xl border border-stone-300 bg-white focus:outline-none focus:border-stone-900 text-stone-900 font-mono" />
+            <span className="text-sm text-stone-600">minutes</span>
+            {presenceWindow && Number(presenceWindow) % 60 === 0 && Number(presenceWindow) >= 60 && (
+              <span className="text-xs font-mono text-stone-400">
+                = {Number(presenceWindow) / 60}h
+              </span>
+            )}
+          </div>
+          {/* Three paragraphs because three separate things are true and
+             two earlier versions of this box each left one of them out.
+             Version one promised the number "never closes anything or
+             changes anyone's hours", which was false above 120. Version
+             two said it only decides what the screens say, which was
+             false in the release where it also set an abandoned block's
+             billed duration. What is true NOW, with the force-close floor
+             in place and the end_time derived from the block's own tasks:
+             lowering it is inert; raising it delays only the SHIFT safety
+             net, and a shift is stamped NOW() when that net fires, so
+             raising it can add time to a shift nobody clocked out of;
+             bedroom durations are untouched either way.
+             Every duration here interpolates its constant. */}
+          <p className="text-xs text-stone-500 mt-2">
+            Leave empty for the default of {PRESENCE_WINDOW_DEFAULT_MIN} minutes. This is how
+            long the app keeps saying a cleaner is in that bedroom. After
+            this long it stops saying she is there and shows her work as
+            left open instead. Raise it for properties where one bedroom
+            genuinely takes longer.
+          </p>
+          <p className="text-xs text-stone-500 mt-2">
+            Lowering it is safe. It never closes anything early and never
+            shortens anyone&rsquo;s hours &mdash; whatever you put here, the app
+            still waits at least {STALE_FORCE_MIN} minutes before it closes a bedroom
+            or a shift that nobody closed.
+          </p>
+          <p className="text-xs text-stone-500 mt-2">
+            Raising it above {STALE_FORCE_MIN} does one thing beyond the screens, so it is
+            worth knowing: a <span className="font-medium">shift</span> nobody clocked out of stays open
+            this long before the app closes it, and a shift counts time
+            right up to when it is closed. A <span className="font-medium">bedroom</span> is not
+            affected either way &mdash; one that nobody closed is recorded as
+            ending at the last item somebody finished in it, which does not
+            depend on this number or on when anyone looked.
+          </p>
+          {/* The idle rules are a different mechanism from this field
+             entirely, and a cleaner who lost pay to them once read this
+             box looking for the reason. useIdleDetector force-ends an
+             open shift at its last activity after IDLE_LIMIT_MS whenever
+             the app is open on the phone, and cleanupStale's soft pass
+             does the same from the owner's Daily view once
+             last_activity_at is older than STALE_IDLE_MIN. Naming only
+             the second would imply she is safe below it. */}
+          <p className="text-xs text-stone-500 mt-2">
+            One thing this number does not change: a cleaner who taps nothing
+            has her shift closed back to her last tap anyway &mdash; after an
+            hour if the app is open on her phone, and at {STALE_IDLE_MIN} minutes
+            otherwise.
+          </p>
         </div>
 
         <div className="p-4 rounded-2xl bg-stone-50 border border-stone-200">
@@ -26732,7 +27769,9 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
   const [unbilled, setUnbilled] = useState(0);
   const [unbilledDetail, setUnbilledDetail] = useState([]); // per-property uninvoiced labor
   const [invoiceHint, setInvoiceHint] = useState([]);       // what ranges DO have invoices
-  const [runaway, setRunaway] = useState({ count: 0, pay: 0, hours: 0 }); // forgotten clock-outs
+  // Forgotten clock-outs. autoCount + longCount === count: a row is
+  // counted once, under the first test it fails, so the banner adds up.
+  const [runaway, setRunaway] = useState({ count: 0, pay: 0, hours: 0, autoCount: 0, longCount: 0 });
 
   const num = (v) => { const n = Number(v); return isNaN(n) ? 0 : n; };
 
@@ -26756,14 +27795,21 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
       // Labor fetch, reused below. Always runs, even with zero invoices —
       // "no invoices cover this range" and "nobody worked this range" are
       // very different answers and the screen has to tell them apart.
+      // auto_closed is read through autoClosedSelect: if v73 has not been
+      // run, the identical query re-runs without that one column and every
+      // block reads as not-auto-closed — exactly how this screen behaved
+      // before. Naming a column that is not there answers data: null, and
+      // this loop would break on the first page and show an empty report.
+      const BLOCK_SELECT = 'id, unit_id, party_id, assignment_id, start_time, end_time, auto_closed, unit:units(label), shift:shifts!inner(customer_id, is_preview, employee:employees(id, name, pay_rate_hourly), customer:customers(id, name))';
       const fetchBlocks = async (winStart, winEnd) => {
         let out = []; const PAGE = 1000;
         for (let from = 0; ; from += PAGE) {
-          const { data, error } = await supabase.from('work_blocks')
-            .select('id, unit_id, party_id, assignment_id, start_time, end_time, unit:units(label), shift:shifts!inner(customer_id, is_preview, employee:employees(id, name, pay_rate_hourly), customer:customers(id, name))')
-            .gte('start_time', winStart + 'T00:00:00').lte('start_time', winEnd + 'T23:59:59')
-            .not('end_time', 'is', null)
-            .range(from, from + PAGE - 1);
+          const { data, error } = await autoClosedSelect(BLOCK_SELECT, (sel) =>
+            supabase.from('work_blocks')
+              .select(sel)
+              .gte('start_time', winStart + 'T00:00:00').lte('start_time', winEnd + 'T23:59:59')
+              .not('end_time', 'is', null)
+              .range(from, from + PAGE - 1));
           if (error || !data) break;
           out = out.concat(data);
           if (data.length < PAGE) break;
@@ -26778,26 +27824,49 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
         return { hrs, pay: hrs * num(b.shift.employee?.pay_rate_hourly) };
       };
       // Split off the forgotten clock-outs before any money is added up.
-      // A block longer than MAX_BLOCK_HOURS isn't a long clean, it's a
-      // block nobody closed — counting it as labor turns a normal week
-      // into a fake five-figure loss.
-      const runawayOf = (list) => list.filter(b => blockPay(b).hrs > MAX_BLOCK_HOURS);
+      // TWO tests now, and failing either one is enough:
+      //
+      //   - auto_closed — nobody closed this block, the app did.
+      //     cleanupStale writes the last moment anyone can show work
+      //     happened in it, which is a floor on the work rather than a
+      //     measurement of it, so it must not be counted as labour however
+      //     ordinary the number looks. This is the test that fires on the
+      //     rows the sweep creates. The hours test no longer does: under
+      //     the old end_time = NOW() an abandoned block grew past eight
+      //     hours and got caught, and a derived end_time never will.
+      //
+      //   - longer than MAX_BLOCK_HOURS — a block longer than that isn't
+      //     a long clean, it's a block nobody closed, and counting it as
+      //     labor turns a normal week into a fake five-figure loss. Still
+      //     needed for rows the sweep never reached and rows closed by an
+      //     older build.
+      const wasAutoClosed = (b) => !!b?.auto_closed;
+      const runawayOf = (list) => list.filter(b => wasAutoClosed(b) || blockPay(b).hrs > MAX_BLOCK_HOURS);
       const sensibleOf = (list) => list.filter(b => {
+        if (wasAutoClosed(b)) return false;
         const h = blockPay(b).hrs;
         return h > 0 && h <= MAX_BLOCK_HOURS;
       });
+      // One tally for both call sites so they cannot drift. Each row is
+      // counted under the FIRST test it fails, so autoCount + longCount
+      // always equals count and the banner's numbers add up.
+      const runawayTally = (list) => {
+        const rows = runawayOf(list);
+        return {
+          count: rows.length,
+          pay: rows.reduce((s, b) => s + blockPay(b).pay, 0),
+          hours: rows.reduce((s, b) => s + blockPay(b).hrs, 0),
+          autoCount: rows.filter(b => wasAutoClosed(b)).length,
+          longCount: rows.filter(b => !wasAutoClosed(b)).length,
+        };
+      };
 
       if (invoices.length === 0) {
         // Nothing bills this range. Show the labor that's sitting
         // uninvoiced, and tell them which ranges DO have invoices, so the
         // fix is "pick the right dates" not "guess".
         const loose = await fetchBlocks(start, end);
-        const runaways = runawayOf(loose);
-        setRunaway({
-          count: runaways.length,
-          pay: runaways.reduce((s, b) => s + blockPay(b).pay, 0),
-          hours: runaways.reduce((s, b) => s + blockPay(b).hrs, 0),
-        });
+        setRunaway(runawayTally(loose));
         const byProp = {};
         let sum = 0;
         sensibleOf(loose).forEach(b => {
@@ -26886,12 +27955,7 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
         // Same guard on the invoiced path. Restricted to the report's own
         // range so the count matches what's on screen.
         const inRange = allBlocks.filter(b => { const d = String(b.start_time).slice(0, 10); return d >= start && d <= end; });
-        const runaways = runawayOf(inRange);
-        setRunaway({
-          count: runaways.length,
-          pay: runaways.reduce((s, b) => s + blockPay(b).pay, 0),
-          hours: runaways.reduce((s, b) => s + blockPay(b).hrs, 0),
-        });
+        setRunaway(runawayTally(inRange));
       }
       const liveBlocks = sensibleOf(allBlocks);
 
@@ -27366,13 +28430,31 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
               <div><div className="text-[10px] uppercase text-stone-400 font-mono">Profit</div><div className={`text-lg font-mono ${profitTotal >= 0 ? 'text-emerald-700' : 'text-red-600'}`}>{fmtMoney(profitTotal)}</div></div>
             </div>
 
+            {/* Two reasons a block lands here and they need different
+               fixes, so the banner names them separately. autoCount is the
+               one that matters now: cleanupStale closes an abandoned block
+               at its last finished item, which is usually well under
+               {MAX_BLOCK_HOURS}h, so the hours test alone would let every
+               such row pass for an ordinary short job. */}
             {runaway.count > 0 && (
               <div className="p-3 rounded-2xl bg-red-50 border border-red-200 text-[11px] text-red-900">
                 <div className="font-medium">
-                  {runaway.count} work {runaway.count === 1 ? 'block' : 'blocks'} in this range {runaway.count === 1 ? 'is' : 'are'} longer than {MAX_BLOCK_HOURS}h — {runaway.hours.toFixed(0)}h total, {fmtMoney(runaway.pay)} of "labor".
+                  {runaway.count} work {runaway.count === 1 ? 'block' : 'blocks'} in this range {runaway.count === 1 ? 'is' : 'are'} almost certainly a forgotten clock-out — {runaway.hours.toFixed(1)}h total, {fmtMoney(runaway.pay)} of "labor".
                 </div>
+                {runaway.autoCount > 0 && (
+                  <div className="mt-1 text-red-800/80">
+                    <span className="font-medium">{runaway.autoCount} the app had to close {runaway.autoCount === 1 ? 'itself' : 'themselves'}.</span>{' '}
+                    Nobody clocked {runaway.autoCount === 1 ? 'it' : 'them'} out, so the time shown is only as far as the last item somebody finished — the least it could have been, not the real figure.
+                  </div>
+                )}
+                {runaway.longCount > 0 && (
+                  <div className="mt-1 text-red-800/80">
+                    <span className="font-medium">{runaway.longCount} {runaway.longCount === 1 ? 'is' : 'are'} longer than {MAX_BLOCK_HOURS}h.</span>{' '}
+                    Nobody cleans one bedroom that long.
+                  </div>
+                )}
                 <div className="mt-1 text-red-800/80">
-                  Almost certainly someone forgot to clock out. Left in, they'd swamp every number on this page, so they're excluded above. Fix them in the timesheet and re-run.
+                  Left in, they'd swamp every number on this page, so they're excluded above. Fix them in the timesheet and re-run.
                 </div>
               </div>
             )}
@@ -29157,7 +30239,11 @@ function WelcomeModal({ propertyName, canViewInvoices = false, onClose }) {
 // Lets the main PM change their own portal code. Logs the change.
 // =================================================================
 // =================================================================
-// IDLE WARNING MODAL — pops at 2 hours of inactivity, gives 3 more hours to respond
+// IDLE WARNING MODAL — pops at IDLE_WARN_MS (45 min) of inactivity and
+// says the cleaner has until IDLE_LIMIT_MS (1 hour) to answer, i.e. up to
+// 15 more minutes. The rendered copy below must agree with those two
+// constants; this comment said "2 hours / 3 more hours" for a release
+// after the copy was corrected.
 // =================================================================
 function IdleWarningModal({ onStillActive }) {
   return (
@@ -29168,10 +30254,10 @@ function IdleWarningModal({ onStillActive }) {
         </div>
         <div className="font-serif text-2xl text-stone-900 mb-2">Still working?</div>
         <div className="text-stone-600 mb-1">
-          We haven't seen any activity for 2 hours.
+          We haven&rsquo;t seen any activity for 45 minutes.
         </div>
         <div className="text-sm text-stone-500 mb-6">
-          If you don't tap below within 3 more hours, we'll clock you out automatically and flag the idle time.
+          If you don&rsquo;t tap below within 15 minutes, we&rsquo;ll clock you out automatically and set your time back to your last tap.
         </div>
         <button onClick={onStillActive}
           className="w-full py-4 rounded-2xl bg-stone-900 text-stone-50 font-medium active:scale-98 transition-transform">
@@ -32842,19 +33928,195 @@ const toDateKey = (d) => {
 //     the cleaner only gets credit for time they were actively in the
 //     app. The idle detector would have done this if the app was open
 //     — this catches cases where the cleaner closed the app entirely.
-//   - HARD (2h since start): force-close anything still open with
-//     end_time = NOW. Safety net for sessions that somehow slipped
-//     past the soft pass (no last_activity_at recorded, etc).
+//   - HARD: force-close anything still open past the FORCE-CLOSE
+//     CUTOFF for its property — STALE_FORCE_MIN floored against that
+//     property's bedroom time limit, so editing the limit can delay
+//     this and never hurry it. A shift gets end_time = NOW; a work
+//     block gets the last moment anyone can show work happened in it,
+//     so an abandoned block records the same hours whenever the sweep
+//     runs and the bedroom time limit never becomes a multiplier on an
+//     uncapped hourly invoice. Safety net for sessions that slipped
+//     past the soft pass (no last_activity_at recorded, or a block
+//     whose shift was closed without it).
 const STALE_IDLE_MIN = 90;   // soft auto-clockout threshold (minutes)
-const STALE_FORCE_MIN = 120; // hard force-close threshold (minutes)
+// The numbers that decide "is someone here" live up with the presence
+// helpers they govern. Search for "THE ONE NUMBER". They are NOT the
+// numbers below and the two must never be merged again — see the floor.
+
+// ──────────────────────────────────────────────────────────────────
+// THE FORCE-CLOSE FLOOR. NOT A PRESENCE VALUE. NEVER WRITTEN ANYWHERE.
+//
+// The minimum age a row must reach before the hard pass may close it.
+// Deliberately not the presence window: the window is a display setting
+// the owner edits on the Edit Property screen, and for one release it
+// doubled as this cutoff. Lowering a property's window to 15 then
+// force-closed live cleaners' shifts at that property and overwrote
+// their open blocks' durations. The floor makes that impossible —
+// editing a window can move this cutoff LATER, never earlier.
+//
+// 120 is the value this cutoff has had since before per-property windows
+// existed. Do not fold it into PRESENCE_WINDOW_DEFAULT_MIN even though
+// both are 120 today: they answer different questions, and treating them
+// as one number is the bug.
+const STALE_FORCE_MIN = 120;
+
+// WHETHER a row may be force-closed, per property. One definition, used
+// by cleanupStale and by the owner's panel, so the panel can never offer
+// to close a row the sweep would have left alone.
+const forceCloseCutoffMinFor = (propertyId) =>
+  Math.max(STALE_FORCE_MIN, presenceWindowFor(propertyId));
+
+// Open for longer than its own property's force-close cutoff. Delegates
+// to blockIsStale for the age arithmetic ONLY — including its handling
+// of a missing or unparseable start_time, which counts as past the
+// cutoff — and feeds it the cutoff above instead of a presence window.
+// Works for shift rows too, because blockPropertyId falls through to a
+// row's own customer_id.
+const pastForceCloseCutoff = (row, now = Date.now()) =>
+  blockIsStale(row, now, forceCloseCutoffMinFor(blockPropertyId(row)));
+
+// WHAT end_time an abandoned work block records: the last moment anyone
+// can show work actually happened in it.
+//
+// The latest end_time among the block's OWN completed tasks, or its
+// start_time if it has none. A task still running (end_time null) proves
+// nothing finished and is skipped, as is an unreadable timestamp and one
+// in the future — startTasksFromPicker stamps queued tasks a second or
+// two ahead, and a hand-edited row could be anything. Never below
+// start_time, so a duration can never come out negative, and never
+// above now, so an end_time is never in the future.
+//
+// A block with no completed task therefore records ZERO hours. That is
+// the honest answer — nobody can attest to any work in it — and it is
+// the same answer at every sweep time, which is the whole point:
+// end_time = NOW() made an invoice depend on when a screen was opened.
+//
+// Rows must carry tasks(end_time). Omitting the embed silently collapses
+// every block to zero hours, so both call sites select it.
+const lastProvableWorkMs = (b, startMs, now = Date.now()) => {
+  let endMs = startMs;
+  for (const t of (b?.tasks || [])) {
+    if (!t?.end_time) continue;
+    const ms = new Date(t.end_time).getTime();
+    if (!Number.isFinite(ms) || ms > now) continue;
+    if (ms > endMs) endMs = ms;
+  }
+  return endMs;
+};
+// ──────────────────────────────────────────────────────────────────
+
+// ──────────────────────────────────────────────────────────────────
+// work_blocks.auto_closed (v73) — THE APP CLOSED THIS, NOT THE CLEANER.
+//
+// The honest end_time above costs the owner the one detector he has for
+// a forgotten clock-out. ProfitReportView flags and excludes a block
+// longer than MAX_BLOCK_HOURS, and under end_time = NOW() an abandoned
+// block eventually tripped it. Derived from the block's own last finished
+// task it never will — it looks exactly like an ordinary short job and
+// lands inside Charged, Paid and Profit as real labour, silently.
+//
+// So the fact is stored rather than inferred from the duration. true
+// means nobody closed this block; the app derived an end_time for it, so
+// the duration is a FLOOR on the work rather than a measurement of it.
+// Named after shifts.auto_clocked_out, which records the same fact about
+// a shift. Set by cleanupStale's hard pass and by the owner's one-tap
+// close on the Who's-where panel — both are the app deriving a time, and
+// the report should say so either way.
+//
+// Same missing-column discipline as presence_window_minutes and
+// audienceSelect, for the same reason: App.jsx is uploaded through the
+// GitHub web editor and v73 may not have been run yet. Here it matters
+// more than usual in BOTH directions — an UPDATE naming a column that
+// does not exist fails outright, so without the fallback no abandoned
+// row would close at all, which is worse than before the column existed;
+// and a SELECT naming it answers with data: null, which would empty the
+// profit report.
+// ──────────────────────────────────────────────────────────────────
+const AUTO_CLOSED_SQL_FILE = 'v73_work_block_auto_closed.sql';
+function isMissingAutoClosedColumn(error) {
+  const m = (error?.message || '') + ' ' + (error?.details || '');
+  return /auto_closed/i.test(m) && /does not exist|could not find|schema cache|unknown column/i.test(m);
+}
+let AUTO_CLOSED_COLUMN_MISSING = false;
+function noteAutoClosedColumnMissing(what) {
+  if (!AUTO_CLOSED_COLUMN_MISSING) {
+    AUTO_CLOSED_COLUMN_MISSING = true;
+    console.warn('[auto-closed] work_blocks.auto_closed is missing, so ' + what
+      + '. Everything else works exactly as it did before. Run ' + AUTO_CLOSED_SQL_FILE + ' in Supabase.');
+  }
+}
+function withoutAutoClosedColumn(select) {
+  return String(select)
+    .replace(/,\s*auto_closed\b/g, '')
+    .replace(/\bauto_closed\b\s*,\s*/g, '');
+}
+// build(select) must return the finished PostgREST query, so the retry is
+// byte-for-byte the same request minus the one column. Without it every
+// block reads as not-auto-closed, which is how the report behaved
+// yesterday.
+async function autoClosedSelect(select, build) {
+  if (AUTO_CLOSED_COLUMN_MISSING) return await build(withoutAutoClosedColumn(select));
+  const res = await build(select);
+  if (!res?.error || !isMissingAutoClosedColumn(res.error)) return res;
+  noteAutoClosedColumnMissing('the profit report cannot flag the blocks the app closed');
+  return await build(withoutAutoClosedColumn(select));
+}
+// Write path. The end_time MUST land even when the marker cannot — an
+// abandoned row that never closes is the worse failure. Reports whether
+// the flag actually saved.
+async function autoClosedWrite(row, run) {
+  if (!AUTO_CLOSED_COLUMN_MISSING) {
+    const res = await run(row);
+    if (!res?.error || !isMissingAutoClosedColumn(res.error)) return { ...res, flagSaved: true };
+    noteAutoClosedColumnMissing('abandoned work blocks are being closed without the marker');
+  }
+  const { auto_closed, ...rest } = row || {};
+  const res = await run(rest);
+  return { ...res, flagSaved: false };
+}
+
+// How many rows one pass of the hard force-close may write, PER TABLE.
+// The pass is a per-row patch loop, and it runs on every load of the
+// owner's home plus every 30 seconds while that tab is visible, so an
+// unbounded loop over a weekend's backlog would be a write storm against
+// the owner's own session. Whatever is left over is closed by the next
+// pass half a minute later; at this cap a backlog drains at ~200 rows a
+// minute, and the end_time written does not depend on which pass gets to
+// the row.
+const STALE_FORCE_MAX_PER_PASS = 50;
+// How many rows one pass may LOOK at, per table. Larger than the write
+// cap because a row inside its own property's cutoff is fetched and then
+// skipped without a write. Explicit so this can never meet PostgREST's
+// silent 1,000-row truncation.
+//
+// STARVATION, stated rather than denied. Rows are taken oldest-first,
+// which is most-overdue-first ONLY while every property sits at the 120
+// default — then the scan cutoff equals every row's own cutoff and every
+// row fetched is due. A property set LONGER than 120 puts not-yet-due
+// rows into the scan ahead of due ones, because an older start_time at a
+// 300-minute property is still inside its cutoff while a newer one at a
+// 120-minute property is past its own. Fill all 500 scan slots with
+// those and a due row is never reached, pass after pass.
+//
+// What that costs: for work blocks, nothing — the end_time is derived
+// from the block's own tasks, so a late close records exactly the hours
+// a prompt one would. For shifts it is real, because a shift is stamped
+// NOW(): a starved shift keeps accruing recorded duration until some
+// pass reaches it. It takes 500 simultaneously-open rows inside one age
+// band to happen at all. If it ever does, raise this number.
+const STALE_FORCE_SCAN_MAX = 500;
 // Sanity ceiling for a SINGLE finished work block, used by the money
-// reports. The two thresholds above only fire while a block is still
-// open, and only when someone loads the owner's Daily view — so a block
-// that nobody force-closed for a week ends up stored with end_time set
-// days after start_time. Those rows are not labor, they're forgotten
+// reports. Eight hours is longer than any real bedroom clean but short
+// enough to catch a runaway. Those rows are not labor, they're forgotten
 // clock-outs, and left alone they quietly wreck any profit number.
-// Eight hours is longer than any real bedroom clean but short enough to
-// catch the runaways.
+//
+// This is now the SECOND of two tests for a forgotten clock-out, not the
+// only one. It catches rows the app never got to — a block closed by
+// hand days later, or one closed by an older build that stamped NOW().
+// A block the sweep closed is caught by auto_closed instead, because its
+// end_time is derived from its own last finished task and is usually
+// well under eight hours. Keying only on the duration would have let
+// every row this release creates pass for an ordinary short job.
 const MAX_BLOCK_HOURS = 8;
 function WhosWherePanel({ employee }) {
   const [rows, setRows] = useState([]);
@@ -32867,17 +34129,46 @@ function WhosWherePanel({ employee }) {
   //   1) SOFT — shifts with last_activity_at older than 90 min get
   //      end_time = last_activity_at. Cleaner gets credit only for
   //      time they were actually active in the app.
-  //   2) HARD — anything still open with start_time older than 120 min
-  //      gets end_time = NOW. Catches sessions where last_activity_at
-  //      is null or somehow missed the soft pass.
-  // Work blocks: no last_activity_at column on that table, so we
-  // hard-close them at 120 min from start. A workblock open longer
-  // than 2 hours is almost certainly stale (a real bedroom clean
-  // rarely exceeds that).
+  //   2) HARD — anything still open past the force-close cutoff for
+  //      its property: STALE_FORCE_MIN floored against that property's
+  //      bedroom time limit. Catches sessions where last_activity_at is
+  //      null or somehow missed the soft pass.
+  // Both tiers are fetch-then-patch loops. The soft pass has to be one
+  // because supabase-js has no column-to-column UPDATE; the hard pass is
+  // one because a bulk UPDATE can carry only a single cutoff and a single
+  // end_time, and work blocks need one of each per row. See the hard pass
+  // below for the money argument.
+  // Work blocks: no last_activity_at column on that table, so whether to
+  // close one is decided on start_time alone and WHAT it records comes
+  // from its own tasks.
   const cleanupStale = async () => {
+    // The windows have to be loaded BEFORE any row is judged, or the first
+    // run on a cold page would judge every one of them against an empty
+    // cache and close a cleaner at a long-window property at two hours —
+    // the exact bug this fixes. A failure here is not fatal: the cache is
+    // left as it was, so every window reads as the 120 default, which is
+    // the flat cutoff this pass had before per-property windows existed,
+    // and the rest of the pass still runs.
+    try {
+      await ensurePresenceWindows();
+    } catch (e) {
+      console.warn('[whos-where] could not read the per-property bedroom limits; using the default', e);
+    }
     const now = Date.now();
     const idleCutoffISO = new Date(now - STALE_IDLE_MIN * 60 * 1000).toISOString();
-    const forceCutoffISO = new Date(now - STALE_FORCE_MIN * 60 * 1000).toISOString();
+    // NOT a cutoff anything is closed by, and deliberately NOT read from
+    // any property's window. Every row's own cutoff is at least
+    // STALE_FORCE_MIN, so a row younger than that can never be closed and
+    // there is no reason to fetch it. Each row that does come back is
+    // re-tested against its own property's cutoff by pastForceCloseCutoff
+    // and left alone if that has not elapsed.
+    //
+    // Reading the SHORTEST window in use here — which is what the previous
+    // release did — meant lowering one property's bedroom time limit
+    // widened this net, and the extra rows it dragged in were then judged
+    // by that same lowered number. That is how a display setting came to
+    // clock a live cleaner out. The floor closes both halves of it.
+    const scanCutoffISO = new Date(now - STALE_FORCE_MIN * 60 * 1000).toISOString();
     try {
       // 1. Soft auto-clockout — pull shifts past the idle cutoff and
       //    set end_time per-row to their last_activity_at. We can't
@@ -32888,27 +34179,150 @@ function WhosWherePanel({ employee }) {
         .is('end_time', null)
         .not('last_activity_at', 'is', null)
         .lt('last_activity_at', idleCutoffISO);
+      // Write failures are COUNTED rather than discarded. supabase-js
+      // resolves with { data, error } instead of throwing while
+      // shouldThrowOnError is false, so the try/catch wrapped round this
+      // whole pass cannot see an RLS denial, a constraint or a 5xx. Before
+      // this, a pass could issue its full budget of patches, land none of
+      // them, and leave nothing in the console to find it by — every 30
+      // seconds, for as long as the tab stayed open. One line per pass,
+      // naming the first error, so a real fault is visible and a healthy
+      // pass stays quiet.
+      const writeFails = { soft: 0, shifts: 0, blocks: 0 };
+      let firstWriteError = null;
+      const noteWrite = (kind, res) => {
+        if (res?.error) {
+          writeFails[kind]++;
+          if (!firstWriteError) firstWriteError = res.error;
+        }
+        return res;
+      };
       for (const s of (idleShifts || [])) {
         const endTime = s.last_activity_at || s.start_time;
-        await supabase.from('shifts').update({ end_time: endTime }).eq('id', s.id);
+        noteWrite('soft', await supabase.from('shifts').update({ end_time: endTime }).eq('id', s.id));
         // Also close any open work_block belonging to this shift, with
         // the same end_time so timing stays consistent.
-        await supabase.from('work_blocks')
+        noteWrite('soft', await supabase.from('work_blocks')
           .update({ end_time: endTime })
           .eq('shift_id', s.id)
-          .is('end_time', null);
+          .is('end_time', null));
       }
-      // 2. Hard force close — catch-all for anything still open beyond
-      //    the 2-hour cutoff (e.g. shift with no last_activity_at, or
-      //    a work_block whose parent shift is somehow already closed).
-      await supabase.from('shifts')
-        .update({ end_time: new Date().toISOString() })
+      // 2. Hard force close — catch-all for anything still open past its
+      //    own property's force-close cutoff (e.g. a shift with no
+      //    last_activity_at, or a work_block whose parent shift was
+      //    closed without it — clockOut and autoClockOut close only the
+      //    cleaner's activeBlock, so blocks she walked away from earlier
+      //    are left open by design and land here).
+      //
+      //    Fetch-then-patch, per row, for the same reason the soft pass
+      //    is: one UPDATE statement can carry only one cutoff, and the
+      //    cutoff is per property. Each pass is capped and ordered
+      //    oldest-first — see STALE_FORCE_MAX_PER_PASS.
+      //
+      //    The cutoff is pastForceCloseCutoff, i.e. Math.max(
+      //    STALE_FORCE_MIN, that property's bedroom time limit). The floor
+      //    is the point: the bedroom time limit is a DISPLAY setting the
+      //    owner edits, and when it was used here unfloored, setting it to
+      //    15 closed live cleaners' shifts and overwrote their open
+      //    blocks' durations with 15 minutes. Nothing here may close a row
+      //    earlier than the app would have closed it anyway.
+      //
+      // 2a. Shifts. end_time = NOW, exactly as on main: what a shift is
+      //     worth is the owner's decision and this code does not get to
+      //     change it. Only the cutoff moved, from the longest window in
+      //     use to this shift's own floored value — so a 120-minute
+      //     property's shift force-closes at 120 as it always did, and a
+      //     300-minute property's shift is no longer cut at 120 mid-clean.
+      //     customer_id is selected because blockPropertyId falls through
+      //     to a row's own customer_id; without it every shift would
+      //     silently resolve to 120 again.
+      //     One timestamp for the whole loop rather than one per row, so
+      //     fifty rows in one pass all record the same end.
+      const forceNowISO = new Date().toISOString();
+      const { data: openShifts } = await supabase.from('shifts')
+        .select('id, start_time, customer_id')
         .is('end_time', null)
-        .lt('start_time', forceCutoffISO);
-      await supabase.from('work_blocks')
-        .update({ end_time: new Date().toISOString() })
+        .lt('start_time', scanCutoffISO)
+        .order('start_time', { ascending: true })
+        .limit(STALE_FORCE_SCAN_MAX);
+      let shiftBudget = STALE_FORCE_MAX_PER_PASS;
+      for (const s of (openShifts || [])) {
+        if (shiftBudget <= 0) break;
+        if (!pastForceCloseCutoff(s, now)) continue;
+        // .is('end_time', null) repeated on the patch: another tab, or the
+        // cleaner's own phone, may have clocked her out between the fetch
+        // and here, and her real end_time must win over this safety net.
+        noteWrite('shifts', await supabase.from('shifts')
+          .update({ end_time: forceNowISO })
+          .eq('id', s.id)
+          .is('end_time', null));
+        shiftBudget--;
+      }
+      // 2b. Work blocks. end_time = the last moment anyone can show work
+      //     actually happened in this block — lastProvableWorkMs: the
+      //     latest end_time among its own completed tasks, or its
+      //     start_time if it has none. NOT NOW() and NOT anything derived
+      //     from the bedroom time limit.
+      //
+      //     This is the money one. InvoiceView.generate() bills hourly
+      //     work straight off end_time - start_time per bedroom with no
+      //     ceiling anywhere in it, the owner sometimes pays hourly at the
+      //     flat-rate properties too, and pay method is chosen per shift
+      //     at pay time — so this duration is money at every property.
+      //     NOW() made an abandoned block worth more the longer nobody
+      //     swept it up; the bedroom time limit made it worth whatever
+      //     somebody typed into a settings field. The last finished task
+      //     is the only number anybody can actually stand behind, and a
+      //     block with no finished task honestly records nothing.
+      //
+      //     Preview blocks are closed here too. They are never billed —
+      //     every money path and every board filters is_preview — and
+      //     excluding them made them immortal: the pass closed the preview
+      //     SHIFT, so exitPreviewMode's "open preview shift" query found
+      //     nothing and never reached the block, and
+      //     ChecklistAssignmentView's "Working on now" drops the preview
+      //     filter on purpose, so an abandoned one showed the owner's name
+      //     at a bedroom on a cleaner's screen forever.
+      const { data: openBlocks } = await supabase.from('work_blocks')
+        .select('id, start_time, shift:shifts!inner(customer_id), tasks(end_time)')
         .is('end_time', null)
-        .lt('start_time', forceCutoffISO);
+        .lt('start_time', scanCutoffISO)
+        .order('start_time', { ascending: true })
+        .limit(STALE_FORCE_SCAN_MAX);
+      let blockBudget = STALE_FORCE_MAX_PER_PASS;
+      for (const b of (openBlocks || [])) {
+        if (blockBudget <= 0) break;
+        if (!pastForceCloseCutoff(b, now)) continue;
+        const startMs = new Date(b.start_time).getTime();
+        // blockIsStale counts an unreadable start_time as past the cutoff,
+        // which is right for "don't claim she is present" and useless
+        // here: there is no honest end to derive from it. Left open for a
+        // human, as the old bulk UPDATE left it too (NULL never matched
+        // its .lt).
+        if (!Number.isFinite(startMs)) continue;
+        // auto_closed: the app derived this end_time, so the profit report
+        // can still call it a forgotten clock-out even though the honest
+        // duration is far under MAX_BLOCK_HOURS. Through autoClosedWrite so
+        // the end_time still lands if v73 has not been run.
+        noteWrite('blocks', await autoClosedWrite(
+          {
+            end_time: new Date(lastProvableWorkMs(b, startMs, now)).toISOString(),
+            auto_closed: true,
+          },
+          (row) => supabase.from('work_blocks')
+            .update(row)
+            .eq('id', b.id)
+            .is('end_time', null),
+        ));
+        blockBudget--;
+      }
+      const totalWriteFails = writeFails.soft + writeFails.shifts + writeFails.blocks;
+      if (totalWriteFails > 0) {
+        console.warn('[whos-where] stale cleanup could not write ' + totalWriteFails
+          + ' row(s) this pass (soft ' + writeFails.soft + ', shifts ' + writeFails.shifts
+          + ', blocks ' + writeFails.blocks + '). Those rows are still open and the next'
+          + ' pass will try again. First error:', firstWriteError);
+      }
     } catch (e) {
       console.warn('[whos-where] stale cleanup failed:', e);
     }
@@ -32917,39 +34331,80 @@ function WhosWherePanel({ employee }) {
   const load = async () => {
     // Run cleanup first so the next two queries only return live rows.
     await cleanupStale();
-    // Defensive client-side cutoff using the hard threshold — even if
-    // cleanup failed, we never show a session "active" beyond
-    // STALE_FORCE_MIN.
-    const cutoffMs = Date.now() - STALE_FORCE_MIN * 60 * 1000;
     // Open work_blocks property-wide. Pull cleaner + property +
     // unit/party labels in one shot via embeds so we don't fan out
     // queries per block.
+    // tasks(end_time) is here for the Close button below, which has to
+    // write the same end_time cleanupStale would have written. Without the
+    // embed every hand-closed block would record zero hours.
     const { data: blocks } = await supabase.from('work_blocks')
-      .select('id, start_time, unit_id, party_id, unit:units(label), party:parties(label), shift:shifts!inner(id, customer_id, employee:employees(id, name), customer:customers(id, name))')
+      .select('id, start_time, unit_id, party_id, is_preview, unit:units(label), party:parties(label), tasks(end_time), shift:shifts!inner(id, customer_id, is_preview, employee:employees(id, name), customer:customers(id, name))')
       .is('end_time', null)
       .order('start_time', { ascending: true });
     // Also pull cleaners who are clocked in but not yet at a bedroom
     // (active shift, no open work_block). Helpful for the owner to
     // see "Maria is at the property but hasn't started a bedroom yet."
+    // is_preview selected and filtered: this panel's standby list had no
+    // preview filter either, so the owner's own preview session showed as
+    // a cleaner on standby here before they had opened a bedroom. Same
+    // defect as the cleaner's "Who's here" popup; WhosWorkingNowModal was
+    // the only one of the three that already got it right.
     const { data: shifts } = await supabase.from('shifts')
-      .select('id, start_time, customer_id, employee:employees(id, name), customer:customers(id, name)')
+      .select('id, start_time, customer_id, is_preview, employee:employees(id, name), customer:customers(id, name)')
       .is('end_time', null);
     const blockedShiftIds = new Set((blocks || []).map(b => b.shift?.id).filter(Boolean));
-    const standby = (shifts || []).filter(s => !blockedShiftIds.has(s.id));
+    const standby = (shifts || []).filter(s => !s.is_preview && !blockedShiftIds.has(s.id));
+    // App-wide query, so presence is decided from these rows directly.
+    // Two things were wrong here. The owner's own preview sessions came
+    // back as cleaners standing in bedrooms — literally imaginary — and
+    // one cleaner who had walked through three bedrooms leaving each
+    // block open appeared three times, in three places at once.
+    const openBlocks = (blocks || []).filter(b => !blockIsPreview(b));
+    const present = await presentOpenBlockIds(openBlocks);
+    const nowMs = Date.now();
     setRows([
-      ...(blocks || [])
-        .filter(b => new Date(b.start_time).getTime() > cutoffMs)
-        .map(b => ({
-          kind: 'block',
-          id: b.id,
-          cleanerName: b.shift?.employee?.name || '?',
-          propertyName: b.shift?.customer?.name || '',
-          unitLabel: b.unit?.label,
-          partyLabel: b.party?.label,
-          startTime: b.start_time,
-        })),
+      ...openBlocks
+        // No age filter here, deliberately. A block past its own
+        // property's bedroom time limit is precisely the row the owner
+        // has to find and close, and `present` below is already false
+        // for it — presentOpenBlockIds applies blockIsStale — so it
+        // renders under this panel's existing "left open" treatment and
+        // claims nobody is there. Filtering it out hid the one row that
+        // needed a human: the hard pass is capped per pass and its write
+        // can fail, and either way the row was invisible until some
+        // later sweep reached it. WhosHerePopup has always listed these
+        // under "Left open"; this agrees with it now.
+        .map(b => {
+          // canClose is NOT "is nobody present". It is the sweep's own
+          // cutoff — so the Close button can only ever do, now, what the
+          // next pass would have done anyway, with the same end_time. A
+          // row that reads as left open but has not reached the cutoff
+          // gets no button: the app will handle it, and offering to
+          // truncate a cleaner who may still be around is not a favour.
+          const startMs = new Date(b.start_time).getTime();
+          const canClose = Number.isFinite(startMs) && pastForceCloseCutoff(b, nowMs);
+          return {
+            kind: 'block',
+            id: b.id,
+            // Not "is this row live" — "is a person standing here". A row
+            // that isn't present still shows, because the owner has to
+            // find and close it; it just doesn't claim anybody is there.
+            present: present.has(b.id),
+            cleanerName: b.shift?.employee?.name || '?',
+            propertyName: b.shift?.customer?.name || '',
+            unitLabel: b.unit?.label,
+            partyLabel: b.party?.label,
+            startTime: b.start_time,
+            canClose,
+            closeAt: canClose ? new Date(lastProvableWorkMs(b, startMs, nowMs)).toISOString() : null,
+          };
+        }),
       ...standby
-        .filter(s => new Date(s.start_time).getTime() > cutoffMs)
+        // Standby rows are shifts, not blocks, but the rule has to be
+        // the same rule. blockIsStale needs a start_time and a
+        // property, and blockPropertyId reads a shift row's own
+        // customer_id — selected above for exactly this reason.
+        .filter(s => !blockIsStale(s))
         .map(s => ({
           kind: 'standby',
           id: s.id,
@@ -32960,6 +34415,61 @@ function WhosWherePanel({ employee }) {
     ]);
     setLoaded(true);
   };
+
+  // The only way anywhere in the app to close an orphaned work block.
+  // forceClockOut closes a SHIFT; nothing closed a block, so the panel
+  // used to name a row the owner had to deal with and give him no way to
+  // deal with it.
+  //
+  // Writes exactly what cleanupStale's hard pass writes: the same
+  // end_time (lastProvableWorkMs — the last item anybody finished in
+  // that bedroom) and the same auto_closed marker, so the Profit report
+  // treats a hand-closed orphan and a swept one identically. And it is
+  // only offered on rows that are already past the force-close cutoff,
+  // which means this button cannot produce a row, or a number, that the
+  // sweep would not have produced within the next half minute by itself.
+  const [closingId, setClosingId] = useState(null);
+  const closeLeftOpen = async (r) => {
+    if (!r?.canClose || !r.closeAt || closingId) return;
+    const where = [r.propertyName, r.unitLabel, r.partyLabel].filter(Boolean).join(' · ');
+    // Two different true sentences. When nothing was ever finished in the
+    // bedroom the end equals the start, and telling the owner it will be
+    // "recorded as finishing at 2:30" when 2:30 is also when it started
+    // reads as a normal short job rather than as nothing at all. He is
+    // about to change what a bedroom is worth; the box has to say which
+    // of the two he is agreeing to.
+    // Compared as instants, NOT as strings. closeAt is built by
+    // toISOString() so it always reads 2026-10-12T13:30:00.000Z, while
+    // startTime is whatever PostgREST handed back for a timestamptz —
+    // commonly 2026-10-12T13:30:00+00:00, sometimes with microseconds. A
+    // string compare is false for every zero-duration block, which would
+    // have shown the owner the wrong one of the two sentences every time.
+    const zero = new Date(r.closeAt).getTime() === new Date(r.startTime).getTime();
+    if (!confirm('Close this bedroom?\n\n' + r.cleanerName + (where ? ' · ' + where : '')
+      + '\n\n' + (zero
+        ? 'Nobody finished a single item in it, so there is nothing to go on'
+          + ' and it will be recorded as no time at all.'
+          + ' Use Edit on the shift instead if you know the real finish time.'
+        : 'It will be recorded as finishing at ' + fmtClock(r.closeAt)
+          + ' — the last item anybody finished in it.')
+      + ' Nobody is in this bedroom, so this takes no time away from anyone.')) return;
+    setClosingId(r.id);
+    // .is('end_time', null) for the same reason the sweep repeats it: the
+    // cleaner's own phone may have closed it between the panel loading
+    // and this tap, and her real end_time must win.
+    const res = await autoClosedWrite(
+      { end_time: r.closeAt, auto_closed: true },
+      (row) => supabase.from('work_blocks').update(row).eq('id', r.id).is('end_time', null),
+    );
+    setClosingId(null);
+    if (res?.error) {
+      alert('Could not close it: ' + (res.error.message || 'the database refused the change')
+        + '\n\nNothing was changed.');
+      return;
+    }
+    load();
+  };
+
   useEffect(() => {
     load();
     const iv = setInterval(() => { if (!document.hidden) load(); }, 30000);
@@ -32969,7 +34479,11 @@ function WhosWherePanel({ employee }) {
   }, []);
 
   if (!loaded) return null;
-  const activeCount = rows.filter(r => r.kind === 'block').length;
+  // "N cleaners in bedrooms" counts people who are actually in one.
+  // Blocks left open behind them are counted separately and named as
+  // what they are.
+  const activeCount = rows.filter(r => r.kind === 'block' && r.present).length;
+  const leftOpenCount = rows.filter(r => r.kind === 'block' && !r.present).length;
   const standbyCount = rows.filter(r => r.kind === 'standby').length;
   return (
     <div className="mb-5 rounded-2xl bg-white border border-stone-200 overflow-hidden">
@@ -32983,11 +34497,16 @@ function WhosWherePanel({ employee }) {
           <div className="text-sm text-stone-900 font-medium">
             {activeCount > 0 ? (
               <>{activeCount} {activeCount === 1 ? 'cleaner' : 'cleaners'} in bedrooms</>
-            ) : (
+            ) : (standbyCount === 0 && leftOpenCount === 0) ? (
               <span className="text-stone-500">No one on the clock</span>
+            ) : (
+              <span className="text-stone-500">Nobody in a bedroom</span>
             )}
             {standbyCount > 0 && (
               <span className="text-stone-500"> · {standbyCount} on standby</span>
+            )}
+            {leftOpenCount > 0 && (
+              <span className="text-stone-500"> · {leftOpenCount} left open</span>
             )}
           </div>
         </div>
@@ -32999,7 +34518,8 @@ function WhosWherePanel({ employee }) {
             const elapsed = Date.now() - new Date(r.startTime).getTime();
             return (
               <div key={`${r.kind}:${r.id}`} className="px-4 py-2.5 flex items-center gap-3">
-                <div className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${r.kind === 'block' ? 'bg-emerald-500' : 'bg-stone-400'}`} />
+                {/* Green only for someone actually standing in a bedroom. */}
+                <div className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${r.kind === 'block' && r.present ? 'bg-emerald-500' : 'bg-stone-400'}`} />
                 <div className="flex-1 min-w-0">
                   <div className="text-sm text-stone-900">
                     <span className="font-bold">{r.cleanerName}</span>
@@ -33016,7 +34536,15 @@ function WhosWherePanel({ employee }) {
                         {r.partyLabel && (
                           <>
                             <span className="text-stone-400"> · </span>
-                            <span className="italic text-amber-700">{r.partyLabel}</span>
+                            <span className={`italic ${r.present ? 'text-amber-700' : 'text-stone-500'}`}>{r.partyLabel}</span>
+                          </>
+                        )}
+                        {/* Says what is true of a block nobody is in. The
+                           row stays so the owner can see and close it. */}
+                        {!r.present && (
+                          <>
+                            <span className="text-stone-400"> · </span>
+                            <span className="text-stone-500 text-xs">{openSinceNote({ start_time: r.startTime })}</span>
                           </>
                         )}
                       </>
@@ -33030,6 +34558,14 @@ function WhosWherePanel({ employee }) {
                     )}
                   </div>
                 </div>
+                {/* Only on a row the sweep would close itself. See
+                   closeLeftOpen for why that gate is the safe one. */}
+                {r.kind === 'block' && !r.present && r.canClose && (
+                  <button type="button" onClick={() => closeLeftOpen(r)} disabled={closingId === r.id}
+                    className="flex-shrink-0 px-2.5 py-1 rounded-lg border border-stone-300 bg-white text-[11px] text-stone-700 hover:bg-stone-100 active:scale-95 transition-transform disabled:opacity-50">
+                    {closingId === r.id ? 'Closing…' : 'Close'}
+                  </button>
+                )}
                 <div className="text-[11px] font-mono text-stone-500 flex-shrink-0">
                   {fmtTimeShort(elapsed)}
                 </div>
@@ -35501,7 +37037,28 @@ function BedroomHistoryView({ propertyId, propertyName, unitId, unitLabel, party
         .order('start_time', { ascending: false });
       if (sinceISO) blocksQ = blocksQ.gte('start_time', sinceISO);
       const { data: blocksRaw } = await blocksQ;
-      const blocks = (blocksRaw || []).filter(b => b.shift?.customer_id === propertyId);
+      // Preview sessions dropped: this is a record of who cleaned this
+      // bedroom, and the owner looking around the cleaner screens is not
+      // one of them. `live` marks a block that is still plausibly being
+      // worked, so a task left unfinished three months ago stops rendering
+      // a pulsing "happening now" dot.
+      //
+      // Deliberately a LOCAL staleness test, not fetchPresentBlockIds():
+      // this is a 180-to-365-day history screen, not a presence board, and
+      // it is not worth an app-wide read per open. It therefore does not
+      // apply the newest-per-cleaner rule — a block inside the window here
+      // reads as live even if the cleaner has since moved on. The window
+      // is what matters on this screen; the "who is where right now"
+      // question is answered by the presence surfaces.
+      //
+      // It DOES use the property's own window, so a Bridges block reads as
+      // live for five hours and a Carriage Cove one for two. Hence the
+      // await: blockIsStale is sync and resolves the window from a cache.
+      await ensurePresenceWindows();
+      const blocks = (blocksRaw || [])
+        .filter(b => b.shift?.customer_id === propertyId)
+        .filter(b => !blockIsPreview(b))
+        .map(b => ({ ...b, live: !b.end_time && !blockIsStale(b) }));
 
       // Fetch assignment_targets at this bedroom (and property-wide) in the window
       let targetsQ = supabase.from('assignment_targets')
@@ -35773,7 +37330,10 @@ function BedroomHistoryView({ propertyId, propertyName, unitId, unitLabel, party
                             <div className="pl-5 space-y-1.5">
                               {b.tasks.map(t => (
                                 <div key={t.id} className="text-xs text-stone-700 flex items-start gap-1.5">
-                                  {t.end_time ? <Check size={11} className="text-emerald-600 mt-0.5 flex-shrink-0" /> : <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse mt-1 flex-shrink-0" />}
+                                  {/* Only a task in a still-live block pulses. An
+                                     unfinished task in a block that closed, or
+                                     one left open past the window, is history. */}
+                                  {t.end_time ? <Check size={11} className="text-emerald-600 mt-0.5 flex-shrink-0" /> : <span className={`w-1.5 h-1.5 rounded-full mt-1 flex-shrink-0 ${b.live ? 'bg-amber-500 animate-pulse' : 'bg-stone-400'}`} />}
                                   <span className="flex-1"><TranslatableText text={t.name} targetLang="en" /></span>
                                   {t.photos?.length > 0 && (
                                     <span className="text-[10px] font-mono text-stone-400">{t.photos.length} 📷</span>
@@ -35890,11 +37450,15 @@ function DailyUnitDayDetail({ date, propertyId, unitId, unitLabel, propertyName,
 
   useEffect(() => { reload(); /* eslint-disable-next-line */ }, [date, unitId, propertyId]);
 
+  // Second copy of saveBlockTimes, kept in step with ShiftDetail's. Same
+  // reason for clearing auto_closed: a person typed these times in, so the
+  // profit report must stop treating the block as a forgotten clock-out.
   const saveBlockTimes = async (block, startISO, endISO) => {
     setBusy(true);
-    const { error } = await supabase.from('work_blocks')
-      .update({ start_time: startISO, end_time: endISO || null })
-      .eq('id', block.id);
+    const { error } = await autoClosedWrite(
+      { start_time: startISO, end_time: endISO || null, auto_closed: false },
+      (row) => supabase.from('work_blocks').update(row).eq('id', block.id),
+    );
     setBusy(false);
     if (error) { alert('Could not save: ' + error.message); return; }
     setEditingBlock(null);
@@ -40782,11 +42346,22 @@ function AssignmentBanner({ propertyId, property = null, unitId, partyId, employ
     if (!unitId || !partyId) { setLiveHere(false); return; }
     let cancelled = false;
     (async () => {
-      const { data } = await supabase.from('work_blocks')
-        .select('id, shift:shifts!inner(customer_id)')
-        .eq('unit_id', unitId).eq('party_id', partyId).is('end_time', null);
+      // "Being worked right now" has to mean somebody is in it. This read
+      // had no preview filter and no time rule, so the owner's own
+      // preview session, or anyone's block left open yesterday, flipped a
+      // bedroom's pill from Pending to In progress for every viewer.
+      // Bedroom-scoped query, so presence is answered app-wide.
+      const [{ data }, present] = await Promise.all([
+        supabase.from('work_blocks')
+          .select('id, is_preview, shift:shifts!inner(customer_id, is_preview)')
+          .eq('unit_id', unitId).eq('party_id', partyId).is('end_time', null),
+        fetchPresentBlockIds(),
+      ]);
       if (cancelled) return;
-      setLiveHere((data || []).some(b => b.shift?.customer_id === propertyId));
+      setLiveHere((data || []).some(b =>
+        b.shift?.customer_id === propertyId
+        && !blockIsPreview(b)
+        && present.has(b.id)));
     })();
     return () => { cancelled = true; };
   }, [propertyId, unitId, partyId]);
@@ -41521,15 +43096,25 @@ function AssignmentCard({ target, property = null, busy, onView, onStart, onPaus
     if (!t.unit_id || !t.party_id || isDone) { setActiveCleaners([]); return; }
     (async () => {
       const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
-      const { data } = await supabase
-        .from('work_blocks')
-        .select('id, end_time, shift:shifts!inner(employee:employees(id, name), customer_id)')
-        .eq('unit_id', t.unit_id).eq('party_id', t.party_id)
-        .or('is_preview.is.null,is_preview.eq.false')
-        .gte('start_time', todayStart.toISOString())
-        .is('end_time', null);
+      // Bedroom-scoped, so presence is answered app-wide. This chip says
+      // "[Name] is here" in bold green with a pulsing dot — the same
+      // claim as the Assignments-tab chip, in a different component. It
+      // already dropped preview rows but applied no time rule at all and
+      // listed one entry per open block, so a cleaner who had walked on
+      // to the next bedroom was still reported standing in this one.
+      const [{ data }, present] = await Promise.all([
+        supabase
+          .from('work_blocks')
+          .select('id, end_time, shift:shifts!inner(employee:employees(id, name), customer_id)')
+          .eq('unit_id', t.unit_id).eq('party_id', t.party_id)
+          .or('is_preview.is.null,is_preview.eq.false')
+          .gte('start_time', todayStart.toISOString())
+          .is('end_time', null),
+        fetchPresentBlockIds(),
+      ]);
       const cleaners = (data || [])
         .filter(b => b.shift?.customer_id === propertyId)
+        .filter(b => present.has(b.id))
         .map(b => b.shift?.employee?.name)
         .filter(Boolean);
       // dedupe
@@ -41968,7 +43553,7 @@ function SuggestedTabContent({ propertyId, employee, onGoToBedroom, onOpenBedroo
       } : null;
 
       // 2. Units + parties + full target detail + open work blocks
-      const [unitsRes, partiesRes, targetsRes, blocksRes] = await Promise.all([
+      const [unitsRes, partiesRes, targetsRes, blocksRes, presentIds] = await Promise.all([
         supabase.from('units').select('id, label, active').eq('customer_id', propertyId).eq('active', true),
         supabase.from('parties').select('id, label, unit_id, sort_order, active'),
         audienceSelect(
@@ -41984,9 +43569,14 @@ function SuggestedTabContent({ propertyId, employee, onGoToBedroom, onOpenBedroo
         // query silently truncates at the 1000-row cap and the "is here"
         // chips go missing on arbitrary cards.
         supabase.from('work_blocks')
-          .select('id, unit_id, party_id, main_section, shift:shifts!inner(customer_id, employee:employees(id, name))')
+          .select('id, unit_id, party_id, main_section, start_time, is_preview, shift:shifts!inner(customer_id, is_preview, employee:employees(id, name))')
           .is('end_time', null)
           .eq('shift.customer_id', propertyId),
+        // Presence is decided app-wide, not from the rows above: a
+        // cleaner's newest open block can be at a property this query
+        // never asked about, and she must not read as present in the
+        // older one.
+        fetchPresentBlockIds(),
       ]);
       const units = unitsRes.data || [];
       const parties = (partiesRes.data || []).filter(p => p.active !== false);
@@ -42003,7 +43593,11 @@ function SuggestedTabContent({ propertyId, employee, onGoToBedroom, onOpenBedroo
       });
       const openBlocks = (blocksRes.data || []).filter(b =>
         b.shift?.customer_id === propertyId &&
-        b.shift?.employee?.id && b.shift.employee.id !== employee.id
+        b.shift?.employee?.id && b.shift.employee.id !== employee.id &&
+        // The owner's preview sessions are not cleaners. They write real
+        // work_blocks rows, and this chip was one of the eight screens
+        // that showed them as somebody standing in a bedroom.
+        !blockIsPreview(b)
       );
 
       // Group open targets by bedroom (party_id)
@@ -42015,6 +43609,8 @@ function SuggestedTabContent({ propertyId, employee, onGoToBedroom, onOpenBedroo
       });
       // Build "who's here" map — keyed by party_id, contains [{ name, partyLabel(if relevant) }]
       // For the chip we just need the cleaner's name; the bedroom IS the card.
+      // `present` separates the two facts an open block used to conflate:
+      // somebody standing in this bedroom, versus work left open in it.
       const whosHereByParty = new Map();
       openBlocks.forEach(b => {
         if (!b.party_id) return;
@@ -42023,6 +43619,8 @@ function SuggestedTabContent({ propertyId, employee, onGoToBedroom, onOpenBedroo
           name: b.shift.employee.name,
           workBlockId: b.id,
           mainSection: b.main_section, // null for legacy blocks; UI hides badge in that case
+          present: presentIds.has(b.id),
+          startTime: b.start_time,
         });
       });
 
@@ -42266,16 +43864,34 @@ function SuggestedTabContent({ propertyId, employee, onGoToBedroom, onOpenBedroo
           // name. Everyone here is at the same bedroom, so joining any of
           // their open blocks lands the helper in this bedroom — we use the
           // first block that has an id.
-          const names = c.whosHere.map(w => w.name).filter(Boolean);
-          const sections = Array.from(new Set(c.whosHere.map(w => w.mainSection).filter(Boolean)));
-          const joinTarget = c.whosHere.find(w => w.workBlockId);
-          const label = names.join(', ') + ' here' + (sections.length ? ` · ${sections.join(', ')}` : '');
+          //
+          // Split by presence first. A cleaner who walked on to the next
+          // bedroom leaving this block open was named here as "here", in
+          // bold amber, which is the claim the owner reported as
+          // imaginary. Her block still gets a chip and still gets Join;
+          // it just says what it is.
+          const herePeople = c.whosHere.filter(w => w.present);
+          const leftOpen = c.whosHere.filter(w => !w.present);
+          const names = herePeople.map(w => w.name).filter(Boolean);
+          const sections = Array.from(new Set(herePeople.map(w => w.mainSection).filter(Boolean)));
+          const joinTarget = (herePeople.find(w => w.workBlockId) || leftOpen.find(w => w.workBlockId));
+          const label = names.length
+            ? names.join(', ') + ' here' + (sections.length ? ` · ${sections.join(', ')}` : '')
+            : null;
           return (
             <div className="mb-2 flex items-center gap-1.5 flex-wrap">
-              <span className="text-[10px] uppercase tracking-wider font-mono text-amber-900 font-bold">●</span>
-              <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-amber-100 text-amber-900 border border-amber-300 font-bold">
-                {label}
-              </span>
+              {label && (<>
+                <span className="text-[10px] uppercase tracking-wider font-mono text-amber-900 font-bold">●</span>
+                <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-amber-100 text-amber-900 border border-amber-300 font-bold">
+                  {label}
+                </span>
+              </>)}
+              {leftOpen.map((w, i) => (
+                <span key={w.workBlockId || `lo${i}`}
+                  className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-100 text-stone-600 border border-stone-300">
+                  {w.name || 'A cleaner'} · {openSinceNote({ start_time: w.startTime })}
+                </span>
+              ))}
               {onJoinBlock && joinTarget && (
                 <button onClick={(e) => { e.stopPropagation(); onJoinBlock({ id: joinTarget.workBlockId }); }}
                   className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-stone-900 hover:bg-stone-800 text-stone-50 font-bold inline-flex items-center gap-1 active:scale-95">
@@ -42654,7 +44270,7 @@ function AssignmentTabContent({ propertyId, property = null, employee, statusFil
     let rows = []; const PAGE = 1000;
     for (let from = 0; ; from += PAGE) {
       const { data, error } = await supabase.from('work_blocks')
-        .select('id, party_id, assignment_id, main_section, shift:shifts!inner(customer_id, employee:employees(id, name))')
+        .select('id, party_id, assignment_id, main_section, start_time, is_preview, shift:shifts!inner(customer_id, is_preview, employee:employees(id, name))')
         .is('end_time', null)
         .eq('shift.customer_id', propertyId)
         .range(from, from + PAGE - 1);
@@ -42663,6 +44279,16 @@ function AssignmentTabContent({ propertyId, property = null, employee, statusFil
       if (data.length < PAGE) break;
       if (from > 100000) break;
     }
+    // THIS IS BUGS 1 AND 2. These cards are where the owner saw a cleaner
+    // reported in the wrong bedroom, and in every bedroom of an
+    // apartment at once. Both came from reading "end_time IS NULL" as
+    // "a person is standing here": one cleaner walking 101-1 → 101-2 →
+    // 101-3 leaves three open rows, and all three got an amber
+    // "[Name] here" chip.
+    //
+    // Presence is decided app-wide — this query is property-scoped, and
+    // a property-scoped list cannot rule out a newer block elsewhere.
+    const presentIds = await fetchPresentBlockIds();
     // Key by assignment_id when the block has one (so "who's here" belongs to
     // the specific job — trash-out vs move-out — not the whole bedroom), and
     // ALSO by party_id as a fallback for legacy blocks with no assignment_id.
@@ -42679,10 +44305,15 @@ function AssignmentTabContent({ propertyId, property = null, employee, statusFil
       // to "join" themselves; the active workblock pill at the top of
       // the cleaner shell already surfaces it.
       if (b.shift?.employee?.id === employee?.id) return;
+      // The owner's preview sessions wrote real rows here and showed up
+      // as a cleaner being in a bedroom.
+      if (blockIsPreview(b)) return;
       const entry = {
         name: b.shift?.employee?.name || '?',
         workBlockId: b.id,
         mainSection: b.main_section,
+        present: presentIds.has(b.id),
+        startTime: b.start_time,
       };
       if (b.assignment_id) push(`a:${b.assignment_id}`, entry);
       push(`p:${b.party_id}`, entry); // legacy fallback key
@@ -43711,16 +45342,27 @@ function AssignmentTabContent({ propertyId, property = null, employee, statusFil
                               return true;
                             });
                             if (here.length === 0) return null;
+                            const anyPresent = here.some(w => w.present);
                             return (
                             <div className="mb-2 flex items-center gap-1.5 flex-wrap">
-                              <span className="text-[10px] uppercase tracking-wider font-mono text-amber-900 font-bold">●</span>
+                              <span className={`text-[10px] uppercase tracking-wider font-mono font-bold ${anyPresent ? 'text-amber-900' : 'text-stone-400'}`}>●</span>
                               {/* One chip per cleaner, each with its own Join —
                                  three people in a bedroom reads as three
-                                 chips, and you join the one you want. */}
+                                 chips, and you join the one you want.
+                                 A cleaner only gets the amber "here" chip
+                                 for the ONE block she is actually in. Her
+                                 other open blocks read "open since …" in
+                                 grey and keep their Join button: the work
+                                 is real and reachable, the claim that
+                                 somebody is standing in it is not. */}
                               {here.map((w, i) => (
                                 <span key={w.workBlockId || i} className="inline-flex items-center gap-1">
-                                  <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-amber-100 text-amber-900 border border-amber-300 font-bold">
-                                    {w.name || 'A cleaner'} here{w.mainSection ? ` · ${w.mainSection}` : ''}
+                                  <span className={`text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full ${w.present
+                                    ? 'bg-amber-100 text-amber-900 border border-amber-300 font-bold'
+                                    : 'bg-stone-100 text-stone-600 border border-stone-300'}`}>
+                                    {w.present
+                                      ? `${w.name || 'A cleaner'} here${w.mainSection ? ` · ${w.mainSection}` : ''}`
+                                      : `${w.name || 'A cleaner'}${w.mainSection ? ` · ${w.mainSection}` : ''} · ${openSinceNote({ start_time: w.startTime })}`}
                                   </span>
                                   {onJoinBlock && w.workBlockId && (
                                     <button onClick={(e) => { e.stopPropagation(); onJoinBlock({ id: w.workBlockId }); }}
@@ -44552,7 +46194,7 @@ function NextUpModal({ from, employeeId, onPick, onClose, onSeeAssignments }) {
     (async () => {
       // 1. Load every unit + party for the property so we can compute
       //    which bedrooms still have open targets and where they live.
-      const [unitsRes, partiesRes, targetsRes, blocksRes] = await Promise.all([
+      const [unitsRes, partiesRes, targetsRes, blocksRes, presentIds] = await Promise.all([
         supabase.from('units')
           .select('id, label, active')
           .eq('customer_id', from.propertyId).eq('active', true),
@@ -44565,8 +46207,9 @@ function NextUpModal({ from, employeeId, onPick, onClose, onSeeAssignments }) {
             .not('status', 'in', '(done,blocked)')),
         // Open work blocks at this property so we can show "who's here"
         supabase.from('work_blocks')
-          .select('unit_id, party_id, shift:shifts!inner(customer_id, employee:employees(id, name))')
+          .select('id, unit_id, party_id, start_time, is_preview, shift:shifts!inner(customer_id, is_preview, employee:employees(id, name))')
           .is('end_time', null),
+        fetchPresentBlockIds(),
       ]);
       const units = (unitsRes.data || []);
       const parties = (partiesRes.data || []).filter(p => p.active !== false);
@@ -44649,11 +46292,18 @@ function NextUpModal({ from, employeeId, onPick, onClose, onSeeAssignments }) {
         return (a.unitNum || 0) - (b.unitNum || 0);
       });
 
-      // Who else is here — cleaners with open blocks in the same apt
+      // Who else is here — cleaners with open blocks in the same apt.
+      // This panel exists to say "someone is STILL at this apartment"
+      // before you walk over, so it is the one screen where a block
+      // nobody is standing in should not appear at all: naming it would
+      // send the cleaner somewhere else for no reason. Previews are not
+      // cleaners; a block the cleaner walked away from is not presence.
       const otherCleaners = (blocksRes.data || [])
         .filter(b => b.shift?.customer_id === from.propertyId)
         .filter(b => b.unit_id === from.unitId)
         .filter(b => b.shift?.employee?.id && b.shift.employee.id !== employeeId)
+        .filter(b => !blockIsPreview(b))
+        .filter(b => presentIds.has(b.id))
         .map(b => ({
           name: b.shift.employee.name,
           partyId: b.party_id,

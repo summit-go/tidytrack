@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "oct20-tap243";
+const BUILD_TAG = "oct20-tap244";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -30300,7 +30300,10 @@ function WelcomeModal({ propertyName, canViewInvoices = false, onClose }) {
     },
     {
       title: 'Assignments',
-      body: 'Ask for specific work — a deep clean on one bedroom, say. Track it while we approve it, then see it once it’s approved. Concerns is where you send us a photo or a note about something that needs attention.',
+      // Copy has to match where the screen actually is. Assignments stopped
+      // being a tab and now opens from the + in the header, and the Concerns
+      // sub-tab this used to describe is hidden.
+      body: 'Ask for specific work — a deep clean on one bedroom, say. Tap the + in the top right to send one over, then track it there while we approve it. Once it’s approved it shows up under Cleanings pending.',
     },
     ...(canViewInvoices ? [{
       title: 'Invoices',
@@ -32166,7 +32169,10 @@ function PortalHome({ property, portalKind, portalUser, properties, onSwitchProp
     // 'invoices' is no longer a tab — it's a screen off the menu. A PM whose
     // saved tab state still says 'invoices' would otherwise land on a blank
     // page under the tab bar.
-    if (tab === 'invoices') setTab('history');
+    // Neither 'invoices' nor 'assignments' is a tab any more — one is a
+    // screen off the menu, the other off the + button. A PM whose saved tab
+    // state still names either would land on a blank page.
+    if (tab === 'invoices' || tab === 'assignments') setTab('history');
     /* eslint-disable-next-line */
   }, [tab, canViewInvoices]);
   const [groups, setGroups] = useState([]);
@@ -32186,10 +32192,25 @@ function PortalHome({ property, portalKind, portalUser, properties, onSwitchProp
   const uploadMethods = portalUploadMethods(property, portalUser);
   const [addKind, setAddKind] = useState(null);
   const [showAddPicker, setShowAddPicker] = useState(false);
+  // The + menu, and the Assignments screen it leads to.
+  const [showAddMenu, setShowAddMenu] = useState(false);
+  const [showAssignments, setShowAssignments] = useState(false);
+  const addMenuRef = useRef(null);
+  // Tapping anywhere else closes the menu — without this it stays open
+  // behind whatever the PM taps next.
+  useEffect(() => {
+    if (!showAddMenu) return;
+    const close = (e) => { if (addMenuRef.current && !addMenuRef.current.contains(e.target)) setShowAddMenu(false); };
+    document.addEventListener('mousedown', close);
+    document.addEventListener('touchstart', close);
+    return () => {
+      document.removeEventListener('mousedown', close);
+      document.removeEventListener('touchstart', close);
+    };
+  }, [showAddMenu]);
   const goAdd = (kind) => {
     setShowAddPicker(false);
-    setTab('assignments');
-    setAsgSub('requests');
+    setShowAssignments(true);   // the flows live on the Assignments screen
     setAddKind(kind);
   };
   const startAddAssignment = () => {
@@ -32409,15 +32430,34 @@ function PortalHome({ property, portalKind, portalUser, properties, onSwitchProp
                rather than opens. It sits in the header on every tab, so a PM
                reading today's cleanings can raise one without navigating
                first — tapping it moves to Assignments and opens the flow. */}
-            {uploadMethods.any && (
-              <button onClick={startAddAssignment}
-                aria-label="Add an assignment"
-                title="Add an assignment"
+            {/* The + opens a short menu rather than jumping straight into a
+               flow. Assignments is the only entry today; it's a menu so the
+               next one doesn't change how this button behaves. Gold, because
+               it's the one thing in this header a PM DOES rather than opens. */}
+            <div className="relative" ref={addMenuRef}>
+              <button onClick={() => setShowAddMenu(o => !o)}
+                aria-label="Add"
+                aria-expanded={showAddMenu}
+                title="Add"
                 className="p-2 rounded-full text-stone-900 hover:brightness-110 active:scale-95 transition"
                 style={{ backgroundColor: '#C99B5C' }}>
                 <Plus size={16} />
               </button>
-            )}
+              {showAddMenu && (
+                <div className="absolute right-0 mt-2 w-60 rounded-2xl bg-white border border-stone-300 shadow-xl overflow-hidden z-50">
+                  <button
+                    onClick={() => { setShowAddMenu(false); setShowAssignments(true); }}
+                    className="w-full px-4 py-3.5 flex items-center gap-3 text-left active:bg-stone-100">
+                    <ClipboardList size={18} className="text-stone-500 flex-shrink-0" />
+                    <span className="flex-1 min-w-0">
+                      <span className="block text-sm font-medium text-stone-900">Assignments</span>
+                      <span className="block text-[11px] text-stone-500">Upload work for the cleaning team</span>
+                    </span>
+                    <ChevronRight size={15} className="text-stone-400 flex-shrink-0" />
+                  </button>
+                </div>
+              )}
+            </div>
             <PortalLangToggle portalUser={portalUser} />
             <button onClick={() => setShowMessages(true)}
               className="relative p-2 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-50"
@@ -32437,14 +32477,15 @@ function PortalHome({ property, portalKind, portalUser, properties, onSwitchProp
           </div>
         </div>
         {/* Pinned to this property — a PM can only ever surface their own
-           apartments, never another client's. */}
+           apartments, never another client's. An assignment result opens the
+           Assignments screen, since that stopped being a tab. */}
         <div className="mt-3">
           <GlobalSearch
             scopePropertyId={property.id}
             dark
             placeholder="Search apartments…"
             onOpenUnit={(u) => onOpenUnitHistory && onOpenUnitHistory(u)}
-            onOpenAssignment={() => setTab('assignments')} />
+            onOpenAssignment={() => setShowAssignments(true)} />
         </div>
         {portalUser?.name && (
           <div className="text-xs text-stone-300 mt-2 font-mono">
@@ -32475,24 +32516,12 @@ function PortalHome({ property, portalKind, portalUser, properties, onSwitchProp
         )}
       </div>
 
-      {/* Tab switcher */}
-      <div className="px-5 pt-4">
-        <div className="flex gap-1 bg-stone-100 p-1 rounded-xl">
-          <button onClick={() => setTab('history')}
-            className={`flex-1 py-2 px-2 rounded-lg text-xs font-medium ${tab === 'history' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
-            Cleanings
-          </button>
-          <button onClick={() => setTab('assignments')}
-            className={`flex-1 py-2 px-2 rounded-lg text-xs font-medium ${tab === 'assignments' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
-            Assignments
-          </button>
-          {/* Invoices moved to the menu — it's a reference screen a PM opens
-             now and then, not one of the two things they came here to do. */}
-        </div>
-      </div>
-
-      {tab === 'history' && (
-        <div>
+      {/* The outer tab switcher is gone. Invoices moved to the menu and
+         Assignments moved behind the + in the header, which left Cleanings
+         as the only button — a one-tab tab bar is just a label taking up a
+         row. The main screen IS cleanings now; done / pending below is the
+         only switch left. */}
+      <div>
           <div className="px-5 pt-3">
             <div className="flex gap-1 bg-stone-100 p-1 rounded-xl">
               <button onClick={() => setCleanSub('done')}
@@ -32517,44 +32546,7 @@ function PortalHome({ property, portalKind, portalUser, properties, onSwitchProp
                 damageExpanded={damageExpandedProp} setDamageExpanded={setDamageExpandedProp} />
             : <PortalScheduleTab property={property} onOpenUnitDay={onOpenUnitDay}
                 />}
-        </div>
-      )}
-      {tab === 'assignments' && (
-        <div>
-          <div className="px-5 pt-3">
-            <div className="flex gap-1 bg-stone-100 p-1 rounded-xl">
-              {/* Waiting / Approved split the assignment list by where it is in
-                 approval. Schedule moved out to Cleanings — it lists cleanings,
-                 not requests, so it never belonged here. */}
-              <button onClick={() => { setAsgSub('requests'); setAsgApproval('waiting'); }}
-                className={`flex-1 py-2 px-2 rounded-lg text-xs font-medium ${asgSub === 'requests' && asgApproval === 'waiting' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
-                Waiting approval
-              </button>
-              <button onClick={() => { setAsgSub('requests'); setAsgApproval('approved'); }}
-                className={`flex-1 py-2 px-2 rounded-lg text-xs font-medium ${asgSub === 'requests' && asgApproval === 'approved' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
-                Approved
-              </button>
-              <button onClick={() => setAsgSub('concerns')}
-                className={`flex-1 py-2 px-2 rounded-lg text-xs font-medium ${asgSub === 'concerns' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
-                Concerns
-              </button>
-            </div>
-            <p className="text-[11px] text-stone-400 font-mono mt-2 px-1">
-              {asgSub === 'concerns'
-                ? 'Send us photos or a message — e.g. a resident complaint or something that needs attention.'
-                : asgApproval === 'waiting'
-                ? 'Requests you\u2019ve sent that the owner hasn\u2019t approved yet, plus any drafts.'
-                : 'Approved and visible to the cleaning team.'}
-            </p>
-          </div>
-          {asgSub === 'requests'
-            ? <PortalAssignmentsTab property={property} portalKind={portalKind} portalUser={portalUser}
-                approvalView={asgApproval}
-                addKind={addKind} onAddHandled={() => setAddKind(null)} />
-            : <PortalPhotoUploadTab property={property} portalKind={portalKind} />}
-        </div>
-      )}
-
+      </div>
 
       {showWelcome && (
         <WelcomeModal propertyName={property.name} canViewInvoices={canViewInvoices}
@@ -32577,6 +32569,38 @@ function PortalHome({ property, portalKind, portalUser, properties, onSwitchProp
           onSignOut={() => { setShowMenu(false); onSignOut && onSignOut(); }}
         />
       )}
+      {/* Assignments as a screen of its own, opened from the + menu. It only
+         shows requests WAITING for approval: approved work already appears
+         under Cleanings pending, so a second list of it was the same jobs in
+         two places. Concerns is hidden rather than deleted — the component is
+         still here and one line brings it back. */}
+      {showAssignments && (
+        <div className="fixed inset-0 z-40 bg-stone-50 overflow-y-auto" style={{ minHeight: '100dvh' }}>
+          <div className="px-5 py-4 border-b border-stone-200 bg-white sticky top-0 z-10">
+            <button onClick={() => setShowAssignments(false)}
+              className="mb-2 inline-flex items-center gap-1 text-xs font-mono text-stone-500 hover:text-stone-900">
+              <ArrowLeft size={14} /> Back
+            </button>
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <h1 className="font-serif text-2xl text-stone-900">Assignments</h1>
+                <span className="text-xs font-mono text-stone-500">{property.name}</span>
+              </div>
+              {uploadMethods.any && (
+                <button onClick={startAddAssignment}
+                  className="flex-shrink-0 px-4 py-2.5 rounded-xl text-sm font-medium text-stone-900 flex items-center gap-1.5 active:scale-95 transition"
+                  style={{ backgroundColor: '#C99B5C' }}>
+                  <Plus size={16} /> New
+                </button>
+              )}
+            </div>
+          </div>
+          <PortalAssignmentsTab property={property} portalKind={portalKind} portalUser={portalUser}
+            approvalView="waiting"
+            addKind={addKind} onAddHandled={() => setAddKind(null)} />
+        </div>
+      )}
+
       {/* Only reached when the property has more than one upload method
          turned on — with a single method the + opens it directly. */}
       {showAddPicker && (

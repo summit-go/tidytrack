@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "oct20-tap242";
+const BUILD_TAG = "oct20-tap243";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -30553,6 +30553,23 @@ function ChangePinModal({ employee, onClose, onSaved }) {
 // PORTAL MENU SHEET — slide-up panel from the hamburger button.
 // Holds the secondary actions (switch property, settings, sign out, help).
 // =================================================================
+// Which "add a cleaning" flows this PM sees on this property. Module scope
+// on purpose: the + lives in the portal header and the flows it opens live
+// inside PortalAssignmentsTab, so two components have to agree on the answer.
+// Derived in one place so the header can't offer a method the tab won't open.
+// Unconfigured (null) keeps the old default: checklist on, quick off, legacy
+// following the per-PM allow_legacy_uploads flag.
+function portalUploadMethods(property, portalUser) {
+  const pmm = property?.pm_upload_methods;
+  const allowLegacy = !!portalUser?.allow_legacy_uploads;
+  const quick = pmm ? !!pmm.quick : false;
+  const checklist = pmm ? !!pmm.checklist : true;
+  const legacy = pmm ? !!pmm.legacy : allowLegacy;
+  // view.kind values PortalAssignmentsTab understands, in the order shown.
+  const kinds = [quick && 'quick', checklist && 'wizard', legacy && 'new'].filter(Boolean);
+  return { quick, checklist, legacy, kinds, any: kinds.length > 0 };
+}
+
 function PortalMenuSheet({ portalUser, property, hasMultipleProperties, portalKind, isPmStaff,
   onClose, onSwitchProperty, onShowWelcome, onChangeCode, onShowTeam, onSignOut,
   canViewInvoices = false, onShowInvoices = null }) {
@@ -32163,6 +32180,23 @@ function PortalHome({ property, portalKind, portalUser, properties, onSwitchProp
   const [showMenu, setShowMenu] = useState(false);
   // Invoices is its own screen now, reached from the menu.
   const [showInvoices, setShowInvoices] = useState(false);
+  // Adding an assignment starts at the header + and finishes inside
+  // PortalAssignmentsTab, which owns the flows. The chosen flow travels down
+  // as addKind; the tab opens it and calls back so one tap can't reopen it.
+  const uploadMethods = portalUploadMethods(property, portalUser);
+  const [addKind, setAddKind] = useState(null);
+  const [showAddPicker, setShowAddPicker] = useState(false);
+  const goAdd = (kind) => {
+    setShowAddPicker(false);
+    setTab('assignments');
+    setAsgSub('requests');
+    setAddKind(kind);
+  };
+  const startAddAssignment = () => {
+    // One method enabled goes straight in; several and we ask which.
+    if (uploadMethods.kinds.length === 1) goAdd(uploadMethods.kinds[0]);
+    else setShowAddPicker(true);
+  };
   const [showTeam, setShowTeam] = useState(false);
   const pmUnread = useUnreadCount({ customer: property });
   const isPmStaff = portalKind === 'pm_staff';
@@ -32370,6 +32404,20 @@ function PortalHome({ property, portalKind, portalUser, properties, onSwitchProp
             </div>
           </button>
           <div className="flex items-center gap-2 flex-shrink-0">
+            {/* Add an assignment. Gold rather than the neutral stone the other
+               header buttons use, because it's the one thing here a PM DOES
+               rather than opens. It sits in the header on every tab, so a PM
+               reading today's cleanings can raise one without navigating
+               first — tapping it moves to Assignments and opens the flow. */}
+            {uploadMethods.any && (
+              <button onClick={startAddAssignment}
+                aria-label="Add an assignment"
+                title="Add an assignment"
+                className="p-2 rounded-full text-stone-900 hover:brightness-110 active:scale-95 transition"
+                style={{ backgroundColor: '#C99B5C' }}>
+                <Plus size={16} />
+              </button>
+            )}
             <PortalLangToggle portalUser={portalUser} />
             <button onClick={() => setShowMessages(true)}
               className="relative p-2 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-50"
@@ -32501,7 +32549,8 @@ function PortalHome({ property, portalKind, portalUser, properties, onSwitchProp
           </div>
           {asgSub === 'requests'
             ? <PortalAssignmentsTab property={property} portalKind={portalKind} portalUser={portalUser}
-                approvalView={asgApproval} />
+                approvalView={asgApproval}
+                addKind={addKind} onAddHandled={() => setAddKind(null)} />
             : <PortalPhotoUploadTab property={property} portalKind={portalKind} />}
         </div>
       )}
@@ -32528,6 +32577,50 @@ function PortalHome({ property, portalKind, portalUser, properties, onSwitchProp
           onSignOut={() => { setShowMenu(false); onSignOut && onSignOut(); }}
         />
       )}
+      {/* Only reached when the property has more than one upload method
+         turned on — with a single method the + opens it directly. */}
+      {showAddPicker && (
+        <div className="fixed inset-0 z-[60] flex items-end sm:items-center justify-center">
+          <div className="absolute inset-0 bg-stone-900/60" onClick={() => setShowAddPicker(false)} />
+          <div className="relative bg-stone-50 w-full sm:max-w-sm rounded-t-3xl sm:rounded-3xl overflow-hidden shadow-2xl">
+            <div className="px-5 py-4 border-b border-stone-200 bg-white">
+              <div className="font-serif text-lg text-stone-900">Add an assignment</div>
+              <div className="text-xs text-stone-500">Pick how you want to send it over.</div>
+            </div>
+            <div className="bg-white">
+              {uploadMethods.quick && (
+                <button onClick={() => goAdd('quick')}
+                  className="w-full px-5 py-4 flex items-center gap-3 active:bg-stone-100 text-left border-b border-stone-100">
+                  <Building2 size={18} className="text-stone-500" />
+                  <span className="flex-1 text-sm font-medium text-stone-900">{uploadButtonLabel(property?.name)}</span>
+                  <ChevronRight size={16} className="text-stone-400" />
+                </button>
+              )}
+              {uploadMethods.checklist && (
+                <button onClick={() => goAdd('wizard')}
+                  className="w-full px-5 py-4 flex items-center gap-3 active:bg-stone-100 text-left border-b border-stone-100">
+                  <ClipboardList size={18} className="text-stone-500" />
+                  <span className="flex-1 text-sm font-medium text-stone-900">{uploadButtonLabel(property?.name)}</span>
+                  <ChevronRight size={16} className="text-stone-400" />
+                </button>
+              )}
+              {uploadMethods.legacy && (
+                <button onClick={() => goAdd('new')}
+                  className="w-full px-5 py-4 flex items-center gap-3 active:bg-stone-100 text-left">
+                  <FileText size={18} className="text-stone-500" />
+                  <span className="flex-1 text-sm font-medium text-stone-900">Legacy file upload</span>
+                  <ChevronRight size={16} className="text-stone-400" />
+                </button>
+              )}
+            </div>
+            <button onClick={() => setShowAddPicker(false)}
+              className="w-full py-3 text-sm font-mono text-stone-500 hover:bg-stone-100 border-t border-stone-200">
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Invoices as a screen of its own rather than a third tab. It sits
          over the portal so closing it returns the PM to the tab and scroll
          position they left, with no tab state to restore. */}
@@ -48960,7 +49053,8 @@ function PortalScheduleTab({ property, onOpenUnitDay }) {
   );
 }
 
-function PortalAssignmentsTab({ property, portalKind, portalUser, approvalView = null }) {
+function PortalAssignmentsTab({ property, portalKind, portalUser, approvalView = null,
+  addKind = null, onAddHandled = null }) {
   const [approvedView, setApprovedView] = useState('list'); // 'list' | 'calendar'
   const [assignments, setAssignments] = useState([]);
   const [loaded, setLoaded] = useState(false);
@@ -48971,16 +49065,19 @@ function PortalAssignmentsTab({ property, portalKind, portalUser, approvalView =
   const [view, setView] = useState({ kind: 'list' });
   const [search, setSearch] = useState('');
 
-  const allowLegacy = !!portalUser?.allow_legacy_uploads;
-  // Per-property control of which upload styles this PM sees. Unconfigured
-  // (null) keeps the old default: checklist on, quick off, legacy following
-  // the per-PM allow_legacy_uploads flag.
-  const pmm = property?.pm_upload_methods;
-  // Shown when more than one upload method is enabled and the + is tapped.
-  const [showAddPicker, setShowAddPicker] = useState(false);
-  const showQuick = pmm ? !!pmm.quick : false;
-  const showChecklist = pmm ? !!pmm.checklist : true;
-  const showLegacy = pmm ? !!pmm.legacy : allowLegacy;
+  // Shared with the header's + button — see portalUploadMethods.
+  const methods = portalUploadMethods(property, portalUser);
+  const { quick: showQuick, checklist: showChecklist, legacy: showLegacy } = methods;
+
+  // The + now lives in the portal header, which can't reach this component's
+  // `view` state. It hands the chosen flow down as addKind instead, and this
+  // opens it and reports back so the same tap can't reopen on every render.
+  useEffect(() => {
+    if (!addKind) return;
+    setView({ kind: addKind });
+    onAddHandled && onAddHandled();
+    /* eslint-disable-next-line */
+  }, [addKind]);
 
   const load = async () => {
     // Every assignment for this property, whoever raised it. The source='pm'
@@ -49104,112 +49201,23 @@ function PortalAssignmentsTab({ property, portalKind, portalUser, approvalView =
 
   return (
     <div className="px-5 pt-6 space-y-5">
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <h2 className="font-serif text-2xl text-stone-900 mb-1">Your assignments</h2>
-          <p className="text-sm text-stone-600">
-            Create assignments for the cleaning team. They take effect once approved.
-          </p>
-        </div>
-        {/* Add a cleaning. Which flow it opens is still the per-property
-           method config — with one enabled it goes straight there, with
-           several it asks. The full-width buttons below stay for now; this
-           is the fast way in from the top of the screen. */}
-        {(showQuick || showChecklist || showLegacy) && (
-          <button
-            onClick={() => {
-              const enabled = [
-                showQuick && 'quick',
-                showChecklist && 'wizard',
-                showLegacy && 'new',
-              ].filter(Boolean);
-              if (enabled.length === 1) setView({ kind: enabled[0] });
-              else setShowAddPicker(true);
-            }}
-            aria-label="Add a cleaning"
-            title="Add a cleaning"
-            className="flex-shrink-0 w-11 h-11 rounded-full bg-stone-900 text-stone-50 flex items-center justify-center active:scale-95 transition-transform">
-            <Plus size={22} />
-          </button>
-        )}
+      <div>
+        <h2 className="font-serif text-2xl text-stone-900 mb-1">Your assignments</h2>
+        <p className="text-sm text-stone-600">
+          {/* Adding happens from the + in the header now, so this line points
+             there instead of describing buttons that used to sit here. */}
+          Everything raised for this property. Use the + at the top to add one.
+        </p>
       </div>
 
-      {/* Both upload buttons are labelled with the PM's own property, so the
-         Bridges portal says "Bridges Upload" and the Carriage Cove portal
-         says "Carriage Cove Upload". Which of the two shows is still driven
-         by the per-property pmMethods flags. */}
-      {showQuick && (
-        <button onClick={() => setView({ kind: 'quick' })}
-          className="w-full py-4 rounded-2xl bg-stone-900 text-stone-50 font-medium flex items-center justify-center gap-2">
-          <Building2 size={18} /> {uploadButtonLabel(property?.name)}
-        </button>
-      )}
-
-      {/* Checklist wizard — structured upload. Shown per-property. */}
-      {showChecklist && (
-        <button onClick={() => setView({ kind: 'wizard' })}
-          className={`w-full py-4 rounded-2xl font-medium flex items-center justify-center gap-2 ${showQuick ? 'border-2 border-stone-300 bg-white text-stone-700' : 'bg-stone-900 text-stone-50'}`}>
-          <Plus size={18} /> {uploadButtonLabel(property?.name)}
-        </button>
-      )}
-
-      {/* Legacy upload — shown per-property (falls back to the per-PM flag
-         when the property hasn't been configured). */}
-      {showLegacy && (
-        <button onClick={() => setView({ kind: 'new' })}
-          title="Upload a file or photo as the source for an assignment (legacy flow)."
-          className="w-full py-2.5 rounded-xl text-xs font-medium flex items-center justify-center gap-1.5 border bg-stone-50 border-stone-300 text-stone-700 hover:bg-stone-100">
-          <FileText size={12} /> Legacy file upload
-        </button>
-      )}
-
+      {/* The three upload buttons and the picker sheet that used to live here
+         are gone — adding is the + in the portal header now, and leaving a
+         second set of entry points meant two places to keep in step. The
+         "no methods enabled" notice stays, because a PM whose property has
+         none turned on would otherwise just find a + that does nothing. */}
       {!showQuick && !showChecklist && !showLegacy && (
         <div className="text-center py-4 text-xs text-stone-400 border-2 border-dashed border-stone-200 rounded-xl">
           Assignment uploads aren't enabled for this property. Ask Summit Clean to turn one on.
-        </div>
-      )}
-
-      {/* Only reached when the property has more than one upload method
-         turned on — with a single method the + opens it directly. */}
-      {showAddPicker && (
-        <div className="fixed inset-0 z-[60] flex items-end sm:items-center justify-center">
-          <div className="absolute inset-0 bg-stone-900/60" onClick={() => setShowAddPicker(false)} />
-          <div className="relative bg-stone-50 w-full sm:max-w-sm rounded-t-3xl sm:rounded-3xl overflow-hidden shadow-2xl">
-            <div className="px-5 py-4 border-b border-stone-200 bg-white">
-              <div className="font-serif text-lg text-stone-900">Add a cleaning</div>
-              <div className="text-xs text-stone-500">Pick how you want to send it over.</div>
-            </div>
-            <div className="bg-white">
-              {showQuick && (
-                <button onClick={() => { setShowAddPicker(false); setView({ kind: 'quick' }); }}
-                  className="w-full px-5 py-4 flex items-center gap-3 active:bg-stone-100 text-left border-b border-stone-100">
-                  <Building2 size={18} className="text-stone-500" />
-                  <span className="flex-1 text-sm font-medium text-stone-900">{uploadButtonLabel(property?.name)}</span>
-                  <ChevronRight size={16} className="text-stone-400" />
-                </button>
-              )}
-              {showChecklist && (
-                <button onClick={() => { setShowAddPicker(false); setView({ kind: 'wizard' }); }}
-                  className="w-full px-5 py-4 flex items-center gap-3 active:bg-stone-100 text-left border-b border-stone-100">
-                  <Plus size={18} className="text-stone-500" />
-                  <span className="flex-1 text-sm font-medium text-stone-900">{uploadButtonLabel(property?.name)}</span>
-                  <ChevronRight size={16} className="text-stone-400" />
-                </button>
-              )}
-              {showLegacy && (
-                <button onClick={() => { setShowAddPicker(false); setView({ kind: 'new' }); }}
-                  className="w-full px-5 py-4 flex items-center gap-3 active:bg-stone-100 text-left">
-                  <FileText size={18} className="text-stone-500" />
-                  <span className="flex-1 text-sm font-medium text-stone-900">Legacy file upload</span>
-                  <ChevronRight size={16} className="text-stone-400" />
-                </button>
-              )}
-            </div>
-            <button onClick={() => setShowAddPicker(false)}
-              className="w-full py-3 text-sm font-mono text-stone-500 hover:bg-stone-100 border-t border-stone-200">
-              Cancel
-            </button>
-          </div>
         </div>
       )}
 

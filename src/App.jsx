@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "oct12-tap241";
+const BUILD_TAG = "oct20-tap242";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -30304,7 +30304,9 @@ function WelcomeModal({ propertyName, canViewInvoices = false, onClose }) {
     },
     ...(canViewInvoices ? [{
       title: 'Invoices',
-      body: 'Your invoices from Summit Clean, oldest to newest.',
+      // Copy has to match where the screen actually lives — it used to be a
+      // tab and is now behind the menu button in the top right.
+      body: 'Your invoices from Summit Clean, oldest to newest. Open them from the menu button in the top right.',
     }] : []),
   ];
 
@@ -30552,7 +30554,8 @@ function ChangePinModal({ employee, onClose, onSaved }) {
 // Holds the secondary actions (switch property, settings, sign out, help).
 // =================================================================
 function PortalMenuSheet({ portalUser, property, hasMultipleProperties, portalKind, isPmStaff,
-  onClose, onSwitchProperty, onShowWelcome, onChangeCode, onShowTeam, onSignOut }) {
+  onClose, onSwitchProperty, onShowWelcome, onChangeCode, onShowTeam, onSignOut,
+  canViewInvoices = false, onShowInvoices = null }) {
   const kindLabel = portalKind === 'property_owner' ? 'Property Owner'
     : portalKind === 'pm_staff' ? 'PM Staff'
     : 'Property Manager';
@@ -30592,6 +30595,11 @@ function PortalMenuSheet({ portalUser, property, hasMultipleProperties, portalKi
 
         {/* Menu items */}
         <div className="bg-white">
+          {/* First item: it's the one with a document at the end of it. */}
+          {canViewInvoices && onShowInvoices && (
+            <Item icon={FileText} label="Invoices" hint="View and download invoices for this property"
+              onClick={onShowInvoices} />
+          )}
           {hasMultipleProperties && (
             <Item icon={Layers} label="Switch property" hint="Pick a different property in your portfolio"
               onClick={onSwitchProperty} />
@@ -31290,7 +31298,9 @@ function PortalDashboard({ property, portalKind, portalUser, properties, onSwitc
   // spot in the list rather than the top of it.
   const [homeScrollY, setHomeScrollY] = useState(0);
   const [schedRecentOpen, setSchedRecentOpen] = useState(false);
-  const [homeFilter, setHomeFilter] = useState('7d'); // History range: 7d / 30d / 1y
+  // Loads 30 days; the Cleanings list SHOWS today + the past week and folds
+  // the rest behind "Show older". Loading only 7 would leave nothing to show.
+  const [homeFilter, setHomeFilter] = useState('30d'); // History range: 7d / 30d / 1y
 
   const backHome = () => {
     setView({ kind: 'home' });
@@ -32110,7 +32120,7 @@ function PortalHome({ property, portalKind, portalUser, properties, onSwitchProp
   // Tab state is owned by PortalDashboard when it passes it down, so a trip
   // into a unit-day and back returns the PM to where they were. The local
   // fallbacks keep this component standalone if it's ever mounted directly.
-  const [ownTab, setOwnTab] = useState('history');        // 'history' (Cleanings) | 'assignments' | 'invoices'
+  const [ownTab, setOwnTab] = useState('history');        // 'history' (Cleanings) | 'assignments'
   const [ownAsgSub, setOwnAsgSub] = useState('requests'); // 'requests' | 'concerns'
   // Cleanings splits into what's finished (the old History tab) and what's
   // still coming (the old Schedule tab, which used to sit oddly under
@@ -32136,18 +32146,23 @@ function PortalHome({ property, portalKind, portalUser, properties, onSwitchProp
   const canViewInvoices = !!portalUser?.can_view_invoices || !!portalUser?.__preview;
   // If invoices was the persisted tab but this user can't see it, fall back.
   useEffect(() => {
-    if (tab === 'invoices' && !canViewInvoices) setTab('history');
+    // 'invoices' is no longer a tab — it's a screen off the menu. A PM whose
+    // saved tab state still says 'invoices' would otherwise land on a blank
+    // page under the tab bar.
+    if (tab === 'invoices') setTab('history');
     /* eslint-disable-next-line */
   }, [tab, canViewInvoices]);
   const [groups, setGroups] = useState([]);
   const [loaded, setLoaded] = useState(false);
-  const [ownFilter, setOwnFilter] = useState('7d');
+  const [ownFilter, setOwnFilter] = useState('30d');   // see PortalDashboard
   const filter = filterProp !== undefined ? filterProp : ownFilter;
   const setFilter = setFilterProp || setOwnFilter;
   const [showWelcome, setShowWelcome] = useState(false);
   const [showChangeCode, setShowChangeCode] = useState(false);
   const [showMessages, setShowMessages] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
+  // Invoices is its own screen now, reached from the menu.
+  const [showInvoices, setShowInvoices] = useState(false);
   const [showTeam, setShowTeam] = useState(false);
   const pmUnread = useUnreadCount({ customer: property });
   const isPmStaff = portalKind === 'pm_staff';
@@ -32248,7 +32263,11 @@ function PortalHome({ property, portalKind, portalUser, properties, onSwitchProp
         return doneUnitParty.has(key1) || doneUnitParty.has(key2);
       });
       filtered.forEach(b => {
-        const date = new Date(b.start_time).toISOString().split('T')[0];
+        // LOCAL day, not UTC. toISOString() pushes an evening clean in Utah
+        // onto the next calendar day, which put it in the wrong date bucket —
+        // and now that the list leads with "Today", a 6pm clean would have
+        // shown up under tomorrow and gone missing from today's section.
+        const date = localDayKey(b.start_time);
         if (!byDate[date]) byDate[date] = {};
         const u = b.unit;
         if (!byDate[date][u.id]) byDate[date][u.id] = { unitId: u.id, label: u.label, photoCount: 0, beds: new Set(), hasDamage: false, hasResolvedDamage: false, hasCannot: false, hasResolvedCannot: false };
@@ -32316,7 +32335,7 @@ function PortalHome({ property, portalKind, portalUser, properties, onSwitchProp
             }
           }));
           return {
-            date: new Date(s.start_time).toISOString().split('T')[0],
+            date: localDayKey(s.start_time),   // local day — see the note above
             units: [{ unitId: null, label: 'Cleaning visit', photoCount, hasDamage, hasResolvedDamage, hasCannot, hasResolvedCannot }]
           };
         });
@@ -32419,12 +32438,8 @@ function PortalHome({ property, portalKind, portalUser, properties, onSwitchProp
             className={`flex-1 py-2 px-2 rounded-lg text-xs font-medium ${tab === 'assignments' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
             Assignments
           </button>
-          {canViewInvoices && (
-            <button onClick={() => setTab('invoices')}
-              className={`flex-1 py-2 px-2 rounded-lg text-xs font-medium ${tab === 'invoices' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
-              Invoices
-            </button>
-          )}
+          {/* Invoices moved to the menu — it's a reference screen a PM opens
+             now and then, not one of the two things they came here to do. */}
         </div>
       </div>
 
@@ -32491,9 +32506,6 @@ function PortalHome({ property, portalKind, portalUser, properties, onSwitchProp
         </div>
       )}
 
-      {tab === 'invoices' && canViewInvoices && (
-        <PortalInvoicesTab property={property} />
-      )}
 
       {showWelcome && (
         <WelcomeModal propertyName={property.name} canViewInvoices={canViewInvoices}
@@ -32511,8 +32523,28 @@ function PortalHome({ property, portalKind, portalUser, properties, onSwitchProp
           onShowWelcome={() => { setShowMenu(false); setShowWelcome(true); }}
           onChangeCode={() => { setShowMenu(false); setShowChangeCode(true); }}
           onShowTeam={() => { setShowMenu(false); setShowTeam(true); }}
+          canViewInvoices={canViewInvoices}
+          onShowInvoices={() => { setShowMenu(false); setShowInvoices(true); }}
           onSignOut={() => { setShowMenu(false); onSignOut && onSignOut(); }}
         />
+      )}
+      {/* Invoices as a screen of its own rather than a third tab. It sits
+         over the portal so closing it returns the PM to the tab and scroll
+         position they left, with no tab state to restore. */}
+      {showInvoices && canViewInvoices && (
+        <div className="fixed inset-0 z-40 bg-stone-50 overflow-y-auto" style={{ minHeight: '100dvh' }}>
+          <div className="px-5 py-4 border-b border-stone-200 bg-white sticky top-0 z-10">
+            <button onClick={() => setShowInvoices(false)}
+              className="mb-2 inline-flex items-center gap-1 text-xs font-mono text-stone-500 hover:text-stone-900">
+              <ArrowLeft size={14} /> Back
+            </button>
+            <div className="flex items-baseline gap-2 flex-wrap">
+              <h1 className="font-serif text-2xl text-stone-900">Invoices</h1>
+              <span className="text-xs font-mono text-stone-500">{property.name}</span>
+            </div>
+          </div>
+          <PortalInvoicesTab property={property} />
+        </div>
       )}
       {showTeam && (
         <PortalTeamModal property={property} portalUser={portalUser}
@@ -32619,6 +32651,8 @@ function PortalHistoryTab({ property, groups, loaded, filter, setFilter, onOpenU
   const [filterDate, setFilterDate] = useState('');        // YYYY-MM-DD or '' for all
   const [filterBuildings, setFilterBuildings] = useState(new Set()); // multi-select of building keys
   const [apartmentSearch, setApartmentSearch] = useState('');
+  // Anything older than the past week stays folded away until asked for.
+  const [showOlder, setShowOlder] = useState(false);
 
   // Build the set of available buildings and dates from the loaded
   // groups so the filter UI only offers options that actually have
@@ -32726,9 +32760,9 @@ function PortalHistoryTab({ property, groups, loaded, filter, setFilter, onOpenU
   // Flatten day-groups into building-groups. Buildings in natural order,
   // apartments within a building in natural order, and the most recent
   // cleaning first when the same apartment appears on several days.
-  const buildingGroups = (() => {
+  const buildingsOf = (dayGroups) => {
     const m = new Map();
-    filteredGroups.forEach(g => g.units.forEach(u => {
+    dayGroups.forEach(g => g.units.forEach(u => {
       const b = buildingFromLabel(u.label) || '__none__';
       if (!m.has(b)) m.set(b, []);
       m.get(b).push({ g, u });
@@ -32744,7 +32778,30 @@ function PortalHistoryTab({ property, groups, loaded, filter, setFilter, onOpenU
         rows: rows.sort((x, y) =>
           naturalCompare(x.u.label, y.u.label) || String(y.g.date).localeCompare(String(x.g.date))),
       }));
+  };
+
+  // The list leads with WHEN, then splits each stretch of time by building.
+  // A PM opening the portal is asking "what happened today?", and that was
+  // previously buried inside a building section among three weeks of work.
+  // Today and the past week answer it; everything older is folded away
+  // rather than padding the page.
+  const todayKey = localDayKey(new Date().toISOString());
+  const weekAgoKey = (() => {
+    const d = new Date();
+    d.setDate(d.getDate() - 6);          // 6 back + today = the last 7 days
+    return localDayKey(d.toISOString());
   })();
+  const todayGroups  = filteredGroups.filter(g => g.date === todayKey);
+  const weekGroups   = filteredGroups.filter(g => g.date < todayKey && g.date >= weekAgoKey);
+  const olderGroups  = filteredGroups.filter(g => g.date < weekAgoKey);
+  const countOf = (gs) => gs.reduce((s, g) => s + g.units.length, 0);
+  const olderCount = countOf(olderGroups);
+  const timeSections = [
+    { key: 'today', label: 'Today',             groups: todayGroups },
+    { key: 'week',  label: 'Earlier this week', groups: weekGroups },
+    ...(showOlder ? [{ key: 'older', label: 'Older', groups: olderGroups }] : []),
+  ].filter(s => s.groups.length > 0)
+   .map(s => ({ ...s, buildings: buildingsOf(s.groups), count: countOf(s.groups) }));
   const damageCount = filteredGroups.reduce((sum, g) => sum + g.units.filter(u => u.hasDamage).length, 0);
   const resolvedDamageCount = filteredGroups.reduce((sum, g) => sum + g.units.filter(u => u.hasResolvedDamage).length, 0);
   const totalCleanings = filteredGroups.reduce((sum, g) => sum + g.units.length, 0);
@@ -32911,16 +32968,24 @@ function PortalHistoryTab({ property, groups, loaded, filter, setFilter, onOpenU
         </div>
       )}
 
-      <div className="mb-3 flex gap-2 mt-3 flex-wrap">
-        {[{ id: '7d', label: '7 days' }, { id: '30d', label: '30 days' }, { id: '1y', label: '1 year' }].map(f => (
-          <button key={f.id} onClick={() => setFilter(f.id)}
-            className={`px-4 py-2 rounded-full text-sm font-medium transition-colors ${
-              filter === f.id ? 'bg-stone-900 text-stone-50' : 'bg-stone-100 text-stone-600'
-            }`}>
-            {f.label}
-          </button>
-        ))}
-      </div>
+      {/* How far back to LOAD. Only shown once the PM has asked to see older
+         work — otherwise it's a second date control sitting next to the
+         Today / This week sections, which is the same decision split across
+         two places (the filters panel below already lost its date chips for
+         exactly this reason). */}
+      {showOlder && (
+        <div className="mb-3 flex gap-2 mt-3 flex-wrap items-center">
+          <span className="text-[10px] uppercase tracking-wider font-mono text-stone-400">Load</span>
+          {[{ id: '7d', label: '7 days' }, { id: '30d', label: '30 days' }, { id: '1y', label: '1 year' }].map(f => (
+            <button key={f.id} onClick={() => setFilter(f.id)}
+              className={`px-4 py-2 rounded-full text-sm font-medium transition-colors ${
+                filter === f.id ? 'bg-stone-900 text-stone-50' : 'bg-stone-100 text-stone-600'
+              }`}>
+              {f.label}
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* Apartment search sits above the panel, not inside it — it's the
          control a PM reaches for first and it shouldn't cost two taps. */}
@@ -33017,12 +33082,32 @@ function PortalHistoryTab({ property, groups, loaded, filter, setFilter, onOpenU
           )}
         </div>
       ) : (
-        <div className="space-y-6">
-          {buildingGroups.map(bg => (
+        <div className="space-y-8">
+          {timeSections.length === 0 && (
+            <div className="text-center py-10 text-stone-400 text-sm border-2 border-dashed border-stone-200 rounded-2xl">
+              Nothing cleaned today or in the past week.
+              {olderCount > 0 && !showOlder && (
+                <button onClick={() => setShowOlder(true)}
+                  className="block mx-auto mt-2 text-xs text-stone-700 hover:text-stone-900 font-mono underline">
+                  Show {olderCount} older {olderCount === 1 ? 'cleaning' : 'cleanings'}
+                </button>
+              )}
+            </div>
+          )}
+          {timeSections.map(sec => (
+            <div key={sec.key}>
+              {/* Time first — Today, then the rest of the week. Buildings
+                 still group the cards inside each stretch, because a PM
+                 walking the property thinks in buildings. */}
+              <div className="flex items-baseline gap-2 mb-3">
+                <h3 className="font-serif text-xl text-stone-900">{sec.label}</h3>
+                <span className="text-[11px] font-mono text-stone-400">
+                  {sec.count} {sec.count === 1 ? 'cleaning' : 'cleanings'}
+                </span>
+              </div>
+              <div className="space-y-6">
+          {sec.buildings.map(bg => (
             <div key={bg.building}>
-              {/* Grouped by BUILDING, not by day — a PM walking a property
-                 thinks in buildings. The date moved onto each card so nothing
-                 is lost by dropping the date headers. */}
               <div className="text-sm font-mono text-stone-500 mb-2 uppercase tracking-wider flex items-center gap-2">
                 <Building2 size={13} />
                 {bg.building === '__none__' ? 'Other' : `Building ${bg.building.replace(/^B/i, '')}`}
@@ -33113,6 +33198,19 @@ function PortalHistoryTab({ property, groups, loaded, filter, setFilter, onOpenU
               </div>
             </div>
           ))}
+              </div>
+            </div>
+          ))}
+
+          {/* Older work is reachable, just not in the way. */}
+          {olderCount > 0 && timeSections.length > 0 && (
+            <button onClick={() => setShowOlder(o => !o)}
+              className="w-full py-3 rounded-xl border border-stone-200 bg-white text-xs font-mono text-stone-600 hover:border-stone-400">
+              {showOlder
+                ? 'Hide older cleanings'
+                : `Show ${olderCount} older ${olderCount === 1 ? 'cleaning' : 'cleanings'}`}
+            </button>
+          )}
         </div>
       )}
     </div>
@@ -48633,11 +48731,11 @@ function PortalScheduleTab({ property, onOpenUnitDay }) {
     ? searched.filter(a => buildingOf(a) === buildingFilter)
     : searched;
 
-  // Group into buildings; dated work first inside each, soonest at the top,
-  // then the undated ones.
-  const buildingGroups = (() => {
+  // Group a set of jobs into buildings; soonest first inside each, then the
+  // undated ones.
+  const buildingsOf = (jobs) => {
     const m = new Map();
-    visible.forEach(a => {
+    jobs.forEach(a => {
       const b = buildingOf(a) || '__none__';
       if (!m.has(b)) m.set(b, []);
       m.get(b).push(a);
@@ -48648,9 +48746,9 @@ function PortalScheduleTab({ property, onOpenUnitDay }) {
         if (y[0] === '__none__') return -1;
         return naturalCompare(x[0], y[0]);
       })
-      .map(([building, jobs]) => ({
+      .map(([building, js]) => ({
         building,
-        jobs: jobs.sort((p, q) => {
+        jobs: js.sort((p, q) => {
           const pd = p.scheduled_date || '';
           const qd = q.scheduled_date || '';
           if (pd && qd) return pd.localeCompare(qd) || naturalCompare(unitLabelOf(p), unitLabelOf(q));
@@ -48659,7 +48757,22 @@ function PortalScheduleTab({ property, onOpenUnitDay }) {
           return naturalCompare(unitLabelOf(p), unitLabelOf(q));
         }),
       }));
-  })();
+  };
+
+  // Pending leads with WHAT'S COMING: today, then the dates ahead. Past-due
+  // work still appears, last and unlabelled as late — whether we're behind is
+  // ours to manage, but silently dropping owed work from a PM's list would be
+  // worse than showing it quietly. Undated jobs sit between the two: they're
+  // owed, they just have no day yet.
+  const todayKey = localDayKey(new Date().toISOString());
+  const dateOf = (a) => String(a.scheduled_date || '').slice(0, 10);
+  const pendingSections = [
+    { key: 'today',    label: 'Today',         jobs: visible.filter(a => dateOf(a) === todayKey) },
+    { key: 'upcoming', label: 'Coming up',     jobs: visible.filter(a => dateOf(a) && dateOf(a) > todayKey) },
+    { key: 'undated',  label: 'Not scheduled', jobs: visible.filter(a => !dateOf(a)) },
+    { key: 'past',     label: 'Still open from earlier', jobs: visible.filter(a => dateOf(a) && dateOf(a) < todayKey) },
+  ].filter(s => s.jobs.length > 0)
+   .map(s => ({ ...s, buildings: buildingsOf(s.jobs) }));
 
 
   // One upcoming/overdue job card. Shared by both lists so the overdue
@@ -48793,7 +48906,17 @@ function PortalScheduleTab({ property, onOpenUnitDay }) {
           {aq || buildingFilter ? 'Nothing open matches that.' : 'Nothing pending right now.'}
         </div>
       ) : (
-        buildingGroups.map(bg => (
+        <div className="space-y-8">
+        {pendingSections.map(sec => (
+          <div key={sec.key}>
+            <div className="flex items-baseline gap-2 mb-3">
+              <h3 className="font-serif text-xl text-stone-900">{sec.label}</h3>
+              <span className="text-[11px] font-mono text-stone-400">
+                {sec.jobs.length} {sec.jobs.length === 1 ? 'cleaning' : 'cleanings'}
+              </span>
+            </div>
+            <div className="space-y-6">
+        {sec.buildings.map(bg => (
           <div key={bg.building}>
             <div className="text-sm font-mono text-stone-500 mb-2 uppercase tracking-wider flex items-center gap-2">
               <Building2 size={13} />
@@ -48807,7 +48930,11 @@ function PortalScheduleTab({ property, onOpenUnitDay }) {
               {bg.jobs.map(a => renderJobCard(a))}
             </div>
           </div>
-        ))
+        ))}
+            </div>
+          </div>
+        ))}
+        </div>
       )}
 
       {/* Attachment viewer — the file tied to an upcoming assignment. */}
@@ -48849,6 +48976,8 @@ function PortalAssignmentsTab({ property, portalKind, portalUser, approvalView =
   // (null) keeps the old default: checklist on, quick off, legacy following
   // the per-PM allow_legacy_uploads flag.
   const pmm = property?.pm_upload_methods;
+  // Shown when more than one upload method is enabled and the + is tapped.
+  const [showAddPicker, setShowAddPicker] = useState(false);
   const showQuick = pmm ? !!pmm.quick : false;
   const showChecklist = pmm ? !!pmm.checklist : true;
   const showLegacy = pmm ? !!pmm.legacy : allowLegacy;
@@ -48975,11 +49104,34 @@ function PortalAssignmentsTab({ property, portalKind, portalUser, approvalView =
 
   return (
     <div className="px-5 pt-6 space-y-5">
-      <div>
-        <h2 className="font-serif text-2xl text-stone-900 mb-1">Your assignments</h2>
-        <p className="text-sm text-stone-600">
-          Create assignments for the cleaning team. They take effect once approved.
-        </p>
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h2 className="font-serif text-2xl text-stone-900 mb-1">Your assignments</h2>
+          <p className="text-sm text-stone-600">
+            Create assignments for the cleaning team. They take effect once approved.
+          </p>
+        </div>
+        {/* Add a cleaning. Which flow it opens is still the per-property
+           method config — with one enabled it goes straight there, with
+           several it asks. The full-width buttons below stay for now; this
+           is the fast way in from the top of the screen. */}
+        {(showQuick || showChecklist || showLegacy) && (
+          <button
+            onClick={() => {
+              const enabled = [
+                showQuick && 'quick',
+                showChecklist && 'wizard',
+                showLegacy && 'new',
+              ].filter(Boolean);
+              if (enabled.length === 1) setView({ kind: enabled[0] });
+              else setShowAddPicker(true);
+            }}
+            aria-label="Add a cleaning"
+            title="Add a cleaning"
+            className="flex-shrink-0 w-11 h-11 rounded-full bg-stone-900 text-stone-50 flex items-center justify-center active:scale-95 transition-transform">
+            <Plus size={22} />
+          </button>
+        )}
       </div>
 
       {/* Both upload buttons are labelled with the PM's own property, so the
@@ -49014,6 +49166,50 @@ function PortalAssignmentsTab({ property, portalKind, portalUser, approvalView =
       {!showQuick && !showChecklist && !showLegacy && (
         <div className="text-center py-4 text-xs text-stone-400 border-2 border-dashed border-stone-200 rounded-xl">
           Assignment uploads aren't enabled for this property. Ask Summit Clean to turn one on.
+        </div>
+      )}
+
+      {/* Only reached when the property has more than one upload method
+         turned on — with a single method the + opens it directly. */}
+      {showAddPicker && (
+        <div className="fixed inset-0 z-[60] flex items-end sm:items-center justify-center">
+          <div className="absolute inset-0 bg-stone-900/60" onClick={() => setShowAddPicker(false)} />
+          <div className="relative bg-stone-50 w-full sm:max-w-sm rounded-t-3xl sm:rounded-3xl overflow-hidden shadow-2xl">
+            <div className="px-5 py-4 border-b border-stone-200 bg-white">
+              <div className="font-serif text-lg text-stone-900">Add a cleaning</div>
+              <div className="text-xs text-stone-500">Pick how you want to send it over.</div>
+            </div>
+            <div className="bg-white">
+              {showQuick && (
+                <button onClick={() => { setShowAddPicker(false); setView({ kind: 'quick' }); }}
+                  className="w-full px-5 py-4 flex items-center gap-3 active:bg-stone-100 text-left border-b border-stone-100">
+                  <Building2 size={18} className="text-stone-500" />
+                  <span className="flex-1 text-sm font-medium text-stone-900">{uploadButtonLabel(property?.name)}</span>
+                  <ChevronRight size={16} className="text-stone-400" />
+                </button>
+              )}
+              {showChecklist && (
+                <button onClick={() => { setShowAddPicker(false); setView({ kind: 'wizard' }); }}
+                  className="w-full px-5 py-4 flex items-center gap-3 active:bg-stone-100 text-left border-b border-stone-100">
+                  <Plus size={18} className="text-stone-500" />
+                  <span className="flex-1 text-sm font-medium text-stone-900">{uploadButtonLabel(property?.name)}</span>
+                  <ChevronRight size={16} className="text-stone-400" />
+                </button>
+              )}
+              {showLegacy && (
+                <button onClick={() => { setShowAddPicker(false); setView({ kind: 'new' }); }}
+                  className="w-full px-5 py-4 flex items-center gap-3 active:bg-stone-100 text-left">
+                  <FileText size={18} className="text-stone-500" />
+                  <span className="flex-1 text-sm font-medium text-stone-900">Legacy file upload</span>
+                  <ChevronRight size={16} className="text-stone-400" />
+                </button>
+              )}
+            </div>
+            <button onClick={() => setShowAddPicker(false)}
+              className="w-full py-3 text-sm font-mono text-stone-500 hover:bg-stone-100 border-t border-stone-200">
+              Cancel
+            </button>
+          </div>
         </div>
       )}
 

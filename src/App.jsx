@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "oct20-tap244";
+const BUILD_TAG = "oct24-tap246";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -6378,14 +6378,27 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   // - A coworker has an open block at this bedroom → join (open the existing one)
   // - Else → set pendingStart banner; cleaner taps Start to create block
   const goToBedroomForTarget = async (target) => {
+    // A job with no bedroom on it — every property-wide assignment is stored
+    // that way. There's nowhere to walk the cleaner to, but "nothing happens"
+    // is the worst possible answer, so say what this job is and put them on
+    // the apartment picker where they can actually start work.
     if (!target.unit_id || !target.party_id) {
-      alert('This assignment isn\'t tied to a specific bedroom.');
+      const ok = confirm(
+        'This job covers the whole property rather than one bedroom, so there\'s no single room to open.\n\n' +
+        'Pick the apartment you\'re working on?'
+      );
+      if (ok) { setCleanerTab('home'); setBlockStartFlow({ step: 'unit' }); }
       return;
     }
 
-    // Already on this bedroom? Just open it.
+    // Already standing in this bedroom's block. This used to be a bare
+    // `return` under a comment that said "just open it" — so when the cleaner
+    // was on the Assignments tab (which stays reachable while a block is
+    // open) and tapped the job for the room they were already in, the tap did
+    // nothing and they were stuck. Take them to the block instead.
     if (activeBlock && activeBlock.unit_id === target.unit_id && activeBlock.party_id === target.party_id && !activeBlock.end_time) {
-      return; // already there
+      setCleanerTab('home');
+      return;
     }
 
     // Active block but on a different bedroom — open the
@@ -16880,6 +16893,24 @@ const localDayKey = (ts) => {
   // getMonth() (0-indexed) unpadded, so July became "6" and the DB read it as
   // June — which broke flat pay (saved to the wrong month) and day matching.
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
+
+// The Monday-to-Sunday week a date falls in, as local day keys. Used to
+// spread a supply purchase over the cleanings it paid for.
+//
+// Built from the date PARTS, never from `new Date(iso)` — that parses a bare
+// "2026-10-21" as UTC midnight, so west of Greenwich it lands on the evening
+// before and a Monday purchase would be filed under the previous week.
+const weekRangeFor = (iso) => {
+  if (!iso) return null;
+  const [y, m, d] = String(iso).slice(0, 10).split('-').map(Number);
+  if (!y || !m || !d) return null;
+  const dow = new Date(y, m - 1, d).getDay();    // 0 = Sunday
+  const back = dow === 0 ? 6 : dow - 1;          // Sunday closes the week that began Monday
+  const mon = new Date(y, m - 1, d - back);
+  const sun = new Date(y, m - 1, d - back + 6);
+  const key = (x) => `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, '0')}-${String(x.getDate()).padStart(2, '0')}`;
+  return { start: key(mon), end: key(sun) };
 };
 
 // =================================================================
@@ -27857,6 +27888,214 @@ function InvoiceList({ property, onOpen, onNew }) {
 // profit_line_reviews and NEVER touch the invoice itself — an invoice
 // you already sent must not change because you fixed a number here.
 // =================================================================
+// =================================================================
+// MATERIALS — supplies you bought, by week.
+//
+// Each purchase is a date, what it was, and what it cost. The P&L spreads
+// it over the Mon-Sun week the date falls in, weighted by how many
+// apartments each property had cleaned that week.
+//
+// Deliberately NOT tied to a property: you buy a case of supplies for the
+// week, not for one building. Tying it to one would mean guessing at the
+// till, and guessing is what this is meant to replace.
+// =================================================================
+function MaterialsModal({ employee, onClose, onChanged }) {
+  const [rows, setRows] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  const [editing, setEditing] = useState(null);   // id being edited, or 'new'
+  const todayIso = localDayKey(new Date().toISOString());
+  const [form, setForm] = useState({ purchase_date: todayIso, description: '', amount: '', notes: '' });
+
+  const load = async () => {
+    setErr('');
+    const { data, error } = await supabase.from('material_purchases')
+      .select('id, purchase_date, description, amount, notes')
+      .order('purchase_date', { ascending: false })
+      .limit(500);
+    if (error) {
+      // The table only exists once v74 has been run.
+      setErr(/relation|does not exist|schema cache/i.test(error.message || '')
+        ? 'The materials table isn’t set up yet. Run the v74 SQL script in Supabase, then reopen this.'
+        : error.message);
+      setRows([]);
+      return;
+    }
+    setRows(data || []);
+  };
+  useEffect(() => { load(); }, []);
+
+  const startNew = () => { setForm({ purchase_date: todayIso, description: '', amount: '', notes: '' }); setEditing('new'); };
+  const startEdit = (r) => {
+    setForm({
+      purchase_date: String(r.purchase_date).slice(0, 10),
+      description: r.description || '',
+      amount: r.amount != null ? String(r.amount) : '',
+      notes: r.notes || '',
+    });
+    setEditing(r.id);
+  };
+
+  const save = async () => {
+    const amt = parseFloat(form.amount);
+    if (!form.purchase_date) { setErr('Pick the date you bought it.'); return; }
+    if (!form.description.trim()) { setErr('Say what it was.'); return; }
+    if (isNaN(amt) || amt <= 0) { setErr('Enter what it cost.'); return; }
+    setBusy(true); setErr('');
+    const payload = {
+      purchase_date: form.purchase_date,
+      description: form.description.trim(),
+      amount: amt,
+      notes: form.notes.trim() || null,
+    };
+    const { error } = editing === 'new'
+      ? await supabase.from('material_purchases').insert({ ...payload, created_by: employee?.id || null })
+      : await supabase.from('material_purchases').update(payload).eq('id', editing);
+    setBusy(false);
+    if (error) { setErr(error.message); return; }
+    setEditing(null);
+    await load();
+    onChanged && onChanged();
+  };
+
+  const remove = async (r) => {
+    if (!confirm(`Delete "${r.description}" (${fmtMoney(r.amount)})?`)) return;
+    setBusy(true);
+    const { error } = await supabase.from('material_purchases').delete().eq('id', r.id);
+    setBusy(false);
+    if (error) { setErr(error.message); return; }
+    await load();
+    onChanged && onChanged();
+  };
+
+  // The week a date lands in, spelled out, so there's no guessing which
+  // cleanings a purchase will be spread over.
+  const weekLabel = (iso) => {
+    const wk = weekRangeFor(iso);
+    if (!wk) return '';
+    const f = (k) => new Date(k + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    return `${f(wk.start)} – ${f(wk.end)}`;
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center">
+      <div className="absolute inset-0 bg-stone-900/60" onClick={onClose} />
+      <div className="relative bg-stone-50 w-full sm:max-w-lg rounded-t-3xl sm:rounded-3xl overflow-hidden shadow-2xl max-h-[92vh] flex flex-col">
+        <div className="px-5 py-4 border-b border-stone-200 bg-white flex items-start justify-between gap-3">
+          <div>
+            <div className="font-serif text-xl text-stone-900">Materials</div>
+            <div className="text-xs text-stone-500">
+              Supplies you bought. Each one is spread over the Mon–Sun week it falls in.
+            </div>
+          </div>
+          <button onClick={onClose} className="p-1.5 rounded-full hover:bg-stone-100 text-stone-500 flex-shrink-0">
+            <X size={18} />
+          </button>
+        </div>
+
+        {err && (
+          <div className="mx-4 mt-3 p-3 rounded-xl bg-amber-50 border border-amber-200 text-[12px] text-amber-900">{err}</div>
+        )}
+
+        <div className="flex-1 overflow-y-auto px-4 py-3 space-y-2">
+          {editing && (
+            <div className="p-3 rounded-2xl bg-white border-2 border-stone-900 space-y-2">
+              <div className="flex gap-2">
+                <label className="flex-1 min-w-0">
+                  <span className="block text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1">Date bought</span>
+                  <input type="date" value={form.purchase_date}
+                    onChange={e => setForm(f => ({ ...f, purchase_date: e.target.value }))}
+                    className="w-full px-2 py-2 rounded-lg border border-stone-300 text-sm font-mono" />
+                </label>
+                <label className="w-28 flex-shrink-0">
+                  <span className="block text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1">Cost</span>
+                  <input type="number" step="0.01" inputMode="decimal" value={form.amount}
+                    onChange={e => setForm(f => ({ ...f, amount: e.target.value }))}
+                    placeholder="0.00"
+                    className="w-full px-2 py-2 rounded-lg border border-stone-300 text-sm font-mono text-right" />
+                </label>
+              </div>
+              {form.purchase_date && (
+                <div className="text-[11px] font-mono text-stone-500">
+                  Spreads over {weekLabel(form.purchase_date)}
+                </div>
+              )}
+              <label className="block">
+                <span className="block text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1">What was it</span>
+                <input value={form.description}
+                  onChange={e => setForm(f => ({ ...f, description: e.target.value }))}
+                  placeholder="e.g. Costco — paper towels, bleach"
+                  className="w-full px-2 py-2 rounded-lg border border-stone-300 text-sm" />
+              </label>
+              <label className="block">
+                <span className="block text-[10px] uppercase tracking-wider font-mono text-stone-500 mb-1">
+                  Note <span className="normal-case text-stone-400">(optional)</span>
+                </span>
+                <input value={form.notes}
+                  onChange={e => setForm(f => ({ ...f, notes: e.target.value }))}
+                  className="w-full px-2 py-2 rounded-lg border border-stone-300 text-sm" />
+              </label>
+              <div className="flex gap-2 pt-1">
+                <button onClick={save} disabled={busy}
+                  className="flex-1 py-2.5 rounded-xl bg-stone-900 text-stone-50 text-sm font-medium disabled:opacity-50">
+                  {busy ? 'Saving…' : 'Save'}
+                </button>
+                <button onClick={() => { setEditing(null); setErr(''); }} disabled={busy}
+                  className="px-4 py-2.5 rounded-xl bg-white border border-stone-300 text-stone-700 text-sm">
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+
+          {rows === null ? (
+            <div className="py-8 text-center text-sm font-mono text-stone-400">Loading…</div>
+          ) : rows.length === 0 && !editing ? (
+            <div className="py-8 text-center text-sm text-stone-400 border-2 border-dashed border-stone-200 rounded-2xl">
+              Nothing recorded yet.
+            </div>
+          ) : (
+            rows.map(r => (
+              <div key={r.id} className="p-3 rounded-2xl bg-white border border-stone-200">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="text-sm text-stone-900 truncate">{r.description}</div>
+                    <div className="text-[11px] font-mono text-stone-500">
+                      {new Date(String(r.purchase_date).slice(0, 10) + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}
+                      <span className="text-stone-400"> · week of {weekLabel(r.purchase_date)}</span>
+                    </div>
+                    {r.notes && <div className="text-[11px] text-stone-500 italic mt-0.5">{r.notes}</div>}
+                  </div>
+                  <div className="flex items-center gap-2 flex-shrink-0">
+                    <span className="font-mono text-sm text-stone-900">{fmtMoney(r.amount)}</span>
+                    <button onClick={() => startEdit(r)} disabled={busy}
+                      className="p-1.5 rounded-lg hover:bg-stone-100 text-stone-500" title="Edit">
+                      <Edit2 size={14} />
+                    </button>
+                    <button onClick={() => remove(r)} disabled={busy}
+                      className="p-1.5 rounded-lg hover:bg-red-50 text-stone-400 hover:text-red-600" title="Delete">
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+
+        <div className="px-4 py-3 border-t border-stone-200 bg-white">
+          {!editing && (
+            <button onClick={startNew}
+              className="w-full py-3 rounded-xl bg-stone-900 text-stone-50 text-sm font-medium flex items-center justify-center gap-2">
+              <Plus size={16} /> Add a purchase
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, topToggle }) {
   const iso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   // Remember the range across refreshes. Re-picking dates and hitting Run
@@ -27891,6 +28130,18 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
   const [cell, setCell] = useState(null);      // { id, field } being edited
   const [cellVal, setCellVal] = useState('');
   const [openRow, setOpenRow] = useState(null); // row showing its item breakdown
+  // Properties folded shut in the table. A month across five properties is a
+  // few hundred rows; collapsing one you've finished with is how you keep the
+  // one you're reading on screen. Holds property ids — absent means open.
+  const [collapsedProps, setCollapsedProps] = useState(new Set());
+  // Supply purchases applied to this report, and the editor for them.
+  const [materials, setMaterials] = useState({ rows: [], applied: 0, unapplied: 0 });
+  const [materialsOpen, setMaterialsOpen] = useState(false);
+  const togglePropCollapse = (id) => setCollapsedProps(prev => {
+    const n = new Set(prev);
+    n.has(id) ? n.delete(id) : n.add(id);
+    return n;
+  });
   const [unbilled, setUnbilled] = useState(0);
   const [unbilledDetail, setUnbilledDetail] = useState([]); // per-property uninvoiced labor
   const [invoiceHint, setInvoiceHint] = useState([]);       // what ranges DO have invoices
@@ -28349,10 +28600,77 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
         byProp[r.propertyId].charge += r.charge;
         byProp[r.propertyId].pay += r.paid;
       });
+      // ---- MATERIALS -------------------------------------------------
+      // Supplies are a weekly cost, not an apartment one, so they never
+      // touch a row's Paid — that column is what the CLEANER was paid and
+      // mixing a shop run into it would make payroll and billing read from
+      // the same number again. Each purchase is spread over the Mon-Sun
+      // week it falls in, weighted by how many apartments each property had
+      // cleaned that week.
+      //
+      // A purchase whose week only partly overlaps the report window lands
+      // only in proportion to the apartments you can actually see. The rest
+      // belongs to a period this report isn't showing, and is reported as
+      // unapplied rather than quietly folded in.
+      let materialRows = [];
+      let materialsUnapplied = 0;
+      try {
+        // A week can reach six days past either edge of the window.
+        const pad = (iso, days) => {
+          const [yy, mm, dd] = String(iso).slice(0, 10).split('-').map(Number);
+          const t = new Date(yy, mm - 1, dd + days);
+          return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`;
+        };
+        const { data: mats, error: matErr } = await supabase
+          .from('material_purchases')
+          .select('id, purchase_date, description, amount')
+          .gte('purchase_date', pad(start, -7))
+          .lte('purchase_date', pad(end, 7))
+          .order('purchase_date', { ascending: true });
+        // Table not created yet (v74 not run) — the report still works, it
+        // just has no materials to apply.
+        if (matErr) throw matErr;
+        materialRows = mats || [];
+      } catch (e) {
+        console.warn('[profit] materials unavailable', e?.message || e);
+        materialRows = [];
+      }
+
+      const materialsByProp = {};
+      materialRows.forEach(mp => {
+        const wk = weekRangeFor(mp.purchase_date);
+        if (!wk) return;
+        const amt = num(mp.amount);
+        if (amt <= 0) return;
+        // Apartments cleaned that week, per property, counted only from rows
+        // this report is showing.
+        const counts = {};
+        let total = 0;
+        allRows.forEach(r => {
+          const hit = (r.cleanedDays || []).some(d => d >= wk.start && d <= wk.end);
+          if (!hit) return;
+          counts[r.propertyId] = (counts[r.propertyId] || 0) + 1;
+          total += 1;
+        });
+        if (total === 0) { materialsUnapplied += amt; return; }
+        Object.entries(counts).forEach(([pid, n]) => {
+          materialsByProp[pid] = (materialsByProp[pid] || 0) + amt * (n / total);
+        });
+      });
+
       const out = Object.values(byProp);
-      out.forEach(g => g.rows.sort((a, b) => (b.charge - b.paid) - (a.charge - a.paid)));
-      out.sort((a, b) => (b.charge - b.pay) - (a.charge - a.pay));
+      out.forEach(g => {
+        g.rows.sort((a, b) => (b.charge - b.paid) - (a.charge - a.paid));
+        g.materials = materialsByProp[g.id] || 0;
+      });
+      // Sorted by what's actually left after supplies, not before them.
+      out.sort((a, b) => ((b.charge - b.pay - (b.materials || 0)) - (a.charge - a.pay - (a.materials || 0))));
       setGroups(out);
+      setMaterials({
+        rows: materialRows,
+        applied: Object.values(materialsByProp).reduce((s, v) => s + v, 0),
+        unapplied: materialsUnapplied,
+      });
       setTotals({
         charge: allRows.reduce((s, r) => s + r.charge, 0),
         pay: allRows.reduce((s, r) => s + r.paid, 0),
@@ -28460,6 +28778,10 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
 
   // Every row, flat — a grid, not cards per property.
   const allRows = (groups || []).flatMap(g => g.rows);
+  // Per-property subtotals, so a folded property still states its own
+  // charged / paid / profit rather than just disappearing.
+  const propTotals = Object.fromEntries((groups || []).map(g => [g.id, g]));
+  const allCollapsed = (groups || []).length > 0 && (groups || []).every(g => collapsedProps.has(g.id));
 
   // Copy as TSV. Pastes straight into Excel or Sheets as real columns.
   const copyForExcel = async () => {
@@ -28471,16 +28793,32 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
       r.cleanedDays.join(' '), r.cleaners.map(c => c.name).join(', '),
       (r.note || '').replace(/\t|\n/g, ' '),
     ]);
+    // One line per property for its share of supplies, as a negative, so
+    // summing the Profit column in Excel lands on the same number the screen
+    // shows. Without these the spreadsheet would quietly total profit BEFORE
+    // materials and disagree with the app.
+    (groups || []).forEach(g => {
+      const m = g.materials || 0;
+      if (m <= 0) return;
+      body.push([
+        g.name, 'Materials (week share)', '',
+        '0.00', (-m).toFixed(2),
+        m.toFixed(2), '0.00',
+        '', '', 'Supplies spread over the weeks cleaned',
+      ]);
+    });
     const tsv = [head, ...body].map(row => row.join('\t')).join('\n');
     try {
       await navigator.clipboard.writeText(tsv);
-      alert('Copied ' + allRows.length + ' rows. Paste straight into Excel or Sheets.');
+      alert('Copied ' + body.length + ' rows. Paste straight into Excel or Sheets.');
     } catch {
       alert('Could not copy automatically — your browser blocked clipboard access.');
     }
   };
 
-  const profitTotal = totals.charge - totals.pay;
+  // Profit is what's left after BOTH labor and supplies.
+  const materialsTotal = materials.applied || 0;
+  const profitTotal = totals.charge - totals.pay - materialsTotal;
 
   return (
     <div className="min-h-screen bg-stone-50 pb-24">
@@ -28497,7 +28835,7 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
             <p className="text-[11px] text-stone-400 mt-1">
               <span className="font-medium text-stone-500">Charged</span> is the amount on the invoice line.
               <span className="font-medium text-stone-500"> Paid</span> is what you marked on the shift, or the rate you usually pay for that apartment size when you haven't marked it yet.
-              Profit is the difference — hours never set the charge.
+              Profit is what's left after labor and, where you've recorded them, materials — hours never set the charge.
             </p>
           </div>
 
@@ -28541,19 +28879,39 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
             </div>
           )}
 
-          <button onClick={run} disabled={loading || !start || !end}
-            className="w-full py-4 rounded-2xl bg-stone-900 text-stone-50 font-medium disabled:opacity-50">
-            {loading ? 'Crunching…' : 'Run report'}
-          </button>
+          <div className="flex gap-2">
+            <button onClick={run} disabled={loading || !start || !end}
+              className="flex-1 py-4 rounded-2xl bg-stone-900 text-stone-50 font-medium disabled:opacity-50">
+              {loading ? 'Crunching…' : 'Run report'}
+            </button>
+            {/* Supplies live next to the thing they change. */}
+            <button onClick={() => setMaterialsOpen(true)}
+              title="Record supplies you bought"
+              className="px-4 py-4 rounded-2xl bg-white border border-stone-300 text-stone-700 font-medium inline-flex items-center gap-2">
+              <ClipboardList size={16} /> Materials
+            </button>
+          </div>
         </div>
 
         {groups && (
           <div className="space-y-4">
-            <div className="p-4 rounded-2xl bg-white border border-stone-200 grid grid-cols-3 gap-2 text-center">
+            <div className={`p-4 rounded-2xl bg-white border border-stone-200 grid gap-2 text-center ${materialsTotal > 0 ? 'grid-cols-4' : 'grid-cols-3'}`}>
               <div><div className="text-[10px] uppercase text-stone-400 font-mono">Charged</div><div className="text-lg font-mono text-stone-900">{fmtMoney(totals.charge)}</div></div>
-              <div><div className="text-[10px] uppercase text-stone-400 font-mono">Paid</div><div className="text-lg font-mono text-stone-900">{fmtMoney(totals.pay)}</div></div>
+              <div><div className="text-[10px] uppercase text-stone-400 font-mono">Labor</div><div className="text-lg font-mono text-stone-900">{fmtMoney(totals.pay)}</div></div>
+              {/* Only takes a column once there's something in it, so the
+                 card stays three-up for anyone not tracking supplies. */}
+              {materialsTotal > 0 && (
+                <div><div className="text-[10px] uppercase text-stone-400 font-mono">Materials</div><div className="text-lg font-mono text-stone-900">{fmtMoney(materialsTotal)}</div></div>
+              )}
               <div><div className="text-[10px] uppercase text-stone-400 font-mono">Profit</div><div className={`text-lg font-mono ${profitTotal >= 0 ? 'text-emerald-700' : 'text-red-600'}`}>{fmtMoney(profitTotal)}</div></div>
             </div>
+
+            {materials.unapplied > 0 && (
+              <div className="p-3 rounded-2xl bg-amber-50 border border-amber-200 text-[11px] text-amber-900">
+                <span className="font-medium">{fmtMoney(materials.unapplied)} of supplies isn’t in this total.</span>{' '}
+                Those purchases fall in weeks where this report shows no cleanings, so there was nothing to spread them over. Widen the dates to pick them up.
+              </div>
+            )}
 
             {/* Two reasons a block lands here and they need different
                fixes, so the banner names them separately. autoCount is the
@@ -28642,11 +29000,23 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
                 <div className="flex items-center justify-between gap-2 mb-2">
                   <span className="text-xs uppercase tracking-wider text-stone-500 font-mono">
                     {allRows.length} {allRows.length === 1 ? 'apartment' : 'apartments'}
+                    {collapsedProps.size > 0 && (
+                      <span className="text-stone-400 normal-case"> · {collapsedProps.size} folded</span>
+                    )}
                   </span>
-                  <button onClick={copyForExcel}
-                    className="text-[11px] font-medium px-3 py-1.5 rounded-full bg-white border border-stone-300 text-stone-700 inline-flex items-center gap-1">
-                    <Copy size={11} /> Copy for Excel
-                  </button>
+                  <span className="flex items-center gap-2">
+                    {(groups || []).length > 1 && (
+                      <button
+                        onClick={() => setCollapsedProps(allCollapsed ? new Set() : new Set((groups || []).map(g => g.id)))}
+                        className="text-[11px] font-medium px-3 py-1.5 rounded-full bg-white border border-stone-300 text-stone-700 inline-flex items-center gap-1">
+                        <Layers size={11} /> {allCollapsed ? 'Expand all' : 'Collapse all'}
+                      </button>
+                    )}
+                    <button onClick={copyForExcel}
+                      className="text-[11px] font-medium px-3 py-1.5 rounded-full bg-white border border-stone-300 text-stone-700 inline-flex items-center gap-1">
+                      <Copy size={11} /> Copy for Excel
+                    </button>
+                  </span>
                 </div>
                 <div className="rounded-2xl border border-stone-200 bg-white overflow-x-auto">
                   <table className="w-full text-xs" style={{ minWidth: 860 }}>
@@ -28688,16 +29058,52 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
                             {val}
                           </button>
                         );
+                        // Folded properties keep their header row — that's the
+                        // handle you reopen them by — and hide their apartments.
+                        const propCollapsed = collapsedProps.has(r.propertyId);
+                        const pt = propTotals[r.propertyId];
+                        const ptMat = pt ? (pt.materials || 0) : 0;
+                        const ptProfit = pt ? pt.charge - pt.pay - ptMat : 0;
                         return (
                           <React.Fragment key={r.id}>
                             {newProp && (
                               <tr>
-                                <td colSpan={8} className="px-3 pt-3 pb-1 bg-stone-50 border-t border-stone-200">
-                                  <span className="font-serif text-sm text-stone-900">{r.propertyName}</span>
-                                  {r.invoiceNumber && <span className="text-[10px] font-mono text-stone-400 ml-2">Inv #{r.invoiceNumber}</span>}
+                                <td colSpan={8} className="px-0 pt-3 pb-0 bg-stone-50 border-t border-stone-200">
+                                  <button onClick={() => togglePropCollapse(r.propertyId)}
+                                    className="w-full px-3 pb-1 flex items-center justify-between gap-3 text-left hover:bg-stone-100"
+                                    title={propCollapsed ? 'Show this property’s apartments' : 'Hide this property’s apartments'}>
+                                    <span className="flex items-center gap-1.5 min-w-0">
+                                      <ChevronRight size={12} className={`text-stone-400 transition-transform flex-shrink-0 ${propCollapsed ? '' : 'rotate-90'}`} />
+                                      <span className="font-serif text-sm text-stone-900 truncate">{r.propertyName}</span>
+                                      {r.invoiceNumber && <span className="text-[10px] font-mono text-stone-400">Inv #{r.invoiceNumber}</span>}
+                                      {pt && (
+                                        <span className="text-[10px] font-mono text-stone-400 flex-shrink-0">
+                                          · {pt.rows.length} {pt.rows.length === 1 ? 'apt' : 'apts'}
+                                        </span>
+                                      )}
+                                    </span>
+                                    {/* The property's own numbers, so folding one
+                                       hides the detail without hiding the result. */}
+                                    {pt && (
+                                      <span className="flex items-center gap-3 flex-shrink-0 font-mono text-[11px]">
+                                        <span className="text-stone-500" title="Charged">{fmtMoney(pt.charge)}</span>
+                                        <span className="text-stone-500" title="Labor">{fmtMoney(pt.pay)}</span>
+                                        {ptMat > 0 && (
+                                          <span className="text-stone-400" title="This property's share of supplies">
+                                            +{fmtMoney(ptMat)} mat
+                                          </span>
+                                        )}
+                                        <span className={ptProfit >= 0 ? 'text-emerald-700 font-medium' : 'text-red-600 font-medium'}
+                                          title="Charged minus labor and supplies">
+                                          {ptProfit >= 0 ? '+' : ''}{ptProfit.toFixed(2)}
+                                        </span>
+                                      </span>
+                                    )}
+                                  </button>
                                 </td>
                               </tr>
                             )}
+                            {!propCollapsed && (
                             <tr className="border-t border-stone-100 align-top">
                               <td className="px-3 py-2">
                                 <button onClick={() => setOpenRow(openRow === r.id ? null : r.id)}
@@ -28752,7 +29158,8 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
                                 )}
                               </td>
                             </tr>
-                            {openRow === r.id && (
+                            )}
+                            {!propCollapsed && openRow === r.id && (
                               <tr className="bg-stone-50">
                                 <td colSpan={8} className="px-6 py-3">
                                   {/* Read-only — this is what the invoice
@@ -28839,18 +29246,47 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
                           </React.Fragment>
                         );
                       })}
+                      {/* Column order here has to match the header above:
+                         Apartment · Charged · Profit · Paid · Hours · Cleaned ·
+                         Cleaner(s). It didn't — when Charged and Profit were
+                         moved up next to Apartment this row kept the old
+                         order, so every total sat under the wrong heading
+                         (hours under "Paid", paid under "Hours", charged under
+                         "Cleaned"). The numbers were right and the labels
+                         above them were not. */}
                       <tr className="border-t-2 border-stone-300 bg-stone-50 font-medium">
-                        <td className="px-3 py-2 font-serif text-stone-900" colSpan={3}>Total</td>
+                        <td className="px-3 py-2 font-serif text-stone-900">Total</td>
+                        <td className="px-3 py-2 text-right font-mono text-stone-900">{totals.charge.toFixed(2)}</td>
+                        <td className={`px-3 py-2 text-right font-mono font-bold ${(totals.charge - totals.pay) >= 0 ? 'text-emerald-700' : 'text-red-600'}`}>
+                          {(totals.charge - totals.pay) >= 0 ? '+' : ''}{(totals.charge - totals.pay).toFixed(2)}
+                        </td>
+                        <td className="px-3 py-2 text-right font-mono text-stone-900">{totals.pay.toFixed(2)}</td>
                         <td className="px-3 py-2 text-right font-mono text-stone-700">
                           {allRows.reduce((s2, r) => s2 + r.hours, 0).toFixed(2)}
                         </td>
-                        <td className="px-3 py-2 text-right font-mono text-stone-900">{totals.pay.toFixed(2)}</td>
-                        <td className="px-3 py-2 text-right font-mono text-stone-900">{totals.charge.toFixed(2)}</td>
-                        <td className={`px-3 py-2 text-right font-mono font-bold ${profitTotal >= 0 ? 'text-emerald-700' : 'text-red-600'}`}>
-                          {profitTotal >= 0 ? '+' : ''}{profitTotal.toFixed(2)}
-                        </td>
-                        <td />
+                        <td /><td /><td />
                       </tr>
+                      {/* Supplies come off after labor, on their own line, so
+                         the arithmetic stays visible: charged − labor is the
+                         row above, minus materials is the row below. */}
+                      {materialsTotal > 0 && (
+                        <>
+                          <tr className="bg-stone-50">
+                            <td className="px-3 py-1.5 font-mono text-[11px] text-stone-500">Materials</td>
+                            <td />
+                            <td className="px-3 py-1.5 text-right font-mono text-red-600">−{materialsTotal.toFixed(2)}</td>
+                            <td colSpan={5} />
+                          </tr>
+                          <tr className="bg-stone-50 border-t border-stone-200">
+                            <td className="px-3 py-2 font-serif text-stone-900">After materials</td>
+                            <td />
+                            <td className={`px-3 py-2 text-right font-mono font-bold ${profitTotal >= 0 ? 'text-emerald-700' : 'text-red-600'}`}>
+                              {profitTotal >= 0 ? '+' : ''}{profitTotal.toFixed(2)}
+                            </td>
+                            <td colSpan={5} />
+                          </tr>
+                        </>
+                      )}
                     </tbody>
                   </table>
                 </div>
@@ -28863,6 +29299,15 @@ function ProfitReportView({ employee, onSignOut, onOpenMessages, onLogoClick, to
           </div>
         )}
       </div>
+
+      {materialsOpen && (
+        <MaterialsModal employee={employee}
+          onClose={() => setMaterialsOpen(false)}
+          // Re-run so the new purchase shows up in the numbers straight
+          // away. Only when a report is already on screen — re-running an
+          // empty one would just flash a spinner at nothing.
+          onChanged={() => { if (groups) run(); }} />
+      )}
     </div>
   );
 }
@@ -29198,6 +29643,32 @@ function DateRangePicker({ start, end, onChange }) {
   for (let i = 0; i < firstDay; i++) cells.push(null);
   for (let d = 1; d <= daysInMonth; d++) cells.push(new Date(year, month, d));
 
+  // Typed entry. Clicking back a month at a time to reach January is nine
+  // taps each for the start and the end; a date you can type is one. The
+  // calendar below still works exactly as it did — this is a second way in,
+  // not a replacement.
+  //
+  // Each field commits on its own so a half-finished range is never written:
+  // setting a start later than the existing end would otherwise leave the
+  // report querying backwards and silently returning nothing.
+  const setStartTyped = (iso) => {
+    if (!iso) { onChange('', end); return; }
+    setView(new Date(iso.slice(0, 4), Number(iso.slice(5, 7)) - 1, 1));
+    if (end && iso > end) onChange(iso, iso);   // dragged past the end — collapse to one day
+    else onChange(iso, end);
+  };
+  const setEndTyped = (iso) => {
+    if (!iso) { onChange(start, ''); return; }
+    if (start && iso < start) onChange(iso, iso);
+    else onChange(start, iso);
+  };
+  // Whole calendar years, newest first — "all of 2025" is one tap.
+  const yearOptions = (() => {
+    const ys = [];
+    for (let y = today.getFullYear(); y >= today.getFullYear() - 4; y--) ys.push(y);
+    return ys;
+  })();
+
   return (
     <div className="relative">
       <button onClick={() => setOpen(o => !o)}
@@ -29209,15 +29680,51 @@ function DateRangePicker({ start, end, onChange }) {
         <>
           <div className="fixed inset-0 z-40 bg-black/20" onClick={() => setOpen(false)} />
           <div className="fixed z-50 left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[300px] max-w-[calc(100vw-2rem)] max-h-[calc(100vh-2rem)] overflow-auto bg-white rounded-2xl border border-stone-200 shadow-xl p-3">
+            {/* Type the dates. First thing in the panel because it's the
+               fastest route to a month that isn't near today. */}
+            <div className="flex items-end gap-2 mb-3">
+              <label className="flex-1 min-w-0">
+                <span className="block text-[10px] uppercase tracking-wider font-mono text-stone-400 mb-1">From</span>
+                <input type="date" value={start || ''} max={end || undefined}
+                  onChange={e => setStartTyped(e.target.value)}
+                  className="w-full px-2 py-1.5 rounded-lg border border-stone-300 text-xs font-mono text-stone-900" />
+              </label>
+              <label className="flex-1 min-w-0">
+                <span className="block text-[10px] uppercase tracking-wider font-mono text-stone-400 mb-1">To</span>
+                <input type="date" value={end || ''} min={start || undefined}
+                  onChange={e => setEndTyped(e.target.value)}
+                  className="w-full px-2 py-1.5 rounded-lg border border-stone-300 text-xs font-mono text-stone-900" />
+              </label>
+            </div>
             <div className="flex gap-1 mb-3 flex-wrap">
               <button onClick={() => setPreset(thisMonthStart, thisMonthEnd)} className="text-[11px] px-2 py-1 rounded-lg bg-stone-100 text-stone-600 hover:bg-stone-200">This month</button>
               <button onClick={() => setPreset(lastMonthStart, lastMonthEnd)} className="text-[11px] px-2 py-1 rounded-lg bg-stone-100 text-stone-600 hover:bg-stone-200">Last month</button>
               <button onClick={() => setPreset(last30, todayIso)} className="text-[11px] px-2 py-1 rounded-lg bg-stone-100 text-stone-600 hover:bg-stone-200">Last 30 days</button>
+              <button onClick={() => setPreset(toIso(new Date(today.getFullYear(), 0, 1)), todayIso)}
+                className="text-[11px] px-2 py-1 rounded-lg bg-stone-100 text-stone-600 hover:bg-stone-200">Year to date</button>
+            </div>
+            {/* Jump to a whole calendar year without walking the months. */}
+            <div className="flex gap-1 mb-3 flex-wrap items-center">
+              <span className="text-[10px] uppercase tracking-wider font-mono text-stone-400">Year</span>
+              {yearOptions.map(y => (
+                <button key={y} onClick={() => setPreset(`${y}-01-01`, y === today.getFullYear() ? todayIso : `${y}-12-31`)}
+                  className="text-[11px] px-2 py-1 rounded-lg bg-stone-100 text-stone-600 hover:bg-stone-200 font-mono">{y}</button>
+              ))}
             </div>
             <div className="flex items-center justify-between mb-2">
-              <button onClick={() => setView(new Date(year, month - 1, 1))} className="p-1.5 rounded-lg hover:bg-stone-100"><ChevronLeft size={16} className="text-stone-600" /></button>
+              <span className="flex items-center gap-0.5">
+                <button onClick={() => setView(new Date(year - 1, month, 1))} title="Previous year"
+                  className="px-1.5 py-1.5 rounded-lg hover:bg-stone-100 text-[11px] font-mono text-stone-600">«</button>
+                <button onClick={() => setView(new Date(year, month - 1, 1))} title="Previous month"
+                  className="p-1.5 rounded-lg hover:bg-stone-100"><ChevronLeft size={16} className="text-stone-600" /></button>
+              </span>
               <span className="text-sm font-medium text-stone-800">{view.toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}</span>
-              <button onClick={() => setView(new Date(year, month + 1, 1))} className="p-1.5 rounded-lg hover:bg-stone-100"><ChevronRight size={16} className="text-stone-600" /></button>
+              <span className="flex items-center gap-0.5">
+                <button onClick={() => setView(new Date(year, month + 1, 1))} title="Next month"
+                  className="p-1.5 rounded-lg hover:bg-stone-100"><ChevronRight size={16} className="text-stone-600" /></button>
+                <button onClick={() => setView(new Date(year + 1, month, 1))} title="Next year"
+                  className="px-1.5 py-1.5 rounded-lg hover:bg-stone-100 text-[11px] font-mono text-stone-600">»</button>
+              </span>
             </div>
             <div className="grid grid-cols-7 gap-0.5 mb-1">
               {['S', 'M', 'T', 'W', 'T', 'F', 'S'].map((d, i) => <div key={i} className="text-center text-[10px] font-mono text-stone-400">{d}</div>)}
@@ -43425,10 +43932,19 @@ function AssignmentCard({ target, property = null, busy, onView, onStart, onPaus
     setEditingDate(false);
     if (onSetDueDate) await onSetDueDate(t.assignment_id || t.assignment?.id, val || null);
   };
-  // Title is always tappable as long as we have a bedroom to navigate
-  // to — even Done assignments. Tapping a Done one is useful for
-  // peeking at history or re-checking the bedroom.
-  const canGo = onGoToBedroom && t.unit_id && t.party_id;
+  // Does this job name one bedroom? Property-wide assignments don't — they
+  // are stored with unit_id and party_id null.
+  const hasBedroom = !!(t.unit_id && t.party_id);
+  // Title and action are tappable whenever there's a handler at all.
+  //
+  // This used to also require a bedroom, which made a property-wide job's
+  // card completely inert: no title button, no "Go to bedroom" button, and
+  // the `onStart` prop below is accepted but never used anywhere in this
+  // component — so the card rendered with nothing on it to press. That is
+  // the "I click the job and it won't let me start it" report. The handler
+  // now explains a bedroom-less job and offers the apartment picker, so the
+  // card's job is just to reach it.
+  const canGo = !!onGoToBedroom;
   const [activeCleaners, setActiveCleaners] = useState([]);
 
   // Pull who's currently working at this target's unit+party (active work blocks today)
@@ -43483,7 +43999,7 @@ function AssignmentCard({ target, property = null, busy, onView, onStart, onPaus
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0 flex-1">
           {canGo ? (
-            <button onClick={onGoToBedroom} disabled={busy} title="Go to this bedroom"
+            <button onClick={onGoToBedroom} disabled={busy} title={hasBedroom ? 'Go to this bedroom' : 'Start this job'}
               className="max-w-full min-w-0 text-left rounded-lg -m-1 p-1 hover:bg-stone-500/10 active:scale-[0.99] transition group inline-flex items-center gap-1 disabled:opacity-50">
               <span className={`font-serif text-base ${D.title} truncate group-hover:underline decoration-stone-300 underline-offset-2`}>{cardTitle}</span>
               <ChevronRight size={15} className="text-stone-400 group-hover:text-stone-600 flex-shrink-0" />
@@ -43718,7 +44234,9 @@ function AssignmentCard({ target, property = null, busy, onView, onStart, onPaus
           {canGo && (
             <button onClick={onGoToBedroom} disabled={busy}
               className="text-[11px] font-medium px-3 py-1.5 rounded-full bg-amber-600 hover:bg-amber-700 text-white flex items-center gap-1 active:scale-95 transition disabled:opacity-50">
-              Go to bedroom <ChevronRight size={12} />
+              {/* A property-wide job has no bedroom to go to, so it says what
+                 it actually does rather than promising a room. */}
+              {hasBedroom ? 'Go to bedroom' : 'Start this job'} <ChevronRight size={12} />
             </button>
           )}
         </div>
@@ -45130,9 +45648,20 @@ function AssignmentTabContent({ propertyId, property = null, employee, statusFil
   // paused targets to in_progress. This stops "I clicked Go and now
   // the assignment is in_progress even though I didn't start work."
   const startAndGo = async (target) => {
-    if (onGoToBedroom && target.unit_id && target.party_id) {
-      onGoToBedroom(target);
+    // This used to be `if (onGoToBedroom && unit_id && party_id) go()` — with
+    // no else. So a job whose target has no bedroom (every property-wide
+    // assignment is created with unit_id and party_id null) swallowed the tap
+    // entirely: no navigation, no message, nothing. From the cleaner's side
+    // the Start button was simply dead, on some jobs and not others.
+    //
+    // The guard also hid the explanation: goToBedroomForTarget already knows
+    // how to handle a bedroom-less job and says so, but could never be
+    // reached to say it. Hand it the target and let it decide.
+    if (!onGoToBedroom) {
+      alert('Clock in at this property first, then open the job from here.');
+      return;
     }
+    onGoToBedroom(target);
   };
 
   if (!loaded) return <div className="text-center py-8 text-stone-400 text-xs">Loading…</div>;
@@ -45563,7 +46092,13 @@ function AssignmentTabContent({ propertyId, property = null, employee, statusFil
                     const newItems = bed.items.filter(t => isPostCutoff(t));
 
                     const firstTarget = bed.items[0];
-                    const canGoToBedroom = !!(onGoToBedroom && firstTarget?.unit_id && firstTarget?.party_id);
+                    // Same rule as AssignmentCard: offer the way in whenever
+                    // there's a handler. Requiring a bedroom here left a
+                    // property-wide job's card with no title button and no
+                    // action button — nothing to press. startAndGo routes to
+                    // the handler, which explains a bedroom-less job.
+                    const bedHasBedroom = !!(firstTarget?.unit_id && firstTarget?.party_id);
+                    const canGoToBedroom = !!onGoToBedroom;
 
                     // Build the bedroom-level bulk card (only when there
                     // are NEW items at this bedroom). We compute a few
@@ -46036,7 +46571,7 @@ function AssignmentTabContent({ propertyId, property = null, employee, statusFil
                               {canGoToBedroom && (
                                 <button onClick={() => startAndGo(firstTarget)} disabled={busy}
                                   className="text-[11px] font-medium px-3 py-1.5 rounded-full bg-amber-600 hover:bg-amber-700 text-white flex items-center gap-1 active:scale-95 transition disabled:opacity-50">
-                                  Go to bedroom <ChevronRight size={12} />
+                                  {bedHasBedroom ? 'Go to bedroom' : 'Start this job'} <ChevronRight size={12} />
                                 </button>
                               )}
                             </div>

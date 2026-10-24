@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "oct24-tap246";
+const BUILD_TAG = "oct24-tap247";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -4312,6 +4312,27 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   const [newTaskName, setNewTaskName] = useState('');
   const [loaded, setLoaded] = useState(false);
   const [busy, setBusy] = useState(false);
+  // BUSY WATCHDOG.
+  //
+  // Every button on the cleaner's screen is disabled={busy}, and there are
+  // ~23 places that do setBusy(true), await a request, then setBusy(false)
+  // on the happy path only. If any of those requests throws — a dropped
+  // connection walking between apartments is the everyday case — busy is
+  // never cleared and the ENTIRE cleaner UI stays greyed out until the app
+  // is reloaded. From the cleaner's side that reads as "I tap the job and it
+  // won't let me start it", and nothing else works either.
+  //
+  // Nothing here legitimately takes 20 seconds, so a flag still set after
+  // that is a stuck one. Releasing it turns a dead session into a pause.
+  // This is a net, not a licence: new code still pairs setBusy in a finally.
+  useEffect(() => {
+    if (!busy) return;
+    const t = setTimeout(() => {
+      console.warn('[busy watchdog] releasing a stuck busy flag');
+      setBusy(false);
+    }, 20000);
+    return () => clearTimeout(t);
+  }, [busy]);
   const [showMessages, setShowMessages] = useState(false);
   const [showChangePin, setShowChangePin] = useState(false);
   const [whosWorkingOpen, setWhosWorkingOpen] = useState(false); // read-only "where is everyone"
@@ -6377,7 +6398,26 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   //   block, then show pending start banner
   // - A coworker has an open block at this bedroom → join (open the existing one)
   // - Else → set pendingStart banner; cleaner taps Start to create block
-  const goToBedroomForTarget = async (target) => {
+  const goToBedroomForTarget = async (target, opts = {}) => {
+    // THE STALE-CLOSURE GUARD. A caller that has just closed the open block
+    // cannot rely on `activeBlock` being null yet: setActiveBlock(null) only
+    // schedules a re-render, so a call made on the very next line still sees
+    // the old, still-open-looking block in this closure.
+    //
+    // That is what broke "Pause + go" and "Finish + go" on the switch-bedroom
+    // modal. They closed the block, called straight back in here, this
+    // function read the stale activeBlock, decided a block was still open at
+    // another bedroom — and reopened the same modal. Tap it again, same
+    // thing. The cleaner could never reach the job, and the comment on the
+    // caller said "which by then has no active block", which was the
+    // assumption that didn't hold.
+    //
+    // Callers that have just closed a block pass its id; we treat it as
+    // closed regardless of what this closure still says.
+    const justClosedId = opts.closedBlockId || null;
+    const isClosed = (b) => !b || !!b.end_time || b.id === justClosedId;
+    const live = isClosed(activeBlock) ? null : activeBlock;
+
     // A job with no bedroom on it — every property-wide assignment is stored
     // that way. There's nowhere to walk the cleaner to, but "nothing happens"
     // is the worst possible answer, so say what this job is and put them on
@@ -6396,7 +6436,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     // was on the Assignments tab (which stays reachable while a block is
     // open) and tapped the job for the room they were already in, the tap did
     // nothing and they were stuck. Take them to the block instead.
-    if (activeBlock && activeBlock.unit_id === target.unit_id && activeBlock.party_id === target.party_id && !activeBlock.end_time) {
+    if (live && live.unit_id === target.unit_id && live.party_id === target.party_id) {
       setCleanerTab('home');
       return;
     }
@@ -6405,11 +6445,11 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     // SwitchBedroomModal with 3 options instead of a native confirm.
     // The modal will call back into resolveSwitchTo* helpers below
     // depending on which button the cleaner taps.
-    if (activeBlock && !activeBlock.end_time) {
+    if (live) {
       setSwitchPending({
         target,
-        fromUnitLabel: activeBlock.unit?.label || '',
-        fromPartyLabel: activeBlock.party?.label || '',
+        fromUnitLabel: live.unit?.label || '',
+        fromPartyLabel: live.party?.label || '',
         toUnitLabel: target.unit?.label || '',
         toPartyLabel: target.party?.label || '',
       });
@@ -6422,17 +6462,28 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     // timer-running view — the user has been explicit about this. The
     // earlier work time stays preserved in the closed block; a fresh
     // block gets created when they tap Start cleaning.
-    const myOpen = workBlocks.find(b => !b.end_time && b.unit_id === target.unit_id && b.party_id === target.party_id);
+    // workBlocks is stale for the same reason activeBlock is, so a block the
+    // caller just closed can still look open here — isClosed() covers it.
+    const myOpen = workBlocks.find(b => !isClosed(b) && b.unit_id === target.unit_id && b.party_id === target.party_id);
     if (myOpen) {
-      setBusy(true);
-      if (activeTask) await stopTask(activeTask, false);
-      const ts = new Date().toISOString();
-      await supabase.from('work_blocks').update({ end_time: ts }).eq('id', myOpen.id);
-      setWorkBlocks(prev => prev.map(b => b.id === myOpen.id ? { ...b, end_time: ts } : b));
-      if (activeBlock?.id === myOpen.id) {
-        setActiveBlock(null); setTasks([]); setActiveTask(null);
+      // Wrapped so a failure here can't strand `busy` at true. Every button
+      // on the cleaner's screen is disabled={busy}, so one thrown request
+      // used to grey out the whole UI until the app was reloaded — which
+      // looks exactly like "it won't let me start anything".
+      try {
+        setBusy(true);
+        if (activeTask) await stopTask(activeTask, false);
+        const ts = new Date().toISOString();
+        await supabase.from('work_blocks').update({ end_time: ts }).eq('id', myOpen.id);
+        setWorkBlocks(prev => prev.map(b => b.id === myOpen.id ? { ...b, end_time: ts } : b));
+        if (activeBlock?.id === myOpen.id) {
+          setActiveBlock(null); setTasks([]); setActiveTask(null);
+        }
+      } catch (e) {
+        console.warn('[goToBedroom] could not close the open block here', e);
+      } finally {
+        setBusy(false);
       }
-      setBusy(false);
     }
 
     // Show the pending start screen — cleaner confirms by tapping Start.
@@ -6488,13 +6539,17 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       }
     }
     const ts = new Date().toISOString();
-    await supabase.from('work_blocks').update({ end_time: ts }).eq('id', activeBlock.id);
+    const closedId = activeBlock.id;
+    await supabase.from('work_blocks').update({ end_time: ts }).eq('id', closedId);
     const updated = { ...activeBlock, end_time: ts, tasks };
-    setWorkBlocks(prev => prev.map(b => b.id === activeBlock.id ? updated : b));
+    setWorkBlocks(prev => prev.map(b => b.id === closedId ? updated : b));
     setActiveBlock(null); setTasks([]); setActiveTask(null);
     setBusy(false);
     // Now route into the requested bedroom (fall-through to pendingStart).
-    await goToBedroomForTarget(target);
+    // closedBlockId is load-bearing: the setActiveBlock(null) above has not
+    // re-rendered yet, so without it this call reads the stale open block and
+    // bounces the cleaner straight back to the switch modal it came from.
+    await goToBedroomForTarget(target, { closedBlockId: closedId });
   };
   // ---- SWITCH BEDROOM WITHIN THE SAME APARTMENT -------------------------
   // Deliberately NOT the same as "go to a different bedroom". That flow
@@ -7219,7 +7274,12 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   // Pending-start route: cleaner tapped Start (or Go to this bedroom)
   // on an assignment but hasn't confirmed yet. Show the bedroom view
   // with no timer running and a big Start cleaning button.
-  if (isMulti && !activeBlock && pendingStart) {
+  // `!activeBlock` was too strict. A closed block that is still sitting in
+  // state outranked pendingStart, so the start screen never rendered and the
+  // cleaner was left looking at the block they had just finished with every
+  // tap doing nothing. A block that has ended must never outrank a pending
+  // start.
+  if (isMulti && pendingStart && (!activeBlock || activeBlock.end_time)) {
     return withIdleModal(<PreparingBlockView shift={shift}
       pendingStart={pendingStart}
       employeeName={employee.name} employee={employee}

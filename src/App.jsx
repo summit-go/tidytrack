@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "oct24-tap248";
+const BUILD_TAG = "oct24-tap250";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -10110,6 +10110,14 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
       const a = t.assignment;
       if (!a || a.active === false || a.deleted_at) return;
       if (!allowed.has(a.customer_id)) return;
+      // A PM request still waiting on approval is not work a cleaner can do.
+      // This list didn't check, while the Ready-to-start screen's card did —
+      // so the job appeared here, the cleaner tapped it, and the next screen
+      // refused to offer a Start button. Two filters on the same job that
+      // disagreed. Owners and managers still see it (badged) so they can
+      // approve it; for a cleaner it simply isn't ready yet.
+      const staffViewer = employee?.role === 'owner' || employee?.role === 'manager';
+      if (!staffViewer && a.source === 'pm' && a.pm_status !== 'approved') return;
       if (!byJob[a.id]) {
         byJob[a.id] = { id: a.id, customerId: a.customer_id, propName: a.customer?.name || 'Property', propAddress: a.customer?.address || '', type: a.assignment_type || '', scheduledDate: a.scheduled_date || null, unitLabel: t.unit?.label || '', partyLabel: t.party?.label || '', unitId: t.unit_id, partyId: t.party_id, bedrooms: t.unit?.bedrooms, bathrooms: t.unit?.bathrooms, priority: false, items: 0, hereNow: [], assignees: [], requested: [], pmStatus: a.pm_status || null, approvedAt: a.approved_at || null, submittedAt: a.created_at || null, doneAt: null, audience: a.audience };
       }
@@ -43226,6 +43234,9 @@ function AssignmentDetail({ property, assignment: assignmentInit, employee, onBa
 function AssignmentBanner({ propertyId, property = null, unitId, partyId, employee, showDone = false, onUpdate, onOpenBedroomHistory, dark = false, undoSlot = null, propertyName = null, elapsedMs = null, workScreen = false, onStartCleaning = null, onExit = null, audienceUnfiltered = false }) {
   const { canSeeJob } = useJobVisibility();
   const [targets, setTargets] = useState([]);
+  // Set when there IS work at this bedroom but every row was filtered out,
+  // so the banner can say why instead of rendering nothing. See the filter.
+  const [blockedInfo, setBlockedInfo] = useState(null);
   const [loaded, setLoaded] = useState(false);
   const [opened, setOpened] = useState(null);
   const [statusModal, setStatusModal] = useState(null);
@@ -43253,25 +43264,19 @@ function AssignmentBanner({ propertyId, property = null, unitId, partyId, employ
 
   const SEL = '*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, approved_at, deleted_at, extracted_text, spanish_translation, translation_status, template_set_id, sheet_type, bathroom_variant, general_variant, assignment_type, scheduled_date, created_at, audience), unit:units(id, label), party:parties(id, label), starter:employees!started_by(name), completer:employees!completed_by(name), assignedTo:employees!assigned_to(id, name)';
   const load = async () => {
-    // THE 1,000-ROW TRAP, and this one decided whether "Start cleaning"
-    // existed at all.
+    // Scoped, ordered and paged.
     //
-    // The OR below deliberately also matches property-level targets
-    // (unit_id and party_id both null). Those were NOT scoped to this
-    // property in the query — the customer check happened in JS afterwards —
-    // so this read asked for every property-level target in the database
-    // alongside this bedroom's own. With no .range() and no ORDER BY,
-    // PostgREST silently capped it at 1,000 rows and returned an ARBITRARY
-    // slice. Once the company had that many such rows, this bedroom's target
-    // could simply fall outside the slice: no assignment card rendered, and
-    // because "Start cleaning" is attached to that card, the cleaner got a
-    // Ready-to-start screen with nothing on it to press. Different rows come
-    // back on different reads, which is why it hit some jobs and not others
-    // and looked random.
+    // The OR below also matches property-level items (unit_id and party_id
+    // both null), and those were NOT scoped to this property in the query —
+    // the customer check only happened in JS afterwards. So this read asked
+    // for every property-level item in the database alongside this bedroom's
+    // own, with no limit and no sort order, which PostgREST would cap at an
+    // arbitrary 1,000 rows once there were that many.
     //
-    // Now: scoped to this property in the query, ordered so paging is
-    // stable, and paged. PortalScheduleTab had this exact bug and the fix
-    // is the same shape.
+    // Measured on the live database: there are currently ZERO property-level
+    // items, so the cap was NOT what broke the Start button. This is hygiene
+    // against a real trap, not the fix for that bug. Keep it anyway; the
+    // same shape has bitten this file before (see PortalScheduleTab).
     const buildQuery = (sel, from, to) => {
       let q = supabase.from('assignment_targets').select(sel)
         .eq('assignment.customer_id', propertyId);
@@ -43302,14 +43307,32 @@ function AssignmentBanner({ propertyId, property = null, unitId, partyId, employ
     if (error) {
       console.error('[AssignmentBanner] load error:', error);
     }
-    // Hide non-approved PM assignments from cleaners — they should only see what's approved
-    const filtered = (data || []).filter(t =>
-      t.assignment?.customer_id === propertyId &&
-      t.assignment?.active &&
-      !t.assignment?.deleted_at &&
-      (t.assignment?.source !== 'pm' || t.assignment?.pm_status === 'approved') &&
-      (audienceUnfiltered || canSeeJob(targetToJob(t)))
-    );
+    // Hide non-approved PM assignments from cleaners — they should only see
+    // what's approved.
+    //
+    // WHY THIS RECORDS ITS REASONS. When every row here is dropped the whole
+    // banner used to render as null — and "Start cleaning" lives on it, so
+    // the cleaner got a Ready-to-start screen with nothing to press and no
+    // hint why. The list of items right below it comes from a different
+    // component with a shorter filter, so the screen could cheerfully say
+    // "4 things to clean here" while this said nothing at all.
+    //
+    // Silence is the bug. Whichever rule drops the row, we now remember it
+    // and the banner says so, which is also how we find out which rule it
+    // actually was on a real phone.
+    const dropped = [];
+    const filtered = (data || []).filter(t => {
+      const a = t.assignment;
+      if (a?.customer_id !== propertyId) { dropped.push('another property'); return false; }
+      if (!a?.active) { dropped.push('the job was turned off'); return false; }
+      if (a?.deleted_at) { dropped.push('the job was deleted'); return false; }
+      if (a?.source === 'pm' && a?.pm_status !== 'approved') { dropped.push('waiting for approval'); return false; }
+      if (!(audienceUnfiltered || canSeeJob(targetToJob(t)))) { dropped.push('assigned to someone else'); return false; }
+      return true;
+    });
+    setBlockedInfo(filtered.length === 0 && dropped.length > 0
+      ? { count: dropped.length, reasons: Array.from(new Set(dropped)) }
+      : null);
     // Priority items first, then by status (pending/in_progress before done)
     filtered.sort((a, b) => {
       const ap = a.priority ? 1 : 0;
@@ -43524,6 +43547,31 @@ function AssignmentBanner({ propertyId, property = null, unitId, partyId, employ
     else if (onUpdate) onUpdate();
   };
 
+  // Work exists here but none of it is startable. Say so. Rendering null
+  // left the cleaner staring at a Ready-to-start screen with no button and
+  // nothing to explain it — which is indistinguishable from the app being
+  // broken, and is what got reported as "it won't let me start the job".
+  if (loaded && targets.length === 0 && blockedInfo) {
+    return (
+      <div className={`p-4 rounded-2xl border mb-4 ${dark ? 'bg-stone-800 border-stone-700' : 'bg-amber-50 border-amber-300'}`}>
+        <div className="flex items-start gap-2">
+          <AlertCircle size={16} className={`flex-shrink-0 mt-0.5 ${dark ? 'text-amber-400' : 'text-amber-700'}`} />
+          <div className="min-w-0">
+            <div className={`text-sm font-medium ${dark ? 'text-stone-50' : 'text-stone-900'}`}>
+              There's work here, but you can't start it yet
+            </div>
+            <div className={`text-xs mt-0.5 ${dark ? 'text-stone-300' : 'text-stone-700'}`}>
+              {blockedInfo.count} {blockedInfo.count === 1 ? 'job is' : 'jobs are'} set up at this bedroom —{' '}
+              {blockedInfo.reasons.join(', ')}.
+            </div>
+            <div className={`text-[11px] font-mono mt-1.5 ${dark ? 'text-stone-400' : 'text-stone-500'}`}>
+              Tell the office and they can sort it out.
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
   if (!loaded || targets.length === 0) return null;
 
   // Group checklist-style targets (template_set_id is set) under their
@@ -44144,6 +44192,16 @@ function AssignmentCard({ target, property = null, busy, onView, onStart, onPaus
             </button>
           ) : (
             <div className={`font-serif text-base ${D.title} truncate`}>{cardTitle}</div>
+          )}
+
+          {/* A PM sent this in and nobody has approved it yet. Only staff
+             ever see such a card — cleaners don't get it in their list —
+             and without this badge it looks like any other job, which is
+             how four of them sat unapproved with nothing saying so. */}
+          {t.assignment?.source === 'pm' && t.assignment?.pm_status === 'pending' && (
+            <div className="mt-1 inline-flex items-center gap-1 text-[10px] uppercase tracking-wider font-mono font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-900 border border-amber-300">
+              <AlertCircle size={10} /> Needs your approval
+            </div>
           )}
 
           {/* Meta line — mono, one line, same as "Carriage Cove · Move out ·
@@ -45374,11 +45432,20 @@ function AssignmentTabContent({ propertyId, property = null, employee, statusFil
     }
     // Customer / active / PM-approval filter — same as before. Items
     // not visible to cleaners get dropped here.
+    // A PM's request that hasn't been approved yet is hidden from CLEANERS —
+    // they must not start work nobody has signed off. But it was hidden from
+    // owners and managers too, and this board is where they would look for
+    // it. So a PM could send a cleaning in, it would sit at pm_status
+    // 'pending' forever, and the one person who could approve it had no way
+    // to see that it existed: "it doesn't show as pending for me anywhere."
+    //
+    // Staff see it, and it is badged below. Cleaners still don't.
+    const staffViewer = employee?.role === 'owner' || employee?.role === 'manager';
     let allRelevant = (data || []).filter(t =>
       t.assignment?.customer_id === propertyId &&
       t.assignment?.active !== false &&
       !t.assignment?.deleted_at &&
-      (t.assignment?.source !== 'pm' || t.assignment?.pm_status === 'approved')
+      (staffViewer || t.assignment?.source !== 'pm' || t.assignment?.pm_status === 'approved')
     );
     // Store the RAW rows. Splitting them into tabs is a pure function of
     // (rows, statusFilter) and happens in the memo below — load() used to do

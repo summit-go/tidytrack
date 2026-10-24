@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "oct24-tap247";
+const BUILD_TAG = "oct24-tap248";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -4589,7 +4589,13 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     if (shift.customer_id !== pendingJob.customerId) return;
     const j = pendingJob;
     setPendingJob(null);
-    goToBedroomForTarget({ unit_id: j.unitId, party_id: j.partyId });
+    goToBedroomForTarget({
+      unit_id: j.unitId, party_id: j.partyId,
+      // Carry the names across. The prep screen can look them up, but it
+      // shouldn't have to when the caller already has them.
+      unit: { label: j.unitLabel || '' }, party: { label: j.partyLabel || '' },
+      assignment_id: j.id || null,
+    });
     /* eslint-disable-next-line */
   }, [shift, pendingJob]);
 
@@ -10580,7 +10586,11 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
     if (onOpenAssignment) { onOpenAssignment(j); return; }
     // Not clocked in yet → tapping a job clocks into its property and opens it.
     if (onStartJob) { onStartJob(j); return; }
-    if (j.customerId === currentPropertyId) onGoToBedroom && onGoToBedroom({ unit_id: j.unitId, party_id: j.partyId });
+    if (j.customerId === currentPropertyId) onGoToBedroom && onGoToBedroom({
+      unit_id: j.unitId, party_id: j.partyId,
+      unit: { label: j.unitLabel || '' }, party: { label: j.partyLabel || '' },
+      assignment_id: j.id || null,
+    });
     else if (onSwitchToJob) onSwitchToJob(j);       // direct: clock into THIS job's property + open it
     else onSwitchProperty && onSwitchProperty();     // fallback: generic picker
   };
@@ -11986,6 +11996,42 @@ function PreparingBlockView({ shift, pendingStart, employeeName, employee,
   // so the chips show in the prep-screen header — same visual language
   // as BlockView.
   const [bedroomContext, setBedroomContext] = useState({ priority: false, types: [] });
+
+  // WHICH BEDROOM AM I IN.
+  //
+  // pendingStart carries labels, but only if whoever routed here had them.
+  // The job list hands over `{ unit_id, party_id }` and nothing else, so
+  // every start that begins from a job card arrived with unitLabel and
+  // partyLabel empty — and this screen then said "Ready to start, Bridges
+  // Apartments" with no apartment and no bedroom on it, which is the one
+  // thing a cleaner standing in a corridor actually needs.
+  //
+  // Rather than fix the callers one at a time and wait for the next one to
+  // forget, the screen looks the names up itself whenever they're missing.
+  const [resolved, setResolved] = useState({ unitLabel: '', partyLabel: '' });
+  useEffect(() => {
+    const haveLabels = !!(pendingStart?.unitLabel || pendingStart?.partyLabel);
+    if (haveLabels || !pendingStart?.unitId) { setResolved({ unitLabel: '', partyLabel: '' }); return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        const [u, p] = await Promise.all([
+          supabase.from('units').select('label').eq('id', pendingStart.unitId).maybeSingle(),
+          pendingStart.partyId
+            ? supabase.from('parties').select('label').eq('id', pendingStart.partyId).maybeSingle()
+            : Promise.resolve({ data: null }),
+        ]);
+        if (cancelled) return;
+        setResolved({ unitLabel: u?.data?.label || '', partyLabel: p?.data?.label || '' });
+      } catch (e) {
+        console.warn('[prepare] could not resolve the bedroom name', e);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [pendingStart?.unitId, pendingStart?.partyId, pendingStart?.unitLabel, pendingStart?.partyLabel]);
+  const unitLabel = pendingStart?.unitLabel || resolved.unitLabel;
+  const partyLabel = pendingStart?.partyLabel || resolved.partyLabel;
+
   useEffect(() => {
     if (!pendingStart?.unitId || !pendingStart?.partyId) {
       setBedroomContext({ priority: false, types: [] }); return;
@@ -12041,8 +12087,8 @@ function PreparingBlockView({ shift, pendingStart, employeeName, employee,
           </div>
         )}
         <div className="font-serif text-2xl text-stone-50 leading-tight">
-          {pendingStart.unitLabel}
-          {partyDisplay(pendingStart.partyLabel) && <> · <span className="italic text-amber-400">{partyDisplay(pendingStart.partyLabel)}</span></>}
+          {unitLabel}
+          {partyDisplay(partyLabel) && <> · <span className="italic text-amber-400">{partyDisplay(partyLabel)}</span></>}
         </div>
         {(bedroomContext.priority || bedroomContext.types.length > 0) && (
           <div className="mt-2 flex items-center gap-1.5 flex-wrap">
@@ -12071,8 +12117,8 @@ function PreparingBlockView({ shift, pendingStart, employeeName, employee,
            running yet, so there's no pressure. */}
         <div className="p-4 rounded-2xl bg-amber-50 border-2 border-amber-300 mb-4">
           <div className="text-sm font-medium text-stone-900 mb-2">
-            Before you start{unitPartyLabel(pendingStart.unitLabel, pendingStart.partyLabel)
-              ? <> — heading to <span className="text-amber-800">{unitPartyLabel(pendingStart.unitLabel, pendingStart.partyLabel)}</span></>
+            Before you start{unitPartyLabel(unitLabel, partyLabel)
+              ? <> — heading to <span className="text-amber-800">{unitPartyLabel(unitLabel, partyLabel)}</span></>
               : ''}
           </div>
           <ul className="space-y-2 text-xs text-stone-700">
@@ -12082,7 +12128,7 @@ function PreparingBlockView({ shift, pendingStart, employeeName, employee,
             </li>
             <li className="flex items-start gap-2">
               <Check size={13} className="text-amber-700 flex-shrink-0 mt-0.5" />
-              <span>Double-check you're at the right bedroom{pendingStart.unitLabel ? <> — <strong>{pendingStart.unitLabel}</strong></> : ''}{partyDisplay(pendingStart.partyLabel) ? <>, <strong>{partyDisplay(pendingStart.partyLabel)}</strong></> : ''}.</span>
+              <span>Double-check you're at the right bedroom{unitLabel ? <> — <strong>{unitLabel}</strong></> : ''}{partyDisplay(partyLabel) ? <>, <strong>{partyDisplay(partyLabel)}</strong></> : ''}.</span>
             </li>
             <li className="flex items-start gap-2">
               <Check size={13} className="text-amber-700 flex-shrink-0 mt-0.5" />
@@ -43207,8 +43253,28 @@ function AssignmentBanner({ propertyId, property = null, unitId, partyId, employ
 
   const SEL = '*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, approved_at, deleted_at, extracted_text, spanish_translation, translation_status, template_set_id, sheet_type, bathroom_variant, general_variant, assignment_type, scheduled_date, created_at, audience), unit:units(id, label), party:parties(id, label), starter:employees!started_by(name), completer:employees!completed_by(name), assignedTo:employees!assigned_to(id, name)';
   const load = async () => {
-    const buildQuery = (sel) => {
-      let q = supabase.from('assignment_targets').select(sel);
+    // THE 1,000-ROW TRAP, and this one decided whether "Start cleaning"
+    // existed at all.
+    //
+    // The OR below deliberately also matches property-level targets
+    // (unit_id and party_id both null). Those were NOT scoped to this
+    // property in the query — the customer check happened in JS afterwards —
+    // so this read asked for every property-level target in the database
+    // alongside this bedroom's own. With no .range() and no ORDER BY,
+    // PostgREST silently capped it at 1,000 rows and returned an ARBITRARY
+    // slice. Once the company had that many such rows, this bedroom's target
+    // could simply fall outside the slice: no assignment card rendered, and
+    // because "Start cleaning" is attached to that card, the cleaner got a
+    // Ready-to-start screen with nothing on it to press. Different rows come
+    // back on different reads, which is why it hit some jobs and not others
+    // and looked random.
+    //
+    // Now: scoped to this property in the query, ordered so paging is
+    // stable, and paged. PortalScheduleTab had this exact bug and the fix
+    // is the same shape.
+    const buildQuery = (sel, from, to) => {
+      let q = supabase.from('assignment_targets').select(sel)
+        .eq('assignment.customer_id', propertyId);
       if (!showDone) q = q.not('status', 'in', '(done,blocked)');
       if (unitId && partyId) {
         q = q.or(`and(unit_id.eq.${unitId},party_id.eq.${partyId}),and(unit_id.is.null,party_id.is.null)`);
@@ -43217,10 +43283,22 @@ function AssignmentBanner({ propertyId, property = null, unitId, partyId, employ
       } else {
         q = q.is('unit_id', null).is('party_id', null);
       }
-      return q;
+      return q.order('id', { ascending: true }).range(from, to);
     };
 
-    const { data, error } = await audienceSelect(SEL, buildQuery);
+    let data = [];
+    let error = null;
+    {
+      const PAGE = 1000;
+      for (let from = 0; ; from += PAGE) {
+        const res = await audienceSelect(SEL, (sel) => buildQuery(sel, from, from + PAGE - 1));
+        if (res.error) { error = res.error; break; }
+        const page = res.data || [];
+        data = data.concat(page);
+        if (page.length < PAGE) break;
+        if (from > 100000) break;
+      }
+    }
     if (error) {
       console.error('[AssignmentBanner] load error:', error);
     }

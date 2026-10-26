@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "oct24-tap250";
+const BUILD_TAG = "oct26-tap252";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -187,6 +187,65 @@ function AssignmentTypeChip({ type, size = 'sm', showEmpty = false }) {
 
 // Small priority badge — red, with an alert icon. Hides itself when
 // priority is falsy so callers can use it unconditionally.
+// Morning / Afternoon. Null means "any time" and renders nothing — a chip
+// on every card would be noise when most jobs have no particular slot.
+function TimeOfDayChip({ value, size = 'sm' }) {
+  if (value !== 'am' && value !== 'pm') return null;
+  const sz = size === 'xs' ? 'text-[9px] px-1.5 py-0' : 'text-[10px] px-2 py-0.5';
+  const am = value === 'am';
+  return (
+    <span className={`${sz} uppercase tracking-wider font-mono font-bold rounded-full border inline-flex items-center gap-0.5 ${
+      am ? 'bg-sky-100 text-sky-800 border-sky-300' : 'bg-indigo-100 text-indigo-800 border-indigo-300'}`}>
+      {am ? 'AM' : 'PM'}
+    </span>
+  );
+}
+
+// The running order for the day — "#1", "#2". Distinct from PriorityChip:
+// priority says THIS IS URGENT, the number says WHICH ONE FIRST. A job can
+// be both (urgent, and third among the urgent ones).
+function OrderChip({ n, size = 'sm' }) {
+  const v = Number(n);
+  if (!v || v < 1) return null;
+  const sz = size === 'xs' ? 'text-[9px] px-1.5 py-0' : 'text-[10px] px-2 py-0.5';
+  return (
+    <span className={`${sz} uppercase tracking-wider font-mono font-bold rounded-full border inline-flex items-center gap-0.5 bg-stone-900 text-stone-50 border-stone-900`}
+      title={`Job ${v} in the order for this property today`}>
+      #{v}
+    </span>
+  );
+}
+
+// One comparator for "what order does a cleaner do these in", so every
+// list that shows jobs agrees. Urgent first (that's the kept Priority
+// flag), then the typed running order, then whatever the caller had.
+// A job with no number sorts AFTER every numbered one rather than at the
+// top — an unnumbered job is "whenever", not "first".
+// Reads the number off whichever shape it is handed: a job object built by
+// a list (priorityOrder), an assignment row (priority_order), or an
+// assignment_target with the assignment embedded. One accessor, so a list
+// that sorts targets can't silently disagree with one that sorts jobs.
+const ORDER_UNSET = 9999;
+function orderOf(x) {
+  const raw = x?.priorityOrder ?? x?.priority_order ?? x?.assignment?.priority_order;
+  const n = Number(raw);
+  return (!n || n < 1) ? ORDER_UNSET : n;
+}
+function slotOf(x) {
+  return x?.timeOfDay ?? x?.time_of_day ?? x?.assignment?.time_of_day ?? null;
+}
+function compareJobOrder(a, b) {
+  const ap = a?.priority ? 0 : 1;
+  const bp = b?.priority ? 0 : 1;
+  if (ap !== bp) return ap - bp;
+  // Morning before afternoon before anything unslotted, so the running
+  // order is read inside the part of the day it belongs to.
+  const rank = (s) => (s === 'am' ? 0 : s === 'pm' ? 1 : 2);
+  const ar = rank(slotOf(a)), br = rank(slotOf(b));
+  if (ar !== br) return ar - br;
+  return orderOf(a) - orderOf(b);
+}
+
 function PriorityChip({ on, size = 'sm' }) {
   if (!on) return null;
   const sz = size === 'xs'
@@ -1535,6 +1594,68 @@ function DueDateEditor({ value, onSave, onCancel, compact = false }) {
       <button onClick={(e) => { stop(e); onCancel(); }}
         className={`${txt} font-mono px-1.5 py-0.5 text-stone-500`}>Cancel</button>
     </span>
+  );
+}
+
+// =================================================================
+// SCHEDULE SLOT EDITOR — morning / afternoon, and the running order.
+//
+// Deliberately NOT folded into DueDateEditor: that one is mounted in nine
+// places, several of them PM-facing, and widening its shape would put
+// owner-only scheduling controls on screens that should not have them.
+//
+// `order` is the cleaner's running order at THIS property on THIS day, so
+// a #1 at Legends and a #1 at Citifront are both correct. Nothing is
+// enforced in the database; `takenOrders` lets the caller warn about a
+// number already used in the same place rather than silently allowing it.
+// =================================================================
+function ScheduleSlotEditor({ timeOfDay, order, onSave, busy = false, takenOrders = [], disabled = false, disabledNote = '' }) {
+  const [draft, setDraft] = useState(order == null ? '' : String(order));
+  useEffect(() => { setDraft(order == null ? '' : String(order)); }, [order]);
+
+  const setSlot = (v) => onSave({ timeOfDay: timeOfDay === v ? null : v, order });
+  const commitOrder = () => {
+    const raw = draft.trim();
+    if (raw === '') { if (order != null) onSave({ timeOfDay, order: null }); return; }
+    const n = parseInt(raw, 10);
+    if (isNaN(n) || n < 1 || n > 999) { setDraft(order == null ? '' : String(order)); return; }
+    if (n !== order) onSave({ timeOfDay, order: n });
+  };
+  const clash = draft.trim() !== '' && takenOrders.includes(parseInt(draft, 10)) && parseInt(draft, 10) !== order;
+
+  const slotBtn = (v, label, activeCls) => (
+    <button type="button" onClick={() => setSlot(v)} disabled={busy || disabled}
+      className={`text-[10px] uppercase tracking-wider font-mono px-2 py-1 rounded-full border transition disabled:opacity-40 ${
+        timeOfDay === v ? activeCls : 'bg-white border-stone-300 text-stone-500 hover:border-stone-500'}`}>
+      {label}
+    </button>
+  );
+
+  return (
+    <div className="inline-flex items-center gap-1.5 flex-wrap align-middle" onClick={(e) => e.stopPropagation()}>
+      {slotBtn('am', 'AM', 'bg-sky-600 border-sky-600 text-white')}
+      {slotBtn('pm', 'PM', 'bg-indigo-600 border-indigo-600 text-white')}
+      <span className="inline-flex items-center gap-1">
+        <span className="text-[10px] font-mono text-stone-400">#</span>
+        <input type="number" min="1" max="999" inputMode="numeric" value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={commitOrder}
+          onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); commitOrder(); e.currentTarget.blur(); } }}
+          disabled={busy || disabled}
+          placeholder="–"
+          title="Order for this property today. Leave blank for no set order."
+          className={`w-12 text-[11px] font-mono px-1.5 py-0.5 rounded border bg-white text-center disabled:opacity-40 ${
+            clash ? 'border-amber-500 bg-amber-50' : 'border-stone-300'}`} />
+      </span>
+      {clash && (
+        <span className="text-[10px] font-mono text-amber-700" title="Another job here already uses this number">
+          already used
+        </span>
+      )}
+      {disabled && disabledNote && (
+        <span className="text-[10px] font-mono text-stone-400">{disabledNote}</span>
+      )}
+    </div>
   );
 }
 
@@ -8598,6 +8719,65 @@ async function audienceSelect(select, build) {
   return await build(withoutAudienceColumn(select));
 }
 
+// =================================================================
+// SCHEDULING COLUMNS — assignments.time_of_day and .priority_order (v76).
+//
+// Exactly the same discipline as `audience` above, and for the same
+// reason: naming a column that isn't there fails the WHOLE query, so a
+// list that merely wanted to show an "AM" chip would instead show
+// nothing at all until the SQL had been run. The app has to work the day
+// before the migration as well as the day after.
+//
+// Without the columns: no AM/PM, no numbering, and every list behaves
+// exactly as it did before the feature existed.
+// =================================================================
+const SCHEDULING_COLUMNS = ['time_of_day', 'priority_order'];
+function withoutSchedulingColumns(select) {
+  let out = String(select);
+  SCHEDULING_COLUMNS.forEach(col => {
+    out = out
+      .replace(new RegExp(`,\\s*${col}\\b`, 'g'), '')
+      .replace(new RegExp(`\\b${col}\\b\\s*,\\s*`, 'g'), '');
+  });
+  return out;
+}
+function isMissingSchedulingColumn(error) {
+  const m = (error?.message || '') + ' ' + (error?.details || '');
+  return SCHEDULING_COLUMNS.some(c => new RegExp(c, 'i').test(m))
+    && /does not exist|could not find|schema cache|unknown column/i.test(m);
+}
+let SCHEDULING_COLUMNS_MISSING = false;
+function noteSchedulingColumnsMissing() { SCHEDULING_COLUMNS_MISSING = true; }
+function schedulingColumnsMissing() { return SCHEDULING_COLUMNS_MISSING; }
+
+// Strips BOTH optional column sets when needed, so one read can tolerate
+// either migration not having been run.
+async function schedulingSelect(select, build) {
+  const prep = (s) => SCHEDULING_COLUMNS_MISSING ? withoutSchedulingColumns(s) : s;
+  const res = await audienceSelect(prep(select), build);
+  if (!res?.error || !isMissingSchedulingColumn(res.error)) return res;
+  noteSchedulingColumnsMissing();
+  return await audienceSelect(withoutSchedulingColumns(select), build);
+}
+
+// Writing them has the same problem: an UPDATE naming a column that isn't
+// there fails outright and changes nothing, so a half-guarded feature
+// doesn't degrade, it silently stops working. Same shape as audienceWrite.
+async function schedulingWrite(patch, run) {
+  if (!SCHEDULING_COLUMNS_MISSING) {
+    const res = await run(patch);
+    if (!res?.error || !isMissingSchedulingColumn(res.error)) return { ...res, schedulingSaved: true };
+    noteSchedulingColumnsMissing();
+  }
+  const stripped = { ...patch };
+  SCHEDULING_COLUMNS.forEach(c => { delete stripped[c]; });
+  // Nothing left to write once the new columns are removed.
+  if (Object.keys(stripped).length === 0) return { data: null, error: null, schedulingSaved: false };
+  const res = await run(stripped);
+  return { ...res, schedulingSaved: false };
+}
+const SCHEDULING_SQL_HINT = 'Morning/afternoon and job numbering are not in the database yet. Run the v76 SQL in Supabase, then try again.';
+
 // Insert/update path equivalent: drop the audience key and retry, so
 // creating a cleaning never depends on the SQL having been run. The
 // caller is told whether the audience actually landed.
@@ -10089,11 +10269,13 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
     // Paginated — this query is unscoped (every property, every open target),
     // so a plain call stops at PostgREST's 1000-row cap and silently drops
     // jobs. That made freshly-assigned work never show up under "Mine".
-    const SEL = 'id, unit_id, party_id, status, priority, completed_at, unit:units(label, bedrooms, bathrooms), party:parties(label), assignment:assignments!inner(id, customer_id, active, deleted_at, assignment_type, scheduled_date, pm_status, approved_at, created_at, source, audience, customer:customers(name, address))';
+    const SEL = 'id, unit_id, party_id, status, priority, completed_at, unit:units(label, bedrooms, bathrooms), party:parties(label), assignment:assignments!inner(id, customer_id, active, deleted_at, assignment_type, scheduled_date, pm_status, approved_at, created_at, source, audience, time_of_day, priority_order, customer:customers(name, address))';
     const fetchOpenTargets = async () => {
       let rows = []; const PAGE = 1000;
       for (let from = 0; ; from += PAGE) {
-        const { data: page, error } = await audienceSelect(SEL, (sel) => supabase.from('assignment_targets')
+        // schedulingSelect, not audienceSelect: this names time_of_day and
+        // priority_order too, and either migration may not have been run.
+        const { data: page, error } = await schedulingSelect(SEL, (sel) => supabase.from('assignment_targets')
           .select(sel)
           .not('status', 'in', '(done,blocked)')
           .range(from, from + PAGE - 1));
@@ -10119,7 +10301,7 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
       const staffViewer = employee?.role === 'owner' || employee?.role === 'manager';
       if (!staffViewer && a.source === 'pm' && a.pm_status !== 'approved') return;
       if (!byJob[a.id]) {
-        byJob[a.id] = { id: a.id, customerId: a.customer_id, propName: a.customer?.name || 'Property', propAddress: a.customer?.address || '', type: a.assignment_type || '', scheduledDate: a.scheduled_date || null, unitLabel: t.unit?.label || '', partyLabel: t.party?.label || '', unitId: t.unit_id, partyId: t.party_id, bedrooms: t.unit?.bedrooms, bathrooms: t.unit?.bathrooms, priority: false, items: 0, hereNow: [], assignees: [], requested: [], pmStatus: a.pm_status || null, approvedAt: a.approved_at || null, submittedAt: a.created_at || null, doneAt: null, audience: a.audience };
+        byJob[a.id] = { id: a.id, customerId: a.customer_id, propName: a.customer?.name || 'Property', propAddress: a.customer?.address || '', type: a.assignment_type || '', scheduledDate: a.scheduled_date || null, unitLabel: t.unit?.label || '', partyLabel: t.party?.label || '', unitId: t.unit_id, partyId: t.party_id, bedrooms: t.unit?.bedrooms, bathrooms: t.unit?.bathrooms, priority: false, items: 0, hereNow: [], assignees: [], requested: [], pmStatus: a.pm_status || null, approvedAt: a.approved_at || null, submittedAt: a.created_at || null, doneAt: null, audience: a.audience, timeOfDay: a.time_of_day || null, priorityOrder: a.priority_order || null };
       }
       byJob[a.id].items++;
       if (t.priority) byJob[a.id].priority = true;
@@ -10310,7 +10492,13 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
       // 'YYYY-MM-DD', so a plain string compare is already date order.
       || (a.scheduledDate || '').localeCompare(b.scheduledDate || '')
       || (sub === 'all' ? ((isMine(b) ? 1 : 0) - (isMine(a) ? 1 : 0)) : 0)
+      // Property before the running order, because the number restarts at
+      // each property: a #1 at Legends and a #1 at Citifront are two
+      // different firsts, and interleaving them would read as a tie.
       || naturalCompare(a.propName, b.propName)
+      // Urgent first, then the typed order. compareJobOrder is the one
+      // definition of that, shared with every other list.
+      || compareJobOrder(a, b)
       || naturalCompare(a.unitLabel, b.unitLabel));
 
   // ---- Building filter pills -------------------------------------------
@@ -10369,6 +10557,10 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
                         </span>
                       )}
                       {mine && <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700">Yours</span>}
+                      {/* The running order and the slot. Priority stays its
+                         own badge — urgent and "third" are different facts. */}
+                      <OrderChip n={j.priorityOrder} />
+                      <TimeOfDayChip value={j.timeOfDay} />
                       {j.priority && <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-red-100 text-red-700 font-bold flex items-center gap-1"><AlertCircle size={9} /> Priority</span>}
                     </span>
                   </div>
@@ -10731,11 +10923,31 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
               </button>
               {!isCollapsed && (
               <div className="space-y-2">
-          {sec.jobs.map(j => {
-            const here = j.customerId === currentPropertyId;
-            const mine = isMine(j);
-            return renderJobCard(j);
-          })}
+          {(() => {
+            // Morning / Afternoon inside the day. The split only appears
+            // when the day actually uses it — a property that never sets a
+            // slot keeps the plain list it has always had rather than
+            // growing an "Any time" heading over everything.
+            const am = sec.jobs.filter(j => j.timeOfDay === 'am');
+            const pm = sec.jobs.filter(j => j.timeOfDay === 'pm');
+            const any = sec.jobs.filter(j => j.timeOfDay !== 'am' && j.timeOfDay !== 'pm');
+            if (am.length === 0 && pm.length === 0) return sec.jobs.map(j => renderJobCard(j));
+            const slots = [
+              { key: 'am', label: 'Morning', jobs: am, tone: 'text-sky-800', bar: 'border-sky-400 bg-sky-50' },
+              { key: 'pm', label: 'Afternoon', jobs: pm, tone: 'text-indigo-800', bar: 'border-indigo-400 bg-indigo-50' },
+              { key: 'any', label: 'Any time', jobs: any, tone: 'text-stone-600', bar: 'border-stone-300 bg-stone-100' },
+            ].filter(s => s.jobs.length > 0);
+            return slots.map(s => (
+              <div key={s.key} className="space-y-2">
+                <div className={`flex items-center gap-2 px-3 py-1 rounded-lg border-l-4 ${s.bar}`}>
+                  <Clock size={11} className={s.tone} />
+                  <span className={`text-[10px] uppercase tracking-wider font-mono font-bold ${s.tone}`}>{s.label}</span>
+                  <span className="text-[10px] font-mono text-stone-500 ml-auto">{s.jobs.length}</span>
+                </div>
+                {s.jobs.map(j => renderJobCard(j))}
+              </div>
+            ));
+          })()}
               </div>
               )}
             </div>
@@ -30340,7 +30552,13 @@ function InvoiceView({ employee, onSignOut, onOpenMessages, onLogoClick, topTogg
     <div className="pb-24">
       <Header name={employee.name} onSignOut={onSignOut} role={employee.role} employee={employee} onOpenMessages={onOpenMessages} onLogoClick={onLogoClick} />
       {topToggle}
-      <div className="px-5 pt-6">
+      {/* Capped width. This app is built mobile-first and this screen had
+         no limit at all, so on a desktop window the property <select> and
+         every button stretched the full 1,600-odd pixels — and a native
+         select that wide renders its own dropdown badly, which is why the
+         property names came out clipped and unreadable. The form reads as a
+         form now instead of a banner. */}
+      <div className="px-5 pt-6 max-w-2xl">
         <div className="text-xs uppercase tracking-widest text-stone-400 font-mono mb-3">Billing</div>
         <h1 className="text-4xl font-light text-stone-900 tracking-tight mb-6">
           Generate <span className="font-serif italic text-amber-700">invoice</span>
@@ -43261,8 +43479,21 @@ function AssignmentBanner({ propertyId, property = null, unitId, partyId, employ
     setEditDueId(null);
     if (id) { await supabase.from('assignments').update({ scheduled_date: date || null }).eq('id', id); load(); }
   };
+  // Morning/afternoon + running order. Goes through schedulingWrite so that
+  // if v76 hasn't been run the UPDATE doesn't fail outright and leave the
+  // owner tapping a control that silently does nothing — they get told.
+  const saveSlotB = async (id, timeOfDay, order) => {
+    if (!id) return;
+    const { error, schedulingSaved } = await schedulingWrite(
+      { time_of_day: timeOfDay || null, priority_order: order ?? null },
+      (patch) => supabase.from('assignments').update(patch).eq('id', id)
+    );
+    if (error) { alert('Could not save that: ' + error.message); return; }
+    if (!schedulingSaved) { alert(SCHEDULING_SQL_HINT); return; }
+    load();
+  };
 
-  const SEL = '*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, approved_at, deleted_at, extracted_text, spanish_translation, translation_status, template_set_id, sheet_type, bathroom_variant, general_variant, assignment_type, scheduled_date, created_at, audience), unit:units(id, label), party:parties(id, label), starter:employees!started_by(name), completer:employees!completed_by(name), assignedTo:employees!assigned_to(id, name)';
+  const SEL = '*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, approved_at, deleted_at, extracted_text, spanish_translation, translation_status, template_set_id, sheet_type, bathroom_variant, general_variant, assignment_type, scheduled_date, created_at, audience, time_of_day, priority_order), unit:units(id, label), party:parties(id, label), starter:employees!started_by(name), completer:employees!completed_by(name), assignedTo:employees!assigned_to(id, name)';
   const load = async () => {
     // Scoped, ordered and paged.
     //
@@ -43296,7 +43527,7 @@ function AssignmentBanner({ propertyId, property = null, unitId, partyId, employ
     {
       const PAGE = 1000;
       for (let from = 0; ; from += PAGE) {
-        const res = await audienceSelect(SEL, (sel) => buildQuery(sel, from, from + PAGE - 1));
+        const res = await schedulingSelect(SEL, (sel) => buildQuery(sel, from, from + PAGE - 1));
         if (res.error) { error = res.error; break; }
         const page = res.data || [];
         data = data.concat(page);
@@ -43334,12 +43565,8 @@ function AssignmentBanner({ propertyId, property = null, unitId, partyId, employ
       ? { count: dropped.length, reasons: Array.from(new Set(dropped)) }
       : null);
     // Priority items first, then by status (pending/in_progress before done)
-    filtered.sort((a, b) => {
-      const ap = a.priority ? 1 : 0;
-      const bp = b.priority ? 1 : 0;
-      if (ap !== bp) return bp - ap;
-      return 0;
-    });
+    // One shared rule: urgent, then morning/afternoon, then the number.
+    filtered.sort(compareJobOrder);
     setTargets(filtered);
     setLoaded(true);
   };
@@ -43876,6 +44103,21 @@ function AssignmentBanner({ propertyId, property = null, unitId, partyId, employ
                       </span>
                     ) : null)))}
                   </div>
+                  {/* Morning / afternoon and the running order. Same
+                     permission as the due date — this is scheduling, and
+                     cleaners don't schedule. Sits under the date because
+                     it only means anything once there IS a date. */}
+                  {canEditDatesB && a?.id && (
+                    <div className="flex items-center gap-1.5 flex-wrap justify-end mt-1">
+                      <ScheduleSlotEditor
+                        timeOfDay={a?.time_of_day || null}
+                        order={a?.priority_order ?? null}
+                        busy={busy}
+                        disabled={!a?.scheduled_date}
+                        disabledNote="set a date first"
+                        onSave={({ timeOfDay, order }) => saveSlotB(a.id, timeOfDay, order)} />
+                    </div>
+                  )}
                   {/* Mini-row 2: History (Quick glance removed — the "X task"
                      count link peeks; the eye pill was redundant). */}
                   <div className="flex items-center gap-1.5 flex-wrap justify-end">
@@ -43894,9 +44136,13 @@ function AssignmentBanner({ propertyId, property = null, unitId, partyId, employ
 
               {/* === TITLE + TYPE + SECTION BREAKDOWN === */}
               <div className="mb-2">
-                {a?.assignment_type && (
-                  <div className="mt-1">
-                    <AssignmentTypeChip type={a.assignment_type} />
+                {(a?.assignment_type || a?.time_of_day || a?.priority_order) && (
+                  <div className="mt-1 flex items-center gap-1.5 flex-wrap">
+                    <AssignmentTypeChip type={a?.assignment_type} />
+                    {/* Order and slot read as facts about the job, so they
+                       sit with the type rather than in the actions row. */}
+                    <OrderChip n={a?.priority_order} />
+                    <TimeOfDayChip value={a?.time_of_day} />
                   </div>
                 )}
                 <div className={`text-[11px] font-mono ${DC.muted} mt-1`}>
@@ -45407,8 +45653,8 @@ function AssignmentTabContent({ propertyId, property = null, employee, statusFil
       // every target row of an assignment — megabytes across a busy
       // property, for something only the peek modal ever reads. Fetched on
       // demand in openTarget() instead.
-      const { data: page, error: pErr } = await audienceSelect(
-        '*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, approved_at, deleted_at, translation_status, assignment_type, scheduled_date, sheet_type, template_set_id, bathroom_variant, general_variant, created_at, audience), unit:units(id, label), party:parties(id, label), starter:employees!started_by(id, name), completer:employees!completed_by(id, name), assignedTo:employees!assigned_to(id, name)',
+      const { data: page, error: pErr } = await schedulingSelect(
+        '*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, approved_at, deleted_at, translation_status, assignment_type, scheduled_date, sheet_type, template_set_id, bathroom_variant, general_variant, created_at, audience, time_of_day, priority_order), unit:units(id, label), party:parties(id, label), starter:employees!started_by(id, name), completer:employees!completed_by(id, name), assignedTo:employees!assigned_to(id, name)',
         (sel) => supabase
           .from('assignment_targets')
           .select(sel)
@@ -45565,9 +45811,8 @@ function AssignmentTabContent({ propertyId, property = null, employee, statusFil
       // started is the one who paused. Priority still wins overall.
       const myId = employee?.id;
       filtered.sort((a, b) => {
-        const ap = a.priority ? 1 : 0;
-        const bp = b.priority ? 1 : 0;
-        if (ap !== bp) return bp - ap;
+        const byOrder = compareJobOrder(a, b);
+        if (byOrder !== 0) return byOrder;
         const aMine = myId && a.started_by === myId ? 0 : 1;
         const bMine = myId && b.started_by === myId ? 0 : 1;
         if (aMine !== bMine) return aMine - bMine;
@@ -45591,9 +45836,8 @@ function AssignmentTabContent({ propertyId, property = null, employee, statusFil
         // Without this every future date ties and the sort collapses
         // straight to building order.
         if (da !== db) return da.localeCompare(db);
-        const ap = a.priority ? 1 : 0;
-        const bp = b.priority ? 1 : 0;
-        if (ap !== bp) return bp - ap;
+        const byOrder = compareJobOrder(a, b);
+        if (byOrder !== 0) return byOrder;
         return naturalCompare(a.unit?.label || '', b.unit?.label || '')
           || naturalCompare(a.party?.label || '', b.party?.label || '');
       });

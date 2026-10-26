@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "oct26-tap252";
+const BUILD_TAG = "oct26-tap253";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -1609,6 +1609,21 @@ function DueDateEditor({ value, onSave, onCancel, compact = false }) {
 // enforced in the database; `takenOrders` lets the caller warn about a
 // number already used in the same place rather than silently allowing it.
 // =================================================================
+// Writes morning/afternoon + running order for one assignment. Module
+// scope on purpose: three different screens render the card that calls it,
+// and a per-screen copy is how two of them end up disagreeing. Goes through
+// schedulingWrite so that, if v76 hasn't been run, the owner is told rather
+// than tapping a control that silently does nothing.
+async function saveAssignmentSlot(assignmentId, timeOfDay, order) {
+  if (!assignmentId) return;
+  const { error, schedulingSaved } = await schedulingWrite(
+    { time_of_day: timeOfDay || null, priority_order: order ?? null },
+    (patch) => supabase.from('assignments').update(patch).eq('id', assignmentId)
+  );
+  if (error) { alert('Could not save that: ' + error.message); return; }
+  if (!schedulingSaved) alert(SCHEDULING_SQL_HINT);
+}
+
 function ScheduleSlotEditor({ timeOfDay, order, onSave, busy = false, takenOrders = [], disabled = false, disabledNote = '' }) {
   const [draft, setDraft] = useState(order == null ? '' : String(order));
   useEffect(() => { setDraft(order == null ? '' : String(order)); }, [order]);
@@ -10410,6 +10425,18 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
   // Owners/managers can flag a job priority right from this list — flips all
   // of the assignment's targets, which is what the priority pill + top-sort
   // read from.
+  // Morning/afternoon + running order from the owner's job list. Updates
+  // the row in place so the chips and the ordering move on the tap rather
+  // than after a refetch.
+  const saveJobSlot = async (j, timeOfDay, order) => {
+    setBusyId(j.id);
+    await saveAssignmentSlot(j.id, timeOfDay, order);
+    setJobs(prev => prev.map(x => x.id === j.id
+      ? { ...x, timeOfDay: timeOfDay || null, priorityOrder: order ?? null }
+      : x));
+    setBusyId(null);
+  };
+
   const toggleJobPriority = async (j) => {
     setBusyId(j.id);
     const turningOn = !j.priority;
@@ -10705,6 +10732,25 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
                     <span className={`text-[11px] font-mono ${j.scheduledDate && j.scheduledDate < todayKey ? 'text-red-600' : j.scheduledDate === todayKey ? 'text-emerald-700' : 'text-stone-400'}`}>{fmtDue(j.scheduledDate)}</span>
                   )}
                   <div className="flex items-center gap-2">
+                    {/* Morning / afternoon + the running order, next to the
+                       priority toggle because they answer the same question:
+                       what order does this get done in. Same permission as
+                       marking priority — cleaners don't schedule. */}
+                    {canAssign && (
+                      <ScheduleSlotEditor
+                        timeOfDay={j.timeOfDay}
+                        order={j.priorityOrder}
+                        busy={busyId === j.id}
+                        disabled={!j.scheduledDate}
+                        disabledNote="set a date first"
+                        takenOrders={jobs
+                          .filter(x => x.id !== j.id
+                            && x.customerId === j.customerId
+                            && x.scheduledDate === j.scheduledDate
+                            && x.priorityOrder)
+                          .map(x => x.priorityOrder)}
+                        onSave={({ timeOfDay, order }) => saveJobSlot(j, timeOfDay, order)} />
+                    )}
                     {false && !mine && !iRequested(j) && !canAssign && (
                       <button onClick={() => requestJob(j)} disabled={busyId === j.id}
                         className="text-[11px] font-medium px-2.5 py-1 rounded-full bg-stone-100 text-stone-700 disabled:opacity-50">Request</button>
@@ -43479,19 +43525,6 @@ function AssignmentBanner({ propertyId, property = null, unitId, partyId, employ
     setEditDueId(null);
     if (id) { await supabase.from('assignments').update({ scheduled_date: date || null }).eq('id', id); load(); }
   };
-  // Morning/afternoon + running order. Goes through schedulingWrite so that
-  // if v76 hasn't been run the UPDATE doesn't fail outright and leave the
-  // owner tapping a control that silently does nothing — they get told.
-  const saveSlotB = async (id, timeOfDay, order) => {
-    if (!id) return;
-    const { error, schedulingSaved } = await schedulingWrite(
-      { time_of_day: timeOfDay || null, priority_order: order ?? null },
-      (patch) => supabase.from('assignments').update(patch).eq('id', id)
-    );
-    if (error) { alert('Could not save that: ' + error.message); return; }
-    if (!schedulingSaved) { alert(SCHEDULING_SQL_HINT); return; }
-    load();
-  };
 
   const SEL = '*, assignment:assignments!inner(id, title, notes, file_url, file_kind, customer_id, active, source, pm_status, approved_at, deleted_at, extracted_text, spanish_translation, translation_status, template_set_id, sheet_type, bathroom_variant, general_variant, assignment_type, scheduled_date, created_at, audience, time_of_day, priority_order), unit:units(id, label), party:parties(id, label), starter:employees!started_by(name), completer:employees!completed_by(name), assignedTo:employees!assigned_to(id, name)';
   const load = async () => {
@@ -43928,6 +43961,7 @@ function AssignmentBanner({ propertyId, property = null, unitId, partyId, employ
               currentEmployeeId={employee?.id}
               canEditDates={can(employee, 'edit_due_dates')}
               onSetDueDate={async (aid, date) => { if (aid) { await supabase.from('assignments').update({ scheduled_date: date }).eq('id', aid); load(); } }}
+                onSetSlot={saveAssignmentSlot}
             onOpenBedroomHistory={onOpenBedroomHistory} dark={dark} workScreen={workScreen} onStartCleaning={onStartCleaning} onExit={onExit} />
         );
         // Checklist group card: ONE card representing a whole inspection
@@ -44103,21 +44137,6 @@ function AssignmentBanner({ propertyId, property = null, unitId, partyId, employ
                       </span>
                     ) : null)))}
                   </div>
-                  {/* Morning / afternoon and the running order. Same
-                     permission as the due date — this is scheduling, and
-                     cleaners don't schedule. Sits under the date because
-                     it only means anything once there IS a date. */}
-                  {canEditDatesB && a?.id && (
-                    <div className="flex items-center gap-1.5 flex-wrap justify-end mt-1">
-                      <ScheduleSlotEditor
-                        timeOfDay={a?.time_of_day || null}
-                        order={a?.priority_order ?? null}
-                        busy={busy}
-                        disabled={!a?.scheduled_date}
-                        disabledNote="set a date first"
-                        onSave={({ timeOfDay, order }) => saveSlotB(a.id, timeOfDay, order)} />
-                    </div>
-                  )}
                   {/* Mini-row 2: History (Quick glance removed — the "X task"
                      count link peeks; the eye pill was redundant). */}
                   <div className="flex items-center gap-1.5 flex-wrap justify-end">
@@ -44340,7 +44359,7 @@ function AssignmentBanner({ propertyId, property = null, unitId, partyId, employ
 
 // Reusable card for one assignment target, used in banner + panel
 function AssignmentCard({ target, property = null, busy, onView, onStart, onPause,
-  assignees = null, teamList = null, assignOpen = false, assignBusy = false, onToggleAssign = null, onSaveAssign = null, onMoveToPending, onDone, onReopen, onBlocked, onReassign, onDelete, onGoToBedroom, onOpenBedroomHistory, onTogglePriority, canPrioritize = false, canMarkDone = true, canMarkDoneAlways = false, currentEmployeeId, propertyId, canEditDates = false, onSetDueDate, dark = false, workScreen = false, onStartCleaning = null, onExit = null, ownerView = false }) {
+  assignees = null, teamList = null, assignOpen = false, assignBusy = false, onToggleAssign = null, onSaveAssign = null, onMoveToPending, onDone, onReopen, onBlocked, onReassign, onDelete, onGoToBedroom, onOpenBedroomHistory, onTogglePriority, canPrioritize = false, canMarkDone = true, canMarkDoneAlways = false, currentEmployeeId, propertyId, canEditDates = false, onSetDueDate, onSetSlot = null, dark = false, workScreen = false, onStartCleaning = null, onExit = null, ownerView = false }) {
   const t = target;
   // Dark variant — used when this card is folded into the cleaner's black
   // "Working on" header. Only the neutral surfaces flip; colored status /
@@ -44363,6 +44382,22 @@ function AssignmentCard({ target, property = null, busy, onView, onStart, onPaus
     setLocalDate(val);
     setEditingDate(false);
     if (onSetDueDate) await onSetDueDate(t.assignment_id || t.assignment?.id, val || null);
+  };
+  // Morning/afternoon + the running order, kept local the same way the date
+  // is so the control responds on tap rather than waiting for a reload.
+  const [localSlot, setLocalSlot] = useState({
+    timeOfDay: t.assignment?.time_of_day || null,
+    order: t.assignment?.priority_order ?? null,
+  });
+  useEffect(() => {
+    setLocalSlot({
+      timeOfDay: t.assignment?.time_of_day || null,
+      order: t.assignment?.priority_order ?? null,
+    });
+  }, [t.assignment?.time_of_day, t.assignment?.priority_order]);
+  const commitSlot = async ({ timeOfDay, order }) => {
+    setLocalSlot({ timeOfDay, order });
+    if (onSetSlot) await onSetSlot(t.assignment_id || t.assignment?.id, timeOfDay, order);
   };
   // Does this job name one bedroom? Property-wide assignments don't — they
   // are stored with unit_id and party_id null.
@@ -44623,6 +44658,22 @@ function AssignmentCard({ target, property = null, busy, onView, onStart, onPaus
             );
           })() : null}
         </div>
+
+        {/* Morning / afternoon and the running order, right under the date
+           they belong to. Same permission as the date — scheduling is not
+           a cleaner's job. Greyed until there IS a date, because "third on
+           Tuesday" means nothing until Tuesday is set. */}
+        {canEditDates && onSetSlot && (
+          <div className="flex items-center gap-1.5 flex-wrap justify-end mt-1">
+            <ScheduleSlotEditor
+              timeOfDay={localSlot.timeOfDay}
+              order={localSlot.order}
+              busy={busy}
+              disabled={!localDate}
+              disabledNote="set a date first"
+              onSave={commitSlot} />
+          </div>
+        )}
 
         <div className="flex items-center gap-1.5 flex-wrap justify-end">
           {onPause && t.status === 'in_progress' && (
@@ -46404,6 +46455,7 @@ function AssignmentTabContent({ propertyId, property = null, employee, statusFil
                 onGoToBedroom={onGoToBedroom ? () => startAndGo(t) : null}
                 canEditDates={can(employee, 'edit_due_dates')}
                 onSetDueDate={async (aid, date) => { if (aid) { await supabase.from('assignments').update({ scheduled_date: date }).eq('id', aid); load(); } }}
+                onSetSlot={saveAssignmentSlot}
                 onDelete={can(employee, 'upload_assignments') && t.assignment?.id ? async () => {
                   if (!confirm('Delete this assignment? Use this only if it was uploaded by mistake — it removes it for everyone.')) return;
                   const { error } = await supabase.from('assignments').update({ deleted_at: new Date().toISOString(), deleted_by: employee?.id || null }).eq('id', t.assignment.id);
@@ -47059,6 +47111,7 @@ function AssignmentTabContent({ propertyId, property = null, employee, statusFil
                             onGoToBedroom={onGoToBedroom ? () => startAndGo(t) : null}
                             canEditDates={can(employee, 'edit_due_dates')}
                             onSetDueDate={async (aid, date) => { if (aid) { await supabase.from('assignments').update({ scheduled_date: date }).eq('id', aid); load(); } }}
+                onSetSlot={saveAssignmentSlot}
                             onDelete={can(employee, 'upload_assignments') && t.assignment?.id ? async () => {
                               if (!confirm('Delete this assignment? Use this only if it was uploaded by mistake — it removes it for everyone.')) return;
                               const { error } = await supabase.from('assignments').update({ deleted_at: new Date().toISOString(), deleted_by: employee?.id || null }).eq('id', t.assignment.id);

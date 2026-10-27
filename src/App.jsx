@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "oct26-tap253";
+const BUILD_TAG = "oct27-tap254";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -15969,9 +15969,15 @@ function NotificationBell({ employee, isOwner, onNavigate }) {
         if (paErr) console.warn('[notify] backfill query error', paErr);
         const live = (pendingAsg || []).filter(a => !a.deleted_at);
         if (live.length) {
+          // The window matters. The feed below only shows rows newer than
+          // weekAgoISO, so a surviving row older than that counts as
+          // "already have one" while being invisible — the item would never
+          // reappear. Scoping this check to the same window the feed uses
+          // means an old row gets replaced with a fresh, visible one.
           const { data: existing } = await supabase.from('notifications')
             .select('link_id')
             .eq('kind', 'pm_assignment')
+            .gte('created_at', weekAgoISO)
             .in('link_id', live.map(a => a.id));
           const have = new Set((existing || []).map(r => r.link_id));
           const toInsert = live.filter(a => !have.has(a.id)).map(a => ({
@@ -16019,19 +16025,30 @@ function NotificationBell({ employee, isOwner, onNavigate }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [employee?.id, isOwner]);
 
+  // Some bell rows are announcements — you read them and you're done. Others
+  // are unfinished work: a cleaning waiting for approval blocks a cleaner
+  // until someone acts on it. Those must not clear themselves just because
+  // the bell was opened, or the badge drops to zero while the job is still
+  // stuck. They're removed outright when the work is settled (see
+  // clearPmAssignmentNotification), and that is their only clear path.
+  const TASK_KINDS = new Set(['pm_assignment', 'recheck']);
+  const isTask = (n) => TASK_KINDS.has(n.kind);
+
   const unread = items.filter(n => !n.read_at).length;
 
   const openBell = async () => {
     setOpen(o => !o);
     if (!open && unread > 0) {
-      const unreadItems = items.filter(n => !n.read_at);
+      // Announcements only. Task rows are left alone on both sides —
+      // local state and DB — so the count keeps telling the truth.
+      const unreadItems = items.filter(n => !n.read_at && !isTask(n));
       // Only the all_cleaners broadcast is truly shared across many people —
       // writing read_at there would mark it read for everyone, so we skip DB
       // for those (they clear when the job is claimed). Owner-scope rows and
       // personal rows SHOULD persist read: the owner team is one audience, so
       // once you've seen them they stay seen and don't pop back up.
       const persistIds = unreadItems.filter(n => n.recipient_scope !== 'all_cleaners').map(n => n.id);
-      setItems(prev => prev.map(n => (!n.read_at ? { ...n, read_at: new Date().toISOString() } : n)));
+      setItems(prev => prev.map(n => (!n.read_at && !isTask(n) ? { ...n, read_at: new Date().toISOString() } : n)));
       if (persistIds.length) {
         try { await supabase.from('notifications').update({ read_at: new Date().toISOString() }).in('id', persistIds); }
         catch (e) { console.warn('[notify] mark read failed', e); }
@@ -16088,8 +16105,10 @@ function NotificationBell({ employee, isOwner, onNavigate }) {
                   const canNavigate = !!onNavigate && (n.link_kind || n.kind);
                   const handleTap = async () => {
                     // Persist read immediately for this row (owner/personal
-                    // scope) so it doesn't come back on reopen.
-                    if (!n.read_at && n.recipient_scope !== 'all_cleaners') {
+                    // scope) so it doesn't come back on reopen. A task row is
+                    // exempt: fading it would hide work that is still
+                    // blocking someone. Only finishing the work clears it.
+                    if (!n.read_at && !isTask(n) && n.recipient_scope !== 'all_cleaners') {
                       setItems(prev => prev.map(x => x.id === n.id ? { ...x, read_at: new Date().toISOString() } : x));
                       try { await supabase.from('notifications').update({ read_at: new Date().toISOString() }).eq('id', n.id); } catch {}
                     }
@@ -16102,6 +16121,14 @@ function NotificationBell({ employee, isOwner, onNavigate }) {
                     <div className="min-w-0 flex-1">
                       <div className="text-sm text-stone-900 font-medium">{n.title}</div>
                       {n.body && <div className="text-xs text-stone-600 mt-0.5 whitespace-pre-wrap">{n.body}</div>}
+                      {/* Most screens never wired a handler for a bell tap,
+                         so on those a task row used to fade and go nowhere.
+                         Say where the button is rather than looking broken. */}
+                      {isTask(n) && !canNavigate && (
+                        <div className="text-[11px] text-amber-800 mt-1">
+                          Approve it in the Assignments tab.
+                        </div>
+                      )}
                       <div className="text-[10px] font-mono text-stone-400 mt-1">{fmtWhen(n.created_at)}</div>
                     </div>
                     {canNavigate && <ChevronRight size={14} className="text-stone-300 flex-shrink-0 self-center" />}
@@ -24215,7 +24242,13 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick, init
       let rows = []; const PAGE = 1000;
       for (let from = 0; ; from += PAGE) {
         const { data, error } = await audienceSelect(
-          'id, status, priority, started_at, unit_id, party_id, template_section, unit:units(label, bedrooms, bathrooms), party:parties(label), assignment:assignments!inner(id, title, customer_id, active, deleted_at, scheduled_date, assignment_type, took_longer, approved_at, created_at, audience)',
+          // source + pm_status were missing here, and that was the whole bug:
+          // this tab showed PM-submitted jobs still waiting for approval as
+          // if they were ordinary live jobs. You could assign a cleaner, the
+          // assignment saved fine, and then seventeen other places correctly
+          // hid the job from that cleaner because it was still 'pending'.
+          // Nothing on this screen said so, because this screen never asked.
+          'id, status, priority, started_at, unit_id, party_id, template_section, unit:units(label, bedrooms, bathrooms), party:parties(label), assignment:assignments!inner(id, title, customer_id, active, deleted_at, scheduled_date, assignment_type, took_longer, approved_at, created_at, audience, source, pm_status)',
           (sel) => supabase.from('assignment_targets')
             .select(sel)
             .not('status', 'in', '(done,blocked)')
@@ -24242,7 +24275,7 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick, init
       const key = `${cid}::${t.unit_id || ''}::${t.party_id || ''}`;
       if (!seenBedrooms.has(key)) { seenBedrooms.add(key); counts[cid] = (counts[cid] || 0) + 1; }
       if (!jobsByAsg[a.id]) {
-        jobsByAsg[a.id] = { id: a.id, customerId: cid, title: a.title || '', scheduledDate: a.scheduled_date || null, type: a.assignment_type || '', unitLabel: t.unit?.label || '', partyLabel: t.party?.label || '', unitId: t.unit_id, partyId: t.party_id, bedrooms: t.unit?.bedrooms, bathrooms: t.unit?.bathrooms, tookLonger: !!a.took_longer, audience: a.audience, priority: false, stale: false, targetIds: [], assignees: [], hereNow: [], count: 0, sections: { bedroom: 0, vanity: 0, bathroom: 0, general: 0, other: 0 } };
+        jobsByAsg[a.id] = { id: a.id, customerId: cid, title: a.title || '', scheduledDate: a.scheduled_date || null, type: a.assignment_type || '', unitLabel: t.unit?.label || '', partyLabel: t.party?.label || '', unitId: t.unit_id, partyId: t.party_id, bedrooms: t.unit?.bedrooms, bathrooms: t.unit?.bathrooms, tookLonger: !!a.took_longer, audience: a.audience, source: a.source || null, pmStatus: a.pm_status || null, needsApproval: a.source === 'pm' && a.pm_status !== 'approved', priority: false, stale: false, targetIds: [], assignees: [], hereNow: [], count: 0, sections: { bedroom: 0, vanity: 0, bathroom: 0, general: 0, other: 0 } };
       }
       if (t.priority) jobsByAsg[a.id].priority = true;
       // Unfinished: began on an earlier day and never closed out, past its
@@ -24286,6 +24319,32 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick, init
     setLoaded(true);
   };
   useEffect(() => { load(); }, []);
+
+  // Every PM-submitted job on this tab still waiting on you, across all
+  // properties. The per-property Approve button inside a property's own
+  // assignment list only ever showed that one property's, so finding these
+  // meant opening every property in turn. This is the whole list.
+  const awaitingApproval = jobs.filter(j => j.needsApproval);
+
+  // Approve one job or all of them. Same four columns the property-level
+  // Approve all writes, so the two routes can't drift: anything that reads
+  // pm_status sees the identical shape whichever button you pressed.
+  const approveJobs = async (ids) => {
+    if (!ids.length) return;
+    setActioning(ids.length === 1 ? ids[0] : 'bulk');
+    const { error } = await supabase.from('assignments').update({
+      pm_status: 'approved',
+      approved_by: employee?.id || null,
+      approved_at: new Date().toISOString(),
+      pm_rejection_reason: null,
+    }).in('id', ids);
+    if (error) { setActioning(null); alert('Could not approve: ' + error.message); return; }
+    // Take the "needs approval" rows out of the bell — the work is settled,
+    // so it should stop asking.
+    for (const id of ids) await clearPmAssignmentNotification(id);
+    setActioning(null);
+    await load();
+  };
 
   // Editing a job straight off a card — the shared host picks the right
   // editor, the same way the job's own detail page does.
@@ -24487,7 +24546,23 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick, init
                        hunting for. Same chip, same grey "No type", as the
                        Daily cards. */}
                     <AssignmentTypeChip type={j.type} showEmpty />
+                    {/* The missing piece. Until now a job sitting at
+                       pm_status='pending' looked exactly like a live one
+                       here, so there was no way to tell why a cleaner
+                       couldn't see it. */}
+                    {j.needsApproval && (
+                      <span className="px-2 py-0.5 rounded-full bg-amber-100 border border-amber-300 text-[10px] font-mono font-bold text-amber-900 uppercase tracking-wide">
+                        Needs your approval
+                      </span>
+                    )}
                   </div>
+                  {j.needsApproval && (
+                    <div className="text-[11px] text-amber-800 mt-1 max-w-[260px]">
+                      A property manager sent this. Cleaners can&rsquo;t see it
+                      until you approve it — even if you&rsquo;ve already picked
+                      who it&rsquo;s for.
+                    </div>
+                  )}
                   <div className="text-[11px] text-stone-500 font-mono">
                     {j.scheduledDate ? fmtSched(j.scheduledDate) : 'no date'} · {j.count} item{j.count === 1 ? '' : 's'}
                   </div>
@@ -24505,6 +24580,15 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick, init
 
                 {/* Inline controls — due date, size, who's on it, took longer */}
                 <div className="flex items-center gap-1.5 flex-wrap mt-2">
+                  {/* Approve sits first, and only while it's the thing
+                     standing between the cleaner and the work. */}
+                  {j.needsApproval && (
+                    <button onClick={() => approveJobs([j.id])}
+                      disabled={actioning === j.id}
+                      className="px-3 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 text-white text-xs font-medium">
+                      {actioning === j.id ? 'Approving…' : 'Approve'}
+                    </button>
+                  )}
                   {/* Due date */}
                   {editDueJob === j.id ? (
                     <DueDateEditor compact value={j.scheduledDate || ''}
@@ -24662,6 +24746,37 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick, init
           </>
         ) : (
           <>
+            {/* Waiting on you — across every property, above everything else
+               on the tab. This is the surface that was missing: the count was
+               only ever shown one property at a time, inside that property's
+               own list, so a job sitting at a property you hadn't opened was
+               invisible and its cleaner was stuck with no explanation. */}
+            {awaitingApproval.length > 0 && (
+              <div className="mb-5 p-4 rounded-xl bg-amber-50 border-2 border-amber-300">
+                <div className="flex items-start justify-between gap-3 flex-wrap">
+                  <div className="flex-1 min-w-[200px]">
+                    <div className="text-xs uppercase tracking-wider font-mono font-bold text-amber-900 mb-1">
+                      {awaitingApproval.length} waiting for your approval
+                    </div>
+                    <div className="text-xs text-stone-700">
+                      Property managers sent these. Cleaners cannot see them
+                      until you approve — assigning someone is not enough on
+                      its own. They&rsquo;re marked below.
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => {
+                      if (!confirm(`Approve all ${awaitingApproval.length} cleaning${awaitingApproval.length === 1 ? '' : 's'} waiting for approval? Cleaners will be able to see them straight away.`)) return;
+                      approveJobs(awaitingApproval.map(j => j.id));
+                    }}
+                    disabled={actioning === 'bulk'}
+                    className="px-4 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 text-white text-sm font-medium flex-shrink-0">
+                    {actioning === 'bulk' ? 'Approving…' : `Approve all (${awaitingApproval.length})`}
+                  </button>
+                </div>
+              </div>
+            )}
+
             <button onClick={() => { setPropSearch(''); setAdding(true); }}
               className="w-full flex items-center justify-center gap-2 bg-stone-900 text-stone-50 rounded-xl py-3.5 font-medium mb-5 active:scale-98">
               <Plus size={18} /> Add assignment
@@ -36947,9 +37062,37 @@ function DailyCalendar({ employee, onSignOut, onPickDay, onOpenInbox, onOpenUnfi
          letterboxes on a very wide monitor. */}
       <div className="px-5 pt-6 mx-auto w-full flex flex-col"
         style={{ maxWidth: '72rem', minHeight: 'calc(100dvh - 12rem)' }}>
-        {/* The inbox banner was removed — PM assignments now surface in the
-           header notification bell. Tapping a bell item opens the same
-           review screen (InboxView) to approve/deny. */}
+        {/* The inbox banner is back, and this is why it has to be.
+           It was removed on the theory that the bell replaced it. The bell
+           did not: it fades a pending item to grey the first time you open
+           the bell for any reason, and tapping it only reaches this review
+           screen from this one screen. Meanwhile the count below carried on
+           being queried on every load and then thrown away, so the app knew
+           the number and never said it. Anything a cleaner is blocked on
+           needs a surface that does not clear itself. */}
+        {inboxTotal > 0 && (
+          <button onClick={() => onOpenInbox && onOpenInbox()}
+            className="w-full mb-4 p-4 rounded-xl bg-amber-50 border-2 border-amber-300 text-left hover:bg-amber-100 active:scale-[0.99] transition flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <div className="text-xs uppercase tracking-wider font-mono font-bold text-amber-900 mb-1">
+                {inboxTotal} waiting for you
+              </div>
+              <div className="text-xs text-stone-700">
+                {[
+                  inboxCounts.pendingAssignments > 0 && `${inboxCounts.pendingAssignments} cleaning${inboxCounts.pendingAssignments === 1 ? '' : 's'} to approve`,
+                  inboxCounts.pendingRechecks > 0 && `${inboxCounts.pendingRechecks} recheck${inboxCounts.pendingRechecks === 1 ? '' : 's'}`,
+                  inboxCounts.newPhotos > 0 && `${inboxCounts.newPhotos} new photo${inboxCounts.newPhotos === 1 ? '' : 's'}`,
+                ].filter(Boolean).join(' · ')}
+              </div>
+              {inboxCounts.pendingAssignments > 0 && (
+                <div className="text-[11px] text-amber-800 mt-1">
+                  Cleaners can&rsquo;t see a cleaning until it&rsquo;s approved.
+                </div>
+              )}
+            </div>
+            <ChevronRight size={18} className="text-amber-700 flex-shrink-0" />
+          </button>
+        )}
         {/* "Who's working now" moved to the person icon in the header.
            The three occasional tools (Assigned vs cleaned, Activity
            timeline, Label overrides) moved into the header ⋯ menu — see

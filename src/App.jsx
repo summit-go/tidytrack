@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "oct27-tap254";
+const BUILD_TAG = "oct27-tap255";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -8636,14 +8636,25 @@ function YourJobsCard({ propertyId, employeeId, onGoToBedroom }) {
 //
 //   'all'   — every active cleaner sees this cleaning.
 //   'named' — only the people with an `assignment_assignees` row see it.
-//             A 'named' cleaning with NO names on it is seen by nobody.
-//             That is the "this is scheduled but nobody has been put on
-//             it yet" state, and it stays hidden until someone is named.
 //
-// Zero rows in assignment_assignees used to be the only way to say
-// "everyone", which made "I chose everyone" and "nobody has decided
-// yet" the same state. Those two behave differently now, so the choice
-// is stored rather than inferred.
+// NOBODY NAMED MEANS EVERYONE. Taking the last name off a cleaning, or
+// saving one with nobody on it, stores 'all'. There is deliberately no
+// state in which a live, scheduled cleaning is invisible to every cleaner.
+//
+// It did work the other way for a while: 'named' with zero names meant
+// "scheduled, but nobody has been put on it yet", kept hidden until
+// someone was named. The reasoning was that "I chose everyone" and
+// "nobody has decided yet" are different things and deserved different
+// states. What it produced in practice was a cleaning that looked
+// completely normal on every owner screen and appeared on no phone at
+// all, with only a confirm dialog standing between the owner and that
+// outcome. An unassigned cleaning showing up for everybody is a problem
+// you can see and fix from its card; one showing up for nobody is a
+// cleaner standing in a hallway with an empty screen.
+//
+// So the audience is still stored rather than inferred — the two writes
+// that narrow a cleaning say so explicitly — but zero names can no
+// longer mean zero viewers.
 //
 // The names and the audience are independent. Naming Matias on an 'all'
 // cleaning still labels it his and sorts it to the top of his list —
@@ -8999,20 +9010,16 @@ function AssignPicker({ assignmentId = null, team, currentIds, busy, onSave, onC
   const dirty = namesDirty || (audience !== null && baseAudience !== null && audience !== baseAudience);
   const known = audience !== null;
   const named = audience === AUDIENCE_NAMED;
-  const nobodyCanSee = named && sel.size === 0;
+  // Saving with nobody selected now widens the cleaning to everyone rather
+  // than hiding it, so there is nothing left to warn about and no confirm
+  // to click through. Both dialogs that used to live here described an
+  // outcome the app no longer produces.
+  const willWidenToEveryone = sel.size === 0 && (named || !known);
 
   const save = () => {
-    if (nobodyCanSee && !confirm(
-      'Nobody is named on this cleaning, so no cleaner will see it anywhere on their phone until you add someone. Save it that way?'
-    )) return;
-    // Unknown setting AND about to leave nobody on it. If it really is
-    // "only these people", this save hides it from everyone, so say so
-    // rather than letting a failed read swallow the warning.
-    if (!known && !audienceOff && sel.size === 0 && base.size > 0 && !confirm(
-      'Who this cleaning is for could not be read. If it is set to specific people, saving it with nobody named will hide it from every cleaner. Save anyway?'
-    )) return;
     // audience stays null when it is unknown or switched off — saveAssignees
-    // then leaves the column alone rather than guessing at it.
+    // then leaves the column alone rather than guessing at it. The one thing
+    // it no longer leaves alone is zero names, which it writes as 'all'.
     onSave(Array.from(sel), audience);
   };
 
@@ -9033,8 +9040,12 @@ function AssignPicker({ assignmentId = null, team, currentIds, busy, onSave, onC
           </button>
         </div>
       </div>
-      {/* Everyone vs. specific people. Explicit, because "no names on it"
-         no longer means "everyone" — it means nobody has decided yet.
+      {/* Everyone vs. specific people. Still an explicit choice, because
+         naming somebody on a cleaning everyone can see is a real and useful
+         thing to do — it labels it theirs and sorts it to the top of their
+         list without hiding it from anyone. What the choice can no longer
+         do is hide a cleaning from everybody: picking "only these people"
+         and naming nobody saves as Everyone.
          Hidden entirely when the column isn't in the database: there is no
          choice to offer, and the picker falls back to exactly what it did
          before this feature existed. Neither button reads as selected while
@@ -9065,9 +9076,9 @@ function AssignPicker({ assignmentId = null, team, currentIds, busy, onSave, onC
           audience SQL in Supabase. Names below work the way they always have.
         </div>
       )}
-      {nobodyCanSee && (
-        <div className="mb-1.5 px-2 py-1.5 rounded-lg bg-red-50 border border-red-200 text-[10px] text-red-800">
-          Nobody is named — no cleaner will see this cleaning.
+      {willWidenToEveryone && (
+        <div className="mb-1.5 px-2 py-1.5 rounded-lg bg-stone-100 border border-stone-200 text-[10px] text-stone-600">
+          Nobody is named, so every cleaner will see this cleaning.
         </div>
       )}
       <div className="max-h-40 overflow-y-auto grid grid-cols-2 gap-1">
@@ -9106,6 +9117,18 @@ async function saveAssignees(assignmentId, currentIds, nextIds, actorId, audienc
   const toAdd = Array.from(next).filter(id => !cur.has(id));
   const toRemove = Array.from(cur).filter(id => !next.has(id));
 
+  // NOBODY NAMED MEANS EVERYONE.
+  //
+  // Leaving nobody on a cleaning used to mean nobody could see it — it was
+  // stored as 'named' with no names, on the reasoning that "I picked
+  // everyone" and "nobody has decided yet" deserved to be different states.
+  // In practice that produced a cleaning that existed, was scheduled, read
+  // as normal on every owner screen, and was invisible on every phone, with
+  // only a confirm dialog between the owner and that outcome. Allan's rule
+  // is the simpler one and it has no invisible state in it: if you have not
+  // narrowed a cleaning to specific people, everybody sees it.
+  if (next.size === 0) audience = AUDIENCE_ALL;
+
   // THE ORDER IS THE SAFETY. Names on first, audience second, names off
   // last. Three writes, no transaction available from the browser, so
   // the only question that matters is what a failure half-way leaves
@@ -9142,6 +9165,31 @@ async function saveAssignees(assignmentId, currentIds, nextIds, actorId, audienc
     if (error) return error;
   }
   return null;
+}
+
+// The same rule, for the removal paths that don't go through the picker —
+// denying or cancelling a request. Each of those can take the last name off
+// a cleaning that is set to 'named', which under the old rule left it
+// invisible to everyone with nothing on screen saying so. Checked rather
+// than assumed: only flips when no names are genuinely left.
+//
+// Deliberately NOT done by loading every assignee row in the app and
+// deciding on read. That read is one row per cleaner per cleaning, and
+// paging all of it on a cleaner's phone to answer "does this job have
+// anybody on it" would cost more than the whole screen.
+async function relaxAudienceIfNobodyNamed(assignmentId) {
+  if (!assignmentId) return;
+  try {
+    const { count, error } = await supabase.from('assignment_assignees')
+      .select('employee_id', { count: 'exact', head: true })
+      .eq('assignment_id', assignmentId);
+    if (error || count === null || count > 0) return;
+    const { error: aErr } = await supabase.from('assignments')
+      .update({ audience: AUDIENCE_ALL }).eq('id', assignmentId);
+    if (aErr && !isMissingAudienceColumn(aErr)) {
+      console.warn('[visibility] could not widen an unnamed cleaning', aErr);
+    }
+  } catch (e) { console.warn('[visibility] audience relax skipped', e); }
 }
 
 // =================================================================
@@ -10404,6 +10452,8 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
     setBusyId(j.id);
     await supabase.from('assignment_assignees').delete()
       .eq('assignment_id', j.id).eq('employee_id', empId).eq('status', 'requested');
+    // That may have been the last name on it. Nobody named means everyone.
+    await relaxAudienceIfNobodyNamed(j.id);
     setBusyId(null); load();
   };
   // A cleaner cancels their OWN pending request.
@@ -10411,6 +10461,7 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
     setBusyId(j.id);
     await supabase.from('assignment_assignees').delete()
       .eq('assignment_id', j.id).eq('employee_id', employee.id).eq('status', 'requested');
+    await relaxAudienceIfNobodyNamed(j.id);
     setBusyId(null); load();
   };
   const markDone = async (j) => {
@@ -15820,9 +15871,17 @@ async function deleteMessagePhoto(path) {
 // Write a notification row. Fire-and-forget — never blocks the action that
 // triggered it. `to` is either { employeeId } for a specific person or
 // { scope: 'owner' } to broadcast to the owner/manager team.
+// Returns an error object, or null on success.
+//
+// This used to swallow everything. supabase insert() RESOLVES with
+// { error } rather than throwing, so the try/catch never fired and the
+// error object was dropped on the floor — a notification that failed to
+// insert looked exactly like one that worked, from every one of the
+// fourteen call sites. Callers now get the error and decide; most log it,
+// because a missing bell item should not fail the thing it was announcing.
 async function createNotification({ to, kind, title, body = null, linkKind = null, linkId = null, createdBy = null }) {
   try {
-    await supabase.from('notifications').insert({
+    const { error } = await supabase.from('notifications').insert({
       recipient_employee_id: to?.employeeId || null,
       recipient_scope: to?.scope || null,
       kind: kind || 'other',
@@ -15830,7 +15889,9 @@ async function createNotification({ to, kind, title, body = null, linkKind = nul
       link_kind: linkKind, link_id: linkId,
       created_by: createdBy,
     });
-  } catch (e) { console.warn('[notify] insert failed', e); }
+    if (error) { console.warn('[notify] insert failed', error); return error; }
+    return null;
+  } catch (e) { console.warn('[notify] insert threw', e); return e; }
 }
 
 // =================================================================
@@ -24219,6 +24280,13 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick, init
   const [adding, setAdding] = useState(false); // property picker for adding
   const [expanded, setExpanded] = useState(() => new Set()); // expanded card keys
   const [actioning, setActioning] = useState(null); // job id being marked done / deleted
+  // Pending PM cleanings read STRAIGHT from assignments, not inferred from
+  // the job cards. The cards come from assignment_targets with an inner
+  // join, so a cleaning with no target rows yet — or whose targets are all
+  // done or blocked — produces no card at all and would go on hiding from
+  // the approval callout exactly as it hid everywhere else. The thing the
+  // owner must never be able to miss cannot depend on a join.
+  const [pendingPm, setPendingPm] = useState([]);
   const [team, setTeam] = useState([]);
   const [editDueJob, setEditDueJob] = useState(null);
   const [assignJob, setAssignJob] = useState(null);
@@ -24260,10 +24328,19 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick, init
       }
       return { data: rows };
     };
-    const [propsRes, targetsRes] = await Promise.all([
+    const [propsRes, targetsRes, pendingRes] = await Promise.all([
       supabase.from('customers').select('*').eq('active', true).order('name'),
       fetchOpenTargets(),
+      // deleted_at is filtered in JS, not here: if that column is ever
+      // absent the whole query errors and the callout silently empties,
+      // which is the failure mode this entire fix exists to remove.
+      supabase.from('assignments')
+        .select('id, title, customer_id, scheduled_date, created_at, deleted_at, customer:customers(name)')
+        .eq('source', 'pm').eq('pm_status', 'pending')
+        .order('created_at', { ascending: true }),
     ]);
+    if (pendingRes.error) console.warn('[assignments] pending PM read failed', pendingRes.error);
+    setPendingPm((pendingRes.data || []).filter(a => !a.deleted_at));
     const counts = {};
     const seenBedrooms = new Set();
     const jobsByAsg = {};
@@ -24320,11 +24397,17 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick, init
   };
   useEffect(() => { load(); }, []);
 
-  // Every PM-submitted job on this tab still waiting on you, across all
-  // properties. The per-property Approve button inside a property's own
-  // assignment list only ever showed that one property's, so finding these
-  // meant opening every property in turn. This is the whole list.
-  const awaitingApproval = jobs.filter(j => j.needsApproval);
+  // Every PM-submitted cleaning still waiting on you, across all properties.
+  // The per-property Approve button inside a property's own assignment list
+  // only ever showed that one property's, so finding these meant opening
+  // every property in turn. This is the whole list, straight from the
+  // assignments table, so a cleaning with no card still counts.
+  const awaitingApproval = pendingPm;
+  // The ones with no job card behind them. Worth naming separately: the
+  // owner can approve them from here, but they won't appear in the list
+  // below, and "approved 3, see 2" with no explanation is its own bug report.
+  const cardIds = new Set(jobs.map(j => j.id));
+  const pendingWithoutCard = pendingPm.filter(a => !cardIds.has(a.id));
 
   // Approve one job or all of them. Same four columns the property-level
   // Approve all writes, so the two routes can't drift: anything that reads
@@ -24763,6 +24846,15 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick, init
                       until you approve — assigning someone is not enough on
                       its own. They&rsquo;re marked below.
                     </div>
+                    {pendingWithoutCard.length > 0 && (
+                      <div className="text-[11px] text-amber-800 mt-1.5">
+                        {pendingWithoutCard.length} of them {pendingWithoutCard.length === 1 ? 'has' : 'have'} no
+                        apartment picked yet, so {pendingWithoutCard.length === 1 ? 'it' : 'they'} won&rsquo;t
+                        appear in the list below — but Approve all still covers
+                        {pendingWithoutCard.length === 1 ? ' it' : ' them'}:
+                        {' '}{pendingWithoutCard.map(a => a.customer?.name || 'a property').join(', ')}.
+                      </div>
+                    )}
                   </div>
                   <button
                     onClick={() => {
@@ -50904,6 +50996,11 @@ function PortalAssignmentForm({ property, assignment, portalKind, onCancel, onSa
       }
 
       const newStatus = submitForApproval ? 'pending' : 'draft';
+      // Every assignments row this submit creates. A multi-bedroom submit
+      // creates one row per bedroom, and the owner needs a bell item per
+      // row — one item for five cleanings meant four of them had nothing
+      // telling the owner they existed.
+      const createdIds = [];
 
       if (isEdit) {
         setProgress('Saving changes…');
@@ -50995,6 +51092,7 @@ function PortalAssignmentForm({ property, assignment, portalKind, onCancel, onSa
             ...filePayload,
           }).select().single();
           if (e1) throw e1;
+          createdIds.push(created.id);
 
           // Fire translation once for the first sibling (file is shared)
           if (t === 0 && filePayload?.file_url && filePayload?.file_kind) {
@@ -51013,12 +51111,29 @@ function PortalAssignmentForm({ property, assignment, portalKind, onCancel, onSa
         }
       }
       if (submitForApproval) {
-        createNotification({
-          to: { scope: 'owner' }, kind: 'pm_assignment',
-          title: `New assignment to approve`,
-          body: `${property.name} · ${title.trim() || assignmentTypeLabel(assignmentType)}${isEdit ? ' (resubmitted)' : ''}`,
-          linkKind: 'assignment', linkId: (isEdit ? assignment.id : null),
-        });
+        // ONE BELL ITEM PER CLEANING, EACH CARRYING ITS OWN ID.
+        //
+        // This used to send a single notification with linkId null on every
+        // new submission. Two things broke because of it. The owner could
+        // not be taken to the cleaning, because there was no id to open.
+        // And clearPmAssignmentNotification deletes by link_id, so a row
+        // with no id could never be cleared once approved — it sat in the
+        // bell forever while the work it referred to was long done. A
+        // five-bedroom submit also produced five cleanings and one item.
+        const ids = isEdit ? [assignment.id] : createdIds;
+        const label = title.trim() || assignmentTypeLabel(assignmentType);
+        for (const id of ids) {
+          const err = await createNotification({
+            to: { scope: 'owner' }, kind: 'pm_assignment',
+            title: 'New assignment to approve',
+            body: `${property.name} · ${label}${isEdit ? ' (resubmitted)' : ''}`,
+            linkKind: 'assignment', linkId: id,
+          });
+          // Don't fail the submit over this — the cleaning is saved and the
+          // owner's approval screens read the assignments table directly,
+          // so it is still findable. Just stop pretending it was silent.
+          if (err) console.warn('[notify] pm_assignment notify failed', err);
+        }
       }
       onSaved();
     } catch (err) {

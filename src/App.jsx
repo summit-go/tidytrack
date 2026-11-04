@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "oct27-tap255";
+const BUILD_TAG = "nov1-tap257";
 const assignmentTypeMeta = (value) =>
   ASSIGNMENT_TYPES.find(t => t.value === value) || null;
 
@@ -5572,6 +5572,38 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       console.warn('[joinBlock] could not pre-close own open blocks', e);
     }
     try {
+      // THE STARTER NEEDS A PARTICIPANT ROW TOO.
+      //
+      // Only joining ever wrote to work_block_participants, so the cleaner
+      // who STARTED a block had no row in it. leaveBlock decides whether
+      // you are the last one here by counting participant rows other than
+      // your own — so the moment a helper left, that count was zero and
+      // leaveBlock closed the block out from under the person who was
+      // still standing in the room working. Joining someone was worse than
+      // not joining them.
+      //
+      // Backfilled here, at the one place that cares, dated to the block's
+      // own start so the starter's share of the time is not shortened to
+      // whenever the helper happened to arrive.
+      try {
+        const { data: blockRow } = await supabase.from('work_blocks')
+          .select('start_time, shift:shifts!inner(id, employee_id)')
+          .eq('id', targetBlock.id).single();
+        const ownerId = blockRow?.shift?.employee_id;
+        if (ownerId && ownerId !== employee.id) {
+          const { error: oErr } = await supabase.from('work_block_participants').insert({
+            work_block_id: targetBlock.id,
+            employee_id: ownerId,
+            shift_id: blockRow.shift.id,
+            joined_at: blockRow.start_time || new Date().toISOString(),
+          });
+          // A duplicate means it is already there, which is the goal.
+          if (oErr && !oErr.message?.includes('duplicate key')) {
+            console.warn('[joinBlock] could not backfill the starter', oErr);
+          }
+        }
+      } catch (e) { console.warn('[joinBlock] starter backfill skipped', e); }
+
       // Count current participants (joined and not yet left)
       const { data: current } = await supabase.from('work_block_participants')
         .select('id, employee_id')
@@ -5876,23 +5908,41 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     if (activeTask) await stopTask(activeTask, false);
     const ts = new Date().toISOString();
     await supabase.from('work_blocks').update({ end_time: ts }).eq('id', activeBlock.id);
-    // Auto-complete on close-out: EVERY still-open target at this (unit,
-    // party) — pending, in_progress OR paused — gets flipped to done. The
-    // earlier version only caught in_progress, so an assignment the cleaner
-    // never tapped "Start" on stayed pending and lingered in All Pending
-    // after they hit "I'm done here". "Done here" means done here.
+    // Auto-complete on close-out: every still-open target — pending,
+    // in_progress or paused — IN THE SECTION THIS BLOCK IS FOR.
+    //
+    // THE SECTION SCOPE IS THE WHOLE POINT. This swept every open target at
+    // the (unit, party) regardless of section, which since each section
+    // became its own workblock meant finishing Bathroom silently marked
+    // Bedroom, Vanity and General done as well — the entire assignment
+    // closed from one section's Done button, including sections a COLLEAGUE
+    // was still standing in. The sweep itself is right: "done here" should
+    // close out work the cleaner never tapped Start on, which is why it
+    // covers pending too. It just has to mean "done with this section".
+    //
+    // Sections swept = this block's stamped main_section, plus any section
+    // its own tasks actually belong to (a block can hold cross-section work,
+    // and a legacy block may have no stamp at all). If that set comes out
+    // empty, nothing is swept: closing the block is still correct, and
+    // guessing would put us back to closing the whole bedroom.
     //
     // Limited to active assignments at this customer. PM-sourced
     // assignments must be approved before they count.
     try {
-      const { data: inProg } = await supabase
+      const sweepSections = new Set();
+      if (activeBlock.main_section) sweepSections.add(activeBlock.main_section);
+      (tasks || [])
+        .filter(t => t.work_block_id === activeBlock.id && SECTIONS.includes(t.category))
+        .forEach(t => sweepSections.add(t.category));
+      const { data: inProg } = sweepSections.size === 0 ? { data: [] } : await supabase
         .from('assignment_targets')
-        .select('id, assignment:assignments!inner(customer_id, active, source, pm_status, deleted_at)')
+        .select('id, template_section, assignment:assignments!inner(customer_id, active, source, pm_status, deleted_at)')
         .eq('unit_id', activeBlock.unit_id)
         .eq('party_id', activeBlock.party_id)
         .in('status', ['pending', 'in_progress', 'paused']);
       const ids = (inProg || [])
         .filter(t =>
+          sweepSections.has(String(t.template_section || '').toLowerCase()) &&
           t.assignment?.customer_id === shift?.customer_id &&
           t.assignment?.active &&
       !t.assignment?.deleted_at &&
@@ -6767,6 +6817,51 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
     } catch (e) {
       console.warn('[confirmPendingStart] could not pre-close open blocks', e);
     }
+    // SOMEBODY ALREADY WORKING HERE? OFFER TO JOIN THEM.
+    //
+    // This is the moment a second cleaner arrives at a bedroom, and until
+    // now it was the one moment the app would not let them hop in: it
+    // created a separate workblock at the same bedroom without a word. The
+    // Join button exists, but only inside BlockView — so you had to start
+    // your own block first and then find it, leaving a stray block behind.
+    // (SectionPicker was built for exactly this and is not mounted
+    // anywhere; the Join card was deliberately kept off the ready-to-start
+    // screen, so a prompt is the way that doesn't re-clutter it.)
+    //
+    // Asked by BEDROOM, not section: at this point nobody knows which
+    // section either cleaner will do — the section is stamped later from
+    // the items they pick — so bedroom is the only honest question here.
+    try {
+      const { data: here } = await supabase.from('work_blocks')
+        .select('id, start_time, end_time, main_section, work_notes, is_preview, unit:units(label), party:parties(label), shift:shifts!inner(customer_id, is_preview, employee:employees(id, name)), tasks(id, category)')
+        .eq('unit_id', pendingStart.unitId)
+        .eq('party_id', pendingStart.partyId)
+        .is('end_time', null);
+      const theirs = (here || []).filter(b =>
+        b.shift?.employee?.id && b.shift.employee.id !== employee?.id &&
+        b.shift?.customer_id === shift?.customer_id &&
+        !blockIsPreview(b) &&
+        // An abandoned shell is not a colleague to join — same rule the
+        // Join cards use, so the two can't disagree about who is here.
+        !blockIsEmptyShell(b)
+      );
+      if (theirs.length > 0) {
+        const b = theirs[0];
+        const who = b.shift?.employee?.name || 'Another cleaner';
+        const sec = b.main_section ? ` on ${b.main_section}` : '';
+        const where = unitPartyLabel(b.unit?.label, b.party?.label) || 'this bedroom';
+        if (confirm(tt(`${who} is already working${sec} in ${where}.\n\nOK — join them and share this workblock.\nCancel — start your own separate workblock here.`))) {
+          setBusy(false);
+          setPendingStart(null);
+          await joinBlock({ id: b.id });
+          return;
+        }
+      }
+    } catch (e) {
+      // Never block starting work over this. Worst case they get their own
+      // block, which is exactly the old behaviour.
+      console.warn('[confirmPendingStart] join-offer check failed', e);
+    }
     const { data, error } = await supabase.from('work_blocks')
       .insert({
         shift_id: shift.id,
@@ -7451,11 +7546,19 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   }
   if (isMulti && activeBlock) {
     return withIdleModal(<>
+      {/* The copy used to read "You will close out this entire assignment",
+         which was an accurate description of a bug: one section's Done
+         button closed every section at the bedroom. Now it finishes the
+         section it is on, so it says which one, and says what is left. */}
       <ConfirmModal
         open={finishConfirmOpen}
-        title="Close out this assignment?"
-        message="You will close out this entire assignment. Confirm?"
-        confirmLabel="Confirm" cancelLabel="Cancel"
+        title={blockSectionOf(activeBlock)
+          ? `Finish ${blockSectionOf(activeBlock)}?`
+          : 'Finish this workblock?'}
+        message={blockSectionOf(activeBlock)
+          ? `This closes out the ${blockSectionOf(activeBlock)} work in ${unitPartyLabel(activeBlock?.unit?.label, activeBlock?.party?.label) || 'this bedroom'}. Any other section here stays open.`
+          : 'This closes out this workblock. Any other section here stays open.'}
+        confirmLabel="Finish" cancelLabel="Cancel"
         busy={busy}
         onCancel={() => setFinishConfirmOpen(false)}
         onConfirm={async () => { await finishBlock(); setFinishConfirmOpen(false); }} />
@@ -8091,7 +8194,7 @@ function ApartmentProgressList({ propertyId, workBlocks }) {
             assignment:assignments!inner(customer_id, active, source, pm_status, deleted_at)
           `)
           .eq('assignment.customer_id', propertyId)
-          .eq('assignment.active', true)
+          .not('assignment.active', 'is', false)
           .is('assignment.deleted_at', null)
           .order('id', { ascending: true })
           .range(from, from + PAGE - 1);
@@ -8236,7 +8339,7 @@ function FloorFocusList({ propertyId, workBlocks, onGoToBedroom }) {
         const { data: page, error } = await audienceSelect(SEL, (sel) => supabase.from('assignment_targets')
           .select(sel)
           .eq('assignment.customer_id', propertyId)
-          .eq('assignment.active', true)
+          .not('assignment.active', 'is', false)
           .is('assignment.deleted_at', null)
           .order('id', { ascending: true })
           .range(from, from + PAGE - 1));
@@ -10333,21 +10436,47 @@ function CleanerWorkList({ employee, currentPropertyId, onGoToBedroom, onSwitchP
     // so a plain call stops at PostgREST's 1000-row cap and silently drops
     // jobs. That made freshly-assigned work never show up under "Mine".
     const SEL = 'id, unit_id, party_id, status, priority, completed_at, unit:units(label, bedrooms, bathrooms), party:parties(label), assignment:assignments!inner(id, customer_id, active, deleted_at, assignment_type, scheduled_date, pm_status, approved_at, created_at, source, audience, time_of_day, priority_order, customer:customers(name, address))';
+    // Same three problems as the owner's board, same three fixes: an
+    // explicit order so pages can't overlap or skip, the active/deleted
+    // test pushed into the query instead of discarding rows after they
+    // arrive, and the pages fetched together rather than one after another.
+    // This one runs on a cleaner's phone, so the payload cut matters most.
+    const openTargetsQuery = (sel, from, to) => supabase.from('assignment_targets')
+      .select(sel)
+      .not('status', 'in', '(done,blocked)')
+      .not('assignment.active', 'is', false)
+      .is('assignment.deleted_at', null)
+      .order('id', { ascending: true })
+      .range(from, to);
     const fetchOpenTargets = async () => {
-      let rows = []; const PAGE = 1000;
-      for (let from = 0; ; from += PAGE) {
-        // schedulingSelect, not audienceSelect: this names time_of_day and
-        // priority_order too, and either migration may not have been run.
-        const { data: page, error } = await schedulingSelect(SEL, (sel) => supabase.from('assignment_targets')
-          .select(sel)
-          .not('status', 'in', '(done,blocked)')
-          .range(from, from + PAGE - 1));
-        if (error || !page) break;
-        rows = rows.concat(page);
-        if (page.length < PAGE) break;
-        if (from > 100000) break;
+      const PAGE = 1000;
+      const { count } = await supabase.from('assignment_targets')
+        .select('id, assignment:assignments!inner(id)', { count: 'exact', head: true })
+        .not('status', 'in', '(done,blocked)')
+        .not('assignment.active', 'is', false)
+        .is('assignment.deleted_at', null);
+      // schedulingSelect, not audienceSelect: SEL names time_of_day and
+      // priority_order too, and either migration may not have been run.
+      if (count === null || count === undefined) {
+        let rows = [];
+        for (let from = 0; ; from += PAGE) {
+          const { data: page, error } = await schedulingSelect(SEL,
+            (sel) => openTargetsQuery(sel, from, from + PAGE - 1));
+          if (error || !page) break;
+          rows = rows.concat(page);
+          if (page.length < PAGE) break;
+          if (from > 100000) break;
+        }
+        return rows;
       }
-      return rows;
+      const pages = Math.min(Math.ceil(count / PAGE), 100);
+      const results = await Promise.all(
+        Array.from({ length: pages }, (_, i) => schedulingSelect(SEL,
+          (sel) => openTargetsQuery(sel, i * PAGE, i * PAGE + PAGE - 1)))
+      );
+      const failed = results.find(r => r.error);
+      if (failed) console.warn('[cleaner work list] a page failed', failed.error);
+      return results.flatMap(r => r.data || []);
     };
     const data = await fetchOpenTargets();
     const byJob = {};
@@ -14319,7 +14448,7 @@ function ViewOnlyAssignmentsPanel({ propertyId, employee, onOpenBedroomHistory }
           .from('assignment_targets')
           .select(sel)
           .eq('assignment.customer_id', propertyId)
-          .eq('assignment.active', true)
+          .not('assignment.active', 'is', false)
           .is('assignment.deleted_at', null)
           .order('id', { ascending: true })
           .range(from, from + PAGE - 1));
@@ -16003,6 +16132,18 @@ async function clearPmAssignmentNotification(assignmentId) {
 // Bell icon + dropdown feed for the header. Shows unread count, lists recent
 // notifications (read + unread) as 7-day history, marks them read on open.
 function NotificationBell({ employee, isOwner, onNavigate }) {
+  // A TAP HAS TO GO SOMEWHERE FROM EVERY SCREEN.
+  //
+  // onNavigate is passed by exactly one of the ten owner screens that
+  // mount a Header. On the other nine a tap did nothing at all — which,
+  // for the one item type that represents blocked work, meant the bell
+  // looked like the place to approve cleanings and silently wasn't.
+  //
+  // SearchContext already wraps the whole owner app and already knows how
+  // to switch to the Assignments tab (it is what a search result for an
+  // assignment does). Reusing it means every screen can act on a bell tap
+  // without threading a new prop through nine components.
+  const searchCtx = React.useContext(SearchContext);
   const [open, setOpen] = useState(false);
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -16017,42 +16158,64 @@ function NotificationBell({ employee, isOwner, onNavigate }) {
     if (isOwner) {
       supabase.from('notifications').delete().lt('created_at', weekAgoISO)
         .then(({ error }) => { if (error) console.warn('[notify] prune failed', error); });
-      // Backfill: PM assignments that are pending approval but have no bell
-      // notification yet (e.g. submitted before the bell existed). Create one
-      // per assignment so the owner sees them in the bell, not just a screen.
-      try {
-        // Don't filter on deleted_at in the query itself — if that column is
-        // absent the whole query errors and the backfill silently no-ops.
-        // Filter it out in JS instead.
-        const { data: pendingAsg, error: paErr } = await supabase.from('assignments')
-          .select('id, title, customer_id, deleted_at, customer:customers(name)')
-          .eq('source', 'pm').eq('pm_status', 'pending');
-        if (paErr) console.warn('[notify] backfill query error', paErr);
-        const live = (pendingAsg || []).filter(a => !a.deleted_at);
-        if (live.length) {
-          // The window matters. The feed below only shows rows newer than
-          // weekAgoISO, so a surviving row older than that counts as
-          // "already have one" while being invisible — the item would never
-          // reappear. Scoping this check to the same window the feed uses
-          // means an old row gets replaced with a fresh, visible one.
-          const { data: existing } = await supabase.from('notifications')
-            .select('link_id')
-            .eq('kind', 'pm_assignment')
-            .gte('created_at', weekAgoISO)
-            .in('link_id', live.map(a => a.id));
-          const have = new Set((existing || []).map(r => r.link_id));
-          const toInsert = live.filter(a => !have.has(a.id)).map(a => ({
-            recipient_scope: 'owner', kind: 'pm_assignment',
-            title: 'New assignment to approve',
-            body: `${a.customer?.name || 'A property'} · ${a.title || 'Assignment'}`,
-            link_kind: 'assignment', link_id: a.id,
-          }));
-          if (toInsert.length) {
-            const { error: insErr } = await supabase.from('notifications').insert(toInsert);
-            if (insErr) console.warn('[notify] backfill insert error', insErr);
-          }
-        }
-      } catch (e) { console.warn('[notify] pm backfill skipped', e); }
+    }
+
+    // ============================================================
+    // CLEANINGS WAITING ON THE OWNER — READ LIVE, NOT STORED.
+    //
+    // This used to work by writing a notifications row per waiting
+    // cleaning and then reading the notifications table back. Every
+    // failure we chased came from that one indirection:
+    //
+    //   * the PM portal wrote its row with link_id null, so it could
+    //     neither be opened nor ever be cleared once approved;
+    //   * createNotification dropped its error, so a row that failed to
+    //     insert was indistinguishable from one that worked;
+    //   * the backfill only looked for pm_status='pending', so a cleaning
+    //     a PM left as a DRAFT was never announced anywhere at all;
+    //   * the 7-day prune and the 7-day feed window disagreed about which
+    //     rows existed.
+    //
+    // A stored copy of a fact that is already in the database is a second
+    // thing that can be wrong. So the bell now asks the assignments table
+    // directly, every load. Nothing to insert, nothing to keep in sync,
+    // nothing to go stale, and no row for RLS to silently refuse. These
+    // items appear because the work is waiting and disappear because it
+    // is not.
+    // ============================================================
+    let liveItems = [];
+    if (isOwner) {
+      // deleted_at filtered in JS on purpose: if that column is ever
+      // missing, filtering on it here errors the whole query and the bell
+      // goes quiet, which is the exact failure this rewrite removes.
+      const { data: waiting, error: wErr } = await supabase.from('assignments')
+        .select('id, title, pm_status, created_at, deleted_at, customer:customers(name)')
+        .eq('source', 'pm')
+        .in('pm_status', ['pending', 'draft'])
+        .order('created_at', { ascending: false });
+      if (wErr) console.warn('[notify] waiting-cleanings read failed', wErr);
+      liveItems = (waiting || [])
+        .filter(a => !a.deleted_at)
+        .map(a => ({
+          // Not a notifications row, so it gets a key of its own shape.
+          id: `pm:${a.id}`,
+          synthetic: true,
+          kind: 'pm_assignment',
+          // A draft is the PM's half-finished submission, not something to
+          // approve yet — but it is still a cleaning no cleaner can see, so
+          // saying nothing about it is how they went missing for weeks.
+          title: a.pm_status === 'draft'
+            ? 'Draft from a property manager — not submitted'
+            : 'Cleaning to approve',
+          body: `${a.customer?.name || 'A property'} · ${a.title || 'Assignment'}`
+            + (a.pm_status === 'draft' ? ' · cleaners cannot see it' : ''),
+          link_kind: 'assignment',
+          link_id: a.id,
+          created_at: a.created_at,
+          read_at: null,
+          recipient_scope: 'owner',
+          pmStatus: a.pm_status,
+        }));
     }
     // A person sees notifications addressed to them, plus (if owner/manager)
     // the 'owner' broadcast feed.
@@ -16071,7 +16234,18 @@ function NotificationBell({ employee, isOwner, onNavigate }) {
       q = q.or(`recipient_employee_id.eq.${employee.id},recipient_scope.eq.all_cleaners`);
     }
     const { data } = await q;
-    setItems(data || []);
+    // Stored pm_assignment rows are superseded by the live read above, so
+    // they are dropped rather than shown twice. This also retires the
+    // link_id-null rows the PM portal used to write, which could never be
+    // cleared and so sat in the bell pointing at nothing.
+    const stored = (data || []).filter(n => n.kind !== 'pm_assignment');
+    // Anything still waiting on someone sorts above the day's news,
+    // whatever time it arrived. A notification you have to act on is not
+    // competing with one you only have to read.
+    setItems([
+      ...liveItems,
+      ...stored,
+    ]);
     setLoading(false);
   };
 
@@ -16102,14 +16276,14 @@ function NotificationBell({ employee, isOwner, onNavigate }) {
     if (!open && unread > 0) {
       // Announcements only. Task rows are left alone on both sides —
       // local state and DB — so the count keeps telling the truth.
-      const unreadItems = items.filter(n => !n.read_at && !isTask(n));
+      const unreadItems = items.filter(n => !n.read_at && !isTask(n) && !n.synthetic);
       // Only the all_cleaners broadcast is truly shared across many people —
       // writing read_at there would mark it read for everyone, so we skip DB
       // for those (they clear when the job is claimed). Owner-scope rows and
       // personal rows SHOULD persist read: the owner team is one audience, so
       // once you've seen them they stay seen and don't pop back up.
       const persistIds = unreadItems.filter(n => n.recipient_scope !== 'all_cleaners').map(n => n.id);
-      setItems(prev => prev.map(n => (!n.read_at && !isTask(n) ? { ...n, read_at: new Date().toISOString() } : n)));
+      setItems(prev => prev.map(n => (!n.read_at && !isTask(n) && !n.synthetic ? { ...n, read_at: new Date().toISOString() } : n)));
       if (persistIds.length) {
         try { await supabase.from('notifications').update({ read_at: new Date().toISOString() }).in('id', persistIds); }
         catch (e) { console.warn('[notify] mark read failed', e); }
@@ -16163,17 +16337,34 @@ function NotificationBell({ employee, isOwner, onNavigate }) {
                   // if a navigation handler is wired on this screen, opens the
                   // related screen too. Even without navigation, the tap clears
                   // it so a resolved item stops nagging.
-                  const canNavigate = !!onNavigate && (n.link_kind || n.kind);
+                  // The screen's own handler first — on the calendar it opens
+                  // the full review screen, which is richer than the tab.
+                  // Otherwise fall back to the Assignments tab, where the
+                  // Approve buttons live.
+                  const toAssignments = isTask(n) && searchCtx?.onOpenAssignment
+                    ? () => searchCtx.onOpenAssignment()
+                    : null;
+                  // A draft goes to the Assignments tab even on the calendar.
+                  // The review screen is the approve/deny queue and lists
+                  // pm_status='pending' only, so sending a draft there would
+                  // land the owner on a screen that doesn't contain it.
+                  const navigate = (n.pmStatus === 'draft' && toAssignments)
+                    ? toAssignments
+                    : (onNavigate ? () => onNavigate(n) : toAssignments);
+                  const canNavigate = !!navigate && (n.link_kind || n.kind);
                   const handleTap = async () => {
                     // Persist read immediately for this row (owner/personal
                     // scope) so it doesn't come back on reopen. A task row is
                     // exempt: fading it would hide work that is still
                     // blocking someone. Only finishing the work clears it.
-                    if (!n.read_at && !isTask(n) && n.recipient_scope !== 'all_cleaners') {
+                    // n.synthetic has no row behind it — its id is 'pm:<uuid>',
+                    // not a notifications id, so an update keyed on it would
+                    // match nothing. It clears when the work is done.
+                    if (!n.synthetic && !n.read_at && !isTask(n) && n.recipient_scope !== 'all_cleaners') {
                       setItems(prev => prev.map(x => x.id === n.id ? { ...x, read_at: new Date().toISOString() } : x));
                       try { await supabase.from('notifications').update({ read_at: new Date().toISOString() }).eq('id', n.id); } catch {}
                     }
-                    if (canNavigate) { setOpen(false); onNavigate(n); }
+                    if (canNavigate) { setOpen(false); navigate(); }
                   };
                   return (
                   <div key={n.id} role="button" onClick={handleTap}
@@ -16182,12 +16373,9 @@ function NotificationBell({ employee, isOwner, onNavigate }) {
                     <div className="min-w-0 flex-1">
                       <div className="text-sm text-stone-900 font-medium">{n.title}</div>
                       {n.body && <div className="text-xs text-stone-600 mt-0.5 whitespace-pre-wrap">{n.body}</div>}
-                      {/* Most screens never wired a handler for a bell tap,
-                         so on those a task row used to fade and go nowhere.
-                         Say where the button is rather than looking broken. */}
-                      {isTask(n) && !canNavigate && (
+                      {isTask(n) && canNavigate && (
                         <div className="text-[11px] text-amber-800 mt-1">
-                          Approve it in the Assignments tab.
+                          Tap to open it.
                         </div>
                       )}
                       <div className="text-[10px] font-mono text-stone-400 mt-1">{fmtWhen(n.created_at)}</div>
@@ -24287,6 +24475,10 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick, init
   // the approval callout exactly as it hid everywhere else. The thing the
   // owner must never be able to miss cannot depend on a join.
   const [pendingPm, setPendingPm] = useState([]);
+  // True when part of the board didn't load. An incomplete list of jobs
+  // looks exactly like a shorter list of jobs, which is the kind of quiet
+  // wrongness that gets a cleaning missed.
+  const [loadPartial, setLoadPartial] = useState(false);
   const [team, setTeam] = useState([]);
   const [editDueJob, setEditDueJob] = useState(null);
   const [assignJob, setAssignJob] = useState(null);
@@ -24306,27 +24498,76 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick, init
   const load = async () => {
     // Paginated — a plain query hits PostgREST's 1000-row cap and silently
     // drops jobs (cards then show missing/blank options).
+    // WHY THIS TAB WAS SLOW, and the two things that were also wrong.
+    //
+    // 1. NO ORDER BY. Pages were taken with .range() off an unordered
+    //    result. Postgres is free to return rows in any order it likes
+    //    between those two requests, so page 2 could repeat rows from page
+    //    1 and skip others entirely — a job silently missing from the
+    //    board. CLAUDE.md already says every paged query needs an order;
+    //    this one had the paging and not the order.
+    //
+    // 2. INACTIVE AND DELETED ROWS WERE FETCHED, THEN THROWN AWAY. The
+    //    active/deleted_at test ran in JS after download. deleted_at is a
+    //    soft delete, so those rows accumulate forever and every one of
+    //    them was being shipped to the phone to be discarded on arrival.
+    //    Filtering in the query cuts the payload and, with it, the number
+    //    of pages.
+    //
+    // 3. PAGES WERE SEQUENTIAL. Each 1,000 rows waited for the one before
+    //    it, so the wait grew in steps as the business did. One count up
+    //    front lets every page go out at once.
+    const SEL_OPEN_TARGETS =
+      // source + pm_status were missing here, and that was the whole bug:
+      // this tab showed PM-submitted jobs still waiting for approval as
+      // if they were ordinary live jobs. You could assign a cleaner, the
+      // assignment saved fine, and then seventeen other places correctly
+      // hid the job from that cleaner because it was still 'pending'.
+      // Nothing on this screen said so, because this screen never asked.
+      'id, status, priority, started_at, unit_id, party_id, template_section, unit:units(label, bedrooms, bathrooms), party:parties(label), assignment:assignments!inner(id, title, customer_id, active, deleted_at, scheduled_date, assignment_type, took_longer, approved_at, created_at, audience, source, pm_status)';
+    const openTargetsQuery = (sel, from, to) => supabase.from('assignment_targets')
+      .select(sel)
+      .not('status', 'in', '(done,blocked)')
+      .not('assignment.active', 'is', false)
+      .is('assignment.deleted_at', null)
+      .order('id', { ascending: true })
+      .range(from, to);
     const fetchOpenTargets = async () => {
-      let rows = []; const PAGE = 1000;
-      for (let from = 0; ; from += PAGE) {
-        const { data, error } = await audienceSelect(
-          // source + pm_status were missing here, and that was the whole bug:
-          // this tab showed PM-submitted jobs still waiting for approval as
-          // if they were ordinary live jobs. You could assign a cleaner, the
-          // assignment saved fine, and then seventeen other places correctly
-          // hid the job from that cleaner because it was still 'pending'.
-          // Nothing on this screen said so, because this screen never asked.
-          'id, status, priority, started_at, unit_id, party_id, template_section, unit:units(label, bedrooms, bathrooms), party:parties(label), assignment:assignments!inner(id, title, customer_id, active, deleted_at, scheduled_date, assignment_type, took_longer, approved_at, created_at, audience, source, pm_status)',
-          (sel) => supabase.from('assignment_targets')
-            .select(sel)
-            .not('status', 'in', '(done,blocked)')
-            .range(from, from + PAGE - 1));
-        if (error || !data) break;
-        rows = rows.concat(data);
-        if (data.length < PAGE) break;
-        if (from > 100000) break;
+      const PAGE = 1000;
+      // Cheap: head request, no rows come back. Same filters as the real
+      // read, or the page count would be for a different question.
+      const { count } = await supabase.from('assignment_targets')
+        .select('id, assignment:assignments!inner(id)', { count: 'exact', head: true })
+        .not('status', 'in', '(done,blocked)')
+        .not('assignment.active', 'is', false)
+        .is('assignment.deleted_at', null);
+      // No count (older PostgREST, or the head request failed) — fall back
+      // to the sequential walk rather than guessing how much there is.
+      if (count === null || count === undefined) {
+        let rows = [];
+        for (let from = 0; ; from += PAGE) {
+          const { data, error } = await audienceSelect(SEL_OPEN_TARGETS,
+            (sel) => openTargetsQuery(sel, from, from + PAGE - 1));
+          if (error || !data) break;
+          rows = rows.concat(data);
+          if (data.length < PAGE) break;
+          if (from > 100000) break;
+        }
+        return { data: rows };
       }
-      return { data: rows };
+      const pages = Math.min(Math.ceil(count / PAGE), 100);
+      const results = await Promise.all(
+        Array.from({ length: pages }, (_, i) => audienceSelect(SEL_OPEN_TARGETS,
+          (sel) => openTargetsQuery(sel, i * PAGE, i * PAGE + PAGE - 1)))
+      );
+      // A failed page is not an empty page. Returning a partial board would
+      // read as "those jobs are gone", so say so instead of quietly lying.
+      const failed = results.find(r => r.error);
+      if (failed) {
+        console.warn('[assignments] a page of open targets failed', failed.error);
+        return { data: results.flatMap(r => r.data || []), partial: true };
+      }
+      return { data: results.flatMap(r => r.data || []) };
     };
     const [propsRes, targetsRes, pendingRes] = await Promise.all([
       supabase.from('customers').select('*').eq('active', true).order('name'),
@@ -24335,12 +24576,13 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick, init
       // absent the whole query errors and the callout silently empties,
       // which is the failure mode this entire fix exists to remove.
       supabase.from('assignments')
-        .select('id, title, customer_id, scheduled_date, created_at, deleted_at, customer:customers(name)')
-        .eq('source', 'pm').eq('pm_status', 'pending')
+        .select('id, title, customer_id, scheduled_date, created_at, deleted_at, pm_status, customer:customers(name)')
+        .eq('source', 'pm').in('pm_status', ['pending', 'draft'])
         .order('created_at', { ascending: true }),
     ]);
     if (pendingRes.error) console.warn('[assignments] pending PM read failed', pendingRes.error);
     setPendingPm((pendingRes.data || []).filter(a => !a.deleted_at));
+    setLoadPartial(!!targetsRes.partial);
     const counts = {};
     const seenBedrooms = new Set();
     const jobsByAsg = {};
@@ -24402,12 +24644,18 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick, init
   // only ever showed that one property's, so finding these meant opening
   // every property in turn. This is the whole list, straight from the
   // assignments table, so a cleaning with no card still counts.
-  const awaitingApproval = pendingPm;
+  // Submitted and waiting on a decision. These are what Approve all covers.
+  const awaitingApproval = pendingPm.filter(a => a.pm_status === 'pending');
+  // Saved as a DRAFT by the property manager and never submitted. Not yours
+  // to approve — the PM hasn't asked yet — but no cleaner can see one
+  // either, so a draft left sitting is work silently going undone. It gets
+  // counted and named here, and deliberately NOT swept into Approve all.
+  const pmDrafts = pendingPm.filter(a => a.pm_status === 'draft');
   // The ones with no job card behind them. Worth naming separately: the
   // owner can approve them from here, but they won't appear in the list
   // below, and "approved 3, see 2" with no explanation is its own bug report.
   const cardIds = new Set(jobs.map(j => j.id));
-  const pendingWithoutCard = pendingPm.filter(a => !cardIds.has(a.id));
+  const pendingWithoutCard = awaitingApproval.filter(a => !cardIds.has(a.id));
 
   // Approve one job or all of them. Same four columns the property-level
   // Approve all writes, so the two routes can't drift: anything that reads
@@ -24634,16 +24882,19 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick, init
                        here, so there was no way to tell why a cleaner
                        couldn't see it. */}
                     {j.needsApproval && (
-                      <span className="px-2 py-0.5 rounded-full bg-amber-100 border border-amber-300 text-[10px] font-mono font-bold text-amber-900 uppercase tracking-wide">
-                        Needs your approval
+                      <span className={`px-2 py-0.5 rounded-full border text-[10px] font-mono font-bold uppercase tracking-wide ${
+                        j.pmStatus === 'draft'
+                          ? 'bg-stone-200 border-stone-400 text-stone-700'
+                          : 'bg-amber-100 border-amber-300 text-amber-900'}`}>
+                        {j.pmStatus === 'draft' ? 'Draft — not submitted' : 'Needs your approval'}
                       </span>
                     )}
                   </div>
                   {j.needsApproval && (
                     <div className="text-[11px] text-amber-800 mt-1 max-w-[260px]">
-                      A property manager sent this. Cleaners can&rsquo;t see it
-                      until you approve it — even if you&rsquo;ve already picked
-                      who it&rsquo;s for.
+                      {j.pmStatus === 'draft'
+                        ? 'A property manager saved this as a draft and never submitted it, so no cleaner can see it.'
+                        : 'A property manager sent this. Cleaners can’t see it until you approve it — even if you’ve already picked who it’s for.'}
                     </div>
                   )}
                   <div className="text-[11px] text-stone-500 font-mono">
@@ -24829,6 +25080,18 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick, init
           </>
         ) : (
           <>
+            {loadPartial && (
+              <div className="mb-4 p-3 rounded-xl bg-red-50 border-2 border-red-300 flex items-center justify-between gap-3">
+                <div className="text-xs text-red-800">
+                  Some jobs didn&rsquo;t load, so this list is incomplete. Pull
+                  to refresh or tap Retry — don&rsquo;t treat it as the full board.
+                </div>
+                <button onClick={() => load()}
+                  className="px-3 py-1.5 rounded-lg bg-red-700 hover:bg-red-800 text-white text-xs font-medium flex-shrink-0">
+                  Retry
+                </button>
+              </div>
+            )}
             {/* Waiting on you — across every property, above everything else
                on the tab. This is the surface that was missing: the count was
                only ever shown one property at a time, inside that property's
@@ -24865,6 +25128,31 @@ function AssignmentsTab({ employee, onSignOut, onOpenMessages, onLogoClick, init
                     className="px-4 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 text-white text-sm font-medium flex-shrink-0">
                     {actioning === 'bulk' ? 'Approving…' : `Approve all (${awaitingApproval.length})`}
                   </button>
+                </div>
+              </div>
+            )}
+
+            {/* Drafts. A separate box on purpose: these are NOT yours to
+               approve, because the manager never submitted them. But no
+               cleaner can see a draft either, so one left sitting is a
+               cleaning that quietly never happens — which is how these went
+               missing in the first place. Naming them is the whole fix;
+               chasing the manager is a conversation, not a button. */}
+            {pmDrafts.length > 0 && (
+              <div className="mb-5 p-4 rounded-xl bg-stone-100 border border-stone-300">
+                <div className="text-xs uppercase tracking-wider font-mono font-bold text-stone-700 mb-1">
+                  {pmDrafts.length} draft{pmDrafts.length === 1 ? '' : 's'} not submitted yet
+                </div>
+                <div className="text-xs text-stone-600">
+                  A property manager saved {pmDrafts.length === 1 ? 'this' : 'these'} with
+                  &ldquo;Save as draft&rdquo; instead of &ldquo;Submit for approval&rdquo;, so
+                  {pmDrafts.length === 1 ? ' it has' : ' they have'} never reached you and no
+                  cleaner can see {pmDrafts.length === 1 ? 'it' : 'them'}. Ask them to submit,
+                  or approve {pmDrafts.length === 1 ? 'it' : 'them'} from the card below if
+                  you already know the work is wanted.
+                </div>
+                <div className="text-[11px] font-mono text-stone-500 mt-1.5">
+                  {pmDrafts.map(a => `${a.customer?.name || 'A property'} · ${a.title || 'Assignment'}`).join(' — ')}
                 </div>
               </div>
             )}
@@ -45945,7 +46233,7 @@ function AssignmentTabContent({ propertyId, property = null, employee, statusFil
           .from('assignment_targets')
           .select(sel)
           .eq('assignment.customer_id', propertyId)
-          .eq('assignment.active', true)
+          .not('assignment.active', 'is', false)
           .is('assignment.deleted_at', null)
           .order('id', { ascending: true })
           .range(from, from + PAGE - 1));

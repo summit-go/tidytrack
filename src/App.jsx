@@ -8,7 +8,7 @@ import {
   Trash2, Eye, EyeOff, LayoutDashboard, FileText, DollarSign,
   Home, Layers, User, Edit2, Copy, Printer, Calendar, HelpCircle,
   MessageCircle, MessageSquare, Settings, Languages, Menu, Square, Share2,
-  ClipboardList, Lock, Circle, MoreVertical, RotateCcw, Undo2, Bell
+  ClipboardList, Lock, Circle, MoreVertical, RotateCcw, Undo2, Bell, Flag
 } from 'lucide-react';
 
 // =================================================================
@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "nov4-tap262";
+const BUILD_TAG = "nov4-tap263";
 // ---- Hidden for now, at Allan's request -------------------------------
 // Both of these are switches rather than deletions: the code stays whole
 // and working, so turning either back on is this one line. Flip to true.
@@ -277,14 +277,21 @@ function compareJobOrder(a, b) {
   return orderOf(a) - orderOf(b);
 }
 
-function PriorityChip({ on, size = 'sm' }) {
-  if (!on) return null;
+// `count` is optional and additive: pass it to say HOW MANY items were
+// flagged, which is what matters when the flag is the reason a cleaning
+// gets charged differently. Without it this behaves exactly as it always
+// has, so the six existing call sites are untouched.
+function PriorityChip({ on, size = 'sm', count = null }) {
+  if (!on && !count) return null;
   const sz = size === 'xs'
     ? 'text-[9px] px-1.5 py-0'
     : 'text-[10px] px-2 py-0.5';
+  const n = Number(count) || 0;
   return (
-    <span className={`${sz} uppercase tracking-wider font-mono font-bold rounded-full border inline-flex items-center gap-0.5 bg-red-100 text-red-800 border-red-300`}>
-      <AlertCircle size={size === 'xs' ? 8 : 10} /> Priority
+    <span
+      title={n > 1 ? `${n} items marked priority` : 'Marked priority'}
+      className={`${sz} uppercase tracking-wider font-mono font-bold rounded-full border inline-flex items-center gap-0.5 bg-red-100 text-red-800 border-red-300`}>
+      <AlertCircle size={size === 'xs' ? 8 : 10} /> Priority{n > 1 ? ` ×${n}` : ''}
     </span>
   );
 }
@@ -27220,7 +27227,12 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
       const PAGE = 1000;
       for (let from = 0; ; from += PAGE) {
         let q = supabase.from('assignment_targets')
-          .select('id, unit_id, party_id, assignment_id, template_item_key, template_section, status_notes, completed_at, status, assignment:assignments(id, assignment_type, deleted_at, took_longer), party:parties(id,label)')
+          // priority + the assignment's notes. Both were already in the
+          // database and neither reached this screen -- which is the one
+          // screen where they decide money: a flagged cleaning is
+          // sometimes charged more, and the property's note is often the
+          // reason why.
+          .select('id, unit_id, party_id, assignment_id, template_item_key, template_section, status_notes, completed_at, status, priority, assignment:assignments(id, assignment_type, deleted_at, took_longer, notes), party:parties(id,label)')
           .eq('status', 'done')
           .in('unit_id', unitIds)
           .gte('completed_at', start + 'T00:00:00').lte('completed_at', end + 'T23:59:59')
@@ -27356,6 +27368,12 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
       // pushed below, which never carried an `assignment` key — so it was
       // always undefined and no line was ever marked EXTRA.
       if (t.assignment?.took_longer) byAssign.get(aid).tookLonger = true;
+      // Carried onto the group so the line card can show them while the
+      // owner is pricing it.
+      if (t.priority) byAssign.get(aid).priorityCount = (byAssign.get(aid).priorityCount || 0) + 1;
+      if (t.assignment?.notes && !byAssign.get(aid).pmNote) {
+        byAssign.get(aid).pmNote = String(t.assignment.notes).trim() || null;
+      }
       // When the work actually happened. Every target carries completed_at
       // (the draft only takes status='done'), so collect the distinct days.
       if (t.completed_at) byAssign.get(aid).days.add(String(t.completed_at).slice(0, 10));
@@ -27604,7 +27622,8 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
         samples: shapeSamples.length,
         median: shapeGuess,
       };
-      return { key: g.aid, unitId: g.unit_id, partyId: g.party_id, label, serviceType: g.type, tookLonger, cleanedDays: Array.from(g.days).sort(), description: INVOICE_DESCR[g.type] || '', subsections: subs, amountOverride, comboKey, fromMemory, priceBasis, extraOn: tookLonger, extraMode: 'fixed', extraAmount: '', extraMinutes: '', extraRate: '', extraNote: '', sourceTargetIds: g.targetIds };
+      return { key: g.aid, unitId: g.unit_id, partyId: g.party_id, label, serviceType: g.type, tookLonger,
+        priorityCount: g.priorityCount || 0, pmNote: g.pmNote || null, cleanedDays: Array.from(g.days).sort(), description: INVOICE_DESCR[g.type] || '', subsections: subs, amountOverride, comboKey, fromMemory, priceBasis, extraOn: tookLonger, extraMode: 'fixed', extraAmount: '', extraMinutes: '', extraRate: '', extraNote: '', sourceTargetIds: g.targetIds };
     }).filter(l => l.label && l.subsections.length > 0).sort((a, b) => a.label.localeCompare(b.label, undefined, { numeric: true }));
 
     // Reopen path: carry the SAVED invoice's customizations onto the
@@ -28520,6 +28539,10 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
                           <Clock size={9} /> EXTRA{xtra > 0 ? ` +$${xtra.toFixed(2)}` : ''}
                         </span>
                       )}
+                      {/* Right beside the EXTRA chip, because it is the same
+                         kind of decision: both say "this one may not be the
+                         standard price". */}
+                      <PriorityChip on={(l.priorityCount || 0) > 0} count={l.priorityCount || 0} size="xs" />
                     </button>
                     {/* Custom lines name themselves. The input lives outside the
                        expand button so typing in it doesn't collapse the row. */}
@@ -28686,6 +28709,19 @@ function InvoiceDraftEditor({ property, start, end, employee, onBack, onSaved, s
                           </div>
                         );
                       })()}
+                      {/* The property's own note, above the description box.
+                         Placed here deliberately: this is where the owner
+                         decides what this line says and what it costs, and
+                         the note is frequently the argument for both. It is
+                         NOT copied into the description -- what a manager
+                         wrote to us is not automatically what we bill them,
+                         and auto-filling it would put their words on our
+                         invoice without anyone choosing to. */}
+                      {l.pmNote && (
+                        <div className="pt-2">
+                          <SubmissionNote note={l.pmNote} />
+                        </div>
+                      )}
                       <div className="pt-2 border-t border-stone-100">
                         <label className="block text-[11px] font-mono text-stone-500 mb-1">Description (prints on invoice)</label>
                         <input value={l.description} onChange={e => updateLine(l.key, { description: e.target.value })}
@@ -36686,6 +36722,47 @@ function PortalPhotoSection({ label, photos, highlight, description, onResolve, 
 // DAILY VIEW — calendar-first drill-down
 // Calendar month → pick a date → see units cleaned that day → pick a unit → full detail
 // =================================================================
+// ============================================================
+// WHAT A PROPERTY TOLD US, AND WHAT THEY FLAGGED.
+//
+// Two facts that were already in the database and shown almost nowhere:
+//
+//   assignments.notes          what the property manager typed when they
+//                              submitted the cleaning
+//   assignment_targets.priority  the items marked priority, by them or by
+//                              the owner
+//
+// Both change what a cleaning is worth, so both have to be visible at the
+// moment the owner is pricing it -- not only on one history screen.
+//
+// Deliberately ONE pair of components used by every surface rather than
+// the markup repeated per screen. Four renderers of the same fact is how
+// the PM approval state ended up meaning different things on different
+// screens for weeks.
+// ============================================================
+
+// A property manager's note, in full. NOT clamped: the bedroom history
+// showed it at line-clamp-2, which is fine for a glance and useless when
+// the note is the reason you are charging differently -- the half you
+// cannot read is the half that mattered.
+function SubmissionNote({ note, from = 'property manager', className = '' }) {
+  const text = String(note || '').trim();
+  if (!text) return null;
+  return (
+    <div className={`p-2.5 rounded-xl bg-sky-50 border border-sky-200 ${className}`}>
+      <div className="flex items-center gap-1.5 mb-1">
+        <MessageSquare size={10} className="text-sky-700 flex-shrink-0" />
+        <span className="text-[9px] font-mono uppercase tracking-wider font-bold text-sky-900">
+          Note from the {from}
+        </span>
+      </div>
+      {/* pre-wrap, because these are typed by hand and arrive with line
+         breaks in them. Collapsing those runs a list into one sentence. */}
+      <div className="text-xs text-stone-800 whitespace-pre-wrap break-words">{text}</div>
+    </div>
+  );
+}
+
 function DailyView({ employee, onSignOut, onOpenMessages, onLogoClick, onOpenUnfinishedTab }) {
   const [view, setView] = useState({ kind: 'calendar' });
   const showMoney = canSeeMoney(employee);
@@ -38819,7 +38896,7 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit, onShift
       const { data: page, error: pageErr } = await supabase.from('assignment_targets')
         // party_id so the shared controls can tell which bedroom's hours
         // belong to this job when it is deleted or re-pointed.
-        .select('id, unit_id, party_id, status, completed_at, unit:units(id, bedrooms, bathrooms), assignment:assignments!inner(id, active, deleted_at, scheduled_date, took_longer, assignment_type, created_at)')
+        .select('id, unit_id, party_id, status, completed_at, priority, unit:units(id, bedrooms, bathrooms), assignment:assignments!inner(id, notes, active, deleted_at, scheduled_date, took_longer, assignment_type, created_at)')
         .in('unit_id', ids)
         .not('status', 'eq', 'blocked')
         .order('id')
@@ -38856,9 +38933,17 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit, onShift
           open: false, assignmentType: a.assignment_type || null,
           createdAt: a.created_at || null, assignees: [],
           unitId: t.unit_id, partyId: t.party_id || null,
+          // The note the property manager typed on submitting, and a count
+          // of the items flagged priority. Both already existed in the
+          // database and appeared on no card -- which for priority meant
+          // the owner was pricing cleanings without seeing the one flag
+          // that says this one is worth more.
+          notes: String(a.notes || '').trim() || null,
+          priorityCount: 0,
         };
       }
       const rec = byId[a.id];
+      if (t.priority) rec.priorityCount += 1;
       if (t.status !== 'done') rec.open = true;   // open if anything on it is
       // Finished on this date, or due on this date — either makes it a
       // candidate for "the cleaning this card is showing".
@@ -39359,6 +39444,9 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit, onShift
                                   {unitAsgFresh && (
                                     <AssignmentTypeChip type={ua?.assignmentType} showEmpty />
                                   )}
+                                  {unitAsgFresh && (
+                                    <PriorityChip on={(ua?.priorityCount || 0) > 0} count={ua?.priorityCount || 0} size="xs" />
+                                  )}
                                   {u.hasDamage && (
                                     <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-red-100 text-red-700">
                                       ⚠ Damage
@@ -39380,6 +39468,17 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit, onShift
                               <ChevronRight size={16} className="text-stone-400 flex-shrink-0 ml-2" />
                             </div>
                           </button>
+
+                          {/* OUTSIDE the button on purpose: a note can run to
+                             several lines and is often the reason this
+                             cleaning is priced differently, so it must be
+                             readable and selectable rather than swallowed by
+                             a tap target that navigates away. */}
+                          {unitAsgFresh && ua?.notes && (
+                            <div className="mt-2">
+                              <SubmissionNote note={ua.notes} />
+                            </div>
+                          )}
 
                           {/* Inline controls for this unit's open assignment */}
                           <div className="flex items-center gap-1.5 flex-wrap mt-2">
@@ -40143,7 +40242,11 @@ function BedroomHistoryView({ propertyId, propertyName, unitId, unitLabel, party
                                 <span className="text-[10px] font-mono text-stone-500">{t.status}</span>
                               </div>
                               <div className="text-sm font-medium text-stone-900 truncate">{a.title}</div>
-                              {a.notes && <div className="text-xs text-stone-600 mt-1 line-clamp-2">{a.notes}</div>}
+                              {/* Was line-clamp-2. A note is usually the reason a cleaning is
+                                 priced differently, and the clamped half was the
+                                 half that mattered. Full text now, through the
+                                 same component every other screen uses. */}
+                              {a.notes && <SubmissionNote note={a.notes} className="mt-1.5" />}
                             </div>
                             {a.file_url && (
                               <button onClick={() => setOpenedAssignment(t)}
@@ -40284,6 +40387,8 @@ function DailyUnitDayDetail({ date, propertyId, unitId, unitLabel, propertyName,
   // failed" (asgTypeKnown covers the second).
   const [asgType, setAsgType] = useState(null);
   const [asgTypeKnown, setAsgTypeKnown] = useState(false);
+  const [unitNotes, setUnitNotes] = useState([]);
+  const [unitPriority, setUnitPriority] = useState(0);
 
   const reload = async () => {
     setLoaded(false);
@@ -40304,19 +40409,32 @@ function DailyUnitDayDetail({ date, propertyId, unitId, unitLabel, propertyName,
     // card the owner tapped and this screen always name the same job.
     // One unit, so no paging needed here.
     const { data: tRows, error: tErr } = await supabase.from('assignment_targets')
-      .select('status, assignment:assignments!inner(id, active, deleted_at, assignment_type, created_at)')
+      // priority + notes: the two facts that decide whether this cleaning
+      // is worth more than the standard rate, neither of which this screen
+      // was asking for.
+      .select('status, priority, assignment:assignments!inner(id, notes, active, deleted_at, assignment_type, created_at)')
       .eq('unit_id', unitId)
       .not('status', 'eq', 'blocked');
     let picked = null;
+    // What the property said, and what got flagged. Collected across this
+    // apartment's live targets: notes are per assignment, priority is per
+    // item, so one apartment can carry several notes and a count.
+    const noteSet = new Set();
+    let prioCount = 0;
     (tRows || []).forEach(t => {
       const a = t.assignment;
       if (!a || a.active === false || a.deleted_at) return;
+      if (t.priority) prioCount += 1;
+      const n = String(a.notes || '').trim();
+      if (n) noteSet.add(n);
       const cand = {
         id: a.id, open: t.status !== 'done',
         assignmentType: a.assignment_type || null, createdAt: a.created_at || null,
       };
       if (unitAssignmentWins(cand, picked)) picked = cand;
     });
+    setUnitNotes(Array.from(noteSet));
+    setUnitPriority(prioCount);
     // A failed read is "we don't know", not "no type".
     setAsgTypeKnown(!tErr);
     setAsgType(picked ? picked.assignmentType : null);
@@ -40420,10 +40538,22 @@ function DailyUnitDayDetail({ date, propertyId, unitId, unitLabel, propertyName,
              looks for after the apartment name. "No type" here means it
              still needs labelling. */}
           {asgTypeKnown && <AssignmentTypeChip type={asgType} showEmpty />}
+          <PriorityChip on={unitPriority > 0} count={unitPriority} />
         </div>
         <div className="text-sm text-stone-600 flex items-center gap-1.5">
           <Building2 size={13} /> {propertyName}
         </div>
+
+        {/* What the property manager typed when they submitted this. It was
+           stored and shown on one history screen only, which is no use at
+           the moment you are deciding what to charge. Several notes can
+           land on one apartment -- one per submitted cleaning -- so they
+           are listed rather than merged. */}
+        {unitNotes.length > 0 && (
+          <div className="mt-3 space-y-2">
+            {unitNotes.map((n, i) => <SubmissionNote key={i} note={n} />)}
+          </div>
+        )}
 
         {/* Stats summary */}
         <div className={`grid ${showMoney ? 'grid-cols-3' : 'grid-cols-2'} gap-3 mt-6 mb-6`}>

@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "nov4-tap264";
+const BUILD_TAG = "nov4-tap263";
 // ---- Hidden for now, at Allan's request -------------------------------
 // Both of these are switches rather than deletions: the code stays whole
 // and working, so turning either back on is this one line. Flip to true.
@@ -4516,10 +4516,8 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   // see the workblock UI right away. Without this, if they started the
   // block from the Assignments tab, they'd see the assignments list
   // with the workblock running silently in the background — confusing.
-  // Starting a cleaning takes them to it -- which is now tab 2. Sending
-  // them to tab 1 would drop them on the list they just picked from.
   useEffect(() => {
-    if (activeBlock) setCleanerTab('assignments');
+    if (activeBlock) setCleanerTab('home');
   }, [activeBlock?.id]);
   // Not clocked in → always land on Home. Otherwise a cleaner who was last
   // on More or Assignments clocks out and comes back to that tab instead of
@@ -7452,8 +7450,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
           employee={employee} onOpenMessages={() => setShowMessages(true)}
           onNotificationNavigate={(n) => {
             if (n?.link_kind === 'conversation') { setShowMessages(true); return; }
-            // The LIST, which is tab 1 now -- tab 2 is the room in hand.
-            setCleanerTab('home');
+            setCleanerTab('assignments');
           }}
           onOpenWhosHere={() => setWhosWorkingOpen(true)} />
         {whosWorkingOpen && (
@@ -7572,18 +7569,7 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       onExit={() => { setActiveBlock(null); setPendingStart(null); setCleanerTab('home'); }}
       busy={busy} />);
   }
-  // THE TRAP, AND WHY THIS LINE WAS IT.
-  //
-  // This read `cleanerTab !== 'home'`, so a running cleaning took over tab
-  // 1. The cleaner could still move around the nav -- that part worked --
-  // but tapping the first tab, the one holding their list of cleanings,
-  // handed them the room they were already in. There was no route back to
-  // the list while a cleaning was open, which is what "it doesn't let me
-  // exit until I finish" actually was.
-  //
-  // The live cleaning now lives on tab 2 ("Current"), so tab 1 is the list
-  // and stays the list.
-  if (isMulti && (!activeBlock || cleanerTab !== 'assignments')) {
+  if (isMulti && (!activeBlock || cleanerTab !== 'home')) {
     return withIdleModal(<PropertyHub shift={shift} workBlocks={workBlocks} employeeName={employee.name} employee={employee}
       onSignOut={signOutWithCleanup} onClockOut={clockOut} onSwitchProperty={switchProperty} onSwitchToJob={switchToJob}
       onStartNew={startNewBlock} onReopen={reopenBlock} onEndBlock={endBlock} onGoToBedroom={goToBedroomForTarget}
@@ -8057,20 +8043,9 @@ function CleanerBottomNav({ active, onChange }) {
   return (
     <div className="sticky bottom-0 left-0 right-0 z-30 bg-white border-t border-stone-200 flex mt-auto"
       style={{ paddingBottom: 'env(safe-area-inset-bottom, 0px)' }}>
-      {/* THE TAB IDS ARE HISTORICAL. 'home' and 'assignments' are threaded
-         through roughly thirty call sites, so they were left alone rather
-         than swept; what each one HOLDS has changed:
-
-           home         -> "Cleanings": the list, always. It used to be
-                           hijacked by the live cleaning, so while a
-                           cleaning was running there was no way to get
-                           the list back on this tab.
-           assignments  -> "Current": the room being cleaned right now.
-           more         -> unchanged, plus past cleanings.
-      */}
-      <Item id="home"        label="Cleanings" useLogo />
-      <Item id="assignments" label="Current"   Icon={ClipboardList} />
-      <Item id="more"        label="More"      Icon={Menu} />
+      <Item id="home"        label="Today"       useLogo />
+      <Item id="assignments" label="Assignments" Icon={ClipboardList} />
+      <Item id="more"        label="More"        Icon={Menu} />
     </div>
   );
 }
@@ -11574,14 +11549,6 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
   // Which properties the assignments list covers. Lives here so the header
   // dropdown and the list stay in step.
   const [propScope, setPropScope] = useState('current'); // 'current' | 'all'
-  // Which sub-tab the assignments panel should open on. Set by "Past
-  // cleanings" in More, and cleared the moment they leave that tab so
-  // coming back to Current lands on today's work, not on finished work.
-  const [panelTab, setPanelTab] = useState(null);
-  // Cleared on any tab change, so it is always a deliberate trip.
-  useEffect(() => {
-    if (cleanerTab !== 'more' && panelTab) setPanelTab(null);
-  }, [cleanerTab, panelTab]);
   // Bottom nav tab — Home / Assignments / More. Parent (AuthedShift)
   // controls this when provided so the tab persists across BlockView
   // navigation. Falls back to local state for standalone use.
@@ -11688,8 +11655,7 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
           // drops them on their assignments board. Without a handler at all
           // the bell rendered every item as dead text — tapping did nothing.
           if (n?.link_kind === 'conversation') { if (onOpenMessages) onOpenMessages(); return; }
-          // The LIST, which is tab 1 now -- tab 2 is the room in hand.
-          if (setCleanerTab) setCleanerTab('home');
+          if (setCleanerTab) setCleanerTab('assignments');
         }}
         onOpenWhosHere={() => setWhosHereOpen(true)} />
       {whosHereOpen && (
@@ -11718,7 +11684,7 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
               employee={employee}
               disabled={busy}
               showingAll={propScope === 'all'}
-              onShowAllProperties={() => { setPropScope(propScope === 'all' ? 'current' : 'all'); setCleanerTab('home'); }}
+              onShowAllProperties={() => { setPropScope(propScope === 'all' ? 'current' : 'all'); setCleanerTab('assignments'); }}
               onSwitch={(p) => onSwitchProperty && onSwitchProperty(p)} />
           </div>
           <div className="flex flex-col gap-1.5 items-end shrink-0">
@@ -11928,47 +11894,11 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
       )}
 
       {/* === MORE TAB === */}
-      {/* Past cleanings opens IN PLACE, on this tab. It deliberately does
-         not switch to Current: Current is the room being cleaned whenever
-         one is open, so sending them there to read finished work would
-         have dropped them back into the job they are standing in. */}
-      {cleanerTab === 'more' && panelTab === 'done' && (
-        <>
-          <div className="px-4 pt-4">
-            <button onClick={() => setPanelTab(null)}
-              className="flex items-center gap-2 text-sm text-stone-700 mb-3">
-              <ArrowLeft size={15} /> More
-            </button>
-          </div>
-          <AssignmentsPanel initialTab="done"
-            propertyId={shift.customer_id} property={shift.customer} employee={employee}
-            onGoToBedroom={onGoToBedroom} onOpenBedroomHistory={onOpenBedroomHistory} onJoinBlock={onJoinBlock} />
-        </>
-      )}
-      {cleanerTab === 'more' && panelTab !== 'done' && (
+      {cleanerTab === 'more' && (
         <div className="px-4 pt-4 space-y-2">
           {/* "Browse properties" removed — the property name at the top of the
              screen is the switcher now, so this was the long way round to the
              same thing. */}
-          {/* PAST CLEANINGS. Done came off the sub-tab row because it is for
-             checking back, not for working from -- so it sits here as an
-             extra action instead of taking a slot beside today's work.
-             The key on AssignmentsPanel above forces a remount so the
-             requested sub-tab actually takes, and panelTab is cleared when
-             they leave, so coming back to Current does not strand them on
-             a list of finished work. */}
-          <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2">Your work</div>
-          <button
-            onClick={() => setPanelTab('done')}
-            className="w-full px-4 py-4 flex items-center gap-3 text-left bg-white rounded-2xl border border-stone-200 active:bg-stone-100">
-            <Check size={18} className="text-stone-500 flex-shrink-0" />
-            <span className="min-w-0">
-              <span className="block text-sm text-stone-900">Past cleanings</span>
-              <span className="block text-[11px] text-stone-500">What you&rsquo;ve finished here</span>
-            </span>
-            <ChevronRight size={15} className="text-stone-300 ml-auto flex-shrink-0" />
-          </button>
-
           <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 pt-3">Account &amp; settings</div>
           <CleanerMoreExtras employee={employee}
             onOpenMessages={onOpenMessages}
@@ -13328,8 +13258,7 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
           // drops them on their assignments board. Without a handler at all
           // the bell rendered every item as dead text — tapping did nothing.
           if (n?.link_kind === 'conversation') { if (onOpenMessages) onOpenMessages(); return; }
-          // The LIST, which is tab 1 now -- tab 2 is the room in hand.
-          if (setCleanerTab) setCleanerTab('home');
+          if (setCleanerTab) setCleanerTab('assignments');
         }}
         onOpenWhosHere={() => setWhosHereOpen(true)}
         onLogoClick={handleLogoClick} />
@@ -23933,8 +23862,8 @@ function PropertyForm({ property, currentUserRole, onCancel, onSaved, onManageAs
               <p className="text-xs text-stone-500 mb-2">Pick which ways this property's PM can create assignments in their portal. Off = hidden from them.</p>
               <div className="space-y-2">
                 {[
-                  { k: 'quick', label: 'Quick Upload', desc: 'Fast builder — no cleaner picker. Lands as a draft for your approval.' },
-                  { k: 'checklist', label: 'Full Upload', desc: 'The structured upload with bedroom items.' },
+                  { k: 'quick', label: 'Bridges/Citifront (quick assignment)', desc: 'Fast builder — no cleaner picker. Lands as a draft for your approval.' },
+                  { k: 'checklist', label: 'Carriage Cove Uploads (checklist wizard)', desc: 'The structured upload with bedroom items.' },
                   { k: 'legacy', label: 'Legacy file upload', desc: 'Upload a file or photo as the source.' },
                 ].map(m => (
                   <button type="button" key={m.k} onClick={() => togglePmMethod(m.k)}
@@ -41199,22 +41128,16 @@ function AssignmentList({ property, employee, onBack, onNew, onNewChecklist, onN
       <div className="px-5 pt-6">
         {can(employee, 'upload_assignments') && (
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-4">
-            {/* Named for WHAT THEY DO, not which property happened to use
-               them first. These read "Bridges/Citifront" and "Carriage Cove
-               Uploads", which stopped being true the moment either form was
-               used anywhere else -- and gave no clue which one to pick for a
-               new property. The PM portal keeps its own wording; this is the
-               owner side only. */}
             {onNewQuick && (
               <button onClick={onNewQuick}
                 className="p-4 rounded-2xl bg-stone-900 text-stone-50 font-medium flex items-center justify-center gap-2 active:scale-98">
-                <Building2 size={18} /> Quick Upload
+                <Building2 size={18} /> Bridges/Citifront
               </button>
             )}
             {onNewChecklist && (
               <button onClick={onNewChecklist}
                 className="p-4 rounded-2xl border-2 border-stone-300 bg-white text-stone-700 font-medium flex items-center justify-center gap-2 active:scale-98">
-                <FileText size={18} /> Full Upload
+                <FileText size={18} /> Carriage Cove Uploads
               </button>
             )}
             <button onClick={onNew}
@@ -41549,17 +41472,7 @@ function QuickAssignmentForm({ property, employee, portalUser = null, portalKind
     })();
     /* eslint-disable-next-line */
   }, [isEditMode]);
-  // A SET, not one id. This was a single <select> whose own hint said
-  // "add more people later from the cleaning's card" -- so two cleaners on
-  // one apartment meant creating it, finding it again, and assigning from
-  // there. assignment_assignees has always been a many-to-many table and
-  // saveAssignees has always taken a list; only this form insisted on one.
-  const [assignedTo, setAssignedTo] = useState(() => new Set());
-  const toggleAssignee = (id) => setAssignedTo(prev => {
-    const next = new Set(prev);
-    if (next.has(id)) next.delete(id); else next.add(id);
-    return next;
-  });
+  const [assignedTo, setAssignedTo] = useState('');
   const [cleaners, setCleaners] = useState([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -41812,9 +41725,7 @@ function QuickAssignmentForm({ property, employee, portalUser = null, portalKind
       // between commits a cleaning set to "only these people" with nobody
       // on it, which no cleaner can see, while the owner is told the save
       // failed. Same reasoning as the ordering in saveAssignees.
-      // Named people, if any. Empty = everyone sees it, which is the rule
-      // set in saveAssignees: nobody named means everyone.
-      const narrowIds = isPM ? [] : Array.from(assignedTo);
+      const narrowTo = (!isPM && assignedTo) ? assignedTo : null;
       const { data: asg, error: ae, audienceSaved } = await audienceWrite({
         customer_id: property.id, title, notes: notes.trim() || null,
         uploaded_by: isPM ? null : employee.id, active: true, assignment_type: cleanType,
@@ -41835,10 +41746,7 @@ function QuickAssignmentForm({ property, employee, portalUser = null, portalKind
         QUICK_SECTIONS.map(sec => ({
           assignment_id: asg.id, unit_id: unit.id, party_id: party.id,
           status: 'pending', priority: isPM ? false : !!priority,
-          // A single column, so it carries the first named person. It is a
-          // per-bedroom note that governs nothing (see below) -- the real
-          // record of who is on this is assignment_assignees.
-          assigned_to: narrowIds[0] || null,
+          assigned_to: isPM ? null : (assignedTo || null),
           template_section: sec,
           template_item_key: `${sec}:entire`,
         }))
@@ -41855,18 +41763,15 @@ function QuickAssignmentForm({ property, employee, portalUser = null, portalKind
       // Name first, narrow second. Every way this can stop part-way leaves
       // the cleaning visible to everyone — which is wrong but obvious, and
       // fixable from its card — rather than visible to nobody.
-      if (narrowIds.length) {
-        // One upsert for all of them, so two cleaners cannot half-land.
+      if (narrowTo) {
         const { error: aaErr } = await supabase.from('assignment_assignees')
-          .upsert(narrowIds.map(id => ({
-            assignment_id: asg.id, employee_id: id, status: 'assigned', created_by: employee.id,
-          })), { onConflict: 'assignment_id,employee_id' });
-        // The cleaning exists and is correct apart from the names. Say so
+          .upsert({ assignment_id: asg.id, employee_id: narrowTo, status: 'assigned', created_by: employee.id },
+            { onConflict: 'assignment_id,employee_id' });
+        // The cleaning exists and is correct apart from the name. Say so
         // rather than throwing, or the owner retries and creates a second.
         if (aaErr) {
           setBusy(false);
-          const who = narrowIds.map(id => cleaners.find(c => c.id === id)?.name).filter(Boolean).join(', ') || 'those cleaners';
-          setError('The cleaning was created and every cleaner can see it, but ' + who + ' could not be put on it: ' + aaErr.message + ' Open the cleaning and use Assign.');
+          setError('The cleaning was created and every cleaner can see it, but ' + (cleaners.find(c => c.id === narrowTo)?.name || 'that cleaner') + ' could not be put on it: ' + aaErr.message + ' Open the cleaning and use Assign.');
           return;
         }
         if (audienceSaved) {
@@ -41927,7 +41832,7 @@ function QuickAssignmentForm({ property, employee, portalUser = null, portalKind
         <div>
           <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">{property.name}</div>
           <div className="font-serif text-xl text-stone-900">
-            {isEditMode ? 'Edit assignment' : (isPM ? 'Bridges/Citifront' : 'Quick Upload')}
+            {isEditMode ? 'Edit assignment' : 'Bridges/Citifront'}
           </div>
         </div>
       </div>
@@ -41988,38 +41893,15 @@ function QuickAssignmentForm({ property, employee, portalUser = null, portalKind
         {!isPM && !isEditMode && (
         <div>
           <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Who is this for</label>
-          {/* Tick as many as are going. A dropdown could only ever hold one
-             name, which is why two cleaners on one apartment used to mean
-             saving it and then reopening it to add the second. */}
-          <div className="rounded-xl border border-stone-300 bg-white overflow-hidden">
-            <button type="button" onClick={() => setAssignedTo(new Set())}
-              className={`w-full flex items-center gap-2.5 px-4 py-3 text-left border-b border-stone-200 ${assignedTo.size === 0 ? 'bg-stone-900 text-stone-50' : 'text-stone-700 hover:bg-stone-50'}`}>
-              <span className={`w-4 h-4 rounded flex items-center justify-center flex-shrink-0 ${assignedTo.size === 0 ? 'bg-white text-stone-900' : 'border border-stone-300 text-transparent'}`}>
-                <Check size={11} />
-              </span>
-              <span className="text-sm">Everyone &mdash; every cleaner sees this</span>
-            </button>
-            <div className="max-h-56 overflow-y-auto">
-              {cleaners.map(cl => {
-                const on = assignedTo.has(cl.id);
-                return (
-                  <button type="button" key={cl.id} onClick={() => toggleAssignee(cl.id)}
-                    className={`w-full flex items-center gap-2.5 px-4 py-2.5 text-left border-b border-stone-100 last:border-b-0 ${on ? 'bg-amber-50' : 'hover:bg-stone-50'}`}>
-                    <span className={`w-4 h-4 rounded flex items-center justify-center flex-shrink-0 ${on ? 'bg-stone-900 text-white' : 'border border-stone-300 text-transparent'}`}>
-                      <Check size={11} />
-                    </span>
-                    <span className={`text-sm ${on ? 'text-stone-900 font-medium' : 'text-stone-700'}`}>{cl.name}</span>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
+          <select value={assignedTo} onChange={e => setAssignedTo(e.target.value)}
+            className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white text-stone-900 text-sm">
+            <option value="">Everyone — every cleaner sees this</option>
+            {cleaners.map(c => <option key={c.id} value={c.id}>Only {c.name}</option>)}
+          </select>
           <div className="text-[11px] text-stone-500 mt-1 font-mono">
-            {assignedTo.size === 0
-              ? 'Every cleaner sees it, the same as today.'
-              : assignedTo.size === 1
-                ? 'Only this cleaner sees it. You and your managers always do.'
-                : `Only these ${assignedTo.size} cleaners see it. You and your managers always do.`}
+            {assignedTo
+              ? 'Only this cleaner sees it. You and your managers always do. Add more people later from the cleaning’s card.'
+              : 'Every cleaner sees it, the same as today.'}
           </div>
         </div>
         )}
@@ -44921,7 +44803,7 @@ function ChecklistAssignmentWizard({ property, employee, actorKind = null, porta
           <div className="flex-1 min-w-0">
             <div className="text-xs uppercase tracking-wider font-mono text-stone-500">{property.name}</div>
             <div className="font-serif text-lg text-stone-900 font-bold">
-              {isEditMode ? 'Edit assignment' : (isPmActor ? 'Carriage Cove Uploads' : 'Full Upload')}
+              {isEditMode ? 'Edit assignment' : 'Carriage Cove Uploads'}
             </div>
             {isEditMode && (
               <div className="text-[11px] font-mono text-stone-500 truncate">{editAssignment.title}</div>
@@ -46639,10 +46521,8 @@ function AssignmentCard({ target, property = null, busy, onView, onStart, onPaus
 
 // AssignmentsPanel — full tabbed view for the property hub.
 // Tabs: Pending | Paused | In Progress | Done
-function AssignmentsPanel({ propertyId, property = null, employee, refreshKey, onGoToBedroom, onOpenBedroomHistory, onJoinBlock, initialTab = null }) {
-  // initialTab is how "Past cleanings" in the More menu lands straight on
-  // Done, now that Done is not a button on the row.
-  const [tab, setTab] = useState(initialTab || 'pending');
+function AssignmentsPanel({ propertyId, property = null, employee, refreshKey, onGoToBedroom, onOpenBedroomHistory, onJoinBlock }) {
+  const [tab, setTab] = useState('pending');
   // Guard against a stale 'paused' selection now that the tab is hidden.
   useEffect(() => {
     if (!SHOW_PAUSED_TAB && tab === 'paused') setTab('in_progress');
@@ -46678,14 +46558,10 @@ function AssignmentsPanel({ propertyId, property = null, employee, refreshKey, o
             Paused{counts.paused > 0 && ` (${counts.paused})`}
           </button>
         )}
-        {/* In progress and Done are both off this row now.
-           In progress: barely used -- a cleaning being worked is on the
-           Current tab, where the cleaner already is, so a second list of
-           it earned nothing. Its code path stays reachable (Unfinished
-           still routes here, and the paused guard falls back to it), so
-           this is one button removed, not a feature.
-           Done: moved into More, since it is for checking past work rather
-           than something you need beside today's list. */}
+        <button onClick={() => setTab('in_progress')}
+          className={`flex-1 min-w-fit py-2 px-2 rounded-lg text-xs font-medium transition-colors whitespace-nowrap ${tab === 'in_progress' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+          In progress{counts.in_progress > 0 && ` (${counts.in_progress})`}
+        </button>
         {/* Unfinished — started on an earlier day and never closed out.
            These are a subset of In progress, pulled out because nobody comes
            back to them on their own. Amber so they read as needing a decision
@@ -46696,19 +46572,13 @@ function AssignmentsPanel({ propertyId, property = null, employee, refreshKey, o
             <AlertCircle size={11} /> Unfinished ({counts.unfinished})
           </button>
         )}
-        {/* Done lives in More now (see the comment above). It is still
-           selectable -- initialTab sends the cleaner straight here from
-           the More menu -- so when it IS the current tab it needs a
-           button to show as selected and to get back out of. */}
-        {tab === 'done' && (
-          <button onClick={() => setTab('done')}
-            className="flex-1 min-w-fit py-2 px-2 rounded-lg text-xs font-medium bg-white shadow-sm text-stone-900 whitespace-nowrap">
-            Done{counts.done > 0 && ` (${counts.done})`}
-            {counts.blocked > 0 && (
-              <span className="ml-1 text-[10px] font-mono text-red-700">· {counts.blocked}⊘</span>
-            )}
-          </button>
-        )}
+        <button onClick={() => setTab('done')}
+          className={`flex-1 min-w-fit py-2 px-2 rounded-lg text-xs font-medium transition-colors whitespace-nowrap ${tab === 'done' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
+          Done{counts.done > 0 && ` (${counts.done})`}
+          {counts.blocked > 0 && (
+            <span className="ml-1 text-[10px] font-mono text-red-700">· {counts.blocked}⊘</span>
+          )}
+        </button>
         {/* Mine tab — items the current cleaner personally completed today.
            Hidden if the cleaner has no completions yet so the row stays
            compact for owners/managers viewing the same panel. */}

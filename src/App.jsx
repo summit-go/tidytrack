@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "nov6-tap269";
+const BUILD_TAG = "nov6-tap271";
 // ---- Hidden for now, at Allan's request -------------------------------
 // Both of these are switches rather than deletions: the code stays whole
 // and working, so turning either back on is this one line. Flip to true.
@@ -18061,8 +18061,15 @@ function ShiftPayView({ shifts, currentEmployee, onReload, onAddShift, onOpenShi
     // 1. Which assignments touch these apartments.
     const tgt = [];
     for (let i = 0; i < unitIds.length; i += 200) {
+      // assigned_to comes along too. THERE ARE TWO WAYS A CLEANER GETS
+      // PUT ON A JOB and this only read one of them:
+      //   assignment_assignees        the job-level Assign picker
+      //   assignment_targets.assigned_to  the per-bedroom dropdown
+      // Assign from the dropdown and nothing was written to the table
+      // this screen was looking at, so the Assigned line came back empty
+      // -- which is exactly what it was doing.
       const { data, error } = await supabase.from('assignment_targets')
-        .select('assignment_id, unit_id, party_id, assignment:assignments!inner(id, scheduled_date, deleted_at, active)')
+        .select('assignment_id, unit_id, party_id, assigned_to, assignedTo:employees!assigned_to(id, name), assignment:assignments!inner(id, scheduled_date, deleted_at, active)')
         .in('unit_id', unitIds.slice(i, i + 200));
       if (error) { console.warn('[pay] assignment target read failed', error); return; }
       tgt.push(...(data || []));
@@ -18087,15 +18094,25 @@ function ShiftPayView({ shifts, currentEmployee, onReload, onAddShift, onOpenShi
     const out = {};
     infos.forEach(b => {
       const key = `${b.dateKey}::${b.unitId}::${b.partyId || ''}`;
+      // The bedroom is NOT part of the match. An assignment is often
+      // recorded for the whole apartment while the block is on one
+      // bedroom, or the other way about, and requiring both to agree
+      // dropped the row. The rest of this screen already works per
+      // apartment, so this does too.
       const hits = live.filter(t =>
         t.unit_id === b.unitId
-        && (t.party_id || null) === (b.partyId || null)
         && (t.assignment_id === b.assignmentId || t.assignment?.scheduled_date === b.dateKey));
       const seen = new Set(); const names = [];
-      hits.forEach(t => (people[t.assignment_id] || []).forEach(pp => {
-        if (seen.has(pp.id)) return;
-        seen.add(pp.id); names.push(pp);
-      }));
+      const add = (id, name) => {
+        if (!id || seen.has(id)) return;
+        seen.add(id); names.push({ id, name: name || 'Cleaner' });
+      };
+      hits.forEach(t => {
+        // Both routes, merged. Whichever way the job was handed out, the
+        // person shows up here.
+        (people[t.assignment_id] || []).forEach(pp => add(pp.id, pp.name));
+        if (t.assigned_to) add(t.assigned_to, t.assignedTo?.name);
+      });
       if (names.length) out[key] = names;
     });
     setAssignedByJob(out);
@@ -39457,6 +39474,14 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit, onShift
   // open at that apartment", which is typically a future booking.
   const [asgById, setAsgById] = useState({});
   const [dayAsgIds, setDayAsgIds] = useState({}); // unitId -> [assignmentId]
+  // Every cleaning SCHEDULED for this day, read from the assignments rather
+  // than from anybody's shift. See the loader below for why that is a
+  // different question from the one the rest of this screen asks.
+  const [plannedJobs, setPlannedJobs] = useState(null);
+  // Bumped by refreshUnitAsg, so every existing button that already reloads
+  // the day's jobs reloads the schedule too — assigning somebody to an
+  // unstarted cleaning has to redraw that card, not just the started ones.
+  const [plannedNonce, setPlannedNonce] = useState(0);
   const loadUnitAsg = async (unitIds) => {
     // Scope to the units on this day. A global query hits PostgREST's
     // 1000-row cap once there are thousands of done items, which silently
@@ -39571,7 +39596,7 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit, onShift
     });
     return Array.from(set);
   }, [data]);
-  const refreshUnitAsg = () => loadUnitAsg(dayUnitIds);
+  const refreshUnitAsg = () => { setPlannedNonce(n => n + 1); return loadUnitAsg(dayUnitIds); };
   // `date` is a dependency too: stepping to the next day can land on the
   // identical set of apartments, and which cleaning belongs to a card
   // depends on the date. Without it the day-matching went stale silently.
@@ -39580,6 +39605,161 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit, onShift
   // the day on screen right now. Goes false by itself the instant either
   // changes, because both are recomputed in the same render.
   const unitAsgFresh = unitAsgKey === `${date}|${dayUnitIds.join(',')}`;
+
+  // ── EVERY CLEANING SCHEDULED FOR THIS DAY ───────────────────────────────
+  //
+  // Everything above this line starts from SHIFTS. The cards are built from
+  // work_blocks; dayUnitIds is read back off those cards; loadUnitAsg is
+  // scoped to dayUnitIds. That loop is closed: an apartment nobody clocked
+  // into is never in dayUnitIds, so its cleaning is never queried, so no
+  // card is ever drawn for it. Six on the schedule, four on the screen, and
+  // nothing on this screen able to say which two were missed — the day looks
+  // complete right up until someone notices the work did not happen.
+  //
+  // So this query starts from the other end: the assignments due today,
+  // regardless of whether anyone touched them. The ones with no work logged
+  // are drawn as "Not started" cards, which is the whole point — a job going
+  // unworked is only useful to know about while the day is still running.
+  //
+  // Scoped to one date, so the row count is the day's work, not the history.
+  // Paged anyway: PostgREST truncates at 1000 without erroring, and a
+  // truncated page here would put us right back to hiding cleanings.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setPlannedJobs(null);
+      // assigned_to is the per-bedroom route onto a job and does not exist in
+      // every copy of this schema. Ask for it, and fall back to the select
+      // without it rather than letting the whole day's schedule 400.
+      const BASE = 'id, unit_id, party_id, status, priority, completed_at, unit:units(id, label, bedrooms, bathrooms, customer_id), assignment:assignments!inner(id, notes, active, deleted_at, scheduled_date, took_longer, assignment_type, customer_id, customer:customers(id, name, property_type))';
+      const WITH_ASSIGNED = `assigned_to, assignedTo:employees!assigned_to(id, name), ${BASE}`;
+      const PAGE = 1000;
+      let sel = WITH_ASSIGNED;
+      let rows = [];
+      let failed = null;
+      for (let from = 0; ; from += PAGE) {
+        const { data: page, error } = await supabase.from('assignment_targets')
+          .select(sel)
+          .eq('assignment.scheduled_date', date)
+          .not('status', 'eq', 'blocked')
+          .order('id')
+          .range(from, from + PAGE - 1);
+        if (error) {
+          if (sel === WITH_ASSIGNED) { sel = BASE; rows = []; from = -PAGE; continue; }
+          failed = error.message; break;
+        }
+        rows = rows.concat(page || []);
+        if (!page || page.length < PAGE) break;
+      }
+      if (cancelled) return;
+      if (failed) { setPlannedJobs({ byProp: {}, error: failed }); return; }
+
+      // One record per ASSIGNMENT, not per apartment. Two cleanings on one
+      // apartment in a day is a real thing — a move-out in the morning and a
+      // reclean after the walkthrough — and keying by apartment would drop
+      // the second one, which is exactly the kind of job that goes unworked.
+      const recs = {};
+      const nameNeeded = new Set();
+      (rows || []).forEach(t => {
+        const a = t.assignment;
+        if (!a || a.active === false || a.deleted_at) return;
+        if (!t.unit_id || !t.unit) return;
+        const propId = a.customer_id || t.unit.customer_id;
+        if (!propId) return;
+        if (!recs[a.id]) {
+          recs[a.id] = {
+            id: a.id, propId,
+            property: a.customer || null,
+            unitId: t.unit_id, unitLabel: t.unit.label || '',
+            partyId: t.party_id || null,
+            bedrooms: t.unit.bedrooms, bathrooms: t.unit.bathrooms,
+            scheduledDate: a.scheduled_date || null,
+            assignmentType: a.assignment_type || null,
+            tookLonger: !!a.took_longer,
+            notes: String(a.notes || '').trim() || null,
+            priorityCount: 0, open: false, doneCount: 0, itemCount: 0,
+            assignees: [], _seen: new Set(),
+          };
+          nameNeeded.add(a.id);
+        }
+        const rec = recs[a.id];
+        rec.itemCount += 1;
+        if (t.priority) rec.priorityCount += 1;
+        if (t.status === 'done') rec.doneCount += 1; else rec.open = true;
+        // The per-bedroom route onto the job, merged in by person so a
+        // cleaner named both ways is still one chip.
+        if (t.assigned_to && !rec._seen.has(t.assigned_to)) {
+          rec._seen.add(t.assigned_to);
+          rec.assignees.push({ id: t.assigned_to, name: t.assignedTo?.name || '', requested: false });
+        }
+      });
+
+      // The job-level route. Same merge, so neither way of assigning can
+      // leave the card saying nobody is on it.
+      const ids = Array.from(nameNeeded);
+      if (ids.length) {
+        const { data: emps } = await supabase.from('employees').select('id, name').eq('active', true);
+        const nameById = Object.fromEntries((emps || []).map(e => [e.id, e.name]));
+        Object.values(recs).forEach(r => r.assignees.forEach(a => { if (!a.name) a.name = nameById[a.id] || ''; }));
+        for (let i = 0; i < ids.length; i += 200) {
+          const { data: aa } = await supabase.from('assignment_assignees')
+            .select('assignment_id, employee_id, status').in('assignment_id', ids.slice(i, i + 200));
+          (aa || []).forEach(r => {
+            const rec = recs[r.assignment_id];
+            if (!rec || rec._seen.has(r.employee_id)) return;
+            rec._seen.add(r.employee_id);
+            rec.assignees.push({ id: r.employee_id, name: nameById[r.employee_id] || '', requested: r.status === 'requested' });
+          });
+        }
+      }
+      if (cancelled) return;
+
+      const byProp = {};
+      Object.values(recs).forEach(r => {
+        if (!byProp[r.propId]) byProp[r.propId] = { property: r.property, jobs: [] };
+        byProp[r.propId].jobs.push(r);
+      });
+      setPlannedJobs({ byProp, error: null });
+    })();
+    return () => { cancelled = true; };
+  }, [date, plannedNonce]);
+
+  // Which of the day's scheduled cleanings have no work against them. A job
+  // only counts as started if today's hours can actually be tied to it —
+  // being at the same apartment is not enough on its own, because a clean
+  // and a reclean share an apartment and only one of them got done.
+  const unstartedByProp = React.useMemo(() => {
+    const byProp = plannedJobs?.byProp || {};
+    const workedAsgIds = new Set();   // jobs the day's blocks name outright
+    const workedUnits = new Set();    // apartments with any hours today
+    const attributed = new Set();     // apartments where a block named its job
+    Object.values(data?.groups || {}).forEach(pg => {
+      Object.values(pg.units || {}).forEach(u => {
+        if (!u.unitId) return;
+        workedUnits.add(u.unitId);
+        const ids = Array.from(u.assignmentIds || []);
+        if (ids.length) attributed.add(u.unitId);
+        ids.forEach(id => workedAsgIds.add(id));
+      });
+    });
+    const out = {};
+    Object.entries(byProp).forEach(([propId, g]) => {
+      const jobs = g.jobs.filter(j => {
+        // The day's blocks name this job outright — the card above IS it.
+        if (workedAsgIds.has(j.id)) return false;
+        // Hours at this apartment that name no job at all — somebody started
+        // here ad-hoc. We cannot tell which cleaning they were doing, so say
+        // nothing: calling a job unstarted when the work is sitting right
+        // there on the same card would send him chasing a cleaner who did it.
+        // The cost is staying quiet about a second cleaning at an apartment
+        // worked ad-hoc; the alternative cries wolf, which is worse.
+        if (workedUnits.has(j.unitId) && !attributed.has(j.unitId)) return false;
+        return true;
+      }).sort((a, b) => naturalCompare(a.unitLabel, b.unitLabel));
+      if (jobs.length) out[propId] = { property: g.property, jobs };
+    });
+    return out;
+  }, [plannedJobs, data]);
 
   const dSaveDue = async (asgId, val) => {
     setDDueFor(null); setDBusy(asgId);
@@ -39728,9 +39908,13 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit, onShift
   if (!data) return <Splash text="Loading…" />;
 
   const dateObj = new Date(date + 'T12:00:00');
-  const propIds = Object.keys(data.groups);
+  // Properties with hours on them, plus properties that only have cleanings
+  // nobody has started. The second kind used to be invisible entirely: with
+  // no shift there was no group, and with no group there was no heading.
+  const shiftPropIds = Object.keys(data.groups);
   const totalShifts = data.shifts.length;
-  const totalProperties = propIds.length;
+  const totalProperties = shiftPropIds.length;
+  const propIds = [...new Set([...shiftPropIds, ...Object.keys(unstartedByProp)])];
 
   return (
     <div className="pb-24">
@@ -39943,19 +40127,30 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit, onShift
         ) : (
           <div className="space-y-6">
             {propIds.map(propId => {
-              const pg = data.groups[propId];
+              // A property can be here with no shifts at all — everything
+              // scheduled on it is still unstarted — so the group has to be
+              // able to stand up without one.
+              const unstarted = unstartedByProp[propId]?.jobs || [];
+              const pg = data.groups[propId]
+                || { property: unstartedByProp[propId]?.property || { name: 'Property' }, units: {}, simpleShifts: [] };
               const unitIds = Object.keys(pg.units);
               const sortedUnits = unitIds.map(id => pg.units[id])
                 .sort((a, b) => naturalCompare(a.unitLabel, b.unitLabel));
+              // The count has to include the ones nobody started, or the
+              // heading goes on quietly disagreeing with the schedule.
+              const cleaningCount = (sortedUnits.length || pg.simpleShifts.length) + unstarted.length;
 
               return (
                 <div key={propId}>
                   <div className="flex items-baseline justify-between mb-3 pb-2 border-b border-stone-200">
                     <h3 className="font-serif text-xl text-stone-900 flex items-center gap-2">
-                      <Building2 size={16} /> {pg.property.name}
+                      <Building2 size={16} /> {pg.property?.name || 'Property'}
                     </h3>
                     <span className="text-xs font-mono text-stone-500">
-                      {sortedUnits.length || pg.simpleShifts.length} {(sortedUnits.length || pg.simpleShifts.length) === 1 ? 'cleaning' : 'cleanings'}
+                      {cleaningCount} {cleaningCount === 1 ? 'cleaning' : 'cleanings'}
+                      {unstarted.length > 0 && (
+                        <span className="text-amber-700"> · {unstarted.length} not started</span>
+                      )}
                     </span>
                   </div>
 
@@ -40141,6 +40336,109 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit, onShift
                         </div>
                         );
                       })}
+                    </div>
+                  )}
+
+                  {/* SCHEDULED FOR TODAY, NOBODY STARTED IT.
+                     Same controls as a worked card, because these are real
+                     cleanings and the owner has to be able to assign, re-date
+                     and close them from right here. The difference is that
+                     there are no hours on it — which is the whole point of
+                     the card, so it says so instead of looking broken. */}
+                  {unstarted.length > 0 && (
+                    <div className={`space-y-2 ${sortedUnits.length > 0 ? 'mt-2' : ''}`}>
+                      {unstarted.map(j => (
+                        <div key={j.id}
+                          className="w-full text-left p-4 rounded-2xl border border-dashed border-amber-300 bg-amber-50/40">
+                          <button onClick={() => onOpenUnit(propId, j.unitId, j.unitLabel, pg.property?.name || '')}
+                            className="w-full text-left">
+                            <div className="flex items-center justify-between">
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-2 flex-wrap mb-1">
+                                  <span className="font-serif text-lg text-stone-900">{j.unitLabel}</span>
+                                  <AssignmentTypeChip type={j.assignmentType} showEmpty />
+                                  <PriorityChip on={j.priorityCount > 0} count={j.priorityCount} size="xs" />
+                                  <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-amber-200 text-amber-900 font-bold">
+                                    Not started
+                                  </span>
+                                </div>
+                                <div className="text-xs text-stone-500 font-mono">
+                                  No hours logged · on today's schedule
+                                </div>
+                                <div className="text-xs text-stone-600 mt-1">
+                                  {j.assignees.length
+                                    ? `Assigned: ${j.assignees.map(a => a.name || '—').join(', ')}`
+                                    : 'Nobody assigned'}
+                                </div>
+                              </div>
+                              <ChevronRight size={16} className="text-stone-400 flex-shrink-0 ml-2" />
+                            </div>
+                          </button>
+
+                          {j.notes && (<div className="mt-2"><SubmissionNote note={j.notes} /></div>)}
+
+                          <div className="flex items-center gap-1.5 flex-wrap mt-2">
+                            <OwnerJobControls employee={employee}
+                              job={{
+                                assignmentId: j.id, unitId: j.unitId, partyId: j.partyId,
+                                unitLabel: j.unitLabel, partyLabel: '',
+                                type: j.assignmentType || '',
+                                bedrooms: j.bedrooms, bathrooms: j.bathrooms,
+                              }}
+                              onChanged={refreshUnitAsg}
+                              onEdit={() => setDEditJob({ id: j.id, propertyId: propId })} />
+
+                            {dDueFor === j.id ? (
+                              <DueDateEditor compact value={j.scheduledDate || ''}
+                                onSave={(d) => dSaveDue(j.id, d)} onCancel={() => setDDueFor(null)} />
+                            ) : canDailyDates ? (
+                              <button onClick={() => setDDueFor(j.id)}
+                                className={`text-[10px] font-mono px-2 py-0.5 rounded-full border inline-flex items-center gap-1 ${j.scheduledDate
+                                  ? (j.scheduledDate < dToday ? 'bg-red-100 text-red-700 border-red-200'
+                                     : j.scheduledDate === dToday ? 'bg-emerald-100 text-emerald-800 border-emerald-200'
+                                     : 'bg-stone-100 text-stone-600 border-stone-200')
+                                  : 'bg-white text-stone-500 border-dashed border-stone-300'}`}>
+                                <Calendar size={9} /> {j.scheduledDate ? fmtDueDate(j.scheduledDate) : 'Set due date'}
+                              </button>
+                            ) : null}
+
+                            {j.assignees.map(a => (
+                              <span key={a.id} className={`text-[10px] font-mono px-2 py-0.5 rounded-full inline-flex items-center gap-1 ${a.requested ? 'bg-amber-100 text-amber-800' : 'bg-indigo-100 text-indigo-700'}`}>
+                                <User size={9} /> {a.name || '—'}{a.requested ? ' asked' : ''}
+                              </span>
+                            ))}
+                            {canDailyAssign && (
+                              <button onClick={() => setDAssignFor(dAssignFor === j.id ? null : j.id)}
+                                className="text-[10px] font-mono px-2 py-0.5 rounded-full border border-dashed border-stone-300 text-stone-500 inline-flex items-center gap-1">
+                                <Plus size={9} /> Assign
+                              </button>
+                            )}
+
+                            <button onClick={() => dToggleExtra(j.id, j.tookLonger)} disabled={dBusy === j.id}
+                              className={`text-[10px] font-mono px-2 py-0.5 rounded-full inline-flex items-center gap-1 disabled:opacity-50 ${j.tookLonger ? 'bg-amber-500 text-white' : 'bg-white border border-dashed border-stone-300 text-stone-500'}`}>
+                              <Clock size={9} /> {j.tookLonger ? 'Extra' : 'Mark extra'}
+                            </button>
+
+                            {canDailyDone && (j.open ? (
+                              <button onClick={() => dMarkDone(j.id, j.unitLabel)} disabled={dBusy === j.id}
+                                className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-600 text-white inline-flex items-center gap-1 disabled:opacity-50">
+                                <Check size={9} /> Mark done
+                              </button>
+                            ) : (
+                              <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 inline-flex items-center gap-1">
+                                <Check size={9} /> Done
+                              </span>
+                            ))}
+                          </div>
+
+                          {canDailyAssign && dAssignFor === j.id && (
+                            <AssignPicker key={j.id} assignmentId={j.id} team={dTeam} busy={dBusy === j.id}
+                              currentIds={j.assignees.map(a => a.id)}
+                              onCancel={() => setDAssignFor(null)}
+                              onSave={(ids, audience) => dCommitAssignees(j, ids, audience)} />
+                          )}
+                        </div>
+                      ))}
                     </div>
                   )}
 

@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "nov6-tap267";
+const BUILD_TAG = "nov6-tap268";
 // ---- Hidden for now, at Allan's request -------------------------------
 // Both of these are switches rather than deletions: the code stays whole
 // and working, so turning either back on is this one line. Flip to true.
@@ -17836,7 +17836,12 @@ function describeShift(s) {
   const seen = new Set();
   const jobs = [];
   blocks.forEach(b => {
-    const k = `${b.unit_id}::${b.assignment_id || ''}`;
+    // Keyed on the APARTMENT, not the apartment+assignment. Two
+    // assignments on one apartment in one day (a clean and a reclean,
+    // say) were listed as two jobs with two separate pay rows, so the
+    // same apartment showed twice and the money landed on whichever row
+    // happened to be opened.
+    const k = `${b.unit_id}::${b.party_id || ''}`;
     if (seen.has(k)) return;
     seen.add(k);
     const bd = b.unit?.bedrooms, ba = b.unit?.bathrooms;
@@ -18117,6 +18122,36 @@ function ShiftPayView({ shifts, currentEmployee, onReload, onAddShift, onOpenShi
   // What this shift costs, and how that figure was arrived at. Per-job
   // rows win over a whole-shift flat amount, which wins over the clock —
   // the same order the P&L uses, so the two cannot disagree.
+  // WHICH CARD OWNS WHICH APARTMENT.
+  //
+  // employee_pay_days is keyed by employee + DAY + property + apartment,
+  // with no shift in it. So when a cleaner has two shifts on one day and
+  // both touch the same apartment, both cards resolved the SAME pay row:
+  // the apartment appeared twice, and -- the part that actually costs
+  // money -- Payroll at the top added it twice, because it sums per
+  // shift. The earliest shift of the day that touches an apartment owns
+  // it; later ones leave it out. Same for a whole-shift flat amount,
+  // which is keyed by day and property and was double-counted the same
+  // way.
+  const claims = React.useMemo(() => {
+    const unitOwner = new Map();
+    const flatOwner = new Map();
+    const byTime = [...visible].sort((a, b) =>
+      new Date(a.start_time) - new Date(b.start_time));
+    byTime.forEach(s => {
+      const empId = s.employee?.id || s.employee_id;
+      const dateKey = localDayKey(s.start_time);
+      const custId = s.customer?.id || s.customer_id || null;
+      const fk = `${empId}::${dateKey}::${custId || ''}`;
+      if (!flatOwner.has(fk)) flatOwner.set(fk, s.id);
+      describeShift(s).forEach(j => {
+        const uk = `${empId}::${dateKey}::${j.unitId}::${j.partyId || ''}`;
+        if (!unitOwner.has(uk)) unitOwner.set(uk, s.id);
+      });
+    });
+    return { unitOwner, flatOwner };
+  }, [visible]);
+
   const payFor = (s) => {
     const empId = s.employee?.id || s.employee_id;
     const dateKey = localDayKey(s.start_time);
@@ -18159,10 +18194,21 @@ function ShiftPayView({ shifts, currentEmployee, onReload, onAddShift, onOpenShi
         jobs.push(fp);
       });
     }
-    const jobRows = jobs.map(j => ({
-      job: j,
-      row: payRows[payRowKey(empId, dateKey, custId, j.assignmentId, j.unitId)] || null,
-    }));
+    // Drop apartments an earlier shift today already owns.
+    jobs = jobs.filter(j =>
+      claims.unitOwner.get(`${empId}::${dateKey}::${j.unitId}::${j.partyId || ''}`) === s.id);
+    const jobRows = jobs.map(j => {
+      // Any row for this APARTMENT today, whatever assignment it was
+      // filed under. Keying the lookup on the assignment too is what
+      // produced "$0 on one card, $90 on the other" for one apartment:
+      // two assignments, two rows, each editor seeing only its own.
+      const rows = payList.filter(r =>
+        r.employee_id === empId && r.work_date === dateKey
+        && (r.customer_id || null) === custId
+        && r.unit_id === j.unitId && r.flat_amount != null);
+      const row = rows.find(r => (r.assignment_id || null) === (j.assignmentId || null)) || rows[0] || null;
+      return { job: j, row, allRows: rows };
+    });
     const perJob = jobRows.filter(r => r.row && r.row.flat_amount != null);
     if (perJob.length) {
       return {
@@ -18171,9 +18217,16 @@ function ShiftPayView({ shifts, currentEmployee, onReload, onAddShift, onOpenShi
         paid: perJob.every(r => !!r.row.paid_at) && perJob.length > 0,
       };
     }
-    const flat = payRows[payRowKey(empId, dateKey, custId, null, null)];
+    const ownsFlat = claims.flatOwner.get(`${empId}::${dateKey}::${custId || ''}`) === s.id;
+    const flat = ownsFlat ? payRows[payRowKey(empId, dateKey, custId, null, null)] : null;
     if (flat && flat.flat_amount != null) {
       return { mode: 'flat', total: Number(flat.flat_amount), jobRows, jobs, empId, dateKey, custId, payListRef: payList, paid: !!flat.paid_at, flatRow: flat };
+    }
+    // Nothing of its own left and the day's flat amount belongs to an
+    // earlier shift: say so rather than quietly pricing this one by the
+    // clock, which would put money on screen that nobody entered.
+    if (jobs.length === 0 && !ownsFlat) {
+      return { mode: 'covered', total: 0, jobRows, jobs, empId, dateKey, custId, payListRef: payList, paid: false, flatRow: null };
     }
     const rate = Number(s.employee?.pay_rate_hourly) || 0;
     const hrs = shiftBillableMs(s) / 3600000;
@@ -18319,7 +18372,8 @@ function ShiftPayView({ shifts, currentEmployee, onReload, onAddShift, onOpenShi
                 {!isEditing ? (
                   <div className="flex items-center justify-between gap-2 pt-2.5 border-t border-stone-100 flex-wrap">
                     <span className="text-[9px] font-mono uppercase tracking-wider text-stone-500">
-                      {p.mode === 'job' ? `${p.jobRows.filter(r => r.row).length} job${p.jobRows.filter(r => r.row).length === 1 ? '' : 's'} · per job`
+                      {p.mode === 'covered' ? 'counted on an earlier shift today'
+                        : p.mode === 'job' ? `${p.jobRows.filter(r => r.row).length} job${p.jobRows.filter(r => r.row).length === 1 ? '' : 's'} · per job`
                         : p.mode === 'flat' ? 'flat for the shift'
                         : p.rate > 0 ? `${p.hours.toFixed(2)}h × ${fmtMoney(p.rate)} · hourly`
                         : 'no rate set'}
@@ -18440,6 +18494,15 @@ function PayEditor({ shift, p, sizeRates, busy, setBusy, currentEmployee, splitC
           : val;
         const e = await writePayRow({ ...common, asgId: job.assignmentId, unitId: job.unitId, patch: { flat_amount: mine } });
         if (e) { setBusy(null); setErr('Could not save: ' + (e.message || 'unknown error')); return; }
+        // Clear any OTHER row for this same apartment today -- filed
+        // under a different assignment, from before one apartment meant
+        // one amount. Leaving it would re-create the split-brain where
+        // the figure depends on which card you opened.
+        const stale = (p.jobRows.find(r => r.job.unitId === job.unitId)?.allRows || [])
+          .filter(r => (r.assignment_id || null) !== (job.assignmentId || null));
+        for (const r of stale) {
+          await writePayRow({ ...common, asgId: r.assignment_id || null, unitId: job.unitId, patch: { flat_amount: null } });
+        }
         // THE OTHER PEOPLE ON IT. Writing their row is the whole mechanism:
         // the split shows on their card because they are genuinely being
         // paid for this apartment, not because a note was left on this one.

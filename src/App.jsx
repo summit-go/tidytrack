@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "nov6-tap271";
+const BUILD_TAG = "nov6-tap272";
 // ---- Hidden for now, at Allan's request -------------------------------
 // Both of these are switches rather than deletions: the code stays whole
 // and working, so turning either back on is this one line. Flip to true.
@@ -17511,6 +17511,11 @@ function ManagerDashboard({ employee, onSignOut, onOpenMessages, onLogoClick }) 
 
       {subView === 'pay' ? (
         <ShiftPayView shifts={filteredShifts} currentEmployee={employee} onReload={load}
+          /* The window and the filters go in because the Pay tab now reads
+             the SCHEDULE as well as the clock, and a day whose cleanings
+             nobody started has no shift to derive either one from. */
+          dateFrom={dateFrom} dateTo={dateTo}
+          filterCleaners={filterCleaners} filterProperties={filterProperties}
           onAddShift={() => setAddShiftOpen(true)}
           onOpenShift={(s) => { setSelectedShift(s); setView('detail'); }} />
       ) : subView === 'cleaner' ? (
@@ -17868,7 +17873,29 @@ const CLEAN_TYPE_STYLE = {
   standard: 'bg-emerald-50 border-emerald-200 text-emerald-800',
 };
 
-function ShiftPayView({ shifts, currentEmployee, onReload, onAddShift, onOpenShift }) {
+// THE PAY TAB. One card per CLEANER per SCHEDULED DAY per PROPERTY.
+//
+// It used to be one card per SHIFT, and that is what made the same job
+// show up on two different days in two different screens. Three dates
+// were competing:
+//
+//   assignments.scheduled_date   the day the cleaning was booked for
+//   assignment_targets.completed_at  the day somebody marked it done
+//   shifts.start_time            the day somebody clocked in
+//
+// Pay keyed off the shift, the day view also matched on completed_at, and
+// a cleaning booked Thursday but closed out Friday landed on Thursday in
+// one place and Friday in the other. SCHEDULED DATE IS NOW THE ONLY
+// ANCHOR. If a job slips a day, Allan moves it on the schedule; nothing
+// re-dates itself behind him.
+//
+// The second thing this fixes: the tab was built entirely from shifts, so
+// it could only ever show work somebody clocked into. A cleaner assigned
+// three apartments who clocked into one showed one job, and a cleaner who
+// never clocked in at all had no card. Jobs now come from the SCHEDULE,
+// and the hours are matched onto them -- not the other way round.
+function ShiftPayView({ shifts, currentEmployee, onReload, onAddShift, onOpenShift,
+                        dateFrom = '', dateTo = '', filterCleaners = null, filterProperties = null }) {
   const [payRows, setPayRows] = useState({});
   // The same rows as a flat list, plus the units they name. A hand-added
   // shift has no work blocks, so its apartment can only come from its pay
@@ -17877,29 +17904,134 @@ function ShiftPayView({ shifts, currentEmployee, onReload, onAddShift, onOpenShi
   const [payList, setPayList] = useState([]);
   const [unitMeta, setUnitMeta] = useState({});
   const [loadingPay, setLoadingPay] = useState(true);
-  const [editing, setEditing] = useState(null);   // shift id
+  const [editing, setEditing] = useState(null);   // card id
   const [busy, setBusy] = useState(null);
   const [onlyAdded, setOnlyAdded] = useState(false);
   const [sizeRates, setSizeRates] = useState({}); // `${custId}:3x2` -> amount
 
-  const done = (shifts || []).filter(s => s.end_time);
-  const visible = onlyAdded ? done.filter(s => s.added_manually) : done;
+  // Open shifts are NOT dropped any more. A cleaner still on the clock
+  // used to vanish from this screen completely, which reads as "they only
+  // did one job today" when in fact they are in the middle of the second.
+  // Memoised so the cards below are not rebuilt on every keystroke: a bare
+  // `shifts || []` is a new array identity each render.
+  const all = React.useMemo(() => shifts || [], [shifts]);
+  const done = React.useMemo(() => all.filter(s => s.end_time), [all]);
 
-  // Pay rows back to the oldest shift on screen. Paginated for the same
-  // reason as every other query here: PostgREST stops at 1,000 and would
-  // drop the rest without saying so.
-  const oldestKey = done.reduce((min, s) => {
+  // ── THE WINDOW ────────────────────────────────────────────────────────
+  // The schedule has to be read over the same days the shifts cover, and
+  // it cannot be derived from the shifts themselves: a day whose cleanings
+  // nobody started has no shift to derive it from, and that is precisely
+  // the day worth seeing.
+  const spanFrom = dateFrom || all.reduce((min, s) => {
     const k = localDayKey(s.start_time);
     return (!min || k < min) ? k : min;
   }, null);
+  const spanTo = dateTo || all.reduce((max, s) => {
+    const k = localDayKey(s.start_time);
+    return (!max || k > max) ? k : max;
+  }, null);
 
+  // ── THE SCHEDULE ──────────────────────────────────────────────────────
+  // Every cleaning booked in the window and who it was given to, by BOTH
+  // routes onto a job. Nothing here depends on anyone having clocked in.
+  const [sched, setSched] = useState({ jobs: [], byAsg: {}, ready: false, error: null });
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!spanFrom || !spanTo) { setSched({ jobs: [], byAsg: {}, ready: true, error: null }); return; }
+      const BASE = 'id, unit_id, party_id, status, completed_at, unit:units(id, label, bedrooms, bathrooms, customer_id), assignment:assignments!inner(id, scheduled_date, assignment_type, active, deleted_at, customer_id, customer:customers(id, name))';
+      const WITH_ASSIGNED = `assigned_to, assignedTo:employees!assigned_to(id, name), ${BASE}`;
+      const PAGE = 1000;
+      let sel = WITH_ASSIGNED;
+      let rows = [];
+      let failed = null;
+      for (let from = 0; ; from += PAGE) {
+        const { data: page, error } = await supabase.from('assignment_targets')
+          .select(sel)
+          .gte('assignment.scheduled_date', spanFrom)
+          .lte('assignment.scheduled_date', spanTo)
+          .not('status', 'eq', 'blocked')
+          .order('id')
+          .range(from, from + PAGE - 1);
+        if (error) {
+          // assigned_to does not exist in every copy of this schema.
+          if (sel === WITH_ASSIGNED) { sel = BASE; rows = []; from = -PAGE; continue; }
+          failed = error.message; break;
+        }
+        rows = rows.concat(page || []);
+        if (!page || page.length < PAGE) break;
+        if (from > 100000) break;
+      }
+      if (cancelled) return;
+      if (failed) { setSched({ jobs: [], byAsg: {}, ready: true, error: failed }); return; }
+
+      // One job per assignment + apartment. The bedroom is deliberately not
+      // part of the identity: an assignment is often recorded for a whole
+      // apartment while the work block is on one bedroom, and treating
+      // those as different jobs is what used to drop the match.
+      const jobs = {};
+      const byAsg = {};
+      (rows || []).forEach(t => {
+        const a = t.assignment;
+        if (!a || a.active === false || a.deleted_at || !t.unit_id || !t.unit) return;
+        const day = String(a.scheduled_date || '').slice(0, 10);
+        if (!day) return;
+        byAsg[a.id] = day;
+        const k = `${a.id}::${t.unit_id}`;
+        if (!jobs[k]) {
+          const bd = t.unit.bedrooms, ba = t.unit.bathrooms;
+          jobs[k] = {
+            assignmentId: a.id, unitId: t.unit_id, partyId: t.party_id || null,
+            day,
+            custId: a.customer_id || t.unit.customer_id || null,
+            propName: a.customer?.name || '',
+            label: t.unit.label || 'Apartment',
+            size: (bd != null && ba != null) ? `${bd}x${ba}` : null,
+            type: a.assignment_type || null,
+            people: [], _seen: new Set(),
+          };
+        }
+        const j = jobs[k];
+        if (t.assigned_to && !j._seen.has(t.assigned_to)) {
+          j._seen.add(t.assigned_to);
+          j.people.push({ id: t.assigned_to, name: t.assignedTo?.name || '' });
+        }
+      });
+
+      // The job-level route, merged in by person so a cleaner named both
+      // ways is one name, not two.
+      const asgIds = Array.from(new Set(Object.values(jobs).map(j => j.assignmentId)));
+      if (asgIds.length) {
+        for (let i = 0; i < asgIds.length; i += 200) {
+          const { data: aa } = await supabase.from('assignment_assignees')
+            .select('assignment_id, employee_id, status, employee:employees(id, name)')
+            .in('assignment_id', asgIds.slice(i, i + 200));
+          (aa || []).forEach(r => {
+            if (r.status === 'declined') return;
+            Object.values(jobs).forEach(j => {
+              if (j.assignmentId !== r.assignment_id || j._seen.has(r.employee_id)) return;
+              j._seen.add(r.employee_id);
+              j.people.push({ id: r.employee_id, name: r.employee?.name || '' });
+            });
+          });
+        }
+      }
+      if (cancelled) return;
+      setSched({ jobs: Object.values(jobs), byAsg, ready: true, error: null });
+    })();
+    return () => { cancelled = true; };
+  }, [spanFrom, spanTo]);
+
+  // Pay rows across the window. Paginated for the same reason as every
+  // other query here: PostgREST stops at 1,000 and would drop the rest
+  // without saying so.
   const loadPay = useCallback(async () => {
-    if (!oldestKey) { setPayRows({}); setLoadingPay(false); return; }
+    if (!spanFrom) { setPayRows({}); setPayList([]); setLoadingPay(false); return; }
     const PAGE = 1000;
     let rows = [];
     for (let from = 0; ; from += PAGE) {
       const { data, error } = await supabase.from('employee_pay_days')
-        .select('*').gte('work_date', oldestKey)
+        .select('*').gte('work_date', spanFrom)
         .order('id', { ascending: true })
         .range(from, from + PAGE - 1);
       if (error) { setLoadingPay(false); return; }
@@ -17921,62 +18053,37 @@ function ShiftPayView({ shifts, currentEmployee, onReload, onAddShift, onOpenShi
       }
       setUnitMeta(meta);
     }
-  }, [oldestKey]);
+  }, [spanFrom]);
   useEffect(() => { loadPay(); }, [loadPay]);
 
-  // ============================================================
-  // WHO ELSE WAS ON THIS APARTMENT.
-  //
-  // Two different facts, and payroll needs both:
-  //
-  //   CREW     who actually worked it -- worked out from the shifts
-  //            already on this screen. Every cleaner's shift in the range
-  //            is here with its work blocks, so whoever has a block at
-  //            the same apartment on the same day was in there too. No
-  //            query: the answer was already in the data.
-  //
-  //   ASSIGNED who you gave it to. Needs its own read, and it is worth
-  //            it: assigned-but-never-showed is invisible otherwise, and
-  //            it is exactly the case where you would overpay or chase
-  //            the wrong person.
-  // ============================================================
-  // JOINING DOES NOT CREATE A SECOND BLOCK. That is the thing that made
-  // the first version of this useless: joinBlock writes a
-  // work_block_participants row and the joiner then shares the starter's
-  // single work_blocks row. So a crew worked out from work blocks alone
-  // sees only people who independently started their own -- which is not
-  // how anyone actually pairs up, since Join is the way in.
-  //
-  // Two consequences, both fixed here:
-  //   * nothing ever showed as shared;
-  //   * a cleaner who JOINED had no blocks under their own shift, so
-  //     their Pay card listed no apartments at all and there was nothing
-  //     to attach their pay to.
-  //
-  // So: index every block by id, read the participant rows for them, and
-  // treat a participant as being on that block exactly like its owner.
+  // blockId -> what the app knows about it. The DAY on a block is the day
+  // its cleaning was SCHEDULED for, not the day the cleaner clocked in --
+  // that single line is what stops the same job showing on two days.
   const blockIndex = React.useMemo(() => {
     const m = new Map();
     (shifts || []).forEach(sh => {
       const ownerId = sh.employee?.id || sh.employee_id;
       const ownerName = sh.employee?.name || 'Cleaner';
-      const dateKey = localDayKey(sh.start_time);
+      const clockDay = localDayKey(sh.start_time);
       (sh.work_blocks || []).forEach(b => {
         if (!b.id) return;
         const bd = b.unit?.bedrooms, ba = b.unit?.bathrooms;
         m.set(b.id, {
-          id: b.id, ownerId, ownerName, dateKey,
+          id: b.id, ownerId, ownerName, shiftId: sh.id,
+          dateKey: sched.byAsg[b.assignment_id] || clockDay,
+          clockDay,
           custId: sh.customer?.id || sh.customer_id || null,
           unitId: b.unit_id || null, partyId: b.party_id || null,
           assignmentId: b.assignment_id || null,
           label: unitPartyLabel(b.unit?.label, b.party?.label) || b.unit?.label || 'Apartment',
           size: (bd != null && ba != null) ? `${bd}x${ba}` : null,
           type: b.assignment?.assignment_type || null,
+          ms: Math.max(0, (b.end_time ? new Date(b.end_time) : new Date()) - new Date(b.start_time)),
         });
       });
     });
     return m;
-  }, [shifts]);
+  }, [shifts, sched]);
 
   // employee_id -> [block info], for people who joined someone else's block.
   const [joinedByEmp, setJoinedByEmp] = useState({});
@@ -17997,8 +18104,6 @@ function ShiftPayView({ shifts, currentEmployee, onReload, onAddShift, onOpenShi
         const name = r.employee?.name || 'Cleaner';
         if (!byBlock[r.work_block_id]) byBlock[r.work_block_id] = {};
         byBlock[r.work_block_id][r.employee_id] = name;
-        // Someone else's block they were in -- this is what their own Pay
-        // card is missing.
         if (r.employee_id !== info.ownerId) {
           if (!byEmp[r.employee_id]) byEmp[r.employee_id] = [];
           byEmp[r.employee_id].push(info);
@@ -18020,6 +18125,166 @@ function ShiftPayView({ shifts, currentEmployee, onReload, onAddShift, onOpenShi
     const m = {}; (data || []).forEach(e => { m[e.id] = e.name; });
     setEmpNames(m); setAllCleaners(data || []);
   })(); }, []);
+  const empById = React.useMemo(() => {
+    const m = {}; (allCleaners || []).forEach(e => { m[e.id] = e; }); return m;
+  }, [allCleaners]);
+
+  // ── THE CARDS ─────────────────────────────────────────────────────────
+  // cleaner + scheduled day + property. Built from the schedule first and
+  // the clock second, so a cleaning nobody started still has somewhere to
+  // put its money.
+  const cards = React.useMemo(() => {
+    const out = new Map();
+    const keyOf = (empId, day, custId) => `${empId}::${day}::${custId || ''}`;
+    const ensure = (empId, day, custId, seed = {}) => {
+      if (!empId || !day) return null;
+      const k = keyOf(empId, day, custId);
+      if (!out.has(k)) {
+        out.set(k, {
+          id: k, empId, day, custId: custId || null,
+          employee: seed.employee || empById[empId] || { id: empId, name: empNames[empId] || 'Cleaner' },
+          customer: seed.customer || null,
+          jobs: [], _jobSeen: new Set(),
+          shifts: [], clockedMs: 0, running: false, handAdded: false,
+        });
+      }
+      const c = out.get(k);
+      if (!c.customer && seed.customer) c.customer = seed.customer;
+      if (!c.employee?.pay_rate_hourly && empById[empId]) c.employee = empById[empId];
+      return c;
+    };
+    const addJob = (c, job) => {
+      if (!c || !job.unitId) return;
+      // Identity is the APARTMENT, as everywhere else on this screen. Two
+      // assignments on one apartment in one day were listed twice and the
+      // money landed on whichever row happened to be opened first.
+      const jk = `${job.unitId}::${job.partyId || ''}`;
+      if (c._jobSeen.has(jk)) {
+        // Prefer a job that knows which assignment it is.
+        const prev = c.jobs.find(x => `${x.unitId}::${x.partyId || ''}` === jk);
+        if (prev && !prev.assignmentId && job.assignmentId) prev.assignmentId = job.assignmentId;
+        if (prev && !prev.type && job.type) prev.type = job.type;
+        if (prev && job.clocked) prev.clocked = true;
+        if (prev && job.assigned) prev.assigned = true;
+        return;
+      }
+      c._jobSeen.add(jk);
+      c.jobs.push({ ...job });
+    };
+
+    // 1. THE SCHEDULE. Every cleaning booked in the window, on the card of
+    //    every cleaner it was given to -- clocked in or not.
+    (sched.jobs || []).forEach(j => {
+      j.people.forEach(p => {
+        const c = ensure(p.id, j.day, j.custId, {
+          employee: empById[p.id] || { id: p.id, name: p.name || empNames[p.id] || 'Cleaner' },
+          customer: j.custId ? { id: j.custId, name: j.propName } : null,
+        });
+        addJob(c, {
+          unitId: j.unitId, partyId: j.partyId, assignmentId: j.assignmentId,
+          label: j.label, size: j.size, type: j.type, assigned: true, clocked: false,
+        });
+      });
+    });
+
+    // 2. THE CLOCK. A shift's hours land on the day its work was SCHEDULED
+    //    for. A shift whose blocks span two scheduled days splits its hours
+    //    between them in proportion to the time spent; one with no blocks
+    //    at all falls back to the day it was clocked.
+    all.forEach(s => {
+      const empId = s.employee?.id || s.employee_id;
+      if (!empId) return;
+      const custId = s.customer?.id || s.customer_id || null;
+      const seed = { employee: s.employee || empById[empId], customer: s.customer || null };
+      const blocks = (s.work_blocks || []).map(b => blockIndex.get(b.id)).filter(Boolean);
+      const billable = shiftBillableMs(s);
+      const byDay = {};
+      blocks.forEach(info => { byDay[info.dateKey] = (byDay[info.dateKey] || 0) + info.ms; });
+      const days = Object.keys(byDay);
+      const totalBlockMs = days.reduce((n, d) => n + byDay[d], 0);
+      const landing = days.length ? days : [localDayKey(s.start_time)];
+      landing.forEach(day => {
+        const c = ensure(empId, day, custId, seed);
+        if (!c) return;
+        c.shifts.push(s);
+        c.clockedMs += days.length && totalBlockMs > 0
+          ? billable * (byDay[day] / totalBlockMs)
+          : billable;
+        if (!s.end_time) c.running = true;
+        if (s.added_manually) c.handAdded = true;
+      });
+      blocks.forEach(info => {
+        const c = ensure(empId, info.dateKey, custId, seed);
+        addJob(c, {
+          unitId: info.unitId, partyId: info.partyId, assignmentId: info.assignmentId,
+          label: info.label, size: info.size, type: info.type, clocked: true, assigned: false,
+        });
+      });
+    });
+
+    // 3. APARTMENTS THEY WERE IN ON SOMEONE ELSE'S BLOCK. A joiner never
+    //    gets a work_blocks row of their own, so without this their card
+    //    lists nothing and there is no job to hang their pay on -- the
+    //    exact case of two people on one apartment this screen is for.
+    Object.entries(joinedByEmp).forEach(([empId, infos]) => {
+      infos.forEach(info => {
+        const c = ensure(empId, info.dateKey, info.custId, {});
+        addJob(c, {
+          unitId: info.unitId, partyId: info.partyId, assignmentId: info.assignmentId,
+          label: info.label, size: info.size, type: info.type, clocked: true, assigned: false, joined: true,
+        });
+      });
+    });
+
+    // 4. ANYTHING THAT REACHES THEM ONLY THROUGH A PAY ROW: a hand-added
+    //    shift, or someone marking on another cleaner's card that the job
+    //    was split with them. Money already entered must never be hidden
+    //    by a card failing to exist.
+    (payList || []).forEach(r => {
+      if (!r.employee_id || !r.work_date) return;
+      const c = ensure(r.employee_id, r.work_date, r.customer_id, {});
+      if (!c || !r.unit_id) return;
+      const u = unitMeta[r.unit_id];
+      const bd = u?.bedrooms, ba = u?.bathrooms;
+      addJob(c, {
+        unitId: r.unit_id, partyId: null, assignmentId: r.assignment_id || null,
+        label: u?.label || 'Apartment',
+        size: (bd != null && ba != null) ? `${bd}x${ba}` : null,
+        type: null, fromPayOnly: true,
+      });
+    });
+
+    let list = Array.from(out.values());
+    // The same filters the rest of the screen uses. Without these, filtering
+    // to one cleaner would still show everyone's scheduled work.
+    if (filterCleaners && filterCleaners.size) list = list.filter(c => filterCleaners.has(c.empId));
+    if (filterProperties && filterProperties.size) list = list.filter(c => c.custId && filterProperties.has(c.custId));
+    list.forEach(c => c.jobs.sort((a, b) => naturalCompare(a.label, b.label)));
+    // Newest day first, then cleaner.
+    list.sort((a, b) => (a.day < b.day ? 1 : a.day > b.day ? -1 : 0)
+      || naturalCompare(a.employee?.name || '', b.employee?.name || ''));
+    return list;
+  }, [sched, all, blockIndex, joinedByEmp, payList, unitMeta, empById, empNames, filterCleaners, filterProperties]);
+
+  const visible = onlyAdded ? cards.filter(c => c.handAdded) : cards;
+
+  // The per-size pay tiers already in each property's price book
+  // (__aptpay__:3x2). Read so a per-job row can fill itself in with what
+  // you normally pay for that size, instead of asking you to remember.
+  useEffect(() => { (async () => {
+    const custIds = Array.from(new Set(done.map(s => s.customer?.id || s.customer_id).filter(Boolean)));
+    if (!custIds.length) return;
+    const { data } = await supabase.from('invoice_price_book')
+      .select('customer_id, subsection_key, base_amount')
+      .in('customer_id', custIds)
+      .like('subsection_key', '__aptpay__:%');
+    const m = {};
+    (data || []).forEach(r => {
+      const size = String(r.subsection_key).split('__aptpay__:')[1];
+      if (size) m[`${r.customer_id}:${size}`] = Number(r.base_amount) || 0;
+    });
+    setSizeRates(m);
+  })(); /* eslint-disable-next-line */ }, [done.length]);
 
   const crewByJob = React.useMemo(() => {
     const m = new Map();
@@ -18044,181 +18309,33 @@ function ShiftPayView({ shifts, currentEmployee, onReload, onAddShift, onOpenShi
     return m;
   }, [blockIndex, partsByBlock, payList, empNames]);
 
-  // WHO THE JOB WAS GIVEN TO.
-  //
-  // Keyed by APARTMENT AND DAY, not only by the block's assignment_id.
-  // That column is filled in only when a cleaner starts from the
-  // assignment itself -- start ad-hoc by tapping a bedroom and it is
-  // null, and then nothing about who was assigned could be found at all.
-  // The block's own id is still used when it has one, since that link is
-  // definite; the unit+day match is the fallback that stops the line
-  // disappearing whenever someone takes the quick route in.
-  const [assignedByJob, setAssignedByJob] = useState({});
-  useEffect(() => { (async () => {
-    const infos = Array.from(blockIndex.values()).filter(b => b.unitId);
-    const unitIds = Array.from(new Set(infos.map(b => b.unitId)));
-    if (!unitIds.length) { setAssignedByJob({}); return; }
-    // 1. Which assignments touch these apartments.
-    const tgt = [];
-    for (let i = 0; i < unitIds.length; i += 200) {
-      // assigned_to comes along too. THERE ARE TWO WAYS A CLEANER GETS
-      // PUT ON A JOB and this only read one of them:
-      //   assignment_assignees        the job-level Assign picker
-      //   assignment_targets.assigned_to  the per-bedroom dropdown
-      // Assign from the dropdown and nothing was written to the table
-      // this screen was looking at, so the Assigned line came back empty
-      // -- which is exactly what it was doing.
-      const { data, error } = await supabase.from('assignment_targets')
-        .select('assignment_id, unit_id, party_id, assigned_to, assignedTo:employees!assigned_to(id, name), assignment:assignments!inner(id, scheduled_date, deleted_at, active)')
-        .in('unit_id', unitIds.slice(i, i + 200));
-      if (error) { console.warn('[pay] assignment target read failed', error); return; }
-      tgt.push(...(data || []));
-    }
-    const live = tgt.filter(t => t.assignment && !t.assignment.deleted_at && t.assignment.active !== false);
-    // 2. Who is named on them.
-    const asgIds = Array.from(new Set(live.map(t => t.assignment_id).filter(Boolean)));
-    const people = {};
-    for (let i = 0; i < asgIds.length; i += 200) {
-      const { data, error } = await supabase.from('assignment_assignees')
-        .select('assignment_id, employee_id, status, employee:employees(id, name)')
-        .in('assignment_id', asgIds.slice(i, i + 200));
-      if (error) { console.warn('[pay] assignee read failed', error); return; }
-      (data || []).forEach(r => {
-        if (r.status === 'declined') return;
-        (people[r.assignment_id] = people[r.assignment_id] || []).push({
-          id: r.employee_id, name: r.employee?.name || 'Cleaner',
-        });
-      });
-    }
-    // 3. Hang them on apartment+day.
+  // WHO THE JOB WAS GIVEN TO, straight off the schedule. This used to be
+  // built from work blocks, which meant the Assigned line could only ever
+  // appear beside an apartment somebody had already clocked into -- the
+  // same closed loop that hid the jobs themselves.
+  const assignedByJob = React.useMemo(() => {
     const out = {};
-    infos.forEach(b => {
-      const key = `${b.dateKey}::${b.unitId}::${b.partyId || ''}`;
-      // The bedroom is NOT part of the match. An assignment is often
-      // recorded for the whole apartment while the block is on one
-      // bedroom, or the other way about, and requiring both to agree
-      // dropped the row. The rest of this screen already works per
-      // apartment, so this does too.
-      const hits = live.filter(t =>
-        t.unit_id === b.unitId
-        && (t.assignment_id === b.assignmentId || t.assignment?.scheduled_date === b.dateKey));
-      const seen = new Set(); const names = [];
-      const add = (id, name) => {
-        if (!id || seen.has(id)) return;
-        seen.add(id); names.push({ id, name: name || 'Cleaner' });
-      };
-      hits.forEach(t => {
-        // Both routes, merged. Whichever way the job was handed out, the
-        // person shows up here.
-        (people[t.assignment_id] || []).forEach(pp => add(pp.id, pp.name));
-        if (t.assigned_to) add(t.assigned_to, t.assignedTo?.name);
-      });
-      if (names.length) out[key] = names;
+    (sched.jobs || []).forEach(j => {
+      if (!j.people.length) return;
+      const k = `${j.day}::${j.unitId}::`;
+      const seen = new Set((out[k] || []).map(p => p.id));
+      out[k] = (out[k] || []).concat(j.people
+        .filter(p => p.id && !seen.has(p.id))
+        .map(p => ({ id: p.id, name: p.name || empNames[p.id] || 'Cleaner' })));
     });
-    setAssignedByJob(out);
-  })(); /* eslint-disable-next-line */ }, [blockIndex, payList]);
+    return out;
+  }, [sched, empNames]);
 
-  // The per-size pay tiers already in each property's price book
-  // (__aptpay__:3x2). Read so a per-job row can fill itself in with what
-  // you normally pay for that size, instead of asking you to remember.
-  useEffect(() => { (async () => {
-    const custIds = Array.from(new Set(done.map(s => s.customer?.id || s.customer_id).filter(Boolean)));
-    if (!custIds.length) return;
-    const { data } = await supabase.from('invoice_price_book')
-      .select('customer_id, subsection_key, base_amount')
-      .in('customer_id', custIds)
-      .like('subsection_key', '__aptpay__:%');
-    const m = {};
-    (data || []).forEach(r => {
-      const size = String(r.subsection_key).split('__aptpay__:')[1];
-      if (size) m[`${r.customer_id}:${size}`] = Number(r.base_amount) || 0;
-    });
-    setSizeRates(m);
-  })(); /* eslint-disable-next-line */ }, [done.length]);
-
-  // What this shift costs, and how that figure was arrived at. Per-job
-  // rows win over a whole-shift flat amount, which wins over the clock —
-  // the same order the P&L uses, so the two cannot disagree.
-  // WHICH CARD OWNS WHICH APARTMENT.
-  //
-  // employee_pay_days is keyed by employee + DAY + property + apartment,
-  // with no shift in it. So when a cleaner has two shifts on one day and
-  // both touch the same apartment, both cards resolved the SAME pay row:
-  // the apartment appeared twice, and -- the part that actually costs
-  // money -- Payroll at the top added it twice, because it sums per
-  // shift. The earliest shift of the day that touches an apartment owns
-  // it; later ones leave it out. Same for a whole-shift flat amount,
-  // which is keyed by day and property and was double-counted the same
-  // way.
-  const claims = React.useMemo(() => {
-    const unitOwner = new Map();
-    const flatOwner = new Map();
-    const byTime = [...visible].sort((a, b) =>
-      new Date(a.start_time) - new Date(b.start_time));
-    byTime.forEach(s => {
-      const empId = s.employee?.id || s.employee_id;
-      const dateKey = localDayKey(s.start_time);
-      const custId = s.customer?.id || s.customer_id || null;
-      const fk = `${empId}::${dateKey}::${custId || ''}`;
-      if (!flatOwner.has(fk)) flatOwner.set(fk, s.id);
-      describeShift(s).forEach(j => {
-        const uk = `${empId}::${dateKey}::${j.unitId}::${j.partyId || ''}`;
-        if (!unitOwner.has(uk)) unitOwner.set(uk, s.id);
-      });
-    });
-    return { unitOwner, flatOwner };
-  }, [visible]);
-
-  const payFor = (s) => {
-    const empId = s.employee?.id || s.employee_id;
-    const dateKey = localDayKey(s.start_time);
-    const custId = s.customer?.id || s.customer_id || null;
-    let jobs = describeShift(s);
-    // Apartments they were in on SOMEONE ELSE'S block. A joiner never gets
-    // a work_blocks row of their own, so without this their card lists
-    // nothing and there is no job to hang their pay on -- the exact case
-    // of two people on one apartment that this whole screen is for.
-    (joinedByEmp[empId] || [])
-      .filter(info => info.dateKey === dateKey && info.unitId)
-      .forEach(info => {
-        if (jobs.some(j => j.unitId === info.unitId && (j.partyId || null) === (info.partyId || null))) return;
-        jobs.push({
-          unitId: info.unitId, partyId: info.partyId, assignmentId: info.assignmentId,
-          label: info.label, size: info.size, type: info.type, joined: true,
-        });
-      });
-    // Apartments that reach them ONLY through a pay row: a hand-added
-    // shift, or -- the case this screen exists for -- someone marking on
-    // another cleaner's card that this job was split with them. Writing
-    // that row is what makes the job appear here, so the split shows on
-    // both sides rather than only on the card it was entered from.
-    {
-      const fromPay = payList
-        .filter(r => r.employee_id === empId && r.work_date === dateKey
-          && (r.customer_id || null) === custId && r.unit_id)
-        .map(r => {
-          const u = unitMeta[r.unit_id];
-          const bd = u?.bedrooms, ba = u?.bathrooms;
-          return {
-            unitId: r.unit_id, partyId: null, assignmentId: r.assignment_id || null,
-            label: u?.label || 'Apartment',
-            size: (bd != null && ba != null) ? `${bd}x${ba}` : null,
-            type: null, fromPayOnly: true,
-          };
-        });
-      fromPay.forEach(fp => {
-        if (jobs.some(j => j.unitId === fp.unitId)) return;
-        jobs.push(fp);
-      });
-    }
-    // Drop apartments an earlier shift today already owns.
-    jobs = jobs.filter(j =>
-      claims.unitOwner.get(`${empId}::${dateKey}::${j.unitId}::${j.partyId || ''}`) === s.id);
+  // What this card costs, and how that figure was arrived at. Per-job rows
+  // win over a flat amount for the day, which wins over the clock -- the
+  // same order the P&L uses, so the two cannot disagree.
+  const payFor = (c) => {
+    const { empId, day: dateKey, custId } = c;
+    const jobs = c.jobs;
     const jobRows = jobs.map(j => {
-      // Any row for this APARTMENT today, whatever assignment it was
+      // Any row for this APARTMENT on this day, whatever assignment it was
       // filed under. Keying the lookup on the assignment too is what
-      // produced "$0 on one card, $90 on the other" for one apartment:
-      // two assignments, two rows, each editor seeing only its own.
+      // produced "$0 on one card, $90 on the other" for one apartment.
       const rows = payList.filter(r =>
         r.employee_id === empId && r.work_date === dateKey
         && (r.customer_id || null) === custId
@@ -18227,38 +18344,45 @@ function ShiftPayView({ shifts, currentEmployee, onReload, onAddShift, onOpenShi
       return { job: j, row, allRows: rows };
     });
     const perJob = jobRows.filter(r => r.row && r.row.flat_amount != null);
+    const common = { jobRows, jobs, empId, dateKey, custId, payListRef: payList };
     if (perJob.length) {
       return {
-        mode: 'job', total: perJob.reduce((n, r) => n + Number(r.row.flat_amount || 0), 0),
-        jobRows, jobs, empId, dateKey, custId, payListRef: payList,
+        ...common, mode: 'job',
+        total: perJob.reduce((n, r) => n + Number(r.row.flat_amount || 0), 0),
         paid: perJob.every(r => !!r.row.paid_at) && perJob.length > 0,
       };
     }
-    const ownsFlat = claims.flatOwner.get(`${empId}::${dateKey}::${custId || ''}`) === s.id;
-    const flat = ownsFlat ? payRows[payRowKey(empId, dateKey, custId, null, null)] : null;
+    const flat = payRows[payRowKey(empId, dateKey, custId, null, null)];
     if (flat && flat.flat_amount != null) {
-      return { mode: 'flat', total: Number(flat.flat_amount), jobRows, jobs, empId, dateKey, custId, payListRef: payList, paid: !!flat.paid_at, flatRow: flat };
+      return { ...common, mode: 'flat', total: Number(flat.flat_amount), paid: !!flat.paid_at, flatRow: flat };
     }
-    // Nothing of its own left and the day's flat amount belongs to an
-    // earlier shift: say so rather than quietly pricing this one by the
-    // clock, which would put money on screen that nobody entered.
-    if (jobs.length === 0 && !ownsFlat) {
-      return { mode: 'covered', total: 0, jobRows, jobs, empId, dateKey, custId, payListRef: payList, paid: false, flatRow: null };
+    const rate = Number(c.employee?.pay_rate_hourly) || 0;
+    const hrs = c.clockedMs / 3600000;
+    if (hrs <= 0) {
+      // Assigned, but nothing clocked and nothing entered. Worth $0 until
+      // Allan says otherwise -- never a guessed figure.
+      return { ...common, mode: 'unworked', total: 0, rate, hours: 0, paid: false, flatRow: null };
     }
-    const rate = Number(s.employee?.pay_rate_hourly) || 0;
-    const hrs = shiftBillableMs(s) / 3600000;
-    return { mode: 'hourly', total: rate > 0 ? hrs * rate : 0, rate, hours: hrs, jobRows, jobs, empId, dateKey, custId, payListRef: payList, paid: !!flat?.paid_at, flatRow: flat || null };
+    return { ...common, mode: 'hourly', total: rate > 0 ? hrs * rate : 0, rate, hours: hrs, paid: false, flatRow: null };
   };
 
-  const payrollTotal = visible.reduce((n, s) => n + payFor(s).total, 0);
+  const payrollTotal = visible.reduce((n, c) => n + payFor(c).total, 0);
+  const shiftCount = new Set(visible.flatMap(c => c.shifts.map(s => s.id))).size;
+  const unworkedCount = visible.reduce((n, c) =>
+    n + c.jobs.filter(j => j.assigned && !j.clocked).length, 0);
 
   return (
     <div>
       <div className="flex items-center justify-between gap-3 mb-3 flex-wrap">
         <div className="flex items-center gap-2 flex-wrap">
           <span className="text-xs font-mono uppercase tracking-wider text-stone-500">
-            {visible.length} shift{visible.length === 1 ? '' : 's'}
+            {visible.length} to pay · {shiftCount} shift{shiftCount === 1 ? '' : 's'}
           </span>
+          {unworkedCount > 0 && (
+            <span className="text-[10px] font-mono uppercase tracking-wider text-amber-700">
+              {unworkedCount} assigned, not clocked
+            </span>
+          )}
           <button onClick={() => setOnlyAdded(v => !v)}
             className={`px-2.5 py-1 rounded-full text-[10px] font-mono uppercase tracking-wider border ${onlyAdded ? 'bg-amber-100 border-amber-300 text-amber-900' : 'bg-white border-stone-300 text-stone-600'}`}>
             Added by me
@@ -18276,68 +18400,82 @@ function ShiftPayView({ shifts, currentEmployee, onReload, onAddShift, onOpenShi
       </div>
 
       {loadingPay && <div className="text-xs font-mono text-stone-400 mb-2">Loading pay…</div>}
+      {sched.error && (
+        <div className="text-xs font-mono text-red-700 mb-2">
+          Could not read the schedule, so this is clocked work only: {sched.error}
+        </div>
+      )}
 
       {visible.length === 0 ? (
         <div className="py-8 px-4 border-2 border-dashed border-stone-200 rounded-2xl text-center text-sm text-stone-500">
-          {onlyAdded ? 'No hand-added shifts in this range.' : 'No finished shifts in this range.'}
+          {onlyAdded ? 'No hand-added shifts in this range.' : 'Nothing scheduled or clocked in this range.'}
         </div>
       ) : (
         <div className="space-y-2.5">
-          {visible.map(s => {
-            const p = payFor(s);
-            const ghost = !!s.added_manually;
-            const isEditing = editing === s.id;
+          {visible.map(c => {
+            const p = payFor(c);
+            const isEditing = editing === c.id;
+            const noShift = c.shifts.length === 0;
             return (
-              <div key={s.id}
-                className={`bg-white rounded-2xl p-4 border ${ghost ? 'border-dashed border-amber-400' : 'border-stone-200'}`}>
+              <div key={c.id}
+                className={`bg-white rounded-2xl p-4 border ${c.handAdded ? 'border-dashed border-amber-400' : noShift ? 'border-dashed border-stone-300' : 'border-stone-200'}`}>
                 <div className="flex items-baseline justify-between gap-3 mb-1.5">
-                  <button onClick={() => onOpenShift && onOpenShift(s)}
+                  <button onClick={() => onOpenShift && c.shifts[0] && onOpenShift(c.shifts[0])}
                     className="text-sm font-semibold text-stone-900 hover:underline text-left">
-                    {s.employee?.name || 'Cleaner'}
+                    {c.employee?.name || 'Cleaner'}
                   </button>
+                  {/* THE SCHEDULED DAY. Not the day anyone clocked in -- that
+                     is what used to put one job on two different dates in
+                     two different screens. */}
                   <span className="text-[10px] font-mono text-stone-500 flex-shrink-0">
-                    {new Date(s.start_time).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}
+                    {new Date(c.day + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}
                   </span>
                 </div>
 
-                {ghost && (
-                  <div className="inline-flex items-center mb-2 px-2 py-0.5 rounded-full bg-amber-100 border border-amber-300">
-                    <span className="text-[9px] font-mono font-bold uppercase tracking-wide text-amber-900">
+                <div className="flex items-center gap-1.5 flex-wrap mb-2">
+                  {c.handAdded && (
+                    <span className="px-2 py-0.5 rounded-full bg-amber-100 border border-amber-300 text-[9px] font-mono font-bold uppercase tracking-wide text-amber-900">
                       Added by you · no clock-in
                     </span>
-                  </div>
-                )}
+                  )}
+                  {c.running && (
+                    <span className="px-2 py-0.5 rounded-full bg-emerald-100 border border-emerald-300 text-[9px] font-mono font-bold uppercase tracking-wide text-emerald-900">
+                      Still on the clock
+                    </span>
+                  )}
+                </div>
 
-                <div className="flex items-center gap-1.5 text-[11px] font-mono text-stone-600 mb-2">
+                <div className="flex items-center gap-1.5 text-[11px] font-mono text-stone-600 mb-2 flex-wrap">
                   <Clock size={11} className="text-stone-400" />
-                  {fmtClock(s.start_time)} <span className="text-stone-400">→</span> {fmtClock(s.end_time)}
-                  <span className="text-stone-400">·</span>
-                  <span className="text-stone-900 font-semibold">{fmtTimeShort(shiftBillableMs(s))}</span>
+                  {noShift ? (
+                    <span className="text-amber-800">No shift — assigned only</span>
+                  ) : (<>
+                    {c.shifts.map((s, i) => (
+                      <span key={s.id} className="whitespace-nowrap">
+                        {i > 0 && <span className="text-stone-300 mr-1.5">+</span>}
+                        {fmtClock(s.start_time)} <span className="text-stone-400">→</span> {s.end_time ? fmtClock(s.end_time) : 'now'}
+                      </span>
+                    ))}
+                    <span className="text-stone-400">·</span>
+                    <span className="text-stone-900 font-semibold">{fmtTimeShort(c.clockedMs)}</span>
+                  </>)}
                 </div>
 
                 <div className="space-y-1 mb-2.5">
                   {p.jobs.length === 0 ? (
                     <div className="text-xs text-stone-500">
-                      {s.customer?.name || 'No property'} · nothing recorded as cleaned
+                      {c.customer?.name || 'No property'} · nothing recorded as cleaned
                     </div>
                   ) : p.jobs.map((j, i) => {
-                    // Everyone who had a block at this apartment that day,
-                    // this cleaner aside.
                     // ASSIGNED IS THE HEADLINE; CLOCKED-IN IS THE FOOTNOTE.
-                    //
-                    // This had it the other way round, and that is wrong for
-                    // paying people: only one of two assigned cleaners often
-                    // clocks in, and both still get paid. Leading with who
-                    // turned up hid exactly the pairs Allan was looking for.
-                    // So the badge counts ASSIGNED, the names are the people
-                    // the job was given to, and who actually clocked in is a
-                    // quieter note underneath.
+                    // Only one of two assigned cleaners often clocks in, and
+                    // both still get paid, so the badge counts ASSIGNED and
+                    // who turned up is a quieter note underneath.
                     const jobKey = `${p.dateKey}::${j.unitId}::${j.partyId || ''}`;
-                    const crew = crewByJob.get(jobKey);
-                    const assigned = assignedByJob[jobKey] || [];
+                    const crew = crewByJob.get(jobKey) || crewByJob.get(`${p.dateKey}::${j.unitId}::`);
+                    const assigned = assignedByJob[`${p.dateKey}::${j.unitId}::`] || [];
                     const assignedNames = assigned.map(a =>
-                      (crew && crew.has(a.id)) ? a.name : `${a.name} — didn’t clock in`);
-                    // People who were in there without being named on it.
+                      (crew && crew.has(a.id)) ? a.name : `${a.name} — didn't clock in`);
                     const unassignedCrew = crew
                       ? Array.from(crew.entries())
                           .filter(([id]) => id !== p.empId && !assigned.some(a => a.id === id))
@@ -18346,18 +18484,15 @@ function ShiftPayView({ shifts, currentEmployee, onReload, onAddShift, onOpenShi
                     const others = crew
                       ? Array.from(crew.entries()).filter(([id]) => id !== p.empId).map(([, n]) => n)
                       : [];
-                    // What this apartment cost across EVERYONE, so a split
-                    // can be checked at a glance rather than added up by
-                    // flipping between cards.
-                    const jobRows = payList.filter(r =>
+                    const rowsForJob = payList.filter(r =>
                       r.work_date === p.dateKey && (r.customer_id || null) === p.custId
                       && r.unit_id === j.unitId && (r.assignment_id || null) === (j.assignmentId || null)
                       && r.flat_amount != null);
-                    const jobTotal = jobRows.reduce((n, r) => n + Number(r.flat_amount || 0), 0);
+                    const jobTotal = rowsForJob.reduce((n, r) => n + Number(r.flat_amount || 0), 0);
                     return (
                       <div key={`${j.unitId}-${i}`}>
                         <div className="flex items-center gap-1.5 flex-wrap">
-                          <span className="text-xs text-stone-800">{s.customer?.name} · {j.label}</span>
+                          <span className="text-xs text-stone-800">{c.customer?.name} · {j.label}</span>
                           {j.size && (
                             <span className="px-1.5 py-px rounded-full bg-stone-100 border border-stone-300 text-[9px] font-mono text-stone-700">{j.size}</span>
                           )}
@@ -18366,9 +18501,13 @@ function ShiftPayView({ shifts, currentEmployee, onReload, onAddShift, onOpenShi
                               {assignmentTypeLabel(j.type)}
                             </span>
                           )}
-                          {/* Counts ASSIGNED, not clock-ins. Two people on
-                             a job where only one clocked in is still a job
-                             for two, and that is the case being paid. */}
+                          {/* The job was given to them and no hours exist on
+                             it. This is the line the whole screen was missing. */}
+                          {j.assigned && !j.clocked && (
+                            <span className="px-1.5 py-px rounded-full bg-amber-100 border border-amber-300 text-[9px] font-mono font-bold uppercase tracking-wide text-amber-900">
+                              Assigned · no hours
+                            </span>
+                          )}
                           {assigned.length > 1 && (
                             <span className="px-1.5 py-px rounded-full bg-violet-50 border border-violet-300 text-[9px] font-mono font-bold uppercase tracking-wide text-violet-900 inline-flex items-center gap-1">
                               <Users size={8} /> Assigned &times;{assigned.length}
@@ -18383,17 +18522,14 @@ function ShiftPayView({ shifts, currentEmployee, onReload, onAddShift, onOpenShi
                         {assignedNames.length > 0 && (
                           <div className="text-[10px] text-violet-900 mt-0.5 ml-0.5">
                             Assigned: {assignedNames.join(', ')}
-                            {assigned.length > 1 && jobRows.length > 1 && (
-                              <> &middot; <span className="font-mono">{fmtMoney(jobTotal)}</span> across {jobRows.length}</>
+                            {assigned.length > 1 && rowsForJob.length > 1 && (
+                              <> &middot; <span className="font-mono">{fmtMoney(jobTotal)}</span> across {rowsForJob.length}</>
                             )}
-                            {assigned.length > 1 && jobRows.length <= 1 && (
+                            {assigned.length > 1 && rowsForJob.length <= 1 && (
                               <> &middot; <span className="text-amber-800">only one of them is being paid for it</span></>
                             )}
                           </div>
                         )}
-                        {/* Anyone who was in there without being named on
-                           the job. Quieter, because it is the rarer case and
-                           not what the money hangs on. */}
                         {unassignedCrew.length > 0 && (
                           <div className="text-[10px] text-stone-500 mt-0.5 ml-0.5">
                             Also clocked in: {unassignedCrew.join(', ')}
@@ -18407,9 +18543,9 @@ function ShiftPayView({ shifts, currentEmployee, onReload, onAddShift, onOpenShi
                 {!isEditing ? (
                   <div className="flex items-center justify-between gap-2 pt-2.5 border-t border-stone-100 flex-wrap">
                     <span className="text-[9px] font-mono uppercase tracking-wider text-stone-500">
-                      {p.mode === 'covered' ? 'counted on an earlier shift today'
-                        : p.mode === 'job' ? `${p.jobRows.filter(r => r.row).length} job${p.jobRows.filter(r => r.row).length === 1 ? '' : 's'} · per job`
-                        : p.mode === 'flat' ? 'flat for the shift'
+                      {p.mode === 'job' ? `${p.jobRows.filter(r => r.row).length} job${p.jobRows.filter(r => r.row).length === 1 ? '' : 's'} · per job`
+                        : p.mode === 'flat' ? 'flat for the day'
+                        : p.mode === 'unworked' ? 'assigned · no hours yet'
                         : p.rate > 0 ? `${p.hours.toFixed(2)}h × ${fmtMoney(p.rate)} · hourly`
                         : 'no rate set'}
                     </span>
@@ -18420,14 +18556,14 @@ function ShiftPayView({ shifts, currentEmployee, onReload, onAddShift, onOpenShi
                         </span>
                       )}
                       <span className="font-mono text-[15px] font-semibold text-stone-900">{fmtMoney(p.total)}</span>
-                      <button onClick={() => setEditing(s.id)}
+                      <button onClick={() => setEditing(c.id)}
                         className="px-2.5 py-1.5 rounded-lg border border-stone-400 bg-white text-stone-700 hover:bg-stone-50 text-[11px] font-medium">
-                        Edit pay
+                        {p.mode === 'unworked' ? 'Set pay' : 'Edit pay'}
                       </button>
                     </div>
                   </div>
                 ) : (
-                  <PayEditor shift={s} p={p} sizeRates={sizeRates} busy={busy} setBusy={setBusy}
+                  <PayEditor card={c} p={p} sizeRates={sizeRates} busy={busy} setBusy={setBusy}
                     currentEmployee={currentEmployee}
                     splitCandidates={allCleaners} assignedByJob={assignedByJob}
                     onDone={async () => { setEditing(null); await loadPay(); onReload && onReload(); }}
@@ -18446,7 +18582,7 @@ function ShiftPayView({ shifts, currentEmployee, onReload, onAddShift, onOpenShi
 // figure against each apartment they cleaned — which is what Carriage
 // Cove needs, since a 3x2 move-out and a 1x1 standard on the same shift
 // are not the same money.
-function PayEditor({ shift, p, sizeRates, busy, setBusy, currentEmployee, splitCandidates = [], assignedByJob = {}, onDone, onCancel }) {
+function PayEditor({ card, p, sizeRates, busy, setBusy, currentEmployee, splitCandidates = [], assignedByJob = {}, onDone, onCancel }) {
   const [mode, setMode] = useState(p.mode === 'job' ? 'job' : 'hourly');
   const [amounts, setAmounts] = useState(() => {
     const m = {};
@@ -18463,8 +18599,10 @@ function PayEditor({ shift, p, sizeRates, busy, setBusy, currentEmployee, splitC
   // Hours x rate. The rate starts from their profile and the hours from
   // what they clocked; either can be edited, and the total recomputes
   // unless it has been typed over by hand.
-  const profileRate = Number(shift.employee?.pay_rate_hourly) || 0;
-  const clockedHours = shiftBillableMs(shift) / 3600000;
+  const profileRate = Number(card.employee?.pay_rate_hourly) || 0;
+  // Hours clocked toward THIS scheduled day, summed across however many
+  // shifts fed it -- a card is a cleaner-day now, not a single shift.
+  const clockedHours = (card.clockedMs || 0) / 3600000;
   const [rate, setRate] = useState(profileRate ? String(profileRate) : '');
   const [hours, setHours] = useState(clockedHours > 0 ? clockedHours.toFixed(2) : '');
   const [totalTouched, setTotalTouched] = useState(p.mode === 'flat');
@@ -18509,10 +18647,10 @@ function PayEditor({ shift, p, sizeRates, busy, setBusy, currentEmployee, splitC
     const k = `${job.unitId}:${job.assignmentId || ''}`;
     return n + (parseFloat(amounts[k]) || 0);
   }, 0);
-  const byClock = (Number(shift.employee?.pay_rate_hourly) || 0) * (shiftBillableMs(shift) / 3600000);
+  const byClock = (Number(card.employee?.pay_rate_hourly) || 0) * ((card.clockedMs || 0) / 3600000);
 
   const save = async () => {
-    setErr(null); setBusy(shift.id);
+    setErr(null); setBusy(card.id);
     const common = { empId: p.empId, dateKey: p.dateKey, custId: p.custId, createdBy: currentEmployee?.id || null };
     if (mode === 'job') {
       for (const { job } of p.jobRows) {
@@ -18572,7 +18710,7 @@ function PayEditor({ shift, p, sizeRates, busy, setBusy, currentEmployee, splitC
   };
 
   const togglePaid = async () => {
-    setBusy(shift.id);
+    setBusy(card.id);
     const stamp = p.paid ? null : new Date().toISOString();
     const common = { empId: p.empId, dateKey: p.dateKey, custId: p.custId, createdBy: currentEmployee?.id || null };
     if (p.mode === 'job' && p.jobRows.some(r => r.row)) {
@@ -18716,8 +18854,8 @@ function PayEditor({ shift, p, sizeRates, busy, setBusy, currentEmployee, splitC
         <div className="mb-3 p-3 rounded-xl border border-stone-200">
           <div className="flex items-center gap-2 flex-wrap">
             <div className="flex items-center gap-1.5">
-              <label className="text-[11px] text-stone-600" htmlFor={`h-${shift.id}`}>Hours</label>
-              <input id={`h-${shift.id}`} type="number" step="0.01" min="0" value={hours}
+              <label className="text-[11px] text-stone-600" htmlFor={`h-${card.id}`}>Hours</label>
+              <input id={`h-${card.id}`} type="number" step="0.01" min="0" value={hours}
                 onChange={e => { setHours(e.target.value); setTotalTouched(false); }}
                 placeholder="0.00"
                 className="w-16 px-2 py-1.5 rounded-lg border border-stone-300 bg-white text-right font-mono text-[13px]" />
@@ -18742,8 +18880,8 @@ function PayEditor({ shift, p, sizeRates, busy, setBusy, currentEmployee, splitC
           </div>
           <div className="text-[10px] text-stone-500 mt-2">
             {profileRate > 0
-              ? <>Rate from {shift.employee?.name || 'their'} profile. </>
-              : <>No hourly rate on {shift.employee?.name || 'their'} profile &mdash; type one here. </>}
+              ? <>Rate from {card.employee?.name || 'their'} profile. </>
+              : <>No hourly rate on {card.employee?.name || 'their'} profile &mdash; type one here. </>}
             {clockedHours > 0 && (
               <button type="button"
                 onClick={() => { setHours(clockedHours.toFixed(2)); setTotalTouched(false); }}
@@ -18759,15 +18897,15 @@ function PayEditor({ shift, p, sizeRates, busy, setBusy, currentEmployee, splitC
       {err && <div className="mb-2 p-2 rounded-lg bg-red-50 border border-red-200 text-[11px] text-red-800">{err}</div>}
 
       <div className="flex items-center gap-2 flex-wrap">
-        <button onClick={save} disabled={busy === shift.id}
+        <button onClick={save} disabled={busy === card.id}
           className="px-3 py-2 rounded-xl bg-stone-900 hover:bg-stone-800 disabled:opacity-50 text-stone-50 text-xs font-medium">
-          {busy === shift.id ? 'Saving…' : 'Save pay'}
+          {busy === card.id ? 'Saving…' : 'Save pay'}
         </button>
         <button onClick={onCancel}
           className="px-3 py-2 rounded-xl border border-stone-300 bg-white text-stone-700 text-xs">
           Cancel
         </button>
-        <button onClick={togglePaid} disabled={busy === shift.id}
+        <button onClick={togglePaid} disabled={busy === card.id}
           className={`ml-auto px-3 py-2 rounded-xl text-xs font-medium disabled:opacity-50 ${p.paid ? 'bg-emerald-50 border border-emerald-300 text-emerald-800' : 'border border-stone-300 bg-white text-stone-700'}`}>
           {p.paid ? 'Paid — undo' : 'Mark paid'}
         </button>
@@ -39550,10 +39688,20 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit, onShift
       const rec = byId[a.id];
       if (t.priority) rec.priorityCount += 1;
       if (t.status !== 'done') rec.open = true;   // open if anything on it is
-      // Finished on this date, or due on this date — either makes it a
-      // candidate for "the cleaning this card is showing".
-      if (dayOf(t.completed_at) === date
-        || String(a.scheduled_date || '').slice(0, 10) === date) {
+      // THE SCHEDULED DATE IS THE ONLY DATE.
+      //
+      // This used to accept "finished on this date" as well, and that is
+      // what let one cleaning sit on two different days in two different
+      // screens: a job booked Thursday and closed out Friday matched here
+      // on Friday while Pay matched it on Thursday. If a cleaning slips a
+      // day, Allan moves it on the schedule — nothing re-dates itself.
+      //
+      // completed_at survives only as a fallback for a job that has no
+      // scheduled date at all, which is legacy data rather than a slip.
+      // Without that, those jobs would match no day and quietly lose their
+      // Edit and Delete buttons.
+      const sched = String(a.scheduled_date || '').slice(0, 10);
+      if (sched ? sched === date : dayOf(t.completed_at) === date) {
         (onThisDay[t.unit_id] = onThisDay[t.unit_id] || new Set()).add(a.id);
       }
       if (unitAssignmentWins(rec, m[t.unit_id])) m[t.unit_id] = rec;

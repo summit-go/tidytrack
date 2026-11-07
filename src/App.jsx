@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "nov6-tap272";
+const BUILD_TAG = "nov6-tap273";
 // ---- Hidden for now, at Allan's request -------------------------------
 // Both of these are switches rather than deletions: the code stays whole
 // and working, so turning either back on is this one line. Flip to true.
@@ -18166,10 +18166,14 @@ function ShiftPayView({ shifts, currentEmployee, onReload, onAddShift, onOpenShi
         if (prev && !prev.type && job.type) prev.type = job.type;
         if (prev && job.clocked) prev.clocked = true;
         if (prev && job.assigned) prev.assigned = true;
+        // Hours belong to the APARTMENT, not to the block, so several
+        // blocks on one apartment add up. This is what lets a single job
+        // be paid by the hour while its neighbours are paid per job.
+        if (prev && job.clockedMs) prev.clockedMs = (prev.clockedMs || 0) + job.clockedMs;
         return;
       }
       c._jobSeen.add(jk);
-      c.jobs.push({ ...job });
+      c.jobs.push({ ...job, clockedMs: job.clockedMs || 0 });
     };
 
     // 1. THE SCHEDULE. Every cleaning booked in the window, on the card of
@@ -18218,6 +18222,7 @@ function ShiftPayView({ shifts, currentEmployee, onReload, onAddShift, onOpenShi
         addJob(c, {
           unitId: info.unitId, partyId: info.partyId, assignmentId: info.assignmentId,
           label: info.label, size: info.size, type: info.type, clocked: true, assigned: false,
+          clockedMs: info.ms,
         });
       });
     });
@@ -18489,9 +18494,16 @@ function ShiftPayView({ shifts, currentEmployee, onReload, onAddShift, onOpenShi
                       && r.unit_id === j.unitId && (r.assignment_id || null) === (j.assignmentId || null)
                       && r.flat_amount != null);
                     const jobTotal = rowsForJob.reduce((n, r) => n + Number(r.flat_amount || 0), 0);
+                    // What THIS cleaner is getting for this one apartment.
+                    // The card used to show a single figure at the bottom
+                    // and nothing per job, so a day of four cleanings gave
+                    // no way to see which of them the money was for.
+                    const myRow = p.jobRows.find(r => r.job.unitId === j.unitId
+                      && (r.job.partyId || null) === (j.partyId || null))?.row;
                     return (
                       <div key={`${j.unitId}-${i}`}>
-                        <div className="flex items-center gap-1.5 flex-wrap">
+                        <div className="flex items-start justify-between gap-2">
+                        <div className="flex items-center gap-1.5 flex-wrap min-w-0">
                           <span className="text-xs text-stone-800">{c.customer?.name} · {j.label}</span>
                           {j.size && (
                             <span className="px-1.5 py-px rounded-full bg-stone-100 border border-stone-300 text-[9px] font-mono text-stone-700">{j.size}</span>
@@ -18518,6 +18530,12 @@ function ShiftPayView({ shifts, currentEmployee, onReload, onAddShift, onOpenShi
                               <Users size={8} /> Shared &times;{others.length + 1}
                             </span>
                           )}
+                        </div>
+                        {myRow?.flat_amount != null && (
+                          <span className="font-mono text-[11px] font-semibold text-stone-900 flex-shrink-0 mt-0.5">
+                            {fmtMoney(Number(myRow.flat_amount))}
+                          </span>
+                        )}
                         </div>
                         {assignedNames.length > 0 && (
                           <div className="text-[10px] text-violet-900 mt-0.5 ml-0.5">
@@ -18583,7 +18601,13 @@ function ShiftPayView({ shifts, currentEmployee, onReload, onAddShift, onOpenShi
 // Cove needs, since a 3x2 move-out and a 1x1 standard on the same shift
 // are not the same money.
 function PayEditor({ card, p, sizeRates, busy, setBusy, currentEmployee, splitCandidates = [], assignedByJob = {}, onDone, onCancel }) {
-  const [mode, setMode] = useState(p.mode === 'job' ? 'job' : 'hourly');
+  // A card with nothing on it yet opens job-by-job, because that is what
+  // an assigned-but-unclocked day needs. A card that already has a flat
+  // or hourly amount opens where it was left: saving in job mode clears
+  // the day's flat amount, so landing there by default would let an
+  // accidental Save wipe money that was already entered.
+  const [mode, setMode] = useState(
+    (p.mode === 'job' || p.mode === 'unworked') ? 'job' : 'hourly');
   const [amounts, setAmounts] = useState(() => {
     const m = {};
     p.jobRows.forEach(({ job, row }) => {
@@ -18621,6 +18645,44 @@ function PayEditor({ card, p, sizeRates, busy, setBusy, currentEmployee, splitCa
     return init;
   });
   const [divide, setDivide] = useState({});
+  // HOW EACH CLEANING IS PRICED, chosen per job rather than per card.
+  //
+  // The mode switch at the top was all-or-nothing, which was fine when a
+  // card was one shift. A card is now a whole day, and a day routinely
+  // holds both: a move-out at a flat rate beside a touch-up paid by the
+  // hour. 'hourly' here is a CALCULATOR -- it fills the amount box next
+  // to it, and that amount is still the only thing saved, so nothing
+  // downstream has to learn a second way of storing money.
+  const [basis, setBasis] = useState({});      // jobKey -> 'job' | 'hourly'
+  const [jobHours, setJobHours] = useState({});
+  const [jobRates, setJobRates] = useState({});
+  const jobClockedHours = (job) => (job.clockedMs || 0) / 3600000;
+  const setJobBasis = (k, job, b) => {
+    setBasis(prev => ({ ...prev, [k]: b }));
+    if (b !== 'hourly') return;
+    // Seed from what they clocked ON THIS APARTMENT and their profile rate,
+    // so the usual case needs no typing at all.
+    setJobHours(prev => prev[k] != null ? prev : { ...prev, [k]: jobClockedHours(job).toFixed(2) });
+    setJobRates(prev => prev[k] != null ? prev : { ...prev, [k]: profileRate ? String(profileRate) : '' });
+  };
+  useEffect(() => {
+    setAmounts(prev => {
+      let next = prev, changed = false;
+      Object.keys(basis).forEach(k => {
+        if (basis[k] !== 'hourly') return;
+        const h = parseFloat(jobHours[k]), r = parseFloat(jobRates[k]);
+        if (!isFinite(h) || !isFinite(r)) return;
+        // toFixed, not the raw float: 2.68 x 20.5 is 54.940000000000005,
+        // and a cent of float noise has no business reaching a pay record.
+        const v = (h * r).toFixed(2);
+        if (prev[k] !== v) {
+          if (!changed) { next = { ...prev }; changed = true; }
+          next[k] = v;
+        }
+      });
+      return changed ? next : prev;
+    });
+  }, [basis, jobHours, jobRates]);
   const toggleSplit = (k, id) => setSplits(prev => {
     const cur = prev[k] || [];
     return { ...prev, [k]: cur.includes(id) ? cur.filter(x => x !== id) : [...cur, id] };
@@ -18647,6 +18709,30 @@ function PayEditor({ card, p, sizeRates, busy, setBusy, currentEmployee, splitCa
     const k = `${job.unitId}:${job.assignmentId || ''}`;
     return n + (parseFloat(amounts[k]) || 0);
   }, 0);
+  // THE BREAKDOWN, using the same arithmetic save() uses, so what is on
+  // screen is exactly what gets written. Without this the only figure
+  // here was one total, and with a split in play that was ambiguous: it
+  // is what THIS cleaner gets, while the apartment may be costing twice
+  // or three times that across everyone on it.
+  const breakdown = p.jobRows.map(({ job }) => {
+    const k = `${job.unitId}:${job.assignmentId || ''}`;
+    const amt = parseFloat(amounts[k]) || 0;
+    const sharers = splits[k] || [];
+    const each = sharers.length && divide[k] ? shareFor(k, job) : amt;
+    const mine = (sharers.length && divide[k])
+      ? Number((amt - each * sharers.length).toFixed(2))
+      : amt;
+    return {
+      k, job, amt, sharers, each, mine,
+      how: basis[k] || 'job',
+      hours: parseFloat(jobHours[k]) || 0,
+      rate: parseFloat(jobRates[k]) || 0,
+    };
+  });
+  const mineTotal = breakdown.reduce((n, b) => n + b.mine, 0);
+  const othersTotal = breakdown.reduce((n, b) => n + b.each * b.sharers.length, 0);
+  const sharerNames = Array.from(new Set(breakdown.flatMap(b => b.sharers)))
+    .map(id => (splitCandidates.find(c => c.id === id) || {}).name || 'someone');
   const byClock = (Number(card.employee?.pay_rate_hourly) || 0) * ((card.clockedMs || 0) / 3600000);
 
   const save = async () => {
@@ -18729,11 +18815,11 @@ function PayEditor({ card, p, sizeRates, busy, setBusy, currentEmployee, splitCa
       <div className="flex gap-0.5 bg-stone-100 border border-stone-300 rounded-xl p-0.5 mb-3">
         <button onClick={() => setMode('hourly')}
           className={`flex-1 py-2 rounded-lg text-xs ${mode === 'hourly' ? 'bg-white text-stone-900 font-bold shadow-sm' : 'text-stone-600'}`}>
-          Hourly / flat
+          One amount for the day
         </button>
         <button onClick={() => setMode('job')} disabled={p.jobRows.length === 0}
           className={`flex-1 py-2 rounded-lg text-xs disabled:opacity-40 ${mode === 'job' ? 'bg-white text-stone-900 font-bold shadow-sm' : 'text-stone-600'}`}>
-          Per job
+          Job by job
         </button>
       </div>
 
@@ -18749,6 +18835,57 @@ function PayEditor({ card, p, sizeRates, busy, setBusy, currentEmployee, splitCa
                   {job.size && <span className="px-1.5 py-px rounded-full bg-stone-100 border border-stone-300 text-[9px] font-mono text-stone-700">{job.size}</span>}
                   {job.type && <span className={`px-1.5 py-px rounded-full border text-[9px] font-mono ${CLEAN_TYPE_STYLE[job.type] || 'bg-stone-100 border-stone-300 text-stone-700'}`}>{assignmentTypeLabel(job.type)}</span>}
                 </div>
+                {/* PER JOB OR BY THE HOUR, for this cleaning alone. The
+                   other cleanings on this card are unaffected, which is
+                   the point: a day is not priced one single way. */}
+                <div className="flex items-center gap-1 mb-2 flex-wrap">
+                  {['job', 'hourly'].map(b => (
+                    <button type="button" key={b}
+                      onClick={() => setJobBasis(k, job, b)}
+                      className={`px-2 py-0.5 rounded-full border text-[10px] ${(basis[k] || 'job') === b
+                        ? 'bg-stone-900 border-stone-900 text-stone-50 font-medium'
+                        : 'bg-white border-stone-300 text-stone-600'}`}>
+                      {b === 'job' ? 'Per job' : 'By the hour'}
+                    </button>
+                  ))}
+                  {jobClockedHours(job) > 0 && (
+                    <span className="text-[9px] font-mono text-stone-400 ml-1">
+                      {jobClockedHours(job).toFixed(2)}h clocked here
+                    </span>
+                  )}
+                  {!job.clocked && job.assigned && (
+                    <span className="text-[9px] font-mono text-amber-700 ml-1">no hours clocked</span>
+                  )}
+                </div>
+
+                {(basis[k] || 'job') === 'hourly' && (
+                  <div className="flex items-center gap-2 flex-wrap mb-2 p-2 rounded-lg bg-stone-50 border border-stone-200">
+                    <div className="flex items-center gap-1.5">
+                      <label className="text-[10px] text-stone-600" htmlFor={`jh-${k}`}>Hours</label>
+                      <input id={`jh-${k}`} type="number" step="0.01" min="0" value={jobHours[k] ?? ''}
+                        onChange={e => setJobHours(h => ({ ...h, [k]: e.target.value }))}
+                        placeholder="0.00"
+                        className="w-16 px-2 py-1 rounded-lg border border-stone-300 bg-white text-right font-mono text-[12px]" />
+                    </div>
+                    <span className="text-stone-400 text-xs">&times;</span>
+                    <div className="flex items-center gap-1">
+                      <span className="font-mono text-xs text-stone-400">$</span>
+                      <input type="number" step="0.01" min="0" value={jobRates[k] ?? ''}
+                        onChange={e => setJobRates(r => ({ ...r, [k]: e.target.value }))}
+                        placeholder="0.00"
+                        className="w-16 px-2 py-1 rounded-lg border border-stone-300 bg-white text-right font-mono text-[12px]" />
+                      <span className="text-[10px] text-stone-400">/hr</span>
+                    </div>
+                    {jobClockedHours(job) > 0 && (
+                      <button type="button"
+                        onClick={() => setJobHours(h => ({ ...h, [k]: jobClockedHours(job).toFixed(2) }))}
+                        className="text-[10px] underline text-stone-600 ml-auto">
+                        Use clocked ({jobClockedHours(job).toFixed(2)}h)
+                      </button>
+                    )}
+                  </div>
+                )}
+
                 <div className="flex items-center justify-between gap-2">
                   <span className="text-[11px] text-stone-600">You pay</span>
                   <div className="flex items-center gap-1">
@@ -18834,15 +18971,56 @@ function PayEditor({ card, p, sizeRates, busy, setBusy, currentEmployee, splitCa
               </div>
             );
           })}
-          <div className="flex items-baseline justify-between gap-2 px-1">
-            <span className="text-[9px] font-mono uppercase tracking-wider text-stone-500">Shift total</span>
-            <span className="font-mono text-base font-semibold text-stone-900">{fmtMoney(jobTotal)}</span>
-          </div>
-          {byClock > 0 && (
-            <div className="text-[10px] text-stone-500 px-1">
-              By the clock this would be <span className="font-mono">{fmtMoney(byClock)}</span> — shown for comparison, not applied.
+          {/* WHAT YOU ARE ACTUALLY PAYING, line by line. One total on its
+             own could not answer the question being asked of it: with a
+             split, the money leaving you is not the money reaching this
+             cleaner, and both matter. */}
+          <div className="mt-1 p-3 rounded-xl bg-stone-50 border border-stone-200">
+            <div className="text-[9px] font-mono uppercase tracking-wider text-stone-500 mb-2">
+              Paying {card.employee?.name || 'this cleaner'}
             </div>
-          )}
+            <div className="space-y-1">
+              {breakdown.map(b => (
+                <div key={b.k} className="flex items-baseline justify-between gap-2">
+                  <span className="text-[11px] text-stone-700 min-w-0">
+                    {b.job.label}
+                    {b.how === 'hourly' && b.hours > 0 && (
+                      <span className="font-mono text-[10px] text-stone-400"> · {b.hours}h × {fmtMoney(b.rate)}</span>
+                    )}
+                    {b.sharers.length > 0 && (
+                      <span className="text-[10px] text-violet-800">
+                        {' '}· {divide[b.k] ? `split ${b.sharers.length + 1} ways` : `${b.sharers.length + 1} paid this each`}
+                      </span>
+                    )}
+                  </span>
+                  <span className="font-mono text-[12px] text-stone-900 flex-shrink-0">{fmtMoney(b.mine)}</span>
+                </div>
+              ))}
+            </div>
+            <div className="flex items-baseline justify-between gap-2 mt-2 pt-2 border-t border-stone-200">
+              <span className="text-[11px] font-semibold text-stone-900">
+                {card.employee?.name || 'This cleaner'} gets
+              </span>
+              <span className="font-mono text-base font-semibold text-stone-900">{fmtMoney(mineTotal)}</span>
+            </div>
+            {othersTotal > 0 && (
+              <div className="mt-1.5 pt-1.5 border-t border-dashed border-stone-300 text-[10px] text-stone-600">
+                <div className="flex items-baseline justify-between gap-2">
+                  <span className="min-w-0">Also going to {sharerNames.join(', ')}</span>
+                  <span className="font-mono flex-shrink-0">{fmtMoney(othersTotal)}</span>
+                </div>
+                <div className="flex items-baseline justify-between gap-2 mt-1">
+                  <span className="font-semibold text-stone-800">Total cost of these cleanings</span>
+                  <span className="font-mono font-semibold text-stone-800 flex-shrink-0">{fmtMoney(mineTotal + othersTotal)}</span>
+                </div>
+              </div>
+            )}
+            {byClock > 0 && (
+              <div className="text-[10px] text-stone-500 mt-2">
+                By the clock the whole day would be <span className="font-mono">{fmtMoney(byClock)}</span> — shown for comparison, not applied.
+              </div>
+            )}
+          </div>
         </div>
       ) : (
         /* HOURS x THEIR RATE. This was a single "flat for this shift" box,

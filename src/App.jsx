@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "nov6-tap268";
+const BUILD_TAG = "nov6-tap269";
 // ---- Hidden for now, at Allan's request -------------------------------
 // Both of these are switches rather than deletions: the code stays whole
 // and working, so turning either back on is this one line. Flip to true.
@@ -18099,7 +18099,7 @@ function ShiftPayView({ shifts, currentEmployee, onReload, onAddShift, onOpenShi
       if (names.length) out[key] = names;
     });
     setAssignedByJob(out);
-  })(); /* eslint-disable-next-line */ }, [blockIndex]);
+  })(); /* eslint-disable-next-line */ }, [blockIndex, payList]);
 
   // The per-size pay tiers already in each property's price book
   // (__aptpay__:3x2). Read so a per-job row can fill itself in with what
@@ -18306,22 +18306,29 @@ function ShiftPayView({ shifts, currentEmployee, onReload, onAddShift, onOpenShi
                   ) : p.jobs.map((j, i) => {
                     // Everyone who had a block at this apartment that day,
                     // this cleaner aside.
-                    const crew = crewByJob.get(`${p.dateKey}::${j.unitId}::${j.partyId || ''}`);
+                    // ASSIGNED IS THE HEADLINE; CLOCKED-IN IS THE FOOTNOTE.
+                    //
+                    // This had it the other way round, and that is wrong for
+                    // paying people: only one of two assigned cleaners often
+                    // clocks in, and both still get paid. Leading with who
+                    // turned up hid exactly the pairs Allan was looking for.
+                    // So the badge counts ASSIGNED, the names are the people
+                    // the job was given to, and who actually clocked in is a
+                    // quieter note underneath.
+                    const jobKey = `${p.dateKey}::${j.unitId}::${j.partyId || ''}`;
+                    const crew = crewByJob.get(jobKey);
+                    const assigned = assignedByJob[jobKey] || [];
+                    const assignedNames = assigned.map(a =>
+                      (crew && crew.has(a.id)) ? a.name : `${a.name} — didn’t clock in`);
+                    // People who were in there without being named on it.
+                    const unassignedCrew = crew
+                      ? Array.from(crew.entries())
+                          .filter(([id]) => id !== p.empId && !assigned.some(a => a.id === id))
+                          .map(([, n]) => n)
+                      : [];
                     const others = crew
                       ? Array.from(crew.entries()).filter(([id]) => id !== p.empId).map(([, n]) => n)
                       : [];
-                    // Given the job but never clocked a block on it. Worth
-                    // its own line: it is the case where you would pay the
-                    // wrong person, or chase someone who never went.
-                    // EVERYONE the job was given to -- not just the ones who
-                    // failed to turn up. Allan's question at payment time is
-                    // "who was supposed to be on this", and answering it only
-                    // when somebody no-showed made the line look broken the
-                    // rest of the time.
-                    const jobKey = `${p.dateKey}::${j.unitId}::${j.partyId || ''}`;
-                    const assigned = assignedByJob[jobKey] || [];
-                    const assignedNames = assigned.map(a =>
-                      (crew && crew.has(a.id)) ? a.name : `${a.name} (not clocked in)`);
                     // What this apartment cost across EVERYONE, so a split
                     // can be checked at a glance rather than added up by
                     // flipping between cards.
@@ -18342,26 +18349,37 @@ function ShiftPayView({ shifts, currentEmployee, onReload, onAddShift, onOpenShi
                               {assignmentTypeLabel(j.type)}
                             </span>
                           )}
-                          {others.length > 0 && (
+                          {/* Counts ASSIGNED, not clock-ins. Two people on
+                             a job where only one clocked in is still a job
+                             for two, and that is the case being paid. */}
+                          {assigned.length > 1 && (
                             <span className="px-1.5 py-px rounded-full bg-violet-50 border border-violet-300 text-[9px] font-mono font-bold uppercase tracking-wide text-violet-900 inline-flex items-center gap-1">
+                              <Users size={8} /> Assigned &times;{assigned.length}
+                            </span>
+                          )}
+                          {assigned.length <= 1 && others.length > 0 && (
+                            <span className="px-1.5 py-px rounded-full bg-stone-100 border border-stone-300 text-[9px] font-mono font-bold uppercase tracking-wide text-stone-700 inline-flex items-center gap-1">
                               <Users size={8} /> Shared &times;{others.length + 1}
                             </span>
                           )}
                         </div>
-                        {others.length > 0 && (
+                        {assignedNames.length > 0 && (
                           <div className="text-[10px] text-violet-900 mt-0.5 ml-0.5">
-                            Also in here: {others.join(', ')}
-                            {jobRows.length > 1 && (
-                              <> &middot; <span className="font-mono">{fmtMoney(jobTotal)}</span> for the apartment across {jobRows.length}</>
+                            Assigned: {assignedNames.join(', ')}
+                            {assigned.length > 1 && jobRows.length > 1 && (
+                              <> &middot; <span className="font-mono">{fmtMoney(jobTotal)}</span> across {jobRows.length}</>
                             )}
-                            {jobRows.length === 1 && (
-                              <> &middot; <span className="text-amber-800">only one of you is being paid for it</span></>
+                            {assigned.length > 1 && jobRows.length <= 1 && (
+                              <> &middot; <span className="text-amber-800">only one of them is being paid for it</span></>
                             )}
                           </div>
                         )}
-                        {assignedNames.length > 0 && (
+                        {/* Anyone who was in there without being named on
+                           the job. Quieter, because it is the rarer case and
+                           not what the money hangs on. */}
+                        {unassignedCrew.length > 0 && (
                           <div className="text-[10px] text-stone-500 mt-0.5 ml-0.5">
-                            Assigned: {assignedNames.join(', ')}
+                            Also clocked in: {unassignedCrew.join(', ')}
                           </div>
                         )}
                       </div>
@@ -18394,7 +18412,7 @@ function ShiftPayView({ shifts, currentEmployee, onReload, onAddShift, onOpenShi
                 ) : (
                   <PayEditor shift={s} p={p} sizeRates={sizeRates} busy={busy} setBusy={setBusy}
                     currentEmployee={currentEmployee}
-                    splitCandidates={allCleaners}
+                    splitCandidates={allCleaners} assignedByJob={assignedByJob}
                     onDone={async () => { setEditing(null); await loadPay(); onReload && onReload(); }}
                     onCancel={() => setEditing(null)} />
                 )}
@@ -18411,7 +18429,7 @@ function ShiftPayView({ shifts, currentEmployee, onReload, onAddShift, onOpenShi
 // figure against each apartment they cleaned — which is what Carriage
 // Cove needs, since a 3x2 move-out and a 1x1 standard on the same shift
 // are not the same money.
-function PayEditor({ shift, p, sizeRates, busy, setBusy, currentEmployee, splitCandidates = [], onDone, onCancel }) {
+function PayEditor({ shift, p, sizeRates, busy, setBusy, currentEmployee, splitCandidates = [], assignedByJob = {}, onDone, onCancel }) {
   const [mode, setMode] = useState(p.mode === 'job' ? 'job' : 'hourly');
   const [amounts, setAmounts] = useState(() => {
     const m = {};
@@ -18608,19 +18626,48 @@ function PayEditor({ shift, p, sizeRates, busy, setBusy, currentEmployee, splitC
                       </label>
                     )}
                   </div>
-                  <div className="flex flex-wrap gap-1.5">
-                    {splitCandidates.filter(cl => cl.id !== p.empId).map(cl => {
-                      const on = (splits[k] || []).includes(cl.id);
-                      const share = shareFor(k, job);
-                      return (
-                        <button type="button" key={cl.id}
-                          onClick={() => toggleSplit(k, cl.id)}
-                          className={`px-2 py-1 rounded-full border text-[10px] ${on ? 'bg-violet-100 border-violet-400 text-violet-900 font-medium' : 'bg-white border-stone-300 text-stone-600'}`}>
-                          {cl.name}{on && share > 0 ? ` · ${fmtMoney(share)}` : ''}
-                        </button>
-                      );
-                    })}
-                  </div>
+                  {/* The people actually assigned come first and are
+                     marked, because that is the normal reason to split:
+                     two were put on it, one clocked in, both get paid. */}
+                  {(() => {
+                    const jk = `${p.dateKey}::${job.unitId}::${job.partyId || ''}`;
+                    const asgIds = (assignedByJob[jk] || []).map(a => a.id).filter(id => id !== p.empId);
+                    const ordered = [
+                      ...splitCandidates.filter(cl => asgIds.includes(cl.id)),
+                      ...splitCandidates.filter(cl => cl.id !== p.empId && !asgIds.includes(cl.id)),
+                    ];
+                    const missing = asgIds.filter(id => !(splits[k] || []).includes(id));
+                    return (
+                      <>
+                        {missing.length > 0 && (
+                          <button type="button"
+                            onClick={() => setSplits(prev => ({ ...prev, [k]: Array.from(new Set([...(prev[k] || []), ...asgIds])) }))}
+                            className="mb-1.5 px-2 py-1 rounded-lg bg-violet-700 hover:bg-violet-800 text-white text-[10px] font-medium">
+                            Split with everyone assigned ({asgIds.length + 1})
+                          </button>
+                        )}
+                        <div className="flex flex-wrap gap-1.5">
+                          {ordered.map(cl => {
+                            const on = (splits[k] || []).includes(cl.id);
+                            const isAsg = asgIds.includes(cl.id);
+                            const share = shareFor(k, job);
+                            return (
+                              <button type="button" key={cl.id}
+                                onClick={() => toggleSplit(k, cl.id)}
+                                title={isAsg ? 'Assigned to this job' : undefined}
+                                className={`px-2 py-1 rounded-full border text-[10px] ${on
+                                  ? 'bg-violet-100 border-violet-400 text-violet-900 font-medium'
+                                  : isAsg
+                                    ? 'bg-white border-violet-300 text-violet-800'
+                                    : 'bg-white border-stone-300 text-stone-600'}`}>
+                                {isAsg ? '★ ' : ''}{cl.name}{on && share > 0 ? ` · ${fmtMoney(share)}` : ''}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </>
+                    );
+                  })()}
                   {(splits[k] || []).length > 0 && (
                     <div className="text-[10px] text-stone-500 mt-1.5">
                       {divide[k]

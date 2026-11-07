@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "nov4-tap263";
+const BUILD_TAG = "nov6-tap266";
 // ---- Hidden for now, at Allan's request -------------------------------
 // Both of these are switches rather than deletions: the code stays whole
 // and working, so turning either back on is this one line. Flip to true.
@@ -4516,8 +4516,10 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
   // see the workblock UI right away. Without this, if they started the
   // block from the Assignments tab, they'd see the assignments list
   // with the workblock running silently in the background — confusing.
+  // Starting a cleaning takes them to it -- which is now tab 2. Sending
+  // them to tab 1 would drop them on the list they just picked from.
   useEffect(() => {
-    if (activeBlock) setCleanerTab('home');
+    if (activeBlock) setCleanerTab('assignments');
   }, [activeBlock?.id]);
   // Not clocked in → always land on Home. Otherwise a cleaner who was last
   // on More or Assignments clocks out and comes back to that tab instead of
@@ -7450,7 +7452,8 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
           employee={employee} onOpenMessages={() => setShowMessages(true)}
           onNotificationNavigate={(n) => {
             if (n?.link_kind === 'conversation') { setShowMessages(true); return; }
-            setCleanerTab('assignments');
+            // The LIST, which is tab 1 now -- tab 2 is the room in hand.
+            setCleanerTab('home');
           }}
           onOpenWhosHere={() => setWhosWorkingOpen(true)} />
         {whosWorkingOpen && (
@@ -7569,7 +7572,18 @@ function EmployeeApp({ employee: employeeInit, onSignOut, previewMode = false })
       onExit={() => { setActiveBlock(null); setPendingStart(null); setCleanerTab('home'); }}
       busy={busy} />);
   }
-  if (isMulti && (!activeBlock || cleanerTab !== 'home')) {
+  // THE TRAP, AND WHY THIS LINE WAS IT.
+  //
+  // This read `cleanerTab !== 'home'`, so a running cleaning took over tab
+  // 1. The cleaner could still move around the nav -- that part worked --
+  // but tapping the first tab, the one holding their list of cleanings,
+  // handed them the room they were already in. There was no route back to
+  // the list while a cleaning was open, which is what "it doesn't let me
+  // exit until I finish" actually was.
+  //
+  // The live cleaning now lives on tab 2 ("Current"), so tab 1 is the list
+  // and stays the list.
+  if (isMulti && (!activeBlock || cleanerTab !== 'assignments')) {
     return withIdleModal(<PropertyHub shift={shift} workBlocks={workBlocks} employeeName={employee.name} employee={employee}
       onSignOut={signOutWithCleanup} onClockOut={clockOut} onSwitchProperty={switchProperty} onSwitchToJob={switchToJob}
       onStartNew={startNewBlock} onReopen={reopenBlock} onEndBlock={endBlock} onGoToBedroom={goToBedroomForTarget}
@@ -8043,9 +8057,20 @@ function CleanerBottomNav({ active, onChange }) {
   return (
     <div className="sticky bottom-0 left-0 right-0 z-30 bg-white border-t border-stone-200 flex mt-auto"
       style={{ paddingBottom: 'env(safe-area-inset-bottom, 0px)' }}>
-      <Item id="home"        label="Today"       useLogo />
-      <Item id="assignments" label="Assignments" Icon={ClipboardList} />
-      <Item id="more"        label="More"        Icon={Menu} />
+      {/* THE TAB IDS ARE HISTORICAL. 'home' and 'assignments' are threaded
+         through roughly thirty call sites, so they were left alone rather
+         than swept; what each one HOLDS has changed:
+
+           home         -> "Cleanings": the list, always. It used to be
+                           hijacked by the live cleaning, so while a
+                           cleaning was running there was no way to get
+                           the list back on this tab.
+           assignments  -> "Current": the room being cleaned right now.
+           more         -> unchanged, plus past cleanings.
+      */}
+      <Item id="home"        label="Cleanings" useLogo />
+      <Item id="assignments" label="Current"   Icon={ClipboardList} />
+      <Item id="more"        label="More"      Icon={Menu} />
     </div>
   );
 }
@@ -11549,12 +11574,29 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
   // Which properties the assignments list covers. Lives here so the header
   // dropdown and the list stay in step.
   const [propScope, setPropScope] = useState('current'); // 'current' | 'all'
+  // Which sub-tab the assignments panel should open on. Set by "Past
+  // cleanings" in More, and cleared the moment they leave that tab so
+  // coming back to Current lands on today's work, not on finished work.
+  const [panelTab, setPanelTab] = useState(null);
   // Bottom nav tab — Home / Assignments / More. Parent (AuthedShift)
   // controls this when provided so the tab persists across BlockView
   // navigation. Falls back to local state for standalone use.
   const [cleanerTabLocal, setCleanerTabLocal] = useState('home');
   const cleanerTab = cleanerTabProp ?? cleanerTabLocal;
   const setCleanerTab = setCleanerTabProp ?? setCleanerTabLocal;
+  // Clear the requested sub-tab on any tab change, so Past cleanings is
+  // always a deliberate trip rather than somewhere you get stranded.
+  //
+  // THIS MUST STAY BELOW cleanerTab. It sat above the line that defines
+  // cleanerTab, and a dependency array is evaluated DURING RENDER -- so
+  // PropertyHub threw "Cannot access 'cleanerTab' before initialization"
+  // on mount, every cleaner hit the error screen the moment they clocked
+  // in, and the owner never saw it because the owner shell never renders
+  // this component. esbuild cannot catch it: the reference is legal, the
+  // ORDER is not.
+  useEffect(() => {
+    if (cleanerTab !== 'more' && panelTab) setPanelTab(null);
+  }, [cleanerTab, panelTab]);
   // "Today's activity" toggle on Home tab — flips between MY blocks
   // and OTHER cleaners' blocks at this property today.
   const [activityFilter, setActivityFilter] = useState('mine'); // 'mine' | 'others'
@@ -11655,7 +11697,8 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
           // drops them on their assignments board. Without a handler at all
           // the bell rendered every item as dead text — tapping did nothing.
           if (n?.link_kind === 'conversation') { if (onOpenMessages) onOpenMessages(); return; }
-          if (setCleanerTab) setCleanerTab('assignments');
+          // The LIST, which is tab 1 now -- tab 2 is the room in hand.
+          if (setCleanerTab) setCleanerTab('home');
         }}
         onOpenWhosHere={() => setWhosHereOpen(true)} />
       {whosHereOpen && (
@@ -11684,7 +11727,7 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
               employee={employee}
               disabled={busy}
               showingAll={propScope === 'all'}
-              onShowAllProperties={() => { setPropScope(propScope === 'all' ? 'current' : 'all'); setCleanerTab('assignments'); }}
+              onShowAllProperties={() => { setPropScope(propScope === 'all' ? 'current' : 'all'); setCleanerTab('home'); }}
               onSwitch={(p) => onSwitchProperty && onSwitchProperty(p)} />
           </div>
           <div className="flex flex-col gap-1.5 items-end shrink-0">
@@ -11894,11 +11937,47 @@ function PropertyHub({ shift, workBlocks, employeeName, employee, onSignOut, onC
       )}
 
       {/* === MORE TAB === */}
-      {cleanerTab === 'more' && (
+      {/* Past cleanings opens IN PLACE, on this tab. It deliberately does
+         not switch to Current: Current is the room being cleaned whenever
+         one is open, so sending them there to read finished work would
+         have dropped them back into the job they are standing in. */}
+      {cleanerTab === 'more' && panelTab === 'done' && (
+        <>
+          <div className="px-4 pt-4">
+            <button onClick={() => setPanelTab(null)}
+              className="flex items-center gap-2 text-sm text-stone-700 mb-3">
+              <ArrowLeft size={15} /> More
+            </button>
+          </div>
+          <AssignmentsPanel initialTab="done"
+            propertyId={shift.customer_id} property={shift.customer} employee={employee}
+            onGoToBedroom={onGoToBedroom} onOpenBedroomHistory={onOpenBedroomHistory} onJoinBlock={onJoinBlock} />
+        </>
+      )}
+      {cleanerTab === 'more' && panelTab !== 'done' && (
         <div className="px-4 pt-4 space-y-2">
           {/* "Browse properties" removed — the property name at the top of the
              screen is the switcher now, so this was the long way round to the
              same thing. */}
+          {/* PAST CLEANINGS. Done came off the sub-tab row because it is for
+             checking back, not for working from -- so it sits here as an
+             extra action instead of taking a slot beside today's work.
+             The key on AssignmentsPanel above forces a remount so the
+             requested sub-tab actually takes, and panelTab is cleared when
+             they leave, so coming back to Current does not strand them on
+             a list of finished work. */}
+          <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2">Your work</div>
+          <button
+            onClick={() => setPanelTab('done')}
+            className="w-full px-4 py-4 flex items-center gap-3 text-left bg-white rounded-2xl border border-stone-200 active:bg-stone-100">
+            <Check size={18} className="text-stone-500 flex-shrink-0" />
+            <span className="min-w-0">
+              <span className="block text-sm text-stone-900">Past cleanings</span>
+              <span className="block text-[11px] text-stone-500">What you&rsquo;ve finished here</span>
+            </span>
+            <ChevronRight size={15} className="text-stone-300 ml-auto flex-shrink-0" />
+          </button>
+
           <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 pt-3">Account &amp; settings</div>
           <CleanerMoreExtras employee={employee}
             onOpenMessages={onOpenMessages}
@@ -13258,7 +13337,8 @@ function BlockView({ shift, block, tasks, activeTask, employeeName, employee, on
           // drops them on their assignments board. Without a handler at all
           // the bell rendered every item as dead text — tapping did nothing.
           if (n?.link_kind === 'conversation') { if (onOpenMessages) onOpenMessages(); return; }
-          if (setCleanerTab) setCleanerTab('assignments');
+          // The LIST, which is tab 1 now -- tab 2 is the room in hand.
+          if (setCleanerTab) setCleanerTab('home');
         }}
         onOpenWhosHere={() => setWhosHereOpen(true)}
         onLogoClick={handleLogoClick} />
@@ -17762,6 +17842,10 @@ function describeShift(s) {
     const bd = b.unit?.bedrooms, ba = b.unit?.bathrooms;
     jobs.push({
       unitId: b.unit_id,
+      // partyId was not carried, and the crew lookup is keyed on it --
+      // without it, two cleaners in different bedrooms of the same
+      // apartment would read as sharing one job.
+      partyId: b.party_id || null,
       assignmentId: b.assignment_id || null,
       label: unitPartyLabel(b.unit?.label, b.party?.label) || b.unit?.label || 'Apartment',
       size: (bd != null && ba != null) ? `${bd}x${ba}` : null,
@@ -17834,6 +17918,58 @@ function ShiftPayView({ shifts, currentEmployee, onReload, onAddShift, onOpenShi
     }
   }, [oldestKey]);
   useEffect(() => { loadPay(); }, [loadPay]);
+
+  // ============================================================
+  // WHO ELSE WAS ON THIS APARTMENT.
+  //
+  // Two different facts, and payroll needs both:
+  //
+  //   CREW     who actually worked it -- worked out from the shifts
+  //            already on this screen. Every cleaner's shift in the range
+  //            is here with its work blocks, so whoever has a block at
+  //            the same apartment on the same day was in there too. No
+  //            query: the answer was already in the data.
+  //
+  //   ASSIGNED who you gave it to. Needs its own read, and it is worth
+  //            it: assigned-but-never-showed is invisible otherwise, and
+  //            it is exactly the case where you would overpay or chase
+  //            the wrong person.
+  // ============================================================
+  const crewByJob = React.useMemo(() => {
+    const m = new Map();
+    (shifts || []).forEach(sh => {
+      const who = { id: sh.employee?.id || sh.employee_id, name: sh.employee?.name || 'Cleaner' };
+      if (!who.id) return;
+      const dateKey = localDayKey(sh.start_time);
+      (sh.work_blocks || []).forEach(b => {
+        if (!b.unit_id) return;
+        const k = `${dateKey}::${b.unit_id}::${b.party_id || ''}`;
+        if (!m.has(k)) m.set(k, new Map());
+        m.get(k).set(who.id, who.name);
+      });
+    });
+    return m;
+  }, [shifts]);
+
+  const [assignedByAsg, setAssignedByAsg] = useState({});
+  useEffect(() => { (async () => {
+    const ids = Array.from(new Set(
+      (shifts || []).flatMap(sh => (sh.work_blocks || []).map(b => b.assignment_id).filter(Boolean))
+    ));
+    if (!ids.length) { setAssignedByAsg({}); return; }
+    const out = {};
+    for (let i = 0; i < ids.length; i += 200) {
+      const { data, error } = await supabase.from('assignment_assignees')
+        .select('assignment_id, employee_id, status, employee:employees(id, name)')
+        .in('assignment_id', ids.slice(i, i + 200));
+      if (error) { console.warn('[pay] assignee read failed', error); return; }
+      (data || []).forEach(r => {
+        if (!out[r.assignment_id]) out[r.assignment_id] = [];
+        out[r.assignment_id].push({ id: r.employee_id, name: r.employee?.name || 'Cleaner', status: r.status });
+      });
+    }
+    setAssignedByAsg(out);
+  })(); /* eslint-disable-next-line */ }, [shifts]);
 
   // The per-size pay tiers already in each property's price book
   // (__aptpay__:3x2). Read so a per-job row can fill itself in with what
@@ -17969,19 +18105,65 @@ function ShiftPayView({ shifts, currentEmployee, onReload, onAddShift, onOpenShi
                     <div className="text-xs text-stone-500">
                       {s.customer?.name || 'No property'} · nothing recorded as cleaned
                     </div>
-                  ) : p.jobs.map((j, i) => (
-                    <div key={`${j.unitId}-${i}`} className="flex items-center gap-1.5 flex-wrap">
-                      <span className="text-xs text-stone-800">{s.customer?.name} · {j.label}</span>
-                      {j.size && (
-                        <span className="px-1.5 py-px rounded-full bg-stone-100 border border-stone-300 text-[9px] font-mono text-stone-700">{j.size}</span>
-                      )}
-                      {j.type && (
-                        <span className={`px-1.5 py-px rounded-full border text-[9px] font-mono ${CLEAN_TYPE_STYLE[j.type] || 'bg-stone-100 border-stone-300 text-stone-700'}`}>
-                          {assignmentTypeLabel(j.type)}
-                        </span>
-                      )}
-                    </div>
-                  ))}
+                  ) : p.jobs.map((j, i) => {
+                    // Everyone who had a block at this apartment that day,
+                    // this cleaner aside.
+                    const crew = crewByJob.get(`${p.dateKey}::${j.unitId}::${j.partyId || ''}`);
+                    const others = crew
+                      ? Array.from(crew.entries()).filter(([id]) => id !== p.empId).map(([, n]) => n)
+                      : [];
+                    // Given the job but never clocked a block on it. Worth
+                    // its own line: it is the case where you would pay the
+                    // wrong person, or chase someone who never went.
+                    const assigned = assignedByAsg[j.assignmentId] || [];
+                    const noShows = assigned
+                      .filter(a => a.status !== 'declined' && !(crew && crew.has(a.id)))
+                      .map(a => a.name);
+                    // What this apartment cost across EVERYONE, so a split
+                    // can be checked at a glance rather than added up by
+                    // flipping between cards.
+                    const jobRows = payList.filter(r =>
+                      r.work_date === p.dateKey && (r.customer_id || null) === p.custId
+                      && r.unit_id === j.unitId && (r.assignment_id || null) === (j.assignmentId || null)
+                      && r.flat_amount != null);
+                    const jobTotal = jobRows.reduce((n, r) => n + Number(r.flat_amount || 0), 0);
+                    return (
+                      <div key={`${j.unitId}-${i}`}>
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="text-xs text-stone-800">{s.customer?.name} · {j.label}</span>
+                          {j.size && (
+                            <span className="px-1.5 py-px rounded-full bg-stone-100 border border-stone-300 text-[9px] font-mono text-stone-700">{j.size}</span>
+                          )}
+                          {j.type && (
+                            <span className={`px-1.5 py-px rounded-full border text-[9px] font-mono ${CLEAN_TYPE_STYLE[j.type] || 'bg-stone-100 border-stone-300 text-stone-700'}`}>
+                              {assignmentTypeLabel(j.type)}
+                            </span>
+                          )}
+                          {others.length > 0 && (
+                            <span className="px-1.5 py-px rounded-full bg-violet-50 border border-violet-300 text-[9px] font-mono font-bold uppercase tracking-wide text-violet-900 inline-flex items-center gap-1">
+                              <Users size={8} /> Shared &times;{others.length + 1}
+                            </span>
+                          )}
+                        </div>
+                        {others.length > 0 && (
+                          <div className="text-[10px] text-violet-900 mt-0.5 ml-0.5">
+                            Also in here: {others.join(', ')}
+                            {jobRows.length > 1 && (
+                              <> &middot; <span className="font-mono">{fmtMoney(jobTotal)}</span> for the apartment across {jobRows.length}</>
+                            )}
+                            {jobRows.length === 1 && (
+                              <> &middot; <span className="text-amber-800">only one of you is being paid for it</span></>
+                            )}
+                          </div>
+                        )}
+                        {noShows.length > 0 && (
+                          <div className="text-[10px] text-stone-500 mt-0.5 ml-0.5">
+                            Assigned but never clocked in here: {noShows.join(', ')}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
 
                 {!isEditing ? (
@@ -23862,8 +24044,8 @@ function PropertyForm({ property, currentUserRole, onCancel, onSaved, onManageAs
               <p className="text-xs text-stone-500 mb-2">Pick which ways this property's PM can create assignments in their portal. Off = hidden from them.</p>
               <div className="space-y-2">
                 {[
-                  { k: 'quick', label: 'Bridges/Citifront (quick assignment)', desc: 'Fast builder — no cleaner picker. Lands as a draft for your approval.' },
-                  { k: 'checklist', label: 'Carriage Cove Uploads (checklist wizard)', desc: 'The structured upload with bedroom items.' },
+                  { k: 'quick', label: 'Quick Upload', desc: 'Fast builder — no cleaner picker. Lands as a draft for your approval.' },
+                  { k: 'checklist', label: 'Full Upload', desc: 'The structured upload with bedroom items.' },
                   { k: 'legacy', label: 'Legacy file upload', desc: 'Upload a file or photo as the source.' },
                 ].map(m => (
                   <button type="button" key={m.k} onClick={() => togglePmMethod(m.k)}
@@ -41128,16 +41310,22 @@ function AssignmentList({ property, employee, onBack, onNew, onNewChecklist, onN
       <div className="px-5 pt-6">
         {can(employee, 'upload_assignments') && (
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-4">
+            {/* Named for WHAT THEY DO, not which property happened to use
+               them first. These read "Bridges/Citifront" and "Carriage Cove
+               Uploads", which stopped being true the moment either form was
+               used anywhere else -- and gave no clue which one to pick for a
+               new property. The PM portal keeps its own wording; this is the
+               owner side only. */}
             {onNewQuick && (
               <button onClick={onNewQuick}
                 className="p-4 rounded-2xl bg-stone-900 text-stone-50 font-medium flex items-center justify-center gap-2 active:scale-98">
-                <Building2 size={18} /> Bridges/Citifront
+                <Building2 size={18} /> Quick Upload
               </button>
             )}
             {onNewChecklist && (
               <button onClick={onNewChecklist}
                 className="p-4 rounded-2xl border-2 border-stone-300 bg-white text-stone-700 font-medium flex items-center justify-center gap-2 active:scale-98">
-                <FileText size={18} /> Carriage Cove Uploads
+                <FileText size={18} /> Full Upload
               </button>
             )}
             <button onClick={onNew}
@@ -41472,7 +41660,17 @@ function QuickAssignmentForm({ property, employee, portalUser = null, portalKind
     })();
     /* eslint-disable-next-line */
   }, [isEditMode]);
-  const [assignedTo, setAssignedTo] = useState('');
+  // A SET, not one id. This was a single <select> whose own hint said
+  // "add more people later from the cleaning's card" -- so two cleaners on
+  // one apartment meant creating it, finding it again, and assigning from
+  // there. assignment_assignees has always been a many-to-many table and
+  // saveAssignees has always taken a list; only this form insisted on one.
+  const [assignedTo, setAssignedTo] = useState(() => new Set());
+  const toggleAssignee = (id) => setAssignedTo(prev => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
   const [cleaners, setCleaners] = useState([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -41725,7 +41923,9 @@ function QuickAssignmentForm({ property, employee, portalUser = null, portalKind
       // between commits a cleaning set to "only these people" with nobody
       // on it, which no cleaner can see, while the owner is told the save
       // failed. Same reasoning as the ordering in saveAssignees.
-      const narrowTo = (!isPM && assignedTo) ? assignedTo : null;
+      // Named people, if any. Empty = everyone sees it, which is the rule
+      // set in saveAssignees: nobody named means everyone.
+      const narrowIds = isPM ? [] : Array.from(assignedTo);
       const { data: asg, error: ae, audienceSaved } = await audienceWrite({
         customer_id: property.id, title, notes: notes.trim() || null,
         uploaded_by: isPM ? null : employee.id, active: true, assignment_type: cleanType,
@@ -41746,7 +41946,10 @@ function QuickAssignmentForm({ property, employee, portalUser = null, portalKind
         QUICK_SECTIONS.map(sec => ({
           assignment_id: asg.id, unit_id: unit.id, party_id: party.id,
           status: 'pending', priority: isPM ? false : !!priority,
-          assigned_to: isPM ? null : (assignedTo || null),
+          // A single column, so it carries the first named person. It is a
+          // per-bedroom note that governs nothing (see below) -- the real
+          // record of who is on this is assignment_assignees.
+          assigned_to: narrowIds[0] || null,
           template_section: sec,
           template_item_key: `${sec}:entire`,
         }))
@@ -41763,15 +41966,18 @@ function QuickAssignmentForm({ property, employee, portalUser = null, portalKind
       // Name first, narrow second. Every way this can stop part-way leaves
       // the cleaning visible to everyone — which is wrong but obvious, and
       // fixable from its card — rather than visible to nobody.
-      if (narrowTo) {
+      if (narrowIds.length) {
+        // One upsert for all of them, so two cleaners cannot half-land.
         const { error: aaErr } = await supabase.from('assignment_assignees')
-          .upsert({ assignment_id: asg.id, employee_id: narrowTo, status: 'assigned', created_by: employee.id },
-            { onConflict: 'assignment_id,employee_id' });
-        // The cleaning exists and is correct apart from the name. Say so
+          .upsert(narrowIds.map(id => ({
+            assignment_id: asg.id, employee_id: id, status: 'assigned', created_by: employee.id,
+          })), { onConflict: 'assignment_id,employee_id' });
+        // The cleaning exists and is correct apart from the names. Say so
         // rather than throwing, or the owner retries and creates a second.
         if (aaErr) {
           setBusy(false);
-          setError('The cleaning was created and every cleaner can see it, but ' + (cleaners.find(c => c.id === narrowTo)?.name || 'that cleaner') + ' could not be put on it: ' + aaErr.message + ' Open the cleaning and use Assign.');
+          const who = narrowIds.map(id => cleaners.find(c => c.id === id)?.name).filter(Boolean).join(', ') || 'those cleaners';
+          setError('The cleaning was created and every cleaner can see it, but ' + who + ' could not be put on it: ' + aaErr.message + ' Open the cleaning and use Assign.');
           return;
         }
         if (audienceSaved) {
@@ -41832,7 +42038,7 @@ function QuickAssignmentForm({ property, employee, portalUser = null, portalKind
         <div>
           <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">{property.name}</div>
           <div className="font-serif text-xl text-stone-900">
-            {isEditMode ? 'Edit assignment' : 'Bridges/Citifront'}
+            {isEditMode ? 'Edit assignment' : (isPM ? 'Bridges/Citifront' : 'Quick Upload')}
           </div>
         </div>
       </div>
@@ -41893,15 +42099,38 @@ function QuickAssignmentForm({ property, employee, portalUser = null, portalKind
         {!isPM && !isEditMode && (
         <div>
           <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Who is this for</label>
-          <select value={assignedTo} onChange={e => setAssignedTo(e.target.value)}
-            className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white text-stone-900 text-sm">
-            <option value="">Everyone — every cleaner sees this</option>
-            {cleaners.map(c => <option key={c.id} value={c.id}>Only {c.name}</option>)}
-          </select>
+          {/* Tick as many as are going. A dropdown could only ever hold one
+             name, which is why two cleaners on one apartment used to mean
+             saving it and then reopening it to add the second. */}
+          <div className="rounded-xl border border-stone-300 bg-white overflow-hidden">
+            <button type="button" onClick={() => setAssignedTo(new Set())}
+              className={`w-full flex items-center gap-2.5 px-4 py-3 text-left border-b border-stone-200 ${assignedTo.size === 0 ? 'bg-stone-900 text-stone-50' : 'text-stone-700 hover:bg-stone-50'}`}>
+              <span className={`w-4 h-4 rounded flex items-center justify-center flex-shrink-0 ${assignedTo.size === 0 ? 'bg-white text-stone-900' : 'border border-stone-300 text-transparent'}`}>
+                <Check size={11} />
+              </span>
+              <span className="text-sm">Everyone &mdash; every cleaner sees this</span>
+            </button>
+            <div className="max-h-56 overflow-y-auto">
+              {cleaners.map(cl => {
+                const on = assignedTo.has(cl.id);
+                return (
+                  <button type="button" key={cl.id} onClick={() => toggleAssignee(cl.id)}
+                    className={`w-full flex items-center gap-2.5 px-4 py-2.5 text-left border-b border-stone-100 last:border-b-0 ${on ? 'bg-amber-50' : 'hover:bg-stone-50'}`}>
+                    <span className={`w-4 h-4 rounded flex items-center justify-center flex-shrink-0 ${on ? 'bg-stone-900 text-white' : 'border border-stone-300 text-transparent'}`}>
+                      <Check size={11} />
+                    </span>
+                    <span className={`text-sm ${on ? 'text-stone-900 font-medium' : 'text-stone-700'}`}>{cl.name}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
           <div className="text-[11px] text-stone-500 mt-1 font-mono">
-            {assignedTo
-              ? 'Only this cleaner sees it. You and your managers always do. Add more people later from the cleaning’s card.'
-              : 'Every cleaner sees it, the same as today.'}
+            {assignedTo.size === 0
+              ? 'Every cleaner sees it, the same as today.'
+              : assignedTo.size === 1
+                ? 'Only this cleaner sees it. You and your managers always do.'
+                : `Only these ${assignedTo.size} cleaners see it. You and your managers always do.`}
           </div>
         </div>
         )}
@@ -44803,7 +45032,7 @@ function ChecklistAssignmentWizard({ property, employee, actorKind = null, porta
           <div className="flex-1 min-w-0">
             <div className="text-xs uppercase tracking-wider font-mono text-stone-500">{property.name}</div>
             <div className="font-serif text-lg text-stone-900 font-bold">
-              {isEditMode ? 'Edit assignment' : 'Carriage Cove Uploads'}
+              {isEditMode ? 'Edit assignment' : (isPmActor ? 'Carriage Cove Uploads' : 'Full Upload')}
             </div>
             {isEditMode && (
               <div className="text-[11px] font-mono text-stone-500 truncate">{editAssignment.title}</div>
@@ -46521,8 +46750,10 @@ function AssignmentCard({ target, property = null, busy, onView, onStart, onPaus
 
 // AssignmentsPanel — full tabbed view for the property hub.
 // Tabs: Pending | Paused | In Progress | Done
-function AssignmentsPanel({ propertyId, property = null, employee, refreshKey, onGoToBedroom, onOpenBedroomHistory, onJoinBlock }) {
-  const [tab, setTab] = useState('pending');
+function AssignmentsPanel({ propertyId, property = null, employee, refreshKey, onGoToBedroom, onOpenBedroomHistory, onJoinBlock, initialTab = null }) {
+  // initialTab is how "Past cleanings" in the More menu lands straight on
+  // Done, now that Done is not a button on the row.
+  const [tab, setTab] = useState(initialTab || 'pending');
   // Guard against a stale 'paused' selection now that the tab is hidden.
   useEffect(() => {
     if (!SHOW_PAUSED_TAB && tab === 'paused') setTab('in_progress');
@@ -46558,10 +46789,14 @@ function AssignmentsPanel({ propertyId, property = null, employee, refreshKey, o
             Paused{counts.paused > 0 && ` (${counts.paused})`}
           </button>
         )}
-        <button onClick={() => setTab('in_progress')}
-          className={`flex-1 min-w-fit py-2 px-2 rounded-lg text-xs font-medium transition-colors whitespace-nowrap ${tab === 'in_progress' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
-          In progress{counts.in_progress > 0 && ` (${counts.in_progress})`}
-        </button>
+        {/* In progress and Done are both off this row now.
+           In progress: barely used -- a cleaning being worked is on the
+           Current tab, where the cleaner already is, so a second list of
+           it earned nothing. Its code path stays reachable (Unfinished
+           still routes here, and the paused guard falls back to it), so
+           this is one button removed, not a feature.
+           Done: moved into More, since it is for checking past work rather
+           than something you need beside today's list. */}
         {/* Unfinished — started on an earlier day and never closed out.
            These are a subset of In progress, pulled out because nobody comes
            back to them on their own. Amber so they read as needing a decision
@@ -46572,13 +46807,19 @@ function AssignmentsPanel({ propertyId, property = null, employee, refreshKey, o
             <AlertCircle size={11} /> Unfinished ({counts.unfinished})
           </button>
         )}
-        <button onClick={() => setTab('done')}
-          className={`flex-1 min-w-fit py-2 px-2 rounded-lg text-xs font-medium transition-colors whitespace-nowrap ${tab === 'done' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-500'}`}>
-          Done{counts.done > 0 && ` (${counts.done})`}
-          {counts.blocked > 0 && (
-            <span className="ml-1 text-[10px] font-mono text-red-700">· {counts.blocked}⊘</span>
-          )}
-        </button>
+        {/* Done lives in More now (see the comment above). It is still
+           selectable -- initialTab sends the cleaner straight here from
+           the More menu -- so when it IS the current tab it needs a
+           button to show as selected and to get back out of. */}
+        {tab === 'done' && (
+          <button onClick={() => setTab('done')}
+            className="flex-1 min-w-fit py-2 px-2 rounded-lg text-xs font-medium bg-white shadow-sm text-stone-900 whitespace-nowrap">
+            Done{counts.done > 0 && ` (${counts.done})`}
+            {counts.blocked > 0 && (
+              <span className="ml-1 text-[10px] font-mono text-red-700">· {counts.blocked}⊘</span>
+            )}
+          </button>
+        )}
         {/* Mine tab — items the current cleaner personally completed today.
            Hidden if the cleaner has no completions yet so the row stays
            compact for owners/managers viewing the same panel. */}

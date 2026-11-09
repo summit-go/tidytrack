@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "nov6-tap273";
+const BUILD_TAG = "nov6-tap275b";
 // ---- Hidden for now, at Allan's request -------------------------------
 // Both of these are switches rather than deletions: the code stays whole
 // and working, so turning either back on is this one line. Flip to true.
@@ -17284,11 +17284,34 @@ function ManagerDashboard({ employee, onSignOut, onOpenMessages, onLogoClick }) 
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [addShiftOpen, setAddShiftOpen] = useState(false);
 
+  // load() reads the dates from rangeRef when it starts, so a reload asked
+  // for by a save that began on other dates (Pay's onReload) fetches the
+  // dates on screen now, not the ones the save started on (F7).
+  const rangeRef = useRef({ dateFrom, dateTo });
+  rangeRef.current = { dateFrom, dateTo };
+  // "dateFrom|dateTo" of the shifts on screen. Pay keeps paid actions off
+  // until it matches the dates picked: until the new range's shifts land,
+  // an hourly card is built from the previous range's clock (F8).
+  const [shiftsFor, setShiftsFor] = useState(null);
+  // The last shift read failed (F9): { forKey: "dateFrom|dateTo", msg }.
+  // A failed page used to be silent, and shiftsFor was set anyway, so Pay
+  // opened on half the clock (page 1 of 2) and Paid all stamped an hourly
+  // card short. Now shiftsFor stays unset, Pay keeps paid actions off and
+  // says why. The next load that reads every page clears it.
+  const [shiftsError, setShiftsError] = useState(null);
+  // Only the NEWEST load may write (F8). A calendar pick is two changes
+  // (start, then start + end), and the first is the bigger "since start"
+  // read; when an older read landed last, Pay showed another range's
+  // shifts, and an hourly card on a shared day could be stamped short.
+  const loadGenRef = useRef(0);
   const load = useCallback(async () => {
+    const gen = ++loadGenRef.current;
+    const { dateFrom, dateTo } = rangeRef.current;
     // Paginated load so "all time" returns every shift, not just the
     // first 1000. Date bounds applied when set; empty = no bound.
     const PAGE = 1000;
     let rows = [];
+    let readError = null;
     for (let from = 0; ; from += PAGE) {
       let q = supabase
         .from('shifts')
@@ -17305,14 +17328,28 @@ function ManagerDashboard({ employee, onSignOut, onOpenMessages, onLogoClick }) 
         q = q.lte('start_time', new Date(ty, tm - 1, td, 23, 59, 59, 999).toISOString());
       }
       const { data, error } = await q;
-      if (error) break;
+      if (gen !== loadGenRef.current) return;
+      if (error) { readError = error; break; }
       rows = rows.concat(data || []);
       if (!data || data.length < PAGE) break;
       if (from > 100000) break;
     }
-    setShifts(rows); setLoaded(true);
-  }, [dateFrom, dateTo]);
-  useEffect(() => { load(); }, [load, view]);
+    if (gen !== loadGenRef.current) return;
+    const forKey = `${dateFrom || ''}|${dateTo || ''}`;
+    // On a read error the rows that did arrive are still shown (the other
+    // tabs behave as before), but the dates are NOT marked ready, so Pay
+    // never builds a paid amount from part of the clock (F9).
+    setShifts(rows);
+    if (readError) {
+      setShiftsFor(null);
+      setShiftsError({ forKey, msg: (readError && readError.message) || '' });
+    } else {
+      setShiftsFor(forKey);
+      setShiftsError(null);
+    }
+    setLoaded(true);
+  }, []);
+  useEffect(() => { load(); }, [load, view, dateFrom, dateTo]);
 
   // Keep the drill-down in sync with the cleaner filter. Without this you
   // can be drilled into cleaner A while the filter only allows cleaner B,
@@ -17510,7 +17547,13 @@ function ManagerDashboard({ employee, onSignOut, onOpenMessages, onLogoClick }) 
       </div>
 
       {subView === 'pay' ? (
-        <ShiftPayView shifts={filteredShifts} currentEmployee={employee} onReload={load}
+        /* UNFILTERED shifts: the status filter must not reach Pay. With
+           Status = Completed a running shift was dropped, the card lost its
+           "Still on the clock" and showed short hours that could be paid.
+           Pay applies the cleaner and property filters to its cards itself. */
+        <ShiftPayView shifts={shifts} currentEmployee={employee} onReload={load}
+          shiftsFor={shiftsFor} shiftsError={shiftsError}
+          statusFilterOn={filterStatuses.size > 0}
           /* The window and the filters go in because the Pay tab now reads
              the SCHEDULE as well as the clock, and a day whose cleanings
              nobody started has no shift to derive either one from. */
@@ -17808,12 +17851,36 @@ function payRowKey(empId, dateKey, custId, asgId = null, unitId = null) {
   return `${empId}:${dateKey}:${custId}:${asgId || ''}:${unitId || ''}`;
 }
 
+// PAID ROWS ARE READ-ONLY. Once a pay row has paid_at, nothing in the app
+// changes its amount or flat_amount or clears it; only "Paid -- undo" may
+// touch it, and that clears paid_at alone. Every refusal reads the same:
+//   "<label> is marked paid at $X. Undo Paid first to change it. Nothing was saved."
+// tail replaces the last sentence when part of a save did go through.
+function paidRowAmount(r) {
+  const a = r?.flat_amount != null ? r.flat_amount : r?.amount;
+  return a != null && !isNaN(Number(a)) ? Number(a) : null;
+}
+function paidRefusalText(label, r, tail = 'Nothing was saved.') {
+  const a = paidRowAmount(r);
+  return `${label} is marked paid${a != null ? ` at ${fmtMoney(a)}` : ''}. Undo Paid first to change it.${tail ? ' ' + tail : ''}`;
+}
+// The error writePayRow returns when the row it found is paid. .paid lets a
+// caller word the refusal with its own label; .row is the paid row as read.
+function paidRowError(row) {
+  const e = new Error(paidRefusalText('That pay', row));
+  e.paid = true; e.row = row || null;
+  return e;
+}
+
 // Find-then-write, rather than upsert: uniqueness here is an expression
 // index, which PostgREST's upsert cannot target (onConflict would fail).
-// Returns an error or null.
+// An insert that hits the unique index fails; it never overwrites a row.
+// A row it finds is updated only while unpaid: refused on the read, and the
+// update itself carries .is('paid_at', null), so a row paid in between is
+// left alone too. Returns an error or null (a paid row: paidRowError).
 async function writePayRow({ empId, dateKey, custId, asgId = null, unitId = null, patch, createdBy = null }) {
   if (!empId || !dateKey) return new Error('Missing cleaner or date.');
-  let q = supabase.from('employee_pay_days').select('id')
+  let q = supabase.from('employee_pay_days').select('id, flat_amount, amount, paid_at')
     .eq('employee_id', empId).eq('work_date', dateKey);
   q = custId ? q.eq('customer_id', custId) : q.is('customer_id', null);
   q = asgId ? q.eq('assignment_id', asgId) : q.is('assignment_id', null);
@@ -17821,8 +17888,16 @@ async function writePayRow({ empId, dateKey, custId, asgId = null, unitId = null
   const { data: found, error: fErr } = await q.maybeSingle();
   if (fErr) return fErr;
   if (found?.id) {
-    const { error } = await supabase.from('employee_pay_days').update(patch).eq('id', found.id);
-    return error || null;
+    if (found.paid_at) return paidRowError(found);
+    const { data: upd, error } = await supabase.from('employee_pay_days')
+      .update(patch).eq('id', found.id).is('paid_at', null).select('id');
+    if (error) return error;
+    if (!upd || !upd.length) {
+      const { data: now } = await supabase.from('employee_pay_days')
+        .select('id, flat_amount, amount, paid_at').eq('id', found.id).maybeSingle();
+      return paidRowError(now || found);
+    }
+    return null;
   }
   const { error } = await supabase.from('employee_pay_days').insert({
     employee_id: empId, work_date: dateKey, customer_id: custId || null,
@@ -17831,6 +17906,89 @@ async function writePayRow({ empId, dateKey, custId, asgId = null, unitId = null
   });
   return error || null;
 }
+
+// ONE APARTMENT, ONE AMOUNT. A cleaner gets one pay amount per apartment
+// per day, never two. writePayRow finds a row by all five keys, so when her
+// amount sat under a different cleaning (or none) it INSERTED a second one
+// beside it -- that is how "Split with" doubled Ana's 1427. This reads every
+// row she has at the apartment that day, whatever cleaning or property it
+// is filed under, and writes in place:
+//   2+ amounts  -> writes nothing ('review'; Pay shows "Needs review")
+//   1 amount    -> same value: nothing ('same'); paid: nothing ('paid');
+//                  otherwise that row is updated BY ID, keeping its keys
+//   none        -> blank: nothing; else writePayRow under this card's keys
+// Partner mode (someone else's card split onto her) never writes a blank.
+// Returns { error, skipped: null | 'review' | 'same' | 'paid', row, wrote }.
+async function saveAptPay({ empId, dateKey, custId, unitId, asgId = null, flatAmount, createdBy = null, partner = false }) {
+  if (!empId || !dateKey || !unitId) return { error: new Error('Missing cleaner, date or apartment.'), skipped: null, row: null };
+  const val = (flatAmount === '' || flatAmount == null) ? null : Number(flatAmount);
+  if (partner && val == null) return { error: null, skipped: null, row: null };
+  // No .maybeSingle(): several rows is a valid answer here.
+  const { data, error: rErr } = await supabase.from('employee_pay_days')
+    .select('id, assignment_id, customer_id, flat_amount, paid_at')
+    .eq('employee_id', empId).eq('work_date', dateKey).eq('unit_id', unitId);
+  if (rErr) return { error: rErr, skipped: null, row: null };
+  const withAmt = (data || []).filter(r => r.flat_amount != null);
+  if (withAmt.length >= 2) return { error: null, skipped: 'review', row: null };
+  const row = withAmt[0] || null;
+  if (row) {
+    if (val != null && Math.abs(Number(row.flat_amount) - val) < 0.005) return { error: null, skipped: 'same', row };
+    // Paid is final from here, on her own card as much as a partner's.
+    // Changing it means Paid -- undo first.
+    if (row.paid_at) return { error: null, skipped: 'paid', row };
+    const { data: upd, error } = await supabase.from('employee_pay_days')
+      .update({ flat_amount: val }).eq('id', row.id).is('paid_at', null).select('id');
+    if (error) return { error, skipped: null, row };
+    // Zero rows back: it was marked paid between the read and the write.
+    if (!upd || !upd.length) return { error: null, skipped: 'paid', row };
+    return { error: null, skipped: null, row, wrote: true };
+  }
+  if (val == null) return { error: null, skipped: null, row: null };
+  // A row under this card's keys with no amount can still be paid (Mark
+  // paid on Reports writes one): writePayRow refuses it, reported as 'paid'.
+  const error = await writePayRow({ empId, dateKey, custId, asgId, unitId, patch: { flat_amount: val }, createdBy });
+  if (error?.paid) return { error: null, skipped: 'paid', row: error.row };
+  return { error, skipped: null, row: null, wrote: !error };
+}
+
+// WRITE-TIME PAID GUARD for one pay row, by id. The same guarded update
+// saveAptPay makes: the database itself refuses the write once the row is
+// paid, so a row paid after the screen loaded is never changed. (saveAptPay
+// can't be reused for these callers: it reads by apartment and would update
+// a different row in place.) Returns { error, paid } -- paid: nothing was
+// written because the row is paid (or no longer there).
+async function updateUnpaidPayRow(id, patch) {
+  const { data, error } = await supabase.from('employee_pay_days')
+    .update(patch).eq('id', id).is('paid_at', null).select('id');
+  if (error) return { error, paid: false };
+  return { error: null, paid: !data || !data.length };
+}
+
+// "NEEDS REVIEW": two or more saved amounts for one cleaner, apartment and
+// day. Never added together. ONE of them is counted, picked the same way
+// every time (and the same way as Step 0's Q7): paid first, then the
+// larger amount, then a row with a property (a property-less row lives on
+// a card the property filter hides), then the newest, then the highest id.
+const payRowTime = (r) => { const t = Date.parse(r?.created_at || ''); return isNaN(t) ? -Infinity : t; };
+function comparePayRowsForCount(a, b) {
+  const pa = a.paid_at ? 1 : 0, pb = b.paid_at ? 1 : 0;
+  if (pa !== pb) return pb - pa;
+  const fa = Number(a.flat_amount) || 0, fb = Number(b.flat_amount) || 0;
+  if (fa !== fb) return fb - fa;
+  const ca = a.customer_id ? 1 : 0, cb = b.customer_id ? 1 : 0;
+  if (ca !== cb) return cb - ca;
+  const ta = payRowTime(a), tb = payRowTime(b);
+  if (ta !== tb) return tb > ta ? 1 : -1;
+  const ia = String(a.id ?? ''), ib = String(b.id ?? '');
+  return ia === ib ? 0 : (ib > ia ? 1 : -1);
+}
+const sortPayRowsForCount = (rows) => [...rows].sort(comparePayRowsForCount);
+// The day a row was paid, in Utah time, e.g. "Nov 4". Q7 prints the same.
+const fmtPaidDay = (ts) => new Date(ts).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/Denver' });
+// Where a row came from, judged from the row alone (Q7 uses the same words).
+const payRowSource = (r) => (r.assignment_id ? '(booked cleaning)' : '(no cleaning)');
+// "$45.00 paid Nov 4 (no cleaning)" / "$45.00 (booked cleaning)"
+const payRowLabel = (r) => `${fmtMoney(Number(r.flat_amount || 0))}${r.paid_at ? ` paid ${fmtPaidDay(r.paid_at)}` : ''} ${payRowSource(r)}`;
 
 // What the app knows about one shift, worked out once rather than three
 // times in the render. Everything here is already on the shift from the
@@ -17865,6 +18023,30 @@ function describeShift(s) {
   return jobs;
 }
 
+// Why a Pay card can't be marked paid (payReady's reason), in words: as a
+// button tooltip or Set pay message, and as a "Skipping" line in Paid all.
+const PAY_NOT_READY_TEXT = {
+  'outside dates': 'Outside the dates picked',
+  'paid': 'Already paid',
+  'needs review': 'Needs review: two amounts for one apartment',
+  'on the clock': 'Still on the clock',
+  'zero': 'Nothing to pay ($0)',
+  'not priced': 'An assigned apartment is not priced yet',
+  'blank apartment': 'An apartment has no amount',
+};
+// When a paid action is refused because the Pay screen's data isn't
+// loaded for the dates and filters on screen (F1).
+const PAY_NOT_LOADED_TEXT = 'Pay is not loaded for these dates yet. Nothing was saved. Wait until "Loading pay…" has gone, then tap again. If a red error is showing, refresh the page.';
+const PAY_SKIP_TEXT = {
+  'outside dates': 'outside the dates',
+  'paid': 'already paid',
+  'needs review': 'need review',
+  'on the clock': 'still on the clock',
+  'zero': '$0',
+  'not priced': 'not priced yet',
+  'blank apartment': 'with an apartment with no amount',
+};
+
 const CLEAN_TYPE_STYLE = {
   move_out_check: 'bg-indigo-50 border-indigo-200 text-indigo-800',
   cleaning_check: 'bg-sky-50 border-sky-200 text-sky-800',
@@ -17895,7 +18077,8 @@ const CLEAN_TYPE_STYLE = {
 // never clocked in at all had no card. Jobs now come from the SCHEDULE,
 // and the hours are matched onto them -- not the other way round.
 function ShiftPayView({ shifts, currentEmployee, onReload, onAddShift, onOpenShift,
-                        dateFrom = '', dateTo = '', filterCleaners = null, filterProperties = null }) {
+                        dateFrom = '', dateTo = '', filterCleaners = null, filterProperties = null,
+                        statusFilterOn = false, shiftsFor, shiftsError = null }) {
   const [payRows, setPayRows] = useState({});
   // The same rows as a flat list, plus the units they name. A hand-added
   // shift has no work blocks, so its apartment can only come from its pay
@@ -17904,8 +18087,18 @@ function ShiftPayView({ shifts, currentEmployee, onReload, onAddShift, onOpenShi
   const [payList, setPayList] = useState([]);
   const [unitMeta, setUnitMeta] = useState({});
   const [loadingPay, setLoadingPay] = useState(true);
+  // The last reload's error, shown in red. A failed reload used to return
+  // quietly and leave the old figures on screen as if they were current.
+  const [payLoadError, setPayLoadError] = useState(null);
   const [editing, setEditing] = useState(null);   // card id
   const [busy, setBusy] = useState(null);
+  // The bar after Paid all ("Marked 12 paid · Undo"), and after its Undo.
+  // { kind: 'mark' | 'undo', r: setPaid's result, dates, rk }. dates is
+  // the batch's own "Nov 3–Nov 5" and rk the range it was made on. It is
+  // KEPT when the dates change (F7): its Undo clears only the ids it
+  // stamped, matched on its own stamp, so it doesn't depend on what's on
+  // screen. When the screen shows other dates the bar names the batch's.
+  const [paidResult, setPaidResult] = useState(null);
   const [onlyAdded, setOnlyAdded] = useState(false);
   const [sizeRates, setSizeRates] = useState({}); // `${custId}:3x2` -> amount
 
@@ -17934,11 +18127,17 @@ function ShiftPayView({ shifts, currentEmployee, onReload, onAddShift, onOpenShi
   // ── THE SCHEDULE ──────────────────────────────────────────────────────
   // Every cleaning booked in the window and who it was given to, by BOTH
   // routes onto a job. Nothing here depends on anyone having clocked in.
-  const [sched, setSched] = useState({ jobs: [], byAsg: {}, ready: false, error: null });
+  // key/gen: which window this schedule was read for, and which read it
+  // was. Paid actions run only on a schedule read for the window on screen.
+  const [sched, setSched] = useState({ jobs: [], byAsg: {}, ready: false, error: null, key: null, gen: 0 });
+  const schedKey = `${spanFrom || ''}|${spanTo || ''}`;
+  const schedGenRef = useRef(0);
   useEffect(() => {
     let cancelled = false;
+    const key = `${spanFrom || ''}|${spanTo || ''}`;
+    const gen = ++schedGenRef.current;
     (async () => {
-      if (!spanFrom || !spanTo) { setSched({ jobs: [], byAsg: {}, ready: true, error: null }); return; }
+      if (!spanFrom || !spanTo) { setSched({ jobs: [], byAsg: {}, ready: true, error: null, key, gen }); return; }
       const BASE = 'id, unit_id, party_id, status, completed_at, unit:units(id, label, bedrooms, bathrooms, customer_id), assignment:assignments!inner(id, scheduled_date, assignment_type, active, deleted_at, customer_id, customer:customers(id, name))';
       const WITH_ASSIGNED = `assigned_to, assignedTo:employees!assigned_to(id, name), ${BASE}`;
       const PAGE = 1000;
@@ -17963,7 +18162,7 @@ function ShiftPayView({ shifts, currentEmployee, onReload, onAddShift, onOpenShi
         if (from > 100000) break;
       }
       if (cancelled) return;
-      if (failed) { setSched({ jobs: [], byAsg: {}, ready: true, error: failed }); return; }
+      if (failed) { setSched({ jobs: [], byAsg: {}, ready: true, error: failed, key, gen }); return; }
 
       // One job per assignment + apartment. The bedroom is deliberately not
       // part of the identity: an assignment is often recorded for a whole
@@ -18003,9 +18202,16 @@ function ShiftPayView({ shifts, currentEmployee, onReload, onAddShift, onOpenShi
       const asgIds = Array.from(new Set(Object.values(jobs).map(j => j.assignmentId)));
       if (asgIds.length) {
         for (let i = 0; i < asgIds.length; i += 200) {
-          const { data: aa } = await supabase.from('assignment_assignees')
+          const { data: aa, error: aaErr } = await supabase.from('assignment_assignees')
             .select('assignment_id, employee_id, status, employee:employees(id, name)')
             .in('assignment_id', asgIds.slice(i, i + 200));
+          // A failed read here used to drop who the job was given to, so a
+          // card could look ready when an assigned apartment wasn't priced.
+          if (aaErr) {
+            if (cancelled) return;
+            setSched({ jobs: [], byAsg: {}, ready: true, error: aaErr.message || 'unknown error', key, gen });
+            return;
+          }
           (aa || []).forEach(r => {
             if (r.status === 'declined') return;
             Object.values(jobs).forEach(j => {
@@ -18017,7 +18223,7 @@ function ShiftPayView({ shifts, currentEmployee, onReload, onAddShift, onOpenShi
         }
       }
       if (cancelled) return;
-      setSched({ jobs: Object.values(jobs), byAsg, ready: true, error: null });
+      setSched({ jobs: Object.values(jobs), byAsg, ready: true, error: null, key, gen });
     })();
     return () => { cancelled = true; };
   }, [spanFrom, spanTo]);
@@ -18025,23 +18231,55 @@ function ShiftPayView({ shifts, currentEmployee, onReload, onAddShift, onOpenShi
   // Pay rows across the window. Paginated for the same reason as every
   // other query here: PostgREST stops at 1,000 and would drop the rest
   // without saying so.
+  // Returns { error } so a caller (setPaid) can report a failed reload.
+  // Every call shows "Loading pay…" again (a reload after a date change
+  // used not to), and only the NEWEST call may write: an older read that
+  // lands late is dropped instead of putting another range's rows back.
+  // payLoaded = { key, gen } of the last read that finished cleanly; paid
+  // actions need it to match the range on screen.
+  // The range is read from payRangeRef WHEN THE READ STARTS, not from the
+  // render that made the function (F7). setPaid and Set pay's Save reload
+  // after their writes; their copy of loadPay came from the render where
+  // the tap started, so a date change during the save made that reload
+  // fetch the OLD dates, knock out the new range's read, and leave Pay on
+  // "Loading pay…" for good with the old cards under the new header.
+  const payKey = `${spanFrom || ''}|${dateTo || ''}`;
+  const payRangeRef = useRef({ spanFrom, dateTo });
+  payRangeRef.current = { spanFrom, dateTo };
+  const payGenRef = useRef(0);
+  const [payLoaded, setPayLoaded] = useState(null);
   const loadPay = useCallback(async () => {
-    if (!spanFrom) { setPayRows({}); setPayList([]); setLoadingPay(false); return; }
+    const gen = ++payGenRef.current;
+    const { spanFrom, dateTo } = payRangeRef.current;
+    const key = `${spanFrom || ''}|${dateTo || ''}`;
+    const superseded = () => gen !== payGenRef.current;
+    setLoadingPay(true); setPayLoaded(null);
+    if (!spanFrom) { setPayRows({}); setPayList([]); setLoadingPay(false); setPayLoadError(null); setPayLoaded({ key, gen }); return { error: null }; }
     const PAGE = 1000;
     let rows = [];
     for (let from = 0; ; from += PAGE) {
-      const { data, error } = await supabase.from('employee_pay_days')
-        .select('*').gte('work_date', spanFrom)
+      // Bounded at BOTH ends when an end date is picked. With only the
+      // start bound, a pay row dated after the range made its own card
+      // (step 4 below), so Payroll and Paid all reached past the end date.
+      // "All time" (no dateTo) stays open-ended on purpose.
+      let q = supabase.from('employee_pay_days')
+        .select('*').gte('work_date', spanFrom);
+      if (dateTo) q = q.lte('work_date', dateTo);
+      const { data, error } = await q
         .order('id', { ascending: true })
         .range(from, from + PAGE - 1);
-      if (error) { setLoadingPay(false); return; }
+      if (error) {
+        if (superseded()) return { error: null };
+        setLoadingPay(false); setPayLoadError(error.message || 'unknown error'); return { error };
+      }
       rows = rows.concat(data || []);
       if (!data || data.length < PAGE) break;
       if (from > 100000) break;
     }
+    if (superseded()) return { error: null };
     const m = {};
     rows.forEach(r => { m[payRowKey(r.employee_id, r.work_date, r.customer_id, r.assignment_id, r.unit_id)] = r; });
-    setPayRows(m); setPayList(rows); setLoadingPay(false);
+    setPayRows(m); setPayList(rows);
     // Labels and sizes for any apartment a pay row names.
     const unitIds = Array.from(new Set(rows.map(r => r.unit_id).filter(Boolean)));
     if (unitIds.length) {
@@ -18051,10 +18289,13 @@ function ShiftPayView({ shifts, currentEmployee, onReload, onAddShift, onOpenShi
           .select('id, label, bedrooms, bathrooms').in('id', unitIds.slice(i, i + 200));
         (data || []).forEach(u => { meta[u.id] = u; });
       }
+      if (superseded()) return { error: null };
       setUnitMeta(meta);
     }
-  }, [spanFrom]);
-  useEffect(() => { loadPay(); }, [loadPay]);
+    setLoadingPay(false); setPayLoadError(null); setPayLoaded({ key, gen });
+    return { error: null };
+  }, []);
+  useEffect(() => { loadPay(); }, [loadPay, spanFrom, dateTo]);
 
   // blockId -> what the app knows about it. The DAY on a block is the day
   // its cleaning was SCHEDULED for, not the day the cleaner clocked in --
@@ -18076,6 +18317,9 @@ function ShiftPayView({ shifts, currentEmployee, onReload, onAddShift, onOpenShi
           unitId: b.unit_id || null, partyId: b.party_id || null,
           assignmentId: b.assignment_id || null,
           label: unitPartyLabel(b.unit?.label, b.party?.label) || b.unit?.label || 'Apartment',
+          // The plain apartment label, for when addJob merges two copies of
+          // one apartment that disagree on the bedroom.
+          unitLabel: b.unit?.label || null,
           size: (bd != null && ba != null) ? `${bd}x${ba}` : null,
           type: b.assignment?.assignment_type || null,
           ms: Math.max(0, (b.end_time ? new Date(b.end_time) : new Date()) - new Date(b.start_time)),
@@ -18089,15 +18333,25 @@ function ShiftPayView({ shifts, currentEmployee, onReload, onAddShift, onOpenShi
   const [joinedByEmp, setJoinedByEmp] = useState({});
   // blockId -> Map(employeeId -> name), owners and joiners together.
   const [partsByBlock, setPartsByBlock] = useState({});
+  // { idx, error, gen }: the blockIndex these were read for. A joiner's
+  // apartment is on their card only once this read is done, so paid
+  // actions wait for it too; a failed read is shown and keeps them off.
+  const [partsLoad, setPartsLoad] = useState({ idx: null, error: null, gen: 0 });
+  const partsGenRef = useRef(0);
   useEffect(() => { (async () => {
+    const gen = ++partsGenRef.current;
     const ids = Array.from(blockIndex.keys());
-    if (!ids.length) { setJoinedByEmp({}); setPartsByBlock({}); return; }
+    if (!ids.length) { setJoinedByEmp({}); setPartsByBlock({}); setPartsLoad({ idx: blockIndex, error: null, gen }); return; }
     const byBlock = {}; const byEmp = {};
     for (let i = 0; i < ids.length; i += 200) {
       const { data, error } = await supabase.from('work_block_participants')
         .select('work_block_id, employee_id, left_at, employee:employees(id, name)')
         .in('work_block_id', ids.slice(i, i + 200));
-      if (error) { console.warn('[pay] participant read failed', error); return; }
+      if (error) {
+        console.warn('[pay] participant read failed', error);
+        if (gen === partsGenRef.current) setPartsLoad({ idx: blockIndex, error: error.message || 'unknown error', gen });
+        return;
+      }
       (data || []).forEach(r => {
         const info = blockIndex.get(r.work_block_id);
         if (!info) return;
@@ -18110,7 +18364,8 @@ function ShiftPayView({ shifts, currentEmployee, onReload, onAddShift, onOpenShi
         }
       });
     }
-    setPartsByBlock(byBlock); setJoinedByEmp(byEmp);
+    if (gen !== partsGenRef.current) return;
+    setPartsByBlock(byBlock); setJoinedByEmp(byEmp); setPartsLoad({ idx: blockIndex, error: null, gen });
   })(); /* eslint-disable-next-line */ }, [blockIndex]);
 
   // id -> name for every active cleaner. Needed because a pay row can
@@ -18155,21 +18410,39 @@ function ShiftPayView({ shifts, currentEmployee, onReload, onAddShift, onOpenShi
     };
     const addJob = (c, job) => {
       if (!c || !job.unitId) return;
-      // Identity is the APARTMENT, as everywhere else on this screen. Two
-      // assignments on one apartment in one day were listed twice and the
-      // money landed on whichever row happened to be opened first.
-      const jk = `${job.unitId}::${job.partyId || ''}`;
+      // Identity is the APARTMENT ALONE, as everywhere else on this screen.
+      // Two assignments on one apartment in one day were listed twice and
+      // the money landed on whichever row happened to be opened first.
+      //
+      // The bedroom is NOT part of it. Pay rows are stored and looked up per
+      // apartment, never per bedroom, so two lines for one apartment on one
+      // cleaner-day can only be a duplicate. Keying on the bedroom too is
+      // what listed 1427 twice -- once from the schedule (which carries the
+      // booking's bedroom) and once from the clock or a pay row (which never
+      // do) -- and made payFor add the same saved amount twice.
+      const jk = job.unitId;
       if (c._jobSeen.has(jk)) {
+        const prev = c.jobs.find(x => x.unitId === jk);
+        if (!prev) return;
         // Prefer a job that knows which assignment it is.
-        const prev = c.jobs.find(x => `${x.unitId}::${x.partyId || ''}` === jk);
-        if (prev && !prev.assignmentId && job.assignmentId) prev.assignmentId = job.assignmentId;
-        if (prev && !prev.type && job.type) prev.type = job.type;
-        if (prev && job.clocked) prev.clocked = true;
-        if (prev && job.assigned) prev.assigned = true;
+        if (!prev.assignmentId && job.assignmentId) prev.assignmentId = job.assignmentId;
+        if (!prev.type && job.type) prev.type = job.type;
+        if (job.clocked) prev.clocked = true;
+        if (job.assigned) prev.assigned = true;
+        // A bedroom is kept only if both copies agree on it; otherwise the
+        // line is the whole apartment and is labelled as such.
+        if ((prev.partyId || null) !== (job.partyId || null)) {
+          prev.partyId = null;
+          prev.label = prev.unitLabel || job.unitLabel || prev.label;
+        }
+        if (!prev.unitLabel && job.unitLabel) prev.unitLabel = job.unitLabel;
+        if (!prev.size && job.size) prev.size = job.size;
+        prev.joined = !!(prev.joined || job.joined);
+        prev.fromPayOnly = !!(prev.fromPayOnly && job.fromPayOnly);
         // Hours belong to the APARTMENT, not to the block, so several
         // blocks on one apartment add up. This is what lets a single job
         // be paid by the hour while its neighbours are paid per job.
-        if (prev && job.clockedMs) prev.clockedMs = (prev.clockedMs || 0) + job.clockedMs;
+        if (job.clockedMs) prev.clockedMs = (prev.clockedMs || 0) + job.clockedMs;
         return;
       }
       c._jobSeen.add(jk);
@@ -18186,7 +18459,7 @@ function ShiftPayView({ shifts, currentEmployee, onReload, onAddShift, onOpenShi
         });
         addJob(c, {
           unitId: j.unitId, partyId: j.partyId, assignmentId: j.assignmentId,
-          label: j.label, size: j.size, type: j.type, assigned: true, clocked: false,
+          label: j.label, unitLabel: j.label, size: j.size, type: j.type, assigned: true, clocked: false,
         });
       });
     });
@@ -18221,7 +18494,7 @@ function ShiftPayView({ shifts, currentEmployee, onReload, onAddShift, onOpenShi
         const c = ensure(empId, info.dateKey, custId, seed);
         addJob(c, {
           unitId: info.unitId, partyId: info.partyId, assignmentId: info.assignmentId,
-          label: info.label, size: info.size, type: info.type, clocked: true, assigned: false,
+          label: info.label, unitLabel: info.unitLabel, size: info.size, type: info.type, clocked: true, assigned: false,
           clockedMs: info.ms,
         });
       });
@@ -18236,7 +18509,7 @@ function ShiftPayView({ shifts, currentEmployee, onReload, onAddShift, onOpenShi
         const c = ensure(empId, info.dateKey, info.custId, {});
         addJob(c, {
           unitId: info.unitId, partyId: info.partyId, assignmentId: info.assignmentId,
-          label: info.label, size: info.size, type: info.type, clocked: true, assigned: false, joined: true,
+          label: info.label, unitLabel: info.unitLabel, size: info.size, type: info.type, clocked: true, assigned: false, joined: true,
         });
       });
     });
@@ -18253,7 +18526,7 @@ function ShiftPayView({ shifts, currentEmployee, onReload, onAddShift, onOpenShi
       const bd = u?.bedrooms, ba = u?.bathrooms;
       addJob(c, {
         unitId: r.unit_id, partyId: null, assignmentId: r.assignment_id || null,
-        label: u?.label || 'Apartment',
+        label: u?.label || 'Apartment', unitLabel: u?.label || null,
         size: (bd != null && ba != null) ? `${bd}x${ba}` : null,
         type: null, fromPayOnly: true,
       });
@@ -18273,23 +18546,67 @@ function ShiftPayView({ shifts, currentEmployee, onReload, onAddShift, onOpenShi
 
   const visible = onlyAdded ? cards.filter(c => c.handAdded) : cards;
 
+  // ── IS WHAT'S ON SCREEN LOADED? ───────────────────────────────────────
+  // No paid action runs unless the pay rows, the schedule and who joined
+  // whose apartment were all read for exactly the range on screen (F1).
+  // Before this, a tap while "Loading pay…" decided "ready" from half-
+  // loaded data and stamped a hidden paid hourly row beside a real per-job
+  // amount. payDataKey names the range, the filters and which reads the
+  // screen is showing; it is null while anything is loading or has failed.
+  // setPaid refuses unless the caller's key is still the current one.
+  const setKeyOf = (set) => (set && set.size ? Array.from(set).map(String).sort().join(',') : '');
+  const rangeKey = [dateFrom || '', dateTo || '', spanFrom || '', spanTo || '',
+    setKeyOf(filterCleaners), setKeyOf(filterProperties), onlyAdded ? 'added' : ''].join('|');
+  const payPending = loadingPay || (!payLoadError && !(payLoaded && payLoaded.key === payKey));
+  const schedPending = !(sched.ready && sched.key === schedKey);
+  const partsPending = partsLoad.idx !== blockIndex;
+  // The parent's shifts are for the dates picked (F8). shiftsFor is
+  // "dateFrom|dateTo" of the last shift read the dashboard applied; it is
+  // undefined where the parent doesn't say, and then isn't checked.
+  const shiftsPending = shiftsFor !== undefined && shiftsFor !== `${dateFrom || ''}|${dateTo || ''}`;
+  // The dashboard's last shift read for these dates failed (F9). shiftsFor
+  // is then unset, so shiftsPending keeps the paid actions off; this says
+  // why instead of "Loading pay…". An error for other dates isn't shown:
+  // a newer read for the dates on screen is already out.
+  const shiftsFailed = shiftsError && shiftsError.forKey === `${dateFrom || ''}|${dateTo || ''}` ? shiftsError : null;
+  const payFresh = !payPending && !payLoadError && !schedPending && !sched.error && !partsPending && !partsLoad.error && !shiftsPending;
+  const payDataKey = payFresh ? `${rangeKey}#${payLoaded.gen}#${sched.gen}#${partsLoad.gen}` : null;
+  const payDataKeyRef = useRef(null);
+  payDataKeyRef.current = payDataKey;
+  // Why the paid buttons are greyed out, or null when they aren't.
+  const paidOff = payFresh ? null
+    : (payPending || schedPending || partsPending || (shiftsPending && !shiftsFailed)) ? 'Loading pay…'
+    : 'Pay did not load. Refresh the page to try again.';
+
   // The per-size pay tiers already in each property's price book
   // (__aptpay__:3x2). Read so a per-job row can fill itself in with what
   // you normally pay for that size, instead of asking you to remember.
+  // Properties with finished shifts AND properties with only scheduled
+  // (assigned) work, so an added cleaner's job can be pre-filled too.
+  // Only the NEWEST call may write. This fires once for finished shifts and
+  // again when the schedule lands (a fuller list of properties); if the
+  // first answer arrived last it overwrote the fuller map, and the added
+  // cleaner's job lost its pre-fill.
+  const sizeReqRef = useRef(0);
   useEffect(() => { (async () => {
-    const custIds = Array.from(new Set(done.map(s => s.customer?.id || s.customer_id).filter(Boolean)));
+    const my = ++sizeReqRef.current;
+    const custIds = Array.from(new Set([
+      ...done.map(s => s.customer?.id || s.customer_id),
+      ...(sched.jobs || []).map(j => j.custId),
+    ].filter(Boolean)));
     if (!custIds.length) return;
     const { data } = await supabase.from('invoice_price_book')
       .select('customer_id, subsection_key, base_amount')
       .in('customer_id', custIds)
       .like('subsection_key', '__aptpay__:%');
+    if (my !== sizeReqRef.current) return;
     const m = {};
     (data || []).forEach(r => {
       const size = String(r.subsection_key).split('__aptpay__:')[1];
       if (size) m[`${r.customer_id}:${size}`] = Number(r.base_amount) || 0;
     });
     setSizeRates(m);
-  })(); /* eslint-disable-next-line */ }, [done.length]);
+  })(); /* eslint-disable-next-line */ }, [done.length, sched]);
 
   const crewByJob = React.useMemo(() => {
     const m = new Map();
@@ -18346,32 +18663,439 @@ function ShiftPayView({ shifts, currentEmployee, onReload, onAddShift, onOpenShi
         && (r.customer_id || null) === custId
         && r.unit_id === j.unitId && r.flat_amount != null);
       const row = rows.find(r => (r.assignment_id || null) === (j.assignmentId || null)) || rows[0] || null;
-      return { job: j, row, allRows: rows };
+      // EVERY amount this cleaner has at this apartment today, whatever
+      // cleaning or property it is filed under, once per row id. One
+      // apartment, one amount: two or more is always "Needs review". Only
+      // ONE of them is counted (comparePayRowsForCount), and only on the
+      // card whose property matches it, so neither the card nor Payroll
+      // can add the same apartment twice.
+      const seenIds = new Set();
+      const aptRows = payList.filter(r =>
+        r.employee_id === empId && r.work_date === dateKey
+        && r.unit_id === j.unitId && r.flat_amount != null)
+        .filter(r => {
+          const id = r.id != null ? r.id : r;
+          if (seenIds.has(id)) return false;
+          seenIds.add(id);
+          return true;
+        });
+      if (aptRows.length >= 2) {
+        const sorted = sortPayRowsForCount(aptRows);
+        const chosen = sorted[0];
+        const onCard = (chosen.customer_id || null) === custId;
+        return { job: j, row: onCard ? chosen : null, allRows: rows, review: { rows: sorted, chosen, onCard } };
+      }
+      return { job: j, row, allRows: rows, review: null };
     });
+    const needsReview = jobRows.filter(r => r.review).map(r => r.job.label);
     const perJob = jobRows.filter(r => r.row && r.row.flat_amount != null);
-    const common = { jobRows, jobs, empId, dateKey, custId, payListRef: payList };
+    // paidSoFar is THE paid figure, one per card: the sum of paidRowAmount
+    // over the card's counted rows that are paid (flat_amount on a job or
+    // day amount, amount on a day paid by the clock). "Part paid" and
+    // "paid $X, now $Y" both read it. null = paid, but no figure recorded.
+    const common = { jobRows, jobs, empId, dateKey, custId, payListRef: payList, needsReview, paidSoFar: 0, counted: [] };
     if (perJob.length) {
+      // Each counted row ONCE by row.id: one per apartment (the chosen one
+      // for a "Needs review" apartment), never a sum of several.
+      const countedRows = new Set();
+      const rowsCounted = [];
+      perJob.forEach(({ row }) => {
+        const rk = row.id != null ? row.id : row;
+        if (countedRows.has(rk)) return;
+        countedRows.add(rk);
+        rowsCounted.push(row);
+      });
       return {
         ...common, mode: 'job',
-        total: perJob.reduce((n, r) => n + Number(r.row.flat_amount || 0), 0),
-        paid: perJob.every(r => !!r.row.paid_at) && perJob.length > 0,
+        total: rowsCounted.reduce((n, row) => n + Number(row.flat_amount || 0), 0),
+        paid: rowsCounted.length > 0 && rowsCounted.every(row => !!row.paid_at) && needsReview.length === 0,
+        paidSoFar: rowsCounted.filter(row => !!row.paid_at).reduce((n, row) => n + (paidRowAmount(row) || 0), 0),
+        // The rows this card counts, once each. Mark paid targets these
+        // and nothing else (payTargetsFor).
+        counted: rowsCounted,
       };
     }
-    const flat = payRows[payRowKey(empId, dateKey, custId, null, null)];
-    if (flat && flat.flat_amount != null) {
-      return { ...common, mode: 'flat', total: Number(flat.flat_amount), paid: !!flat.paid_at, flatRow: flat };
+    // The day row: no cleaning, no apartment. A day amount when it holds
+    // flat_amount; a day paid by the clock when it has paid_at only.
+    const dayRow = payRows[payRowKey(empId, dateKey, custId, null, null)] || null;
+    if (dayRow && dayRow.flat_amount != null) {
+      return { ...common, mode: 'flat', total: Number(dayRow.flat_amount), paid: !!dayRow.paid_at, flatRow: dayRow, dayRow,
+        paidSoFar: dayRow.paid_at ? paidRowAmount(dayRow) : 0 };
     }
+    // Paid by the clock: the day row's paid_at, the same rule By cleaner
+    // uses. This read a literal false, so Mark paid on an hourly card saved
+    // but the card never showed Paid, and tapping again re-stamped it.
+    const clockPaid = {
+      paid: !!dayRow?.paid_at,
+      paidSoFar: dayRow?.paid_at ? paidRowAmount(dayRow) : 0,
+      dayRow,
+    };
     const rate = Number(c.employee?.pay_rate_hourly) || 0;
     const hrs = c.clockedMs / 3600000;
     if (hrs <= 0) {
       // Assigned, but nothing clocked and nothing entered. Worth $0 until
       // Allan says otherwise -- never a guessed figure.
-      return { ...common, mode: 'unworked', total: 0, rate, hours: 0, paid: false, flatRow: null };
+      return { ...common, mode: 'unworked', total: 0, rate, hours: 0, flatRow: null, ...clockPaid };
     }
-    return { ...common, mode: 'hourly', total: rate > 0 ? hrs * rate : 0, rate, hours: hrs, paid: false, flatRow: null };
+    return { ...common, mode: 'hourly', total: rate > 0 ? hrs * rate : 0, rate, hours: hrs, flatRow: null, ...clockPaid };
+  };
+
+  // CAN THIS CARD BE MARKED PAID? { ok, reason }. The first failing check
+  // is the reason. setPaid enforces this on every path (each card's button,
+  // Paid all, Set pay); the buttons only use it to grey themselves out.
+  const payReady = (c, p) => {
+    if ((dateFrom && c.day < dateFrom) || (dateTo && c.day > dateTo)) return { ok: false, reason: 'outside dates' };
+    if (p.paid) return { ok: false, reason: 'paid' };
+    // One apartment, one amount: two saved amounts are never paid until
+    // Allan removes the extra (round 2).
+    if (p.needsReview.length) return { ok: false, reason: 'needs review' };
+    if (c.running) return { ok: false, reason: 'on the clock' };
+    if (p.mode === 'unworked' || !(p.total > 0)) return { ok: false, reason: 'zero' };
+    // The card's own "Assigned · not paid yet" badge condition. jobRows is
+    // one entry per job line, so r.row is the line's myRow.
+    if (p.jobRows.some(r => r.job.assigned && !r.job.clocked && !r.row && p.mode !== 'flat')) return { ok: false, reason: 'not priced' };
+    if (p.mode === 'job' && p.jobRows.some(r => !r.row)) return { ok: false, reason: 'blank apartment' };
+    return { ok: true, reason: null };
+  };
+
+  // WHAT MARK PAID WRITES for one card: only rows the card COUNTS, and
+  // only those not paid yet, so an earlier payment is never re-stamped.
+  //   job:    each counted row (once by id), its stored flat_amount as is
+  //   flat:   the day row and its flat_amount
+  //   hourly: the day row by id, or an insert spec when there is none;
+  //           amount = the clocked figure to the cent
+  // .flat is the exact stored flat_amount, for the database-side guard.
+  const payTargetsFor = (c, p) => {
+    if (p.mode === 'job') {
+      return (p.counted || []).filter(r => r.id != null && !r.paid_at)
+        .map(r => ({ cardId: c.id, kind: 'job', id: r.id, flat: r.flat_amount, amount: Number(r.flat_amount) }));
+    }
+    if (p.mode === 'flat') {
+      const r = p.flatRow;
+      return r && r.id != null && !r.paid_at
+        ? [{ cardId: c.id, kind: 'flat', id: r.id, flat: r.flat_amount, amount: Number(r.flat_amount) }] : [];
+    }
+    if (p.mode === 'hourly') {
+      const amount = Math.round(p.total * 100) / 100;
+      if (p.dayRow) return p.dayRow.paid_at || p.dayRow.id == null ? [] : [{ cardId: c.id, kind: 'hourly', id: p.dayRow.id, amount }];
+      return [{ cardId: c.id, kind: 'hourly', amount, spec: {
+        employee_id: c.empId, work_date: c.day, customer_id: c.custId || null,
+        assignment_id: null, unit_id: null, amount, created_by: currentEmployee?.id || null,
+      } }];
+    }
+    return [];
+  };
+
+  // Property names for "counted on the <property> card".
+  const custNameById = React.useMemo(() => {
+    const m = {};
+    (sched.jobs || []).forEach(j => { if (j.custId && j.propName) m[j.custId] = j.propName; });
+    all.forEach(s => { const id = s.customer?.id || s.customer_id; if (id && s.customer?.name) m[id] = s.customer.name; });
+    return m;
+  }, [sched, all]);
+  // "Catalina · Bridges · Nov 3", for results and alerts. The property is
+  // in it because one cleaner can have two cards on one day.
+  const payCardLabel = (c) => `${c.employee?.name || 'Cleaner'} · ${c.customer?.name || (c.custId && custNameById[c.custId]) || 'No property'} · ${new Date(c.day + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`;
+
+  // EVERY PAID WRITE ON THIS SCREEN GOES THROUGH HERE: each card's Mark
+  // paid, Paid all, its Undo, and Set pay's Mark paid.
+  //   setPaid(cards, true)   mark: only payReady cards, only unpaid rows
+  //   setPaid(cards, false)  unmark one card: clears its latest stamp only
+  //   setPaid([], false, { undo: { ids, stamp } })  Paid all's Undo
+  // The database decides, not the screen: marks carry .is('paid_at', null)
+  // plus an amount guard, so a row paid earlier or in another tab is never
+  // re-stamped; Undo carries .eq('paid_at', stamp), so it clears only rows
+  // still holding this batch's stamp. Results are per card, from the ids
+  // the database returns. Ids go 200 at a time. One ref lock covers every
+  // paid control: two taps inside one render can't both get through.
+  // Returns { refused } or { stamp, okCards, changed, failed, skipped,
+  //   touchedIds, undone, missing, remainingIds, readyCount, reloadError }.
+  // remainingIds: after a failed Undo, the ids it never got to clear.
+  // refused: 'not loaded' when the screen's data isn't loaded for the
+  // current range (opts.key, or this render's key, is not the current
+  // payDataKey); 'busy' when another paid write is running.
+  const paidLockRef = useRef(false);
+  const setPaid = async (cardsIn, paid, opts = {}) => {
+    const callerKey = opts.key !== undefined ? opts.key : payDataKey;
+    if (!callerKey || callerKey !== payDataKeyRef.current) return { refused: 'not loaded' };
+    if (paidLockRef.current) return { refused: 'busy' };
+    paidLockRef.current = true;
+    setBusy('paid');
+    const res = { stamp: null, okCards: [], changed: [], failed: [], skipped: [], touchedIds: [], undone: 0, missing: 0, remainingIds: [], readyCount: 0, reloadError: null };
+    const failText = (e) => (e?.code === '23505'
+      ? 'already has a pay row, reloaded, tap again'
+      : (e?.message || 'unknown error'));
+    try {
+      if (opts.undo) {
+        // PAID ALL'S UNDO: only rows still carrying this batch's stamp.
+        const { ids = [], stamp } = opts.undo;
+        res.stamp = stamp;
+        const back = new Set();
+        let undoErr = null, failedAt = ids.length;
+        for (let i = 0; i < ids.length; i += 200) {
+          const { data, error } = await supabase.from('employee_pay_days')
+            .update({ paid_at: null }).in('id', ids.slice(i, i + 200))
+            .eq('paid_at', stamp).select('id');
+          if (error) { undoErr = error; failedAt = i; break; }
+          (data || []).forEach(r => back.add(String(r.id)));
+        }
+        res.touchedIds = Array.from(back);
+        res.undone = back.size;
+        // Chunks that ran: rows not cleared had changed since. From the
+        // failed chunk on: never cleared, kept for a retry (same stamp).
+        res.missing = ids.slice(0, failedAt).filter(id => !back.has(String(id))).length;
+        if (undoErr) {
+          res.failed.push({ card: null, message: failText(undoErr) });
+          res.remainingIds = ids.slice(failedAt);
+        }
+      } else if (paid) {
+        // MARK. Readiness first: a card that isn't ready is never written.
+        const ready = [];
+        for (const c of cardsIn) {
+          const p = payFor(c);
+          const r = payReady(c, p);
+          if (!r.ok) { res.skipped.push({ card: c, reason: r.reason }); continue; }
+          const targets = payTargetsFor(c, p);
+          if (!targets.length) { res.skipped.push({ card: c, reason: 'paid' }); continue; }
+          ready.push({ card: c, targets });
+        }
+        res.readyCount = ready.length;
+        if (!ready.length) return res;
+        const stamp = new Date().toISOString();
+        res.stamp = stamp;
+        // Job and day amounts grouped by the EXACT stored flat_amount (the
+        // guard must match it); clocked figures grouped by cents.
+        const priced = new Map(), clocked = new Map(), inserts = [];
+        ready.forEach(({ targets }) => targets.forEach(t => {
+          if (t.kind === 'hourly' && t.id == null) { inserts.push(t); return; }
+          const m = t.kind === 'hourly' ? clocked : priced;
+          const k = t.kind === 'hourly' ? String(Math.round(t.amount * 100)) : String(t.flat);
+          if (!m.has(k)) m.set(k, []);
+          m.get(k).push(t);
+        }));
+        const back = new Set();
+        for (const list of priced.values()) {
+          const flat = list[0].flat;
+          for (let i = 0; i < list.length; i += 200) {
+            const chunk = list.slice(i, i + 200);
+            const { data, error } = await supabase.from('employee_pay_days')
+              .update({ paid_at: stamp, amount: Number(flat) }).in('id', chunk.map(t => t.id))
+              .is('paid_at', null).eq('flat_amount', flat).select('id');
+            if (error) { chunk.forEach(t => { t.error = error; }); continue; }
+            (data || []).forEach(r => back.add(String(r.id)));
+          }
+        }
+        for (const [cents, list] of clocked) {
+          const amount = Number(cents) / 100;
+          for (let i = 0; i < list.length; i += 200) {
+            const chunk = list.slice(i, i + 200);
+            const { data, error } = await supabase.from('employee_pay_days')
+              .update({ paid_at: stamp, amount }).in('id', chunk.map(t => t.id))
+              .is('paid_at', null).is('flat_amount', null).select('id');
+            if (error) { chunk.forEach(t => { t.error = error; }); continue; }
+            (data || []).forEach(r => back.add(String(r.id)));
+          }
+        }
+        // Clock-only days with no pay row yet: one inserted day row each.
+        // Each chunk is one statement, all or nothing; 23505 = a day row
+        // now exists (employee_pay_days_uniq).
+        for (let i = 0; i < inserts.length; i += 200) {
+          const chunk = inserts.slice(i, i + 200);
+          const { data, error } = await supabase.from('employee_pay_days')
+            .insert(chunk.map(t => ({ ...t.spec, paid_at: stamp })))
+            .select('id, employee_id, work_date, customer_id');
+          if (error) { chunk.forEach(t => { t.error = error; }); continue; }
+          chunk.forEach(t => {
+            const got = (data || []).find(r => r.employee_id === t.spec.employee_id
+              && String(r.work_date).slice(0, 10) === t.spec.work_date
+              && (r.customer_id || null) === (t.spec.customer_id || null));
+            if (got?.id != null) { t.newId = String(got.id); back.add(t.newId); }
+          });
+        }
+        res.touchedIds = Array.from(back);
+        ready.forEach(({ card, targets }) => {
+          const done = targets.filter(t => !t.error && (t.id != null ? back.has(String(t.id)) : !!t.newId));
+          const errs = targets.filter(t => t.error);
+          if (done.length === targets.length) res.okCards.push(card);
+          else if (errs.length) res.failed.push({ card, message: (done.length ? 'partly marked; ' : '') + failText(errs[0].error) });
+          else res.changed.push({ card, note: done.length
+            ? 'partly marked; the rest was already paid or changed elsewhere, reloaded'
+            : 'already paid or changed elsewhere, reloaded' });
+        });
+      } else {
+        // UNMARK ONE CARD. Clears the latest stamp only, so an earlier
+        // payment on a part-paid card stays (round 2). Each row is matched
+        // on the exact paid_at the screen read: a row re-stamped elsewhere
+        // since is left alone and reported. amount is left as it is, and
+        // nothing is ever deleted.
+        for (const c of cardsIn) {
+          const p = payFor(c);
+          let rows = [];
+          if (p.mode === 'job') {
+            const stamped = (p.counted || []).filter(r => r.paid_at && r.id != null);
+            if (stamped.length) {
+              const latest = Math.max(...stamped.map(r => Date.parse(r.paid_at)));
+              rows = stamped.filter(r => Date.parse(r.paid_at) === latest);
+            }
+          } else if (p.dayRow?.paid_at && p.dayRow.id != null) {
+            rows = [p.dayRow];
+          }
+          if (!rows.length) { res.skipped.push({ card: c, reason: 'not paid' }); continue; }
+          const byStamp = new Map();
+          rows.forEach(r => { if (!byStamp.has(r.paid_at)) byStamp.set(r.paid_at, []); byStamp.get(r.paid_at).push(String(r.id)); });
+          const back = new Set();
+          let unErr = null;
+          for (const [paidAt, ids] of byStamp) {
+            for (let i = 0; i < ids.length; i += 200) {
+              const { data, error } = await supabase.from('employee_pay_days')
+                .update({ paid_at: null }).in('id', ids.slice(i, i + 200))
+                .eq('paid_at', paidAt).select('id');
+              if (error) { unErr = error; break; }
+              (data || []).forEach(r => back.add(String(r.id)));
+            }
+            if (unErr) break;
+          }
+          back.forEach(id => res.touchedIds.push(id));
+          if (back.size === rows.length) res.okCards.push(c);
+          else if (unErr) res.failed.push({ card: c, message: (back.size ? 'partly undone; ' : '') + failText(unErr) });
+          else res.changed.push({ card: c, note: 'changed elsewhere, reloaded' });
+        }
+        if (!res.okCards.length && !res.changed.length && !res.failed.length) return res;
+      }
+      // Afterwards, always: reload real state, and say so if that failed.
+      const { error: reloadErr } = (await loadPay()) || {};
+      if (reloadErr) res.reloadError = reloadErr.message || 'unknown error';
+      onReload && onReload();
+      return res;
+    } finally {
+      paidLockRef.current = false;
+      setBusy(null);
+    }
+  };
+
+  // What went wrong in a setPaid result, as lines of text ([] = nothing).
+  const paidProblems = (r) => {
+    if (!r || r.refused) return [];
+    const out = [];
+    r.skipped.forEach(s => out.push(s.reason === 'not paid'
+      ? `${payCardLabel(s.card)}: not paid, nothing to undo.`
+      : `${payCardLabel(s.card)}: not marked paid. ${PAY_NOT_READY_TEXT[s.reason] || s.reason}.`));
+    r.changed.forEach(x => out.push(`${payCardLabel(x.card)}: ${x.note}.`));
+    r.failed.forEach(x => out.push(`${x.card ? payCardLabel(x.card) + ': ' : ''}failed: ${x.message}`));
+    if (r.reloadError) out.push(`Could not reload: ${r.reloadError}`);
+    return out;
+  };
+  // One card's own button. No confirm (Allan): the button shows the amount
+  // and one more tap undoes it. A double tap is refused quietly by the lock.
+  const markOne = async (c, paid) => {
+    const r = await setPaid([c], paid);
+    if (!r) return;
+    if (r.refused === 'not loaded') { alert(PAY_NOT_LOADED_TEXT); return; }
+    if (r.refused) return;
+    const msg = paidProblems(r);
+    if (msg.length) alert(msg.join('\n'));
+  };
+
+  // PAID ALL: every card on screen that is ready. Always asks first, and
+  // the question says how many cards, how much, which dates, how much of
+  // it is clocked hours, and what is being skipped and why.
+  const shortDay = (k) => new Date(k + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  const paidAllLabel = (() => {
+    const n = filterCleaners ? filterCleaners.size : 0;
+    if (n === 0) return 'Paid all';
+    if (n > 1) return `Paid all · ${n} cleaners`;
+    const id = Array.from(filterCleaners)[0];
+    return `Paid all · ${empNames[id] || cards.find(c => c.empId === id)?.employee?.name || '1 cleaner'}`;
+  })();
+  // paidAllOpenRef: one Paid all at a time, from the first tap to the end
+  // of its save. A quick double tap used to show the question twice (the
+  // second click ran before the re-render that greys the button out).
+  const paidAllOpenRef = useRef(false);
+  const paidAll = async () => {
+    if (busy || !payDataKey || paidAllOpenRef.current || paidLockRef.current) return;
+    paidAllOpenRef.current = true;
+    try { await paidAllRun(); } finally { paidAllOpenRef.current = false; }
+  };
+  const paidAllRun = async () => {
+    const key = payDataKey;
+    const ready = [], skipCount = {};
+    visible.forEach(c => {
+      const p = payFor(c);
+      const rd = payReady(c, p);
+      if (rd.ok) ready.push({ c, targets: payTargetsFor(c, p) });
+      else skipCount[rd.reason] = (skipCount[rd.reason] || 0) + 1;
+    });
+    const skipN = Object.values(skipCount).reduce((n, x) => n + x, 0);
+    const skipLine = skipN
+      ? `Skipping ${skipN}: ${Object.keys(PAY_SKIP_TEXT).filter(k => skipCount[k]).map(k => `${skipCount[k]} ${PAY_SKIP_TEXT[k]}`).join(', ')}.`
+      : '';
+    if (!ready.length) { alert(`Nothing here is ready to mark paid.${skipLine ? '\n' + skipLine : ''}`); return; }
+    const all = ready.flatMap(x => x.targets);
+    const total = all.reduce((n, t) => n + t.amount, 0);
+    const hourly = all.filter(t => t.kind === 'hourly');
+    const hourlyTotal = hourly.reduce((n, t) => n + t.amount, 0);
+    const hourlyCards = new Set(hourly.map(t => t.cardId)).size;
+    const days = ready.map(x => x.c.day).sort();
+    const first = shortDay(days[0]), last = shortDay(days[days.length - 1]);
+    const msg = `Mark ${ready.length} card${ready.length === 1 ? '' : 's'} paid: ${fmtMoney(total)} total (dates ${first === last ? first : `${first}–${last}`}).`
+      + (hourlyCards ? `\nIncludes ${fmtMoney(hourlyTotal)} from clocked hours on ${hourlyCards} hourly card${hourlyCards === 1 ? '' : 's'}.` : '')
+      + (skipLine ? `\n${skipLine}` : '');
+    if (!confirm(msg)) return;
+    setPaidResult(null);
+    const rk = `${dateFrom || ''}|${dateTo || ''}`;
+    const dates = first === last ? first : `${first}–${last}`;
+    const r = await setPaid(ready.map(x => x.c), true, { key });
+    if (!r) return;
+    if (r.refused === 'not loaded') { alert(PAY_NOT_LOADED_TEXT); return; }
+    if (r.refused) return;
+    setPaidResult({ kind: 'mark', r, dates, rk });
+  };
+  // Undo a Paid all batch, or retry the part a failed Undo didn't reach.
+  // Either way only rows still carrying that batch's stamp are cleared.
+  const undoIdsOf = (pr) => (!pr ? []
+    : pr.kind === 'mark' ? pr.r.touchedIds
+    : pr.kind === 'undo' ? (pr.r.remainingIds || []) : []);
+  const undoPaidAll = async () => {
+    if (busy || !payDataKey) return;
+    const pr = paidResult;
+    const ids = undoIdsOf(pr);
+    if (!ids.length || !pr.r.stamp) return;
+    const r = await setPaid([], false, { undo: { ids, stamp: pr.r.stamp } });
+    if (!r) return;
+    if (r.refused === 'not loaded') { alert(PAY_NOT_LOADED_TEXT); return; }
+    if (r.refused) return;
+    setPaidResult({ kind: 'undo', r, dates: pr.dates, rk: pr.rk });
+  };
+  // Up to 3 named cards, then "+n more".
+  const namedCards = (arr, withMsg) => arr.slice(0, 3)
+    .map(x => (x.card ? payCardLabel(x.card) : 'batch') + (withMsg && x.message ? ` (${x.message})` : ''))
+    .join(', ') + (arr.length > 3 ? `, +${arr.length - 3} more` : '');
+  const paidResultText = (pr) => {
+    const r = pr.r;
+    let t;
+    if (pr.kind === 'undo') {
+      t = `Undid ${r.undone}.`
+        + (r.missing ? ` ${r.missing} had changed since, left as they are.` : '')
+        + (r.failed.length ? ` Undo failed: ${r.failed[0].message}. ${(r.remainingIds || []).length} still marked paid.` : '');
+    } else {
+      const ok = r.okCards.length;
+      t = (ok === r.readyCount && !r.changed.length && !r.failed.length)
+        ? `Marked ${ok} paid`
+        : `Marked ${ok} of ${r.readyCount}.`
+          + (r.changed.length ? ` ${r.changed.length} changed elsewhere: ${namedCards(r.changed)}.` : '')
+          + ` ${r.failed.length} failed${r.failed.length ? ': ' + namedCards(r.failed, true) : ''}.`;
+    }
+    // Kept from other dates: say which, since its cards may not be on screen.
+    if (pr.dates && pr.rk !== `${dateFrom || ''}|${dateTo || ''}`) t += ` (dates ${pr.dates})`;
+    if (r.reloadError) t += ` Could not reload: ${r.reloadError}`;
+    return t;
   };
 
   const payrollTotal = visible.reduce((n, c) => n + payFor(c).total, 0);
+  const reviewCardCount = visible.filter(c => payFor(c).needsReview.length > 0).length;
+  const countedOnCardName = (row) => (row.customer_id
+    ? `the ${custNameById[row.customer_id] || 'other property'} card`
+    : 'the no-property card');
   const shiftCount = new Set(visible.flatMap(c => c.shifts.map(s => s.id))).size;
   const unworkedCount = visible.reduce((n, c) =>
     n + c.jobs.filter(j => j.assigned && !j.clocked).length, 0);
@@ -18394,9 +19118,18 @@ function ShiftPayView({ shifts, currentEmployee, onReload, onAddShift, onOpenShi
           </button>
         </div>
         <div className="flex items-center gap-2">
+          {reviewCardCount > 0 && (
+            <span className="text-[10px] font-mono uppercase tracking-wider text-amber-700 font-bold">
+              {reviewCardCount} need{reviewCardCount === 1 ? 's' : ''} review
+            </span>
+          )}
           <span className="text-sm text-stone-600">
             Payroll <span className="font-mono font-semibold text-stone-900">{fmtMoney(payrollTotal)}</span>
           </span>
+          <button onClick={paidAll} disabled={!!busy || !payFresh} title={paidOff || undefined}
+            className="px-3 py-1.5 rounded-xl border border-emerald-400 bg-emerald-50 hover:bg-emerald-100 disabled:opacity-50 text-emerald-900 text-xs font-medium">
+            {busy === 'paid' ? 'Saving…' : paidAllLabel}
+          </button>
           <button onClick={onAddShift}
             className="px-3 py-1.5 rounded-xl bg-stone-900 hover:bg-stone-800 text-stone-50 text-xs font-medium flex items-center gap-1.5">
             <Plus size={12} /> Add shift
@@ -18404,10 +19137,50 @@ function ShiftPayView({ shifts, currentEmployee, onReload, onAddShift, onOpenShi
         </div>
       </div>
 
-      {loadingPay && <div className="text-xs font-mono text-stone-400 mb-2">Loading pay…</div>}
+      {paidResult && (
+        <div className={`mb-3 px-3 py-2 rounded-xl border text-xs flex items-center justify-between gap-2 flex-wrap ${
+          paidResult.r.failed.length || paidResult.r.changed.length || paidResult.r.reloadError
+            ? 'bg-amber-50 border-amber-300 text-amber-900' : 'bg-emerald-50 border-emerald-300 text-emerald-900'}`}>
+          <span>{paidResultText(paidResult)}</span>
+          <div className="flex items-center gap-2">
+            {undoIdsOf(paidResult).length > 0 && (
+              <button onClick={undoPaidAll} disabled={!!busy || !payFresh} title={paidOff || undefined}
+                className="px-2.5 py-1 rounded-lg border border-stone-400 bg-white text-stone-800 hover:bg-stone-50 disabled:opacity-50 text-[11px] font-medium">
+                Undo
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+      {statusFilterOn && (
+        <div className="text-xs font-mono text-stone-500 mb-2">Status filter doesn't apply to Pay.</div>
+      )}
+      {/* Shown on first open AND on every reload (a date change, after a
+         save), because the paid buttons are greyed out until it's gone. */}
+      {paidOff === 'Loading pay…' && <div className="text-xs font-mono text-stone-400 mb-2">Loading pay…</div>}
+      {shiftsFailed && (
+        <div className="text-xs font-mono text-red-700 mb-2">
+          Couldn't load all shifts for these dates — refresh the page.{shiftsFailed.msg ? ` ${shiftsFailed.msg}` : ''}
+        </div>
+      )}
       {sched.error && (
         <div className="text-xs font-mono text-red-700 mb-2">
           Could not read the schedule, so this is clocked work only: {sched.error}
+        </div>
+      )}
+      {payLoadError && (
+        <div className="text-xs font-mono text-red-700 mb-2">
+          Could not reload pay, so these figures may be out of date: {payLoadError}
+        </div>
+      )}
+      {!partsPending && partsLoad.error && (
+        <div className="text-xs font-mono text-red-700 mb-2">
+          Could not read who joined whose apartment: {partsLoad.error}
+        </div>
+      )}
+      {paidOff && paidOff !== 'Loading pay…' && (
+        <div className="text-xs font-mono text-red-700 mb-2">
+          Mark paid and Paid all are off until pay loads. Refresh the page to try again.
         </div>
       )}
 
@@ -18498,8 +19271,13 @@ function ShiftPayView({ shifts, currentEmployee, onReload, onAddShift, onOpenShi
                     // The card used to show a single figure at the bottom
                     // and nothing per job, so a day of four cleanings gave
                     // no way to see which of them the money was for.
-                    const myRow = p.jobRows.find(r => r.job.unitId === j.unitId
-                      && (r.job.partyId || null) === (j.partyId || null))?.row;
+                    const myJobRow = p.jobRows.find(r => r.job.unitId === j.unitId
+                      && (r.job.partyId || null) === (j.partyId || null));
+                    const myRow = myJobRow?.row;
+                    // "Needs review": the line lists every amount and shows
+                    // the ONE that counts -- or names the card it counts on.
+                    const myReview = myJobRow?.review || null;
+                    const myAmount = myRow?.flat_amount != null ? Number(myRow.flat_amount) : null;
                     return (
                       <div key={`${j.unitId}-${i}`}>
                         <div className="flex items-start justify-between gap-2">
@@ -18514,10 +19292,13 @@ function ShiftPayView({ shifts, currentEmployee, onReload, onAddShift, onOpenShi
                             </span>
                           )}
                           {/* The job was given to them and no hours exist on
-                             it. This is the line the whole screen was missing. */}
+                             it. This is the line the whole screen was missing.
+                             With nothing saved for it yet (and no flat amount
+                             for the day covering it) it says so outright: an
+                             added cleaner is $0 until Allan sets their pay. */}
                           {j.assigned && !j.clocked && (
                             <span className="px-1.5 py-px rounded-full bg-amber-100 border border-amber-300 text-[9px] font-mono font-bold uppercase tracking-wide text-amber-900">
-                              Assigned · no hours
+                              {(!myRow && p.mode !== 'flat') ? 'Assigned · not paid yet' : 'Assigned · no hours'}
                             </span>
                           )}
                           {assigned.length > 1 && (
@@ -18531,12 +19312,21 @@ function ShiftPayView({ shifts, currentEmployee, onReload, onAddShift, onOpenShi
                             </span>
                           )}
                         </div>
-                        {myRow?.flat_amount != null && (
+                        {myAmount != null && (
                           <span className="font-mono text-[11px] font-semibold text-stone-900 flex-shrink-0 mt-0.5">
-                            {fmtMoney(Number(myRow.flat_amount))}
+                            {fmtMoney(myAmount)}
                           </span>
                         )}
                         </div>
+                        {myReview && (
+                          <div className="text-[10px] text-amber-900 mt-0.5 ml-0.5">
+                            <span className="font-bold text-amber-800">Needs review</span>
+                            {' · '}{myReview.rows.map(payRowLabel).join(' · ')}
+                            {' · '}{myReview.onCard
+                              ? `counting ${fmtMoney(Number(myReview.chosen.flat_amount || 0))}`
+                              : `counted on ${countedOnCardName(myReview.chosen)}`}
+                          </div>
+                        )}
                         {assignedNames.length > 0 && (
                           <div className="text-[10px] text-violet-900 mt-0.5 ml-0.5">
                             Assigned: {assignedNames.join(', ')}
@@ -18573,7 +19363,44 @@ function ShiftPayView({ shifts, currentEmployee, onReload, onAddShift, onOpenShi
                           <Check size={9} /> Paid
                         </span>
                       )}
+                      {/* CHANGED SINCE PAID: the paid figure (paidSoFar) no
+                         longer matches today's. On an hourly day the paid
+                         amount is a snapshot, so edited hours show here.
+                         Read-only: Allan settles the difference by hand. */}
+                      {p.paid && p.paidSoFar != null && Math.abs(p.paidSoFar - p.total) > 0.01 && (
+                        <span className="px-2 py-0.5 rounded-full bg-amber-50 border border-amber-300 text-[9px] font-mono tracking-wide text-amber-800">
+                          paid {fmtMoney(p.paidSoFar)}, now {fmtMoney(p.total)}
+                        </span>
+                      )}
+                      {!p.paid && p.paidSoFar > 0.005 && p.paidSoFar < p.total - 0.005 && (
+                        <span className="px-2 py-0.5 rounded-full bg-amber-50 border border-amber-200 text-[9px] font-mono tracking-wide text-amber-800">
+                          Part paid · {fmtMoney(p.paidSoFar)} of {fmtMoney(p.total)}
+                        </span>
+                      )}
                       <span className="font-mono text-[15px] font-semibold text-stone-900">{fmtMoney(p.total)}</span>
+                      {(() => {
+                        // MARK PAID, one tap. Greyed out (with the reason as
+                        // its tooltip) when the card isn't ready, while any
+                        // paid write is running, and until pay is loaded.
+                        if (p.paid) {
+                          return (
+                            <button onClick={() => markOne(c, false)} disabled={!!busy || !payFresh} title={paidOff || undefined}
+                              className="px-2.5 py-1.5 rounded-lg border border-emerald-300 bg-emerald-50 text-emerald-800 hover:bg-emerald-100 disabled:opacity-50 text-[11px] font-medium">
+                              Paid ✓
+                            </button>
+                          );
+                        }
+                        const rd = payReady(c, p);
+                        const rest = rd.ok ? payTargetsFor(c, p).reduce((n, t) => n + t.amount, 0) : p.total;
+                        const part = p.paidSoFar > 0.005 && p.paidSoFar < p.total - 0.005;
+                        return (
+                          <button onClick={() => markOne(c, true)} disabled={!!busy || !payFresh || !rd.ok}
+                            title={paidOff || (rd.ok ? undefined : PAY_NOT_READY_TEXT[rd.reason])}
+                            className="px-2.5 py-1.5 rounded-lg border border-stone-400 bg-white text-stone-700 hover:bg-stone-50 disabled:opacity-40 text-[11px] font-medium">
+                            {part ? `Mark rest paid ${fmtMoney(rest)}` : `Mark paid ${fmtMoney(rest)}`}
+                          </button>
+                        );
+                      })()}
                       <button onClick={() => setEditing(c.id)}
                         className="px-2.5 py-1.5 rounded-lg border border-stone-400 bg-white text-stone-700 hover:bg-stone-50 text-[11px] font-medium">
                         {p.mode === 'unworked' ? 'Set pay' : 'Edit pay'}
@@ -18584,6 +19411,8 @@ function ShiftPayView({ shifts, currentEmployee, onReload, onAddShift, onOpenShi
                   <PayEditor card={c} p={p} sizeRates={sizeRates} busy={busy} setBusy={setBusy}
                     currentEmployee={currentEmployee}
                     splitCandidates={allCleaners} assignedByJob={assignedByJob}
+                    countedOnCardName={countedOnCardName}
+                    onTogglePaid={setPaid} paidOff={paidOff}
                     onDone={async () => { setEditing(null); await loadPay(); onReload && onReload(); }}
                     onCancel={() => setEditing(null)} />
                 )}
@@ -18600,20 +19429,45 @@ function ShiftPayView({ shifts, currentEmployee, onReload, onAddShift, onOpenShi
 // figure against each apartment they cleaned — which is what Carriage
 // Cove needs, since a 3x2 move-out and a 1x1 standard on the same shift
 // are not the same money.
-function PayEditor({ card, p, sizeRates, busy, setBusy, currentEmployee, splitCandidates = [], assignedByJob = {}, onDone, onCancel }) {
+function PayEditor({ card, p, sizeRates, busy, setBusy, currentEmployee, splitCandidates = [], assignedByJob = {}, countedOnCardName = () => 'another card', onTogglePaid, paidOff = null, onDone, onCancel }) {
   // A card with nothing on it yet opens job-by-job, because that is what
   // an assigned-but-unclocked day needs. A card that already has a flat
   // or hourly amount opens where it was left: saving in job mode clears
   // the day's flat amount, so landing there by default would let an
   // accidental Save wipe money that was already entered.
+  //
+  // An 'hourly' card with an assigned, unclocked, unpaid job also opens
+  // job-by-job, so the size price is pre-filled for the added cleaner.
+  // Safe: 'hourly' means nothing is saved for the day yet (see payFor).
+  // A 'flat' card still opens where it was left, for the reason above.
+  //
+  // "NEEDS REVIEW" APARTMENTS: two or more saved amounts for this
+  // cleaner-day (see payFor). One apartment gets one amount, so the box is
+  // read-only, lists each amount, and offers Remove on every amount that is
+  // not paid. Save never writes to it. jobKey -> { rows, chosen, onCard }.
+  const reviewOf = {};
+  p.jobRows.forEach(({ job, review }) => { if (review) reviewOf[`${job.unitId}:${job.assignmentId || ''}`] = review; });
+  const reviewLabels = p.jobRows.filter(({ review }) => review).map(({ job }) => job.label);
+  // A SINGLE AMOUNT THAT IS ALREADY PAID. Read-only, here as on any card:
+  // a blank box used to clear it and turn a paid apartment unpaid. Changing
+  // it means Paid -- undo first. jobKey -> row.
+  const paidSingleOf = {};
+  p.jobRows.forEach(({ job, row, review }) => {
+    if (!review && row?.flat_amount != null && row.paid_at) paidSingleOf[`${job.unitId}:${job.assignmentId || ''}`] = row;
+  });
   const [mode, setMode] = useState(
-    (p.mode === 'job' || p.mode === 'unworked') ? 'job' : 'hourly');
+    (p.mode === 'job' || p.mode === 'unworked'
+      || (p.mode === 'hourly' && p.jobRows.some(({ job, row }) => job.assigned && !job.clocked && !row)))
+      ? 'job' : 'hourly');
   const [amounts, setAmounts] = useState(() => {
     const m = {};
     p.jobRows.forEach(({ job, row }) => {
       const k = `${job.unitId}:${job.assignmentId || ''}`;
       const tier = sizeRates[`${p.custId}:${job.size}`];
-      m[k] = row?.flat_amount != null ? String(row.flat_amount)
+      // A "Needs review" box shows the ONE amount that counts on this card
+      // (blank when it counts on another card), never a sum.
+      m[k] = reviewOf[k] ? (reviewOf[k].onCard ? String(reviewOf[k].chosen.flat_amount) : '')
+        : row?.flat_amount != null ? String(row.flat_amount)
         : (tier ? String(tier) : '');
     });
     return m;
@@ -18633,14 +19487,19 @@ function PayEditor({ card, p, sizeRates, busy, setBusy, currentEmployee, splitCa
   // jobKey -> [employeeId]. Seeded from who ALREADY has a pay row for the
   // same apartment and day, so reopening shows the split that exists
   // rather than an empty control that looks like nothing was recorded.
+  // Once each (a cleaner with two rows there was listed twice, which
+  // divided the amount one way too many), and never someone whose amount
+  // there is PAID: Save can't change it, so pre-ticking her only repeats a
+  // warning on every save. She can still be ticked by hand.
   const [splits, setSplits] = useState(() => {
     const init = {};
     p.jobRows.forEach(({ job }) => {
       const k = `${job.unitId}:${job.assignmentId || ''}`;
-      init[k] = (p.payListRef || [])
+      const theirs = (p.payListRef || [])
         .filter(r => r.work_date === p.dateKey && r.unit_id === job.unitId
-          && r.employee_id !== p.empId && r.flat_amount != null)
-        .map(r => r.employee_id);
+          && r.employee_id !== p.empId && r.flat_amount != null);
+      init[k] = Array.from(new Set(theirs.map(r => r.employee_id)))
+        .filter(id => !theirs.some(r => r.employee_id === id && r.paid_at));
     });
     return init;
   });
@@ -18657,7 +19516,11 @@ function PayEditor({ card, p, sizeRates, busy, setBusy, currentEmployee, splitCa
   const [jobHours, setJobHours] = useState({});
   const [jobRates, setJobRates] = useState({});
   const jobClockedHours = (job) => (job.clockedMs || 0) / 3600000;
+  // Boxes the user has typed in or priced by the hour. A price book that
+  // lands late may fill a box, but never one of these.
+  const touchedKeys = useRef(new Set());
   const setJobBasis = (k, job, b) => {
+    touchedKeys.current.add(k);
     setBasis(prev => ({ ...prev, [k]: b }));
     if (b !== 'hourly') return;
     // Seed from what they clocked ON THIS APARTMENT and their profile rate,
@@ -18683,6 +19546,28 @@ function PayEditor({ card, p, sizeRates, busy, setBusy, currentEmployee, splitCa
       return changed ? next : prev;
     });
   }, [basis, jobHours, jobRates]);
+  // THE SIZE PRICE CAN ARRIVE AFTER SET PAY OPENS. `amounts` is seeded once
+  // at mount, so a slow price book left the box blank until Cancel and
+  // reopen. Fill it in when it lands -- the same rule as at mount (no saved
+  // row, a price for that size) -- but only into a box that is still blank
+  // and that the user has not touched.
+  useEffect(() => {
+    setAmounts(prev => {
+      let next = prev, changed = false;
+      p.jobRows.forEach(({ job, row }) => {
+        const k = `${job.unitId}:${job.assignmentId || ''}`;
+        if (reviewOf[k] || row?.flat_amount != null) return;
+        if (touchedKeys.current.has(k)) return;
+        if (prev[k] != null && String(prev[k]).trim() !== '') return;
+        const tier = sizeRates[`${p.custId}:${job.size}`];
+        if (!tier) return;
+        if (!changed) { next = { ...prev }; changed = true; }
+        next[k] = String(tier);
+      });
+      return changed ? next : prev;
+    });
+    /* eslint-disable-next-line */
+  }, [sizeRates]);
   const toggleSplit = (k, id) => setSplits(prev => {
     const cur = prev[k] || [];
     return { ...prev, [k]: cur.includes(id) ? cur.filter(x => x !== id) : [...cur, id] };
@@ -18705,7 +19590,18 @@ function PayEditor({ card, p, sizeRates, busy, setBusy, currentEmployee, splitCa
     setFlat((h * r).toFixed(2));
   }, [hours, rate, totalTouched]);
 
-  const jobTotal = p.jobRows.reduce((n, { job }) => {
+  // One entry per amount box. Two job lines sharing a key share one box
+  // and one saved row, so they are counted once, never twice.
+  const uniqJobRows = (() => {
+    const seen = new Set();
+    return p.jobRows.filter(({ job }) => {
+      const k = `${job.unitId}:${job.assignmentId || ''}`;
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
+  })();
+  const jobTotal = uniqJobRows.reduce((n, { job }) => {
     const k = `${job.unitId}:${job.assignmentId || ''}`;
     return n + (parseFloat(amounts[k]) || 0);
   }, 0);
@@ -18714,10 +19610,11 @@ function PayEditor({ card, p, sizeRates, busy, setBusy, currentEmployee, splitCa
   // here was one total, and with a split in play that was ambiguous: it
   // is what THIS cleaner gets, while the apartment may be costing twice
   // or three times that across everyone on it.
-  const breakdown = p.jobRows.map(({ job }) => {
+  const breakdown = uniqJobRows.map(({ job }) => {
     const k = `${job.unitId}:${job.assignmentId || ''}`;
     const amt = parseFloat(amounts[k]) || 0;
-    const sharers = splits[k] || [];
+    // Save writes no split for a "Needs review" box or a paid amount.
+    const sharers = (reviewOf[k] || paidSingleOf[k]) ? [] : (splits[k] || []);
     const each = sharers.length && divide[k] ? shareFor(k, job) : amt;
     const mine = (sharers.length && divide[k])
       ? Number((amt - each * sharers.length).toFixed(2))
@@ -18735,15 +19632,116 @@ function PayEditor({ card, p, sizeRates, busy, setBusy, currentEmployee, splitCa
     .map(id => (splitCandidates.find(c => c.id === id) || {}).name || 'someone');
   const byClock = (Number(card.employee?.pay_rate_hourly) || 0) * ((card.clockedMs || 0) / 3600000);
 
+  // CLOCK PAY DROPS OUT IN JOB MODE. Once any per-job amount is saved the
+  // card total is ONLY those amounts (payFor), by design. So an apartment
+  // they clocked hours on but left blank here pays $0. Warn, offer to fill
+  // it from the clock, and confirm before saving. Changes nothing written.
+  const isBlankAmt = (v) => v == null || String(v).trim() === '';
+  const keyOfJob = (job) => `${job.unitId}:${job.assignmentId || ''}`;
+  const blankClocked = mode !== 'job' ? [] : uniqJobRows
+    .map(({ job }) => job)
+    .filter(job => (job.clockedMs || 0) > 0 && isBlankAmt(amounts[keyOfJob(job)])
+      && uniqJobRows.some(({ job: o }) => keyOfJob(o) !== keyOfJob(job) && !isBlankAmt(amounts[keyOfJob(o)])));
+  // AGAINST THE WHOLE DAY'S CLOCK, not only the apartment blocks. The card's
+  // hourly pay is every billable minute of the shift (card.clockedMs); time
+  // before the first apartment, between apartments, or on a shift with no
+  // apartment at all is in there and in no job. Comparing per apartment let
+  // a 4h shift with no blocks drop from $80 to a $45 job with no warning.
+  //
+  // With every box blank, Save writes nothing that counts and the card stays
+  // on the clock (payFor), so this only applies once an amount is entered.
+  const anyJobAmount = uniqJobRows.some(({ job }) => !isBlankAmt(amounts[keyOfJob(job)]));
+  const loggedMs = uniqJobRows.reduce((n, { job }) => n + (job.clockedMs || 0), 0);
+  // Under a minute is the gap between two taps, not unlogged work.
+  const unloggedMs = Math.max(0, (card.clockedMs || 0) - loggedMs);
+  const unloggedHrs = unloggedMs >= 60000 ? unloggedMs / 3600000 : 0;
+  // FLAT-RATE PROPERTIES (customers.bill_mode 'flat': Bridges, Citifront)
+  // pay per cleaning, so job amounts below the clock are the intended pay,
+  // not a loss -- no clock-pay warning there. Read from the card's SHIFTS:
+  // the card's own customer can be the schedule's seed, which carries no
+  // bill_mode. A card with clocked time always has shifts.
+  const flatProp = (card.shifts || []).some(s => s.customer?.bill_mode === 'flat');
+  const unloggedText = (!flatProp && unloggedHrs > 0)
+    ? `Of the clocked time, ${unloggedHrs.toFixed(2)}h${profileRate > 0 ? ` (${fmtMoney(unloggedHrs * profileRate)})` : ''} isn't logged to any apartment.`
+    : '';
+  const clockShortfall = Number((byClock - mineTotal).toFixed(2));
+  const clockShort = !flatProp && mode === 'job' && (card.clockedMs || 0) > 0 && byClock > 0
+    && anyJobAmount && clockShortfall >= 0.01;
+  // No profile rate: the clock has no dollar figure to compare, so fall back
+  // to naming the clocked apartments left blank, as before.
+  const noRateBlank = mode === 'job' && profileRate <= 0 && blankClocked.length > 0;
+  // At a flat property an apartment cleaned but left blank still pays $0,
+  // so THAT warning stays.
+  const flatBlank = flatProp && mode === 'job' && blankClocked.length > 0;
+  const clockWarnShown = clockShort || noRateBlank || flatBlank;
+  // Hourly: confirm only when this save actually LOWERS pay. Re-saving a
+  // card that is already job by job at the same total still shows the box
+  // but doesn't ask again.
+  const clockConfirm = (clockShort && (p.mode !== 'job' || mineTotal < p.total - 0.005)) || noRateBlank || flatBlank;
+  const clockWarnLines = [];
+  if (clockShort) {
+    clockWarnLines.push(`Clocked pay for this day is ${fmtMoney(byClock)}. Job amounts total ${fmtMoney(mineTotal)}, so ${card.employee?.name || 'this cleaner'} gets ${fmtMoney(clockShortfall)} less than by the clock.`);
+  }
+  if (clockWarnShown) {
+    if (blankClocked.length) {
+      clockWarnLines.push(`${blankClocked.map(j => j.label).join(', ')} had ${(blankClocked.reduce((n, j) => n + (j.clockedMs || 0), 0) / 3600000).toFixed(2)}h clocked but no amount.${clockShort ? '' : ' Saving job by job pays only the amounts typed, so these would be $0.'}`);
+    }
+    if (unloggedText) clockWarnLines.push(unloggedText);
+  }
+  const clockWarnText = clockWarnLines.join('\n\n');
+
+  const nameOf = (id) => (splitCandidates.find(c => c.id === id) || {}).name || 'someone';
+  // Another cleaner's amounts at this apartment today, from the rows already
+  // loaded -- the same one-amount rule saveAptPay applies, so the confirm
+  // can say what a split will do to her BEFORE anything is written.
+  const partnerAptRows = (otherId, unitId) => {
+    const seen = new Set();
+    return (p.payListRef || []).filter(r => r.employee_id === otherId && r.work_date === p.dateKey
+      && r.unit_id === unitId && r.flat_amount != null)
+      .filter(r => { const id = r.id != null ? r.id : r; if (seen.has(id)) return false; seen.add(id); return true; });
+  };
+  // A partner's PAID day row at this property, from the rows already loaded.
+  // save() never writes her share beside it (partnerPaidDay below re-checks
+  // at write time), so the confirm mustn't promise a change.
+  const partnerDayPaidOnScreen = (otherId) => (p.payListRef || []).some(r => r.employee_id === otherId
+    && r.work_date === p.dateKey && (r.customer_id || null) === (p.custId || null)
+    && !r.assignment_id && !r.unit_id && r.paid_at);
+  const sameMoney = (a, b) => Math.abs(Number(a) - Number(b)) < 0.005;
+  // The card's day row (no cleaning, no apartment), whether or not it holds
+  // an amount: a day paid by the clock is a row with paid_at and no
+  // flat_amount, and it is read-only too.
+  const dayRowOf = () => p.flatRow || (p.payListRef || []).find(r => r.employee_id === p.empId
+    && r.work_date === p.dateKey && (r.customer_id || null) === (p.custId || null)
+    && !r.assignment_id && !r.unit_id) || null;
+
   const save = async () => {
-    setErr(null); setBusy(card.id);
+    // Any pay save running (this editor's, or Paid all / a Mark paid) locks Save.
+    if (busy) return;
+    setErr(null);
     const common = { empId: p.empId, dateKey: p.dateKey, custId: p.custId, createdBy: currentEmployee?.id || null };
+    // 1. WORK OUT EVERY BOX FIRST, so a box that isn't a number stops the
+    //    save before anything is written, and the confirm can describe it.
+    const plans = [];
+    // Job by job clears the day's one amount (see below). A PAID day row is
+    // read-only: refuse before anything is written. That covers a paid day
+    // amount AND a day paid by the clock (paid_at, no flat_amount) -- a job
+    // amount added beside it would make the paid day read unpaid.
+    const dayPaidText = (r) => paidRefusalText('The day amount', r);
+    const paidDayRow = mode === 'job' ? dayRowOf() : null;
+    if (paidDayRow?.paid_at) { setErr(dayPaidText(paidDayRow)); return; }
     if (mode === 'job') {
+      const handled = new Set();   // each box once
       for (const { job } of p.jobRows) {
         const k = `${job.unitId}:${job.assignmentId || ''}`;
+        if (handled.has(k)) continue;
+        handled.add(k);
+        // "Needs review": no write, no split. Remove the extra first.
+        if (reviewOf[k]) continue;
         const raw = amounts[k];
-        const val = raw === '' || raw == null ? null : Number(raw);
-        if (val != null && (isNaN(val) || val < 0)) { setBusy(null); setErr('One of those amounts is not a number.'); return; }
+        const val = isBlankAmt(raw) ? null : Number(raw);
+        if (val != null && (isNaN(val) || val < 0)) { setErr('One of those amounts is not a number.'); return; }
+        // Paid: never written from here, and no split either.
+        if (paidSingleOf[k]) { plans.push({ k, job, val, paidRow: paidSingleOf[k] }); continue; }
         const sharers = splits[k] || [];
         // This cleaner keeps the remainder when a divide does not land
         // evenly, so the parts always add back up to the whole.
@@ -18751,64 +19749,220 @@ function PayEditor({ card, p, sizeRates, busy, setBusy, currentEmployee, splitCa
         const mine = (sharers.length && divide[k] && val != null)
           ? Number((val - each * sharers.length).toFixed(2))
           : val;
-        const e = await writePayRow({ ...common, asgId: job.assignmentId, unitId: job.unitId, patch: { flat_amount: mine } });
-        if (e) { setBusy(null); setErr('Could not save: ' + (e.message || 'unknown error')); return; }
-        // Clear any OTHER row for this same apartment today -- filed
-        // under a different assignment, from before one apartment meant
-        // one amount. Leaving it would re-create the split-brain where
-        // the figure depends on which card you opened.
-        const stale = (p.jobRows.find(r => r.job.unitId === job.unitId)?.allRows || [])
-          .filter(r => (r.assignment_id || null) !== (job.assignmentId || null));
-        for (const r of stale) {
-          await writePayRow({ ...common, asgId: r.assignment_id || null, unitId: job.unitId, patch: { flat_amount: null } });
+        plans.push({ k, job, val, each, mine, sharers, asgId: job.assignmentId || null, unitId: job.unitId });
+      }
+    }
+    // 2. ONE CONFIRM for everything that needs one: what a split changes on
+    //    someone else's card, and the clock-pay warning.
+    const partnerLines = [];
+    const paidDayTold = new Set();   // one line per partner
+    plans.forEach(pl => {
+      if (pl.paidRow || pl.each == null) return;
+      pl.sharers.forEach(otherId => {
+        const theirs = partnerAptRows(otherId, pl.unitId);
+        if (theirs.length >= 2) {
+          partnerLines.push(`${nameOf(otherId)}'s ${pl.job.label} needs review; their share won't be saved.`);
+        } else if (theirs.length === 1 && !theirs[0].paid_at && !sameMoney(theirs[0].flat_amount, pl.each)) {
+          if (partnerDayPaidOnScreen(otherId)) {
+            if (!paidDayTold.has(otherId)) { paidDayTold.add(otherId); partnerLines.push(`${nameOf(otherId)}'s day is marked paid — their share won't change.`); }
+          } else {
+            partnerLines.push(`Also changes ${nameOf(otherId)}'s ${pl.job.label} from ${fmtMoney(Number(theirs[0].flat_amount))} to ${fmtMoney(pl.each)}.`);
+          }
         }
-        // THE OTHER PEOPLE ON IT. Writing their row is the whole mechanism:
-        // the split shows on their card because they are genuinely being
-        // paid for this apartment, not because a note was left on this one.
-        for (const otherId of sharers) {
-          const oe = await writePayRow({
+      });
+    });
+    const confirmParts = [...partnerLines];
+    if (clockConfirm) confirmParts.push(clockWarnText);
+    if (confirmParts.length && !confirm(confirmParts.join('\n\n'))) return;
+    setBusy(card.id);
+    if (mode === 'job') {
+      // The same paid check at write time, against the database rather than
+      // the screen: the day row may have been marked paid (with an amount or
+      // by the clock) since it loaded, or written paid by Reports' Mark paid.
+      // Read by its full key, so a day row the screen never saw counts too.
+      {
+        let dq = supabase.from('employee_pay_days').select('id, flat_amount, amount, paid_at')
+          .eq('employee_id', p.empId).eq('work_date', p.dateKey);
+        dq = p.custId ? dq.eq('customer_id', p.custId) : dq.is('customer_id', null);
+        const { data: dayNow, error: de } = await dq.is('assignment_id', null).is('unit_id', null).maybeSingle();
+        if (de) { setBusy(null); setErr('Could not save: ' + (de.message || 'unknown error')); return; }
+        if (dayNow?.paid_at) { setBusy(null); setErr(dayPaidText(dayNow)); return; }
+      }
+      // Anything not saved is listed here and told afterwards; one skipped
+      // apartment doesn't stop the others.
+      const notes = [];
+      let wrote = false, paidNoted = false;   // for the alert's last line
+      const notePaid = (label, row) => { paidNoted = true; notes.push(paidRefusalText(label, row, '')); };
+      // A partner's PAID DAY (by the clock, or a paid day amount) at this
+      // property is read-only too: her share added beside it would make that
+      // day read unpaid on her card. Read once per partner, told once.
+      const partnerDay = new Map();   // otherId -> { row, error }
+      const partnerDayNoted = new Set();
+      const partnerPaidDay = async (otherId) => {
+        if (!partnerDay.has(otherId)) {
+          let q = supabase.from('employee_pay_days').select('id, flat_amount, amount, paid_at')
+            .eq('employee_id', otherId).eq('work_date', p.dateKey);
+          q = p.custId ? q.eq('customer_id', p.custId) : q.is('customer_id', null);
+          const { data, error } = await q.is('assignment_id', null).is('unit_id', null).maybeSingle();
+          partnerDay.set(otherId, { row: data || null, error: error || null });
+        }
+        return partnerDay.get(otherId);
+      };
+      for (const pl of plans) {
+        const { job } = pl;
+        if (pl.paidRow) {
+          if (pl.val == null || !sameMoney(pl.paidRow.flat_amount, pl.val)) notePaid(job.label, pl.paidRow);
+          continue;
+        }
+        // Her ONE amount at this apartment, updated in place. The old
+        // "clear every other row here" clean-up is gone: it blanked paid
+        // amounts filed under another cleaning.
+        const r = await saveAptPay({ ...common, asgId: pl.asgId, unitId: pl.unitId, flatAmount: pl.mine });
+        if (r.error) { setBusy(null); setErr('Could not save: ' + (r.error.message || 'unknown error')); return; }
+        if (r.wrote) wrote = true;
+        if (r.skipped === 'paid') notePaid(job.label, r.row);
+        if (r.skipped === 'review') notes.push(`${job.label} needs review, so it wasn't saved.`);
+        // THE OTHER PEOPLE ON IT. Their own amount at this apartment is
+        // updated in place -- never a second one beside it, never a blank,
+        // never a paid one. Writing their row is what makes the split show
+        // on their card too.
+        if (pl.each == null) continue;
+        for (const otherId of pl.sharers) {
+          const pd = await partnerPaidDay(otherId);
+          if (pd.error) { setBusy(null); setErr('Saved yours, but could not record the split: ' + (pd.error.message || 'unknown error')); return; }
+          if (pd.row?.paid_at) {
+            if (!partnerDayNoted.has(otherId)) { partnerDayNoted.add(otherId); notePaid(`${nameOf(otherId)}'s day amount`, pd.row); }
+            continue;
+          }
+          const o = await saveAptPay({
             empId: otherId, dateKey: p.dateKey, custId: p.custId,
             createdBy: currentEmployee?.id || null,
-            asgId: job.assignmentId, unitId: job.unitId,
-            patch: { flat_amount: each },
+            asgId: pl.asgId, unitId: pl.unitId, flatAmount: pl.each, partner: true,
           });
-          if (oe) { setBusy(null); setErr('Saved yours, but could not record the split: ' + (oe.message || 'unknown error')); return; }
+          if (o.error) { setBusy(null); setErr('Saved yours, but could not record the split: ' + (o.error.message || 'unknown error')); return; }
+          if (o.wrote) wrote = true;
+          if (o.skipped === 'review') notes.push(`${nameOf(otherId)}'s ${job.label} needs review, so their share wasn't saved.`);
+          if (o.skipped === 'paid') notePaid(`${nameOf(otherId)}'s ${job.label}`, o.row);
         }
       }
       // Clear any whole-shift flat amount, or it would sit behind the
-      // per-job rows and reappear the moment one of them is blanked.
-      if (p.flatRow?.flat_amount != null) {
-        await writePayRow({ ...common, patch: { flat_amount: null } });
+      // per-job rows and reappear the moment one of them is blanked. By id,
+      // and only while it is unpaid: the database refuses a paid one.
+      // (p.flatRow always comes from the database, so it has an id.)
+      if (p.flatRow?.flat_amount != null && p.flatRow.id != null) {
+        const g = await updateUnpaidPayRow(p.flatRow.id, { flat_amount: null });
+        if (g.error) { setBusy(null); setErr('Saved the job amounts, but could not clear the day amount: ' + (g.error.message || 'unknown error')); return; }
+        if (g.paid) notePaid('The day amount', p.flatRow);
+        else wrote = true;
       }
-    } else {
-      const val = flat === '' ? null : Number(flat);
-      if (val != null && (isNaN(val) || val < 0)) { setBusy(null); setErr('That amount is not a number.'); return; }
-      const e = await writePayRow({ ...common, patch: { flat_amount: val } });
-      if (e) { setBusy(null); setErr('Could not save: ' + (e.message || 'unknown error')); return; }
-      // And clear the per-job rows, for the same reason in reverse.
-      for (const { job, row } of p.jobRows) {
-        if (row?.flat_amount != null) {
-          await writePayRow({ ...common, asgId: job.assignmentId, unitId: job.unitId, patch: { flat_amount: null } });
-        }
-      }
+      if (paidNoted) notes.push(wrote ? 'Everything else was saved.' : 'Nothing was saved.');
+      setBusy(null);
+      if (notes.length) alert(notes.join('\n'));
+      onDone();
+      return;
     }
-    setBusy(null); onDone();
+    // ONE AMOUNT FOR THE DAY clears every per-job amount. Refuse when that
+    // would hit a "Needs review" apartment or a paid amount.
+    if (reviewLabels.length) {
+      setBusy(null);
+      setErr(`${reviewLabels.join(', ')} ${reviewLabels.length === 1 ? 'needs' : 'need'} review. Remove the extra amount on Job by job first. Nothing was saved.`);
+      return;
+    }
+    const paidSeen = new Set();
+    const paidJobs = p.jobRows.filter(({ row }) => row?.flat_amount != null && row.paid_at)
+      .filter(({ row }) => { const id = row.id != null ? row.id : row; if (paidSeen.has(id)) return false; paidSeen.add(id); return true; });
+    if (paidJobs.length) {
+      setBusy(null);
+      setErr(paidJobs.map(({ job, row }) => paidRefusalText(job.label, row, '')).join(' ') + ' Nothing was saved.');
+      return;
+    }
+    const val = flat === '' ? null : Number(flat);
+    if (val != null && (isNaN(val) || val < 0)) { setBusy(null); setErr('That amount is not a number.'); return; }
+    // THE DAY AMOUNT ITSELF is read-only once paid -- changed, cleared, or
+    // given an amount when it was paid by the clock. Re-saving the figure it
+    // already has changes nothing, so it just closes. writePayRow refuses
+    // again at write time if it was paid after this screen loaded.
+    const dayRow = dayRowOf();
+    if (dayRow?.paid_at) {
+      const hasJobAmts = p.jobRows.some(({ row }) => row?.flat_amount != null);
+      if (!hasJobAmts && val != null && dayRow.flat_amount != null && sameMoney(dayRow.flat_amount, val)) { setBusy(null); onDone(); return; }
+      setBusy(null); setErr(paidRefusalText('The day amount', dayRow)); return;
+    }
+    const e = await writePayRow({ ...common, patch: { flat_amount: val } });
+    if (e?.paid) { setBusy(null); setErr(paidRefusalText('The day amount', e.row)); return; }
+    if (e) { setBusy(null); setErr('Could not save: ' + (e.message || 'unknown error')); return; }
+    // And clear the per-job amounts, for the same reason in reverse. BY ROW
+    // ID: looking them up under the job's cleaning missed a row filed under
+    // another one, inserted an empty row, and left the real amount counting.
+    const clearedIds = new Set();
+    const keptPaid = [];   // paid after the check above: the database refused it
+    for (const { job, row } of p.jobRows) {
+      if (row?.flat_amount == null || row.id == null || clearedIds.has(row.id)) continue;
+      clearedIds.add(row.id);
+      const g = await updateUnpaidPayRow(row.id, { flat_amount: null });
+      if (g.error) { setBusy(null); setErr('Saved the day amount, but could not clear a job amount: ' + (g.error.message || 'unknown error')); return; }
+      if (g.paid) keptPaid.push(paidRefusalText(job.label, row, ''));
+    }
+    setBusy(null);
+    if (keptPaid.length) alert(keptPaid.join('\n') + '\nThe day amount was saved, but this card still counts the job amounts.');
+    onDone();
   };
 
-  const togglePaid = async () => {
-    setBusy(card.id);
-    const stamp = p.paid ? null : new Date().toISOString();
-    const common = { empId: p.empId, dateKey: p.dateKey, custId: p.custId, createdBy: currentEmployee?.id || null };
-    if (p.mode === 'job' && p.jobRows.some(r => r.row)) {
-      for (const { job, row } of p.jobRows) {
-        if (!row) continue;
-        await writePayRow({ ...common, asgId: job.assignmentId, unitId: job.unitId, patch: { paid_at: stamp, amount: Number(row.flat_amount) || 0 } });
-      }
-    } else {
-      await writePayRow({ ...common, patch: { paid_at: stamp, amount: p.total || 0 } });
+  // REMOVE ONE AMOUNT from a "Needs review" apartment. Clears that row's
+  // amount by id -- never a paid one -- after a confirm that names it.
+  const removeAmount = async (job, r) => {
+    if (busy) return;
+    const rv = reviewOf[`${job.unitId}:${job.assignmentId || ''}`];
+    const others = (rv?.rows.length || 2) - 1;
+    const dayText = new Date(p.dateKey + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+    const msg = `Remove ${fmtMoney(Number(r.flat_amount || 0))} ${payRowSource(r)} from ${card.employee?.name || 'this cleaner'}'s ${job.label} on ${dayText}? `
+      + (others === 1 ? 'The other amount stays. ' : `The other ${others} amounts stay. `)
+      + `If both cleanings were real, type the combined amount into the box that's left. This can't be undone in the app.`;
+    if (!confirm(msg)) return;
+    setErr(null); setBusy(card.id);
+    const g = await updateUnpaidPayRow(r.id, { flat_amount: null });
+    if (g.error) { setBusy(null); setErr('Could not remove: ' + (g.error.message || 'unknown error')); return; }
+    if (g.paid) {
+      // Paid since the screen loaded: the database refused it.
+      const { data: now } = await supabase.from('employee_pay_days')
+        .select('flat_amount, amount, paid_at').eq('id', r.id).maybeSingle();
+      setBusy(null);
+      alert(now?.paid_at ? paidRefusalText(job.label, now) : 'That amount is no longer there. Nothing was removed.');
+      onDone();
+      return;
     }
-    setBusy(null); onDone();
+    setBusy(null);
+    onDone();
   };
+
+  // MARK PAID goes through the Pay screen's setPaid, the same routine as
+  // the card's own button and Paid all: it refuses a card that isn't ready
+  // ($0, not priced, on the clock, needs review...), stamps only the
+  // counted rows not yet paid, and undo clears only the latest stamp, so
+  // earlier payments stay. The editor closes only when it worked.
+  const togglePaid = async () => {
+    // paidOff: the Pay screen isn't loaded for this range (setPaid refuses
+    // too; this just keeps the tap from getting that far).
+    if (p.needsReview.length || !onTogglePaid || paidOff) return;
+    setErr(null);
+    const r = await onTogglePaid([card], !p.paid);
+    if (!r) return;
+    if (r.refused === 'not loaded') { setErr(PAY_NOT_LOADED_TEXT); return; }
+    // Another paid write is still running; that tap is doing the work.
+    if (r.refused) return;
+    const sk = r.skipped.find(s => s.card.id === card.id);
+    if (sk) {
+      setErr(sk.reason === 'not paid' ? 'Not paid, so there is nothing to undo.'
+        : 'Not ready to mark paid: ' + (PAY_NOT_READY_TEXT[sk.reason] || sk.reason) + '.');
+      return;
+    }
+    const ch = r.changed.find(x => x.card.id === card.id);
+    if (ch) { setErr(`Not ${p.paid ? 'undone' : 'marked paid'}: ${ch.note}.`); return; }
+    const fl = r.failed.find(x => x.card && x.card.id === card.id);
+    if (fl) { setErr(`Could not ${p.paid ? 'undo paid' : 'mark paid'}: ${fl.message}`); return; }
+    onDone();
+  };
+  const partPaid = !p.paid && p.paidSoFar > 0.005 && p.paidSoFar < p.total - 0.005;
 
   return (
     <div className="pt-3 border-t border-stone-100">
@@ -18825,11 +19979,67 @@ function PayEditor({ card, p, sizeRates, busy, setBusy, currentEmployee, splitCa
 
       {mode === 'job' ? (
         <div className="space-y-2 mb-3">
-          {p.jobRows.map(({ job }) => {
+          {p.jobRows.map(({ job, row }) => {
             const k = `${job.unitId}:${job.assignmentId || ''}`;
             const tier = sizeRates[`${p.custId}:${job.size}`];
+            // Assigned, never clocked, nothing saved: the one to price.
+            const notPaidYet = job.assigned && !job.clocked && !row;
+            // NEEDS REVIEW: several saved amounts. Listed, ONE counted,
+            // never edited or saved from here. Remove clears an unpaid one.
+            if (reviewOf[k]) {
+              const rv = reviewOf[k];
+              const counted = Number(rv.chosen.flat_amount || 0);
+              const anyUnpaid = rv.rows.some(r => !r.paid_at);
+              return (
+                <div key={k} className="p-2.5 rounded-xl border border-amber-300 bg-amber-50/40">
+                  <div className="flex items-center gap-1.5 flex-wrap mb-2">
+                    <span className="text-xs font-semibold text-stone-900">{job.label}</span>
+                    {job.size && <span className="px-1.5 py-px rounded-full bg-stone-100 border border-stone-300 text-[9px] font-mono text-stone-700">{job.size}</span>}
+                    {jobClockedHours(job) > 0 && (
+                      <span className="text-[9px] font-mono text-stone-400 ml-1">{jobClockedHours(job).toFixed(2)}h clocked here</span>
+                    )}
+                  </div>
+                  <div className="text-[11px] text-amber-900 font-medium">
+                    Needs review: {rv.rows.length} saved amounts for {job.label} on this day. One amount per apartment per day. Counting {fmtMoney(counted)}{rv.onCard ? '' : ` on ${countedOnCardName(rv.chosen)}`} until you remove the extra.
+                  </div>
+                  <div className="mt-2 space-y-1">
+                    {rv.rows.map((r, ri) => (
+                      <div key={r.id != null ? r.id : ri} className="flex items-center justify-between gap-2 flex-wrap">
+                        <span className="text-[11px] font-mono text-stone-800">
+                          {fmtMoney(Number(r.flat_amount || 0))} {payRowSource(r)} · {r.paid_at ? `paid ${fmtPaidDay(r.paid_at)}` : 'not paid'}
+                        </span>
+                        {r.paid_at ? (
+                          <span className="text-[10px] text-stone-500">Paid {fmtPaidDay(r.paid_at)}, can't be removed here.</span>
+                        ) : (
+                          <button type="button" onClick={() => removeAmount(job, r)} disabled={!!busy}
+                            className="px-2 py-0.5 rounded-lg border border-red-300 bg-white text-red-700 hover:bg-red-50 text-[10px] font-medium disabled:opacity-50">
+                            Remove
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                  {!anyUnpaid && (
+                    <div className="text-[10px] text-amber-900 mt-1.5">
+                      All of these are marked paid. Nothing here changes paid records. Tell the crew if one is a mistake.
+                    </div>
+                  )}
+                  <div className="flex items-center justify-between gap-2 mt-2">
+                    <span className="text-[11px] text-stone-600">You pay</span>
+                    <div className="flex items-center gap-1">
+                      <span className="font-mono text-xs text-stone-400">$</span>
+                      <input type="number" value={amounts[k] ?? ''} disabled readOnly
+                        aria-label={`${job.label}: needs review, read-only`}
+                        className="w-20 px-2 py-1.5 rounded-lg border border-stone-200 bg-stone-100 text-right font-mono text-[13px] text-stone-600" />
+                    </div>
+                  </div>
+                </div>
+              );
+            }
+            // Paid: read-only, no pricing controls, no split.
+            const paidRow = paidSingleOf[k] || null;
             return (
-              <div key={k} className="p-2.5 rounded-xl border border-stone-200">
+              <div key={k} className={`p-2.5 rounded-xl border ${notPaidYet ? 'border-amber-400 bg-amber-50/40' : 'border-stone-200'}`}>
                 <div className="flex items-center gap-1.5 flex-wrap mb-2">
                   <span className="text-xs font-semibold text-stone-900">{job.label}</span>
                   {job.size && <span className="px-1.5 py-px rounded-full bg-stone-100 border border-stone-300 text-[9px] font-mono text-stone-700">{job.size}</span>}
@@ -18839,7 +20049,7 @@ function PayEditor({ card, p, sizeRates, busy, setBusy, currentEmployee, splitCa
                    other cleanings on this card are unaffected, which is
                    the point: a day is not priced one single way. */}
                 <div className="flex items-center gap-1 mb-2 flex-wrap">
-                  {['job', 'hourly'].map(b => (
+                  {!paidRow && ['job', 'hourly'].map(b => (
                     <button type="button" key={b}
                       onClick={() => setJobBasis(k, job, b)}
                       className={`px-2 py-0.5 rounded-full border text-[10px] ${(basis[k] || 'job') === b
@@ -18858,7 +20068,7 @@ function PayEditor({ card, p, sizeRates, busy, setBusy, currentEmployee, splitCa
                   )}
                 </div>
 
-                {(basis[k] || 'job') === 'hourly' && (
+                {!paidRow && (basis[k] || 'job') === 'hourly' && (
                   <div className="flex items-center gap-2 flex-wrap mb-2 p-2 rounded-lg bg-stone-50 border border-stone-200">
                     <div className="flex items-center gap-1.5">
                       <label className="text-[10px] text-stone-600" htmlFor={`jh-${k}`}>Hours</label>
@@ -18890,13 +20100,24 @@ function PayEditor({ card, p, sizeRates, busy, setBusy, currentEmployee, splitCa
                   <span className="text-[11px] text-stone-600">You pay</span>
                   <div className="flex items-center gap-1">
                     <span className="font-mono text-xs text-stone-400">$</span>
-                    <input type="number" step="0.01" value={amounts[k] ?? ''}
-                      onChange={e => setAmounts(a => ({ ...a, [k]: e.target.value }))}
-                      placeholder="0.00"
-                      className="w-20 px-2 py-1.5 rounded-lg border border-stone-300 bg-white text-right font-mono text-[13px]" />
+                    {paidRow ? (
+                      <input type="number" value={amounts[k] ?? ''} disabled readOnly
+                        aria-label={`${job.label}: paid, read-only`}
+                        className="w-20 px-2 py-1.5 rounded-lg border border-stone-200 bg-stone-100 text-right font-mono text-[13px] text-stone-600" />
+                    ) : (
+                      <input type="number" step="0.01" value={amounts[k] ?? ''}
+                        onChange={e => { touchedKeys.current.add(k); setAmounts(a => ({ ...a, [k]: e.target.value })); }}
+                        placeholder="0.00"
+                        className="w-20 px-2 py-1.5 rounded-lg border border-stone-300 bg-white text-right font-mono text-[13px]" />
+                    )}
                   </div>
                 </div>
-                {tier > 0 && (amounts[k] === String(tier)) && (
+                {paidRow && (
+                  <div className="text-[10px] text-emerald-800 mt-1.5">
+                    Paid {fmtPaidDay(paidRow.paid_at)}. Use Paid — undo to change it.
+                  </div>
+                )}
+                {!paidRow && tier > 0 && (amounts[k] === String(tier)) && (
                   <div className="text-[9px] font-mono text-stone-400 mt-1.5">Filled from your {job.size} pay rate</div>
                 )}
 
@@ -18907,6 +20128,7 @@ function PayEditor({ card, p, sizeRates, busy, setBusy, currentEmployee, splitCa
                    into is not a special place, it is just the one you
                    happened to open. The amount shown below each name is
                    what they will get. */}
+                {!paidRow && (
                 <div className="mt-2 pt-2 border-t border-stone-100">
                   <div className="flex items-center justify-between gap-2 mb-1.5">
                     <span className="text-[10px] font-mono uppercase tracking-wider text-stone-500">Split with</span>
@@ -18968,6 +20190,7 @@ function PayEditor({ card, p, sizeRates, busy, setBusy, currentEmployee, splitCa
                     </div>
                   )}
                 </div>
+                )}
               </div>
             );
           })}
@@ -18996,6 +20219,17 @@ function PayEditor({ card, p, sizeRates, busy, setBusy, currentEmployee, splitCa
                   <span className="font-mono text-[12px] text-stone-900 flex-shrink-0">{fmtMoney(b.mine)}</span>
                 </div>
               ))}
+              {/* Clocked time that no apartment holds. Job by job pays only
+                 the amounts above, so this is shown, not counted -- never
+                 silently dropped, never moved onto an apartment. */}
+              {!flatProp && unloggedHrs > 0 && (
+                <div className="flex items-baseline justify-between gap-2">
+                  <span className="text-[11px] text-amber-800 min-w-0">
+                    {unloggedHrs.toFixed(2)}h not logged to an apartment{profileRate > 0 ? `: ${fmtMoney(unloggedHrs * profileRate)}` : ''}
+                  </span>
+                  <span className="font-mono text-[10px] text-amber-800 flex-shrink-0">not paid</span>
+                </div>
+              )}
             </div>
             <div className="flex items-baseline justify-between gap-2 mt-2 pt-2 border-t border-stone-200">
               <span className="text-[11px] font-semibold text-stone-900">
@@ -19072,10 +20306,31 @@ function PayEditor({ card, p, sizeRates, busy, setBusy, currentEmployee, splitCa
         </div>
       )}
 
+      {clockWarnShown && (
+        <div className="mb-2 p-2.5 rounded-lg bg-amber-50 border border-amber-300 text-[11px] text-amber-900">
+          {clockWarnLines.map((line, i) => (
+            <div key={i} className={i > 0 ? 'mt-1' : ''}>{line}</div>
+          ))}
+          {profileRate <= 0 && blankClocked.length > 0 && (
+            <div className="mt-1">No hourly rate on their profile, so type a rate in the By the hour box.</div>
+          )}
+          {/* Fills only the APARTMENTS they clocked. Time not logged to an
+             apartment stays on its own line above; it is never moved onto
+             an apartment for you. */}
+          {blankClocked.length > 0 && (
+            <button type="button"
+              onClick={() => blankClocked.forEach(job => setJobBasis(keyOfJob(job), job, 'hourly'))}
+              className="mt-1.5 px-2 py-1 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-[10px] font-medium">
+              Fill from clock
+            </button>
+          )}
+        </div>
+      )}
+
       {err && <div className="mb-2 p-2 rounded-lg bg-red-50 border border-red-200 text-[11px] text-red-800">{err}</div>}
 
       <div className="flex items-center gap-2 flex-wrap">
-        <button onClick={save} disabled={busy === card.id}
+        <button onClick={save} disabled={!!busy}
           className="px-3 py-2 rounded-xl bg-stone-900 hover:bg-stone-800 disabled:opacity-50 text-stone-50 text-xs font-medium">
           {busy === card.id ? 'Saving…' : 'Save pay'}
         </button>
@@ -19083,10 +20338,14 @@ function PayEditor({ card, p, sizeRates, busy, setBusy, currentEmployee, splitCa
           className="px-3 py-2 rounded-xl border border-stone-300 bg-white text-stone-700 text-xs">
           Cancel
         </button>
-        <button onClick={togglePaid} disabled={busy === card.id}
+        <button onClick={togglePaid} disabled={!!busy || !!paidOff || p.needsReview.length > 0} title={paidOff || undefined}
           className={`ml-auto px-3 py-2 rounded-xl text-xs font-medium disabled:opacity-50 ${p.paid ? 'bg-emerald-50 border border-emerald-300 text-emerald-800' : 'border border-stone-300 bg-white text-stone-700'}`}>
-          {p.paid ? 'Paid — undo' : 'Mark paid'}
+          {p.needsReview.length ? `Resolve ${p.needsReview.join(', ')} first`
+            : p.paid ? 'Paid — undo'
+            : partPaid ? `Mark rest paid (${fmtMoney(p.total - p.paidSoFar)})`
+            : 'Mark paid'}
         </button>
+        {paidOff && <span className="text-[10px] font-mono text-stone-400">{paidOff === 'Loading pay…' ? paidOff : 'Pay did not load'}</span>}
       </div>
     </div>
   );
@@ -19176,9 +20435,12 @@ function AddShiftModal({ onClose, onSaved, currentEmployee }) {
       // in Team if they end up sticking around.
       let useEmpId = empId;
       if (addingPerson) {
+        // 'employee' is the cleaner role: the database only allows
+        // employee, manager or owner, and Team saves cleaners as 'employee'.
+        // 'cleaner' was refused by employees_role_check.
         const { data: created, error: ce } = await supabase.from('employees').insert({
           name: newName.trim(),
-          role: 'cleaner',
+          role: 'employee',
           active: true,
           pay_rate_hourly: newRate.trim() ? parseFloat(newRate) : null,
         }).select('id').single();
@@ -19217,9 +20479,39 @@ function AddShiftModal({ onClose, onSaved, currentEmployee }) {
       }
       if (error) throw error;
 
+      // ONE APARTMENT, ONE AMOUNT. The lookup below only matches a row with
+      // no cleaning, so an amount she already has at this apartment under a
+      // cleaning got a second one beside it. If any amount exists there
+      // today, the shift is added without the pay, and we say so.
+      let payNotSaved = null;
+      if (flatPay !== '' && !isNaN(Number(flatPay)) && unitId) {
+        const { data: here, error: he } = await supabase.from('employee_pay_days')
+          .select('id, flat_amount').eq('employee_id', useEmpId).eq('work_date', date).eq('unit_id', unitId);
+        const aptLabel = units.find(u => u.id === unitId)?.label || 'That apartment';
+        if (he) {
+          payNotSaved = `Shift added, but the pay already saved for ${aptLabel} couldn't be checked, so the amount you typed wasn't saved. Set it on Shifts → Pay.`;
+        } else {
+          const already = (here || []).find(r => r.flat_amount != null);
+          if (already) {
+            const dayText = new Date(date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+            payNotSaved = `Shift added. ${aptLabel} already has ${fmtMoney(Number(already.flat_amount))} saved for ${emp?.name || 'this cleaner'} on ${dayText}, so the amount you typed wasn't saved. Change it on Shifts → Pay.`;
+          }
+        }
+      }
+      // A PAID DAY is read-only: an apartment amount added beside a day paid
+      // by the clock (paid_at, no flat_amount) or a paid day amount would
+      // make that day read unpaid on Shifts → Pay. The shift is still added.
+      if (!payNotSaved && flatPay !== '' && !isNaN(Number(flatPay)) && unitId) {
+        let dq = supabase.from('employee_pay_days').select('id, flat_amount, amount, paid_at')
+          .eq('employee_id', useEmpId).eq('work_date', date);
+        dq = custId ? dq.eq('customer_id', custId) : dq.is('customer_id', null);
+        const { data: dayRow, error: dre } = await dq.is('assignment_id', null).is('unit_id', null).maybeSingle();
+        if (dre) payNotSaved = "Shift added, but the day's pay couldn't be checked, so the amount you typed wasn't saved. Set it on Shifts → Pay.";
+        else if (dayRow?.paid_at) payNotSaved = `Shift added. ${paidRefusalText('The day amount', dayRow, "The amount you typed wasn't saved.")}`;
+      }
       // A typed amount becomes the day's flat pay — the same row the Set pay
       // control writes, so the shift card shows it and payroll picks it up.
-      if (flatPay !== '' && !isNaN(Number(flatPay))) {
+      if (!payNotSaved && flatPay !== '' && !isNaN(Number(flatPay))) {
         const payload = {
           employee_id: useEmpId,
           work_date: date,
@@ -19229,13 +20521,22 @@ function AddShiftModal({ onClose, onSaved, currentEmployee }) {
           flat_amount: Number(flatPay),
           created_by: currentEmployee?.id || null,
         };
-        let q = supabase.from('employee_pay_days').select('id')
+        let q = supabase.from('employee_pay_days').select('id, flat_amount, amount, paid_at')
           .eq('employee_id', useEmpId).eq('work_date', date);
         q = custId ? q.eq('customer_id', custId) : q.is('customer_id', null);
         q = unitId ? q.eq('unit_id', unitId) : q.is('unit_id', null);
         const { data: found } = await q.is('assignment_id', null).maybeSingle();
-        if (found?.id) {
-          await supabase.from('employee_pay_days').update({ flat_amount: Number(flatPay) }).eq('id', found.id);
+        // PAID IS FINAL: a paid row here (the day's amount, or a row Mark
+        // paid wrote with no amount) is never given the typed figure. The
+        // shift is still added. Refused on the read and again by the write.
+        const payLabel = unitId ? (units.find(u => u.id === unitId)?.label || 'That apartment') : 'The day amount';
+        const paidNote = (r) => `Shift added. ${paidRefusalText(payLabel, r, "The amount you typed wasn't saved.")}`;
+        if (found?.paid_at) {
+          payNotSaved = paidNote(found);
+        } else if (found?.id) {
+          const g = await updateUnpaidPayRow(found.id, { flat_amount: Number(flatPay) });
+          if (g.error) console.warn('[add shift] pay row failed', g.error);
+          else if (g.paid) payNotSaved = paidNote(found);
         } else {
           const { error: pe } = await supabase.from('employee_pay_days').insert(payload);
           // Don't lose the shift over a pay-row failure — it's still editable
@@ -19244,6 +20545,7 @@ function AddShiftModal({ onClose, onSaved, currentEmployee }) {
         }
       }
       setBusy(false);
+      if (payNotSaved) alert(payNotSaved);
       if (onSaved) onSaved(shift?.id);
       onClose();
     } catch (e) {
@@ -19468,39 +20770,93 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
     return Array.from(m.values()).sort((a, b) => naturalCompare(a.name, b.name));
   };
 
+  // The name a paid refusal uses for one pay line: the apartment for a
+  // legacy strip, "The day amount" for a row with no property (whole day /
+  // no property), otherwise the strip's own title ("Bridges · 1427").
+  const payLineLabel = async (custId, assignmentId, unitId, title) => {
+    if (unitId && !assignmentId) {
+      const { data: u } = await supabase.from('units').select('label').eq('id', unitId).maybeSingle();
+      return u?.label || 'This apartment';
+    }
+    if (!custId) return 'The day amount';
+    return title || 'This pay line';
+  };
+  // This line's own row, read fresh by its full key (the screen may be
+  // stale). Returns { row, error }.
+  const readPayLine = async (empId, dateKey, custId, assignmentId, unitId) => {
+    let q = supabase.from('employee_pay_days').select('id, flat_amount, amount, paid_at')
+      .eq('employee_id', empId).eq('work_date', dateKey);
+    q = custId ? q.eq('customer_id', custId) : q.is('customer_id', null);
+    q = assignmentId ? q.eq('assignment_id', assignmentId) : q.is('assignment_id', null);
+    q = unitId ? q.eq('unit_id', unitId) : q.is('unit_id', null);
+    const { data, error } = await q.maybeSingle();
+    return { row: data || null, error: error || null };
+  };
+
   // Flat pay for a whole day / a property / a single assignment — overrides
   // hours x rate. Empty clears it. assignmentId set = a per-assignment line
   // (flat-rate properties); null = the old whole-day or per-property row.
-  const saveFlatPay = async (empId, dateKey, custId, amount, assignmentId = null, unitId = null) => {
+  // title: the strip's title, for the paid refusal.
+  const saveFlatPay = async (empId, dateKey, custId, amount, assignmentId = null, unitId = null, title = null) => {
     if (!empId) { alert('No cleaner id — could not save pay.'); return; }
     const key = payKey(empId, dateKey, custId, assignmentId, unitId);
-    const existing = payDays[key];
     // custId null is a real case now — a shift clocked in without a property.
     // Its pay row is the day+employee row with customer_id null, which is the
     // same shape the old pre-split rows use, so both paths work unchanged.
     const val = (amount === '' || amount == null) ? null : Number(amount);
     if (val != null && (isNaN(val) || val < 0)) { setSettingPay(null); return; }
+    const paidText = async (r) => paidRefusalText(await payLineLabel(custId, assignmentId, unitId, title), r);
+    // A LEGACY STRIP (a block with no cleaning) writes cleaning null plus the
+    // apartment, which is the row Shifts → Pay counts. One apartment, one
+    // amount: if a different row already holds an amount for this cleaner,
+    // apartment and day, refuse rather than add a second one.
+    const strip = !assignmentId && !!unitId;
+    // PAID IS FINAL on EVERY strip -- whole day, no property, hourly
+    // property, per cleaning, legacy: Clear or a new figure on a paid row
+    // writes nothing. Checked against a fresh read, and again by the write
+    // itself (updateUnpaidPayRow), not just against what's on screen.
+    const { row: own, error: oe } = await readPayLine(empId, dateKey, custId, assignmentId, unitId);
+    if (oe) { alert('Could not save pay: ' + (oe.message || 'unknown error')); return; }
+    if (own?.paid_at) {
+      // Saving the figure it already has is not a change: close quietly.
+      if (val != null && own.flat_amount != null && Math.abs(Number(own.flat_amount) - val) < 0.005) { setSettingPay(null); return; }
+      alert(await paidText(own));
+      return;
+    }
+    // A PAID DAY is read-only too. A per-cleaning or apartment amount added
+    // beside a day paid by the clock (paid_at, no flat_amount) or a paid day
+    // amount would make that day read unpaid. Clearing a stray unpaid amount
+    // here is still allowed: it can't change what the paid day counts.
+    if (val != null && (assignmentId || unitId)) {
+      const { row: dayRow, error: dre } = await readPayLine(empId, dateKey, custId, null, null);
+      if (dre) { alert('Could not save pay: ' + (dre.message || 'unknown error')); return; }
+      if (dayRow?.paid_at) { alert(paidRefusalText('The day amount', dayRow)); return; }
+    }
+    if (strip) {
+      const { data: here, error: he } = await supabase.from('employee_pay_days')
+        .select('id, customer_id, assignment_id, flat_amount')
+        .eq('employee_id', empId).eq('work_date', dateKey).eq('unit_id', unitId);
+      if (he) { alert('Could not save pay: ' + (he.message || 'unknown error')); return; }
+      const isOwn = (r) => (r.customer_id || null) === (custId || null) && !r.assignment_id;
+      const other = (here || []).find(r => r.flat_amount != null && !isOwn(r));
+      if (other) {
+        alert(`${await payLineLabel(custId, assignmentId, unitId, title)} already has ${fmtMoney(Number(other.flat_amount))} saved for this day on Shifts → Pay. Change it there.`);
+        return;
+      }
+    }
+    // Write one row by id, refused by the database once the row is paid;
+    // paidRefused says so instead of claiming it saved. No row: insert (an
+    // insert that hits the unique index fails; it never overwrites).
+    let paidRefused = null;   // id of the row the database refused
     setPayBusy(key);
     let error;
-    if (existing?.id) {
-      ({ error } = await supabase.from('employee_pay_days').update({ flat_amount: val }).eq('id', existing.id));
+    if (own?.id) {
+      const g = await updateUnpaidPayRow(own.id, { flat_amount: val });
+      error = g.error;
+      if (g.paid) paidRefused = own.id;
     } else {
-      // No local row. A matching row could still exist server-side (e.g.
-      // from Mark paid) — look it up by the full key rather than relying on
-      // onConflict, since our uniqueness is an expression index that
-      // PostgREST upsert can't target. Update if found, else insert.
-      let q = supabase.from('employee_pay_days').select('id')
-        .eq('employee_id', empId).eq('work_date', dateKey);
-      q = custId ? q.eq('customer_id', custId) : q.is('customer_id', null);
-      q = assignmentId ? q.eq('assignment_id', assignmentId) : q.is('assignment_id', null);
-      q = unitId ? q.eq('unit_id', unitId) : q.is('unit_id', null);
-      const { data: found } = await q.maybeSingle();
-      if (found?.id) {
-        ({ error } = await supabase.from('employee_pay_days').update({ flat_amount: val }).eq('id', found.id));
-      } else {
-        ({ error } = await supabase.from('employee_pay_days')
-          .insert({ employee_id: empId, work_date: dateKey, customer_id: custId, assignment_id: assignmentId, unit_id: unitId, flat_amount: val, created_by: currentEmployee?.id || null }));
-      }
+      ({ error } = await supabase.from('employee_pay_days')
+        .insert({ employee_id: empId, work_date: dateKey, customer_id: custId, assignment_id: assignmentId, unit_id: unitId, flat_amount: val, created_by: currentEmployee?.id || null }));
     }
     setPayBusy(null); setSettingPay(null);
     if (error) {
@@ -19508,6 +20864,11 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
       alert('Could not save pay: ' + (error.message || 'unknown error')
         + (missingCol ? '\n\nPer-assignment pay isn\'t fully set up in your database yet. Run v65 and v66 in Supabase, then try again.' : ''));
       return;
+    }
+    if (paidRefused) {
+      // Paid between the read above and the write. Nothing was changed.
+      const { data: now } = await supabase.from('employee_pay_days').select('flat_amount, amount, paid_at').eq('id', paidRefused).maybeSingle();
+      alert(await paidText(now));
     }
     await loadPay();
   };
@@ -19720,24 +21081,29 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
     return out;
   };
 
-  const togglePaid = async (empId, dateKey, custId, amount, assignmentId = null, unitId = null) => {
+  // Paid (undo) clears paid_at and nothing else. Mark paid stamps only a
+  // row that isn't paid yet: one already paid -- the screen was stale, or it
+  // was paid by the time the write lands -- keeps its date and amount.
+  const togglePaid = async (empId, dateKey, custId, amount, assignmentId = null, unitId = null, title = null) => {
     const key = payKey(empId, dateKey, custId, assignmentId, unitId);
     const existing = payDays[key];
     setPayBusy(key);
-    let error;
+    let error, refused = null;
     if (existing?.paid_at) {
       ({ error } = await supabase.from('employee_pay_days').update({ paid_at: null }).eq('id', existing.id));
-    } else if (existing?.id) {
-      ({ error } = await supabase.from('employee_pay_days').update({ paid_at: new Date().toISOString(), amount }).eq('id', existing.id));
     } else {
-      let q = supabase.from('employee_pay_days').select('id')
-        .eq('employee_id', empId).eq('work_date', dateKey);
-      q = custId ? q.eq('customer_id', custId) : q.is('customer_id', null);
-      q = assignmentId ? q.eq('assignment_id', assignmentId) : q.is('assignment_id', null);
-      q = unitId ? q.eq('unit_id', unitId) : q.is('unit_id', null);
-      const { data: found } = await q.maybeSingle();
-      if (found?.id) {
-        ({ error } = await supabase.from('employee_pay_days').update({ paid_at: new Date().toISOString(), amount }).eq('id', found.id));
+      const { row: own, error: re } = await readPayLine(empId, dateKey, custId, assignmentId, unitId);
+      if (re) {
+        error = re;
+      } else if (own?.paid_at) {
+        refused = own;
+      } else if (own?.id) {
+        const g = await updateUnpaidPayRow(own.id, { paid_at: new Date().toISOString(), amount });
+        error = g.error;
+        if (g.paid) {
+          const { data: now } = await supabase.from('employee_pay_days').select('flat_amount, amount, paid_at').eq('id', own.id).maybeSingle();
+          refused = now || own;
+        }
       } else {
         ({ error } = await supabase.from('employee_pay_days').insert({
           employee_id: empId, work_date: dateKey, customer_id: custId, assignment_id: assignmentId, unit_id: unitId,
@@ -19747,6 +21113,7 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
       }
     }
     setPayBusy(null);
+    if (refused) alert(paidRefusalText(await payLineLabel(custId, assignmentId, unitId, title), refused));
     if (error) {
       const missingCol = /assignment_id|unit_id|customer_id|paid_at/.test(error.message || '') || error.code === '42703' || error.code === 'PGRST204';
       alert('Could not mark paid: ' + (error.message || 'unknown error')
@@ -20175,10 +21542,10 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
                               <input type="number" min="0" step="0.01" autoFocus value={payAmt} onChange={e => setPayAmt(e.target.value)}
                                 placeholder="0.00"
                                 className="w-20 px-1.5 py-0.5 rounded border border-stone-300 text-xs font-mono" />
-                              <button onClick={() => saveFlatPay(empId, d.key, st.pg.id, payAmt, st.assignmentId, st.unitId)} disabled={payBusy === st.key}
+                              <button onClick={() => saveFlatPay(empId, d.key, st.pg.id, payAmt, st.assignmentId, st.unitId, st.title)} disabled={payBusy === st.key}
                                 className="text-[11px] px-2 py-0.5 rounded bg-stone-900 text-white">Save</button>
                               {st.hasFlat && (
-                                <button onClick={() => saveFlatPay(empId, d.key, st.pg.id, '', st.assignmentId, st.unitId)} disabled={payBusy === st.key}
+                                <button onClick={() => saveFlatPay(empId, d.key, st.pg.id, '', st.assignmentId, st.unitId, st.title)} disabled={payBusy === st.key}
                                   className="text-[11px] px-1.5 text-red-600">Clear</button>
                               )}
                               <button onClick={() => setSettingPay(null)} className="text-[11px] px-1 text-stone-500">Cancel</button>
@@ -20213,7 +21580,7 @@ function ShiftsByCleanerView({ shifts, showMoney, selectedCleanerId, onSelectCle
                               </button>
                             </>
                           )}
-                          <button onClick={() => togglePaid(empId, d.key, st.pg.id, st.owed, st.assignmentId, st.unitId)} disabled={payBusy === st.key}
+                          <button onClick={() => togglePaid(empId, d.key, st.pg.id, st.owed, st.assignmentId, st.unitId, st.title)} disabled={payBusy === st.key}
                             className={`text-[11px] font-mono px-2.5 py-0.5 rounded-full flex items-center gap-1 disabled:opacity-50 ${st.paid ? 'bg-emerald-600 text-white' : 'bg-white border border-stone-300 text-stone-600'}`}>
                             {st.paid ? <><Check size={10} /> Paid</> : 'Mark paid'}
                           </button>
@@ -39758,6 +41125,29 @@ function unitAssignmentWins(cand, prev) {
   return String(cand.id) > String(prev.id); // last resort, still stable
 }
 
+// THE "NEXT BOOKING" a Day card names when nothing is booked at that
+// apartment on the day viewed. Not unitAssignmentWins: that picks the most
+// recently CREATED open booking, with no date order, so a booking made last
+// week for Nov 26 beat the one for Nov 8. Order here:
+//   1. the soonest OPEN booking dated on or after the day viewed;
+//   2. failing that, the most recent open booking dated before it;
+//   3. failing that, an undated open booking (newest created first).
+// Ties on one date fall back to unitAssignmentWins so the pick is stable.
+// The card's label and its Move to this day button both use this one pick.
+function pickNextOpenBooking(cands, day) {
+  const open = (cands || []).filter(a => a && a.open);
+  const d = (a) => String(a.scheduledDate || '').slice(0, 10);
+  const tie = (a, b) => (unitAssignmentWins(a, b) ? -1 : 1);
+  const upcoming = open.filter(a => d(a) && d(a) >= day)
+    .sort((a, b) => (d(a) < d(b) ? -1 : d(a) > d(b) ? 1 : tie(a, b)));
+  if (upcoming.length) return upcoming[0];
+  const before = open.filter(a => d(a) && d(a) < day)
+    .sort((a, b) => (d(a) > d(b) ? -1 : d(a) < d(b) ? 1 : tie(a, b)));
+  if (before.length) return before[0];
+  const undated = open.filter(a => !d(a)).sort(tie);
+  return undated[0] || null;
+}
+
 // Day detail: shows all properties + units cleaned on this date
 function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit, onShiftDay = null }) {
   const [data, setData] = useState(null);
@@ -39790,6 +41180,9 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit, onShift
   // open at that apartment", which is typically a future booking.
   const [asgById, setAsgById] = useState({});
   const [dayAsgIds, setDayAsgIds] = useState({}); // unitId -> [assignmentId]
+  // unitId -> every live booking at that apartment, so the "next booking"
+  // can be picked by date (pickNextOpenBooking) rather than by creation.
+  const [unitCands, setUnitCands] = useState({});
   // Every cleaning SCHEDULED for this day, read from the assignments rather
   // than from anybody's shift. See the loader below for why that is a
   // different question from the one the rest of this screen asks.
@@ -39798,12 +41191,22 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit, onShift
   // the day's jobs reloads the schedule too — assigning somebody to an
   // unstarted cleaning has to redraw that card, not just the started ones.
   const [plannedNonce, setPlannedNonce] = useState(0);
+  // Only the NEWEST loadUnitAsg call may write state. Stepping days with
+  // Prev/Next fires several loads; without this an older one that finished
+  // last overwrote the key and sizes for the wrong set of apartments and
+  // left every card stuck with no type chip and "Set size".
+  const asgReqRef = useRef(0);
+  // The database's own message when the cleanings query fails, so the card
+  // can say so (with Retry) instead of a misleading "No open assignment".
+  const [unitAsgError, setUnitAsgError] = useState(null);
   const loadUnitAsg = async (unitIds) => {
+    const my = ++asgReqRef.current;
+    setUnitAsgError(null);
     // Scope to the units on this day. A global query hits PostgREST's
     // 1000-row cap once there are thousands of done items, which silently
     // drops assignments (units then look like they have none).
     const ids = (unitIds || []).filter(Boolean);
-    if (!ids.length) { setUnitAsg({}); setUnitSize({}); setAsgById({}); setDayAsgIds({}); setUnitAsgKey(''); return; }
+    if (!ids.length) { setUnitAsg({}); setUnitSize({}); setAsgById({}); setDayAsgIds({}); setUnitCands({}); setUnitAsgKey(''); return; }
     // Page through. Scoping to the day's units reduces the row count but
     // doesn't bound it — 35 apartments with a year of history each still
     // crosses PostgREST's 1000-row default, and a truncated response
@@ -39822,13 +41225,15 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit, onShift
         .not('status', 'eq', 'blocked')
         .order('id')
         .range(from, from + PAGE - 1);
-      if (pageErr) { rowsComplete = false; break; }
+      if (my !== asgReqRef.current) return;
+      if (pageErr) { rowsComplete = false; setUnitAsgError(pageErr.message || 'unknown error'); break; }
       rows = rows.concat(page || []);
       if (!page || page.length < PAGE) break;
     }
     // Sizes come straight from units so they're always right, even for
     // units with no assignment at all.
     const { data: unitRows } = await supabase.from('units').select('id, bedrooms, bathrooms').in('id', ids);
+    if (my !== asgReqRef.current) return;
     const m = {}; const sizes = {};
     // Every candidate by id, plus which of them actually belong to THE DAY
     // on screen. The query above has no date filter — it cannot have one,
@@ -39836,6 +41241,7 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit, onShift
     // job is narrowed here instead. See the card render.
     const byId = {};
     const onThisDay = {};   // unitId -> Set(assignmentId)
+    const candsByUnit = {}; // unitId -> Map(assignmentId -> record)
     const dayOf = (ts) => {
       if (!ts) return null;
       const d = new Date(ts);
@@ -39882,11 +41288,13 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit, onShift
       if (sched ? sched === date : dayOf(t.completed_at) === date) {
         (onThisDay[t.unit_id] = onThisDay[t.unit_id] || new Set()).add(a.id);
       }
+      (candsByUnit[t.unit_id] = candsByUnit[t.unit_id] || new Map()).set(a.id, rec);
       if (unitAssignmentWins(rec, m[t.unit_id])) m[t.unit_id] = rec;
     });
     setUnitSize(sizes);
     // Roster first, so assignee names resolve without a PostgREST embed.
     const { data: emps } = await supabase.from('employees').select('id, name, role').eq('active', true).order('name');
+    if (my !== asgReqRef.current) return;
     const nameById = Object.fromEntries((emps || []).map(e => [e.id, e.name]));
     // The current pick per unit PLUS whatever can be pinned to this day \u2014
     // either can end up on a card, so both need their assignee names.
@@ -39897,6 +41305,7 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit, onShift
     if (asgIds.length) {
       const { data: asg, error: asgErr } = await supabase.from('assignment_assignees')
         .select('assignment_id, employee_id, status').in('assignment_id', asgIds);
+      if (my !== asgReqRef.current) return;
       if (asgErr) alert('Could not load who\u2019s assigned: ' + asgErr.message);
       (asg || []).forEach(r => {
         const rec = byId[r.assignment_id];
@@ -39905,6 +41314,7 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit, onShift
     }
     setUnitAsg(m);
     setAsgById(byId);
+    setUnitCands(Object.fromEntries(Object.entries(candsByUnit).map(([k, v]) => [k, Array.from(v.values())])));
     setDayAsgIds(Object.fromEntries(Object.entries(onThisDay).map(([k, v]) => [k, Array.from(v)])));
     // Only claim this map describes these units ON THIS DAY if we actually
     // got all of it. A failed page leaves the chips hidden rather than
@@ -39922,15 +41332,26 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit, onShift
     });
     return Array.from(set);
   }, [data]);
+  // THE CARDS ON SCREEN BELONG TO THE HEADER'S DAY. After a day step the
+  // component is not remounted, so `data` still holds the PREVIOUS day's
+  // cards until the new day's query lands -- which on a busy day takes
+  // seconds. Those cards must not be drawn, or acted on, under the new
+  // date: a "Move to this day" on one re-dated the old day's cleaning.
+  const dataIsForDay = !!data && data.date === date;
   const refreshUnitAsg = () => { setPlannedNonce(n => n + 1); return loadUnitAsg(dayUnitIds); };
   // `date` is a dependency too: stepping to the next day can land on the
   // identical set of apartments, and which cleaning belongs to a card
   // depends on the date. Without it the day-matching went stale silently.
-  useEffect(() => { if (dayUnitIds.length) loadUnitAsg(dayUnitIds); /* eslint-disable-next-line */ }, [dayUnitIds.join(','), date]);
+  // Waits for the day's own cards (dataIsForDay): loading with the old
+  // day's apartments and the new date is what made old cards look fresh.
+  useEffect(() => { if (dayUnitIds.length && dataIsForDay) loadUnitAsg(dayUnitIds); /* eslint-disable-next-line */ }, [dayUnitIds.join(','), date, dataIsForDay]);
   // True only when unitAsg was built for the units on screen right now, on
   // the day on screen right now. Goes false by itself the instant either
   // changes, because both are recomputed in the same render.
-  const unitAsgFresh = unitAsgKey === `${date}|${dayUnitIds.join(',')}`;
+  const unitAsgFresh = dataIsForDay && unitAsgKey === `${date}|${dayUnitIds.join(',')}`;
+  // An open Assign picker or date editor belongs to the day it was opened
+  // on. The same cleaning can be on the next day's screen too.
+  useEffect(() => { setDAssignFor(null); setDDueFor(null); }, [date]);
 
   // ── EVERY CLEANING SCHEDULED FOR THIS DAY ───────────────────────────────
   //
@@ -39978,7 +41399,7 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit, onShift
         if (!page || page.length < PAGE) break;
       }
       if (cancelled) return;
-      if (failed) { setPlannedJobs({ byProp: {}, error: failed }); return; }
+      if (failed) { setPlannedJobs({ date, byProp: {}, error: failed }); return; }
 
       // One record per ASSIGNMENT, not per apartment. Two cleanings on one
       // apartment in a day is a real thing — a move-out in the morning and a
@@ -40045,7 +41466,7 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit, onShift
         if (!byProp[r.propId]) byProp[r.propId] = { property: r.property, jobs: [] };
         byProp[r.propId].jobs.push(r);
       });
-      setPlannedJobs({ byProp, error: null });
+      setPlannedJobs({ date, byProp, error: null });
     })();
     return () => { cancelled = true; };
   }, [date, plannedNonce]);
@@ -40055,7 +41476,9 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit, onShift
   // being at the same apartment is not enough on its own, because a clean
   // and a reclean share an apartment and only one of them got done.
   const unstartedByProp = React.useMemo(() => {
-    const byProp = plannedJobs?.byProp || {};
+    // Only a schedule loaded for THIS date. The previous day's stays in
+    // state for a render after stepping.
+    const byProp = (plannedJobs && plannedJobs.date === date) ? (plannedJobs.byProp || {}) : {};
     const workedAsgIds = new Set();   // jobs the day's blocks name outright
     const workedUnits = new Set();    // apartments with any hours today
     const attributed = new Set();     // apartments where a block named its job
@@ -40085,14 +41508,76 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit, onShift
       if (jobs.length) out[propId] = { property: g.property, jobs };
     });
     return out;
-  }, [plannedJobs, data]);
+  }, [plannedJobs, data, date]);
 
-  const dSaveDue = async (asgId, val) => {
+  // WRITE-TIME CHECK, in front of every write a day card makes. Reads the
+  // LATEST render through a ref, not the render the button was drawn in,
+  // and refuses unless the cards, the cleanings map and the header are all
+  // the same day. 'day' actions (Assign, Extra, Mark done, date chip) must
+  // also target a cleaning booked for that day or undated; 'move' must
+  // target an open cleaning loaded for that day's screen.
+  const dayLiveRef = useRef(null);
+  dayLiveRef.current = {
+    date,
+    dataDate: data?.date || null,
+    asgDate: unitAsgKey ? String(unitAsgKey).split('|')[0] : null,
+    asgById,
+    plannedJobs,
+  };
+  const dayGuard = (asgId, kind = 'day') => {
+    const L = dayLiveRef.current || {};
+    let ok = !!L.date && L.dataDate === L.date;
+    if (ok) {
+      const rec = L.asgDate === L.date ? (L.asgById || {})[asgId] : null;
+      const planned = (L.plannedJobs && L.plannedJobs.date === L.date)
+        ? Object.values(L.plannedJobs.byProp || {}).flatMap(g => g.jobs || []).find(j => j.id === asgId)
+        : null;
+      if (kind === 'move') {
+        ok = !!(rec && rec.open);
+      } else {
+        const r = rec || planned;
+        const sd = r ? String(r.scheduledDate || '').slice(0, 10) : '';
+        ok = !!r && (!sd || sd === L.date);
+      }
+    }
+    if (!ok) alert('The day on screen changed before this could save. Nothing was changed. Wait for the day to finish loading, then try again.');
+    return ok;
+  };
+  const dSaveDue = async (asgId, val, kind = 'day') => {
+    if (!dayGuard(asgId, kind)) { setDDueFor(null); return; }
     setDDueFor(null); setDBusy(asgId);
-    await supabase.from('assignments').update({ scheduled_date: val || null }).eq('id', asgId);
-    setDBusy(null); refreshUnitAsg();
+    const { data, error } = await supabase.from('assignments')
+      .update({ scheduled_date: val || null }).eq('id', asgId).select('id');
+    setDBusy(null);
+    if (error) { alert('Could not change the date: ' + error.message); return; }
+    if (!data || data.length === 0) { alert('The date did not save \u2014 the database rejected the update for this job.'); return; }
+    refreshUnitAsg();
+  };
+  // "Move to this day": re-dates an existing OPEN booking onto the day on
+  // screen, through the same write as the date chip. Confirmed first,
+  // because it takes the booking off its old day.
+  const dMoveToDay = (asg, unitLabel) => {
+    // Checked BEFORE the confirm, so its text can never describe a move
+    // from a card that belongs to another day.
+    if (!dayGuard(asg.id, 'move')) return;
+    const typeLabel = assignmentTypeLabel(asg.assignmentType);
+    // "booking", not "cleaning": the type labels already say what kind of
+    // clean it is ("Standard clean", "Deep clean"), so "the Standard clean
+    // cleaning" read twice.
+    const what = typeLabel ? `the ${typeLabel} booking` : 'the booking';
+    const newD = fmtDueDate(date);
+    let msg;
+    if (asg.scheduledDate) {
+      const oldD = fmtDueDate(asg.scheduledDate);
+      msg = `This moves ${what} at ${unitLabel} from ${oldD} to ${newD}. It will no longer be on ${oldD}. If ${oldD} is a separate cleaning, cancel and book a new one instead.`;
+    } else {
+      msg = `This moves ${what} at ${unitLabel}, which has no date, to ${newD}. If it is a separate cleaning, cancel and book a new one instead.`;
+    }
+    if (!confirm(msg)) return;
+    dSaveDue(asg.id, date, 'move');
   };
   const dCommitAssignees = async (ua, ids, audience) => {
+    if (!dayGuard(ua.id)) { setDAssignFor(null); return; }
     setDBusy(ua.id);
     const error = await saveAssignees(ua.id, ua.assignees.map(a => a.id), ids, employee.id, audience);
     setDBusy(null);
@@ -40101,6 +41586,7 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit, onShift
     refreshUnitAsg();
   };
   const dToggleExtra = async (asgId, current) => {
+    if (!dayGuard(asgId)) return;
     setDBusy(asgId);
     const { data, error } = await supabase.from('assignments')
       .update({ took_longer: !current }).eq('id', asgId).select('id, took_longer');
@@ -40110,6 +41596,7 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit, onShift
     refreshUnitAsg();
   };
   const dMarkDone = async (asgId, label) => {
+    if (!dayGuard(asgId)) return;
     if (!confirm(`Mark ${label} completed?`)) return;
     setDBusy(asgId);
     await supabase.from('assignment_targets')
@@ -40124,7 +41611,10 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit, onShift
   const [filterProperties, setFilterProperties] = useState(new Set());
   const [filterCategories, setFilterCategories] = useState(new Set());
 
-  useEffect(() => { (async () => {
+  // `cancelled` so a slow load for a day already stepped past cannot land
+  // last and overwrite the day on screen -- same pattern as the planned-jobs
+  // effect above.
+  useEffect(() => { let cancelled = false; (async () => {
     const [dyY, dyM, dyD] = String(date).split("-").map(Number);
     const dayStart = new Date(dyY, dyM - 1, dyD, 0, 0, 0, 0).toISOString();
     const dayEnd   = new Date(dyY, dyM - 1, dyD, 23, 59, 59, 999).toISOString();
@@ -40137,7 +41627,7 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit, onShift
       // assignment_id on the blocks: it is the only hard link between the
       // work shown on a card and the cleaning it belongs to. Without it the
       // card's buttons had to guess from "what's open at this apartment".
-      .select('id, start_time, end_time, customer_id, idle_seconds, employee:employees(id,name), customer:customers(id,name,property_type,bill_rate_hourly), work_blocks(id, start_time, end_time, bill_rate_at_work, assignment_id, unit:units(id, label), party:parties(id, label, full_name), tasks(*, photos(*, taken_by_employee:employees!taken_by(name))))')
+      .select('id, start_time, end_time, customer_id, idle_seconds, employee:employees(id,name), customer:customers(id,name,property_type,bill_rate_hourly), work_blocks(id, start_time, end_time, bill_rate_at_work, assignment_id, unit:units(id, label, bedrooms, bathrooms), party:parties(id, label, full_name), tasks(*, photos(*, taken_by_employee:employees!taken_by(name))))')
       .gte('start_time', dayStart)
       .lte('start_time', dayEnd)
       .or('is_preview.is.null,is_preview.eq.false')
@@ -40186,6 +41676,10 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit, onShift
           if (!propGroup.units[uId]) {
             propGroup.units[uId] = {
               unitId: uId, unitLabel: b.unit.label,
+              // Size rides along on the same rows that draw the card, so it
+              // cannot come up blank just because loadUnitAsg failed or a
+              // stale response from another day landed last.
+              bedrooms: b.unit.bedrooms, bathrooms: b.unit.bathrooms,
               employees: new Set(), totalMs: 0, hasDamage: false, hasCannot: false, photoCount: 0, blocks: [],
               // Which cleaning(s) this day's work at this apartment was
               // logged against. One is a certain answer; none or several
@@ -40220,8 +41714,11 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit, onShift
       }
     });
 
-    setData({ groups, shifts: shifts || [], byCleaner });
-  })(); }, [date]);
+    if (cancelled) return;
+    // `date` rides along so the render can tell this day's cards from the
+    // previous day's, which stay in state until this load lands.
+    setData({ date, groups, shifts: shifts || [], byCleaner });
+  })(); return () => { cancelled = true; }; }, [date]);
 
   // Editing a cleaning takes over the screen, same as everywhere else.
   if (dEditJob) {
@@ -40274,11 +41771,21 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit, onShift
           )}
         </div>
         <div className="text-sm text-stone-300 mt-2">
-          {totalShifts} {totalShifts === 1 ? 'shift' : 'shifts'} across {totalProperties} {totalProperties === 1 ? 'property' : 'properties'}
+          {dataIsForDay
+            ? <>{totalShifts} {totalShifts === 1 ? 'shift' : 'shifts'} across {totalProperties} {totalProperties === 1 ? 'property' : 'properties'}</>
+            : 'Loading…'}
         </div>
       </div>
 
       <div className="px-5 pt-6">
+        {/* Still holding the PREVIOUS day's cards after a day step: draw
+           none of them under this header, so nothing on them can be
+           pressed for the wrong day. See dataIsForDay. */}
+        {!dataIsForDay ? (
+          <div className="text-center py-12 text-stone-400 text-sm">
+            Loading {dateObj.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}…
+          </div>
+        ) : (<>
         {/* Filters + per-cleaner breakdown live above the property
            grouping so the owner can quickly see "who worked how long"
            before drilling into specific properties/units. */}
@@ -40520,10 +42027,28 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit, onShift
                         // When it isn't, the reversible controls fall back to
                         // the old behaviour rather than vanishing.
                         const ua = dayAsg || unitAsg[u.unitId];
+                        // Hours logged against a booking DATED ANOTHER DAY.
+                        // asgById has no date filter, so if the cleaner's phone
+                        // tied today's hours to next week's open booking,
+                        // dayAsg IS next week's booking. That is not today's
+                        // cleaning, so the card gets no working cleaning.
+                        const offDay = !!(dayAsg && dayAsg.scheduledDate
+                          && String(dayAsg.scheduledDate).slice(0, 10) !== date);
+                        // THE CARD'S WORKING CLEANING. Assign, Extra, Mark done
+                        // and the date chip act on this and nothing else.
+                        const wa = offDay ? null : dayAsg;
+                        // Nothing at all could be tied to this day here.
+                        const noMatch = fromBlocks.length === 0 && fromDay.length === 0;
+                        // The booking "next booking: <date>" names, and the
+                        // one its Move button re-dates. The same pick for
+                        // both, ordered by DATE -- see pickNextOpenBooking.
+                        const nextBk = (unitAsgFresh && noMatch) ? pickNextOpenBooking(unitCands[u.unitId], date) : null;
                         // Size lives on the unit, NOT on the assignment. Read it
                         // from unitSize so the pill is right even when this unit
                         // has no open assignment (ua would be undefined).
-                        const us = unitSize[u.unitId];
+                        // Falls back to the size on the card's own work-block
+                        // rows, so a failed or stale loadUnitAsg cannot blank it.
+                        const us = unitSize[u.unitId] || { bedrooms: u.bedrooms, bathrooms: u.bathrooms };
                         return (
                         <div key={u.unitId}
                           className={`w-full text-left p-4 rounded-2xl border transition-colors ${
@@ -40598,48 +42123,72 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit, onShift
                               }}
                               onChanged={refreshUnitAsg}
                               onEdit={() => setDEditJob({ id: dayAsg.id, propertyId: propId })} />
-                            {unitAsgFresh && !dayAsg && (
+                            {/* Ambiguous only: several cleanings match, or the
+                               day's hours name one that isn't loaded. The
+                               "nothing booked" states say so below instead. */}
+                            {unitAsgFresh && !dayAsg && !noMatch && (
                               <span className="text-[10px] font-mono text-stone-400"
                                 title="More than one cleaning, or none, can be matched to this day at this apartment — open the apartment to edit the right one.">
                                 open the apartment to edit
                               </span>
                             )}
 
-                            {ua ? (<>
-                              {dDueFor === ua.id ? (
-                                <DueDateEditor compact value={ua.scheduledDate || ''}
-                                  onSave={(d) => dSaveDue(ua.id, d)} onCancel={() => setDDueFor(null)} />
+                            {/* Every action here acts on THIS DAY'S cleaning
+                               (wa) only. The old fallback to "whatever is open
+                               at this apartment" is what put added cleaners on
+                               next week's booking, and let Mark done close it. */}
+                            {!unitAsgFresh ? (
+                              unitAsgError ? (<>
+                                <span className="text-[10px] font-mono text-red-700">Couldn't load cleanings: {unitAsgError}</span>
+                                <button onClick={refreshUnitAsg}
+                                  className="text-[10px] font-mono px-2 py-0.5 rounded-full border border-red-300 bg-white text-red-700">
+                                  Retry
+                                </button>
+                              </>) : (
+                                <span className="text-[10px] font-mono text-stone-400">Loading…</span>
+                              )
+                            ) : wa ? (<>
+                              {dDueFor === wa.id ? (
+                                <DueDateEditor compact value={wa.scheduledDate || ''}
+                                  onSave={(d) => dSaveDue(wa.id, d)} onCancel={() => setDDueFor(null)} />
                               ) : canDailyDates ? (
-                                <button onClick={() => setDDueFor(ua.id)}
-                                  className={`text-[10px] font-mono px-2 py-0.5 rounded-full border inline-flex items-center gap-1 ${ua.scheduledDate
-                                    ? (ua.scheduledDate < dToday ? 'bg-red-100 text-red-700 border-red-200'
-                                       : ua.scheduledDate === dToday ? 'bg-emerald-100 text-emerald-800 border-emerald-200'
+                                <button onClick={() => setDDueFor(wa.id)}
+                                  className={`text-[10px] font-mono px-2 py-0.5 rounded-full border inline-flex items-center gap-1 ${wa.scheduledDate
+                                    ? (wa.scheduledDate < dToday ? 'bg-red-100 text-red-700 border-red-200'
+                                       : wa.scheduledDate === dToday ? 'bg-emerald-100 text-emerald-800 border-emerald-200'
                                        : 'bg-stone-100 text-stone-600 border-stone-200')
                                     : 'bg-white text-stone-500 border-dashed border-stone-300'}`}>
-                                  <Calendar size={9} /> {ua.scheduledDate ? fmtDueDate(ua.scheduledDate) : 'Set due date'}
+                                  <Calendar size={9} /> {wa.scheduledDate ? fmtDueDate(wa.scheduledDate) : 'Set due date'}
                                 </button>
                               ) : null}
+                              {/* Pay places people on the SCHEDULED date and skips
+                                 a cleaning that has none, so say so here. */}
+                              {!wa.scheduledDate && (
+                                <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 border border-amber-300">
+                                  No date — won't show on Pay
+                                </span>
+                              )}
 
-                              {ua.assignees.map(a => (
+                              {wa.assignees.map(a => (
                                 <span key={a.id} className={`text-[10px] font-mono px-2 py-0.5 rounded-full inline-flex items-center gap-1 ${a.requested ? 'bg-amber-100 text-amber-800' : 'bg-indigo-100 text-indigo-700'}`}>
                                   <User size={9} /> {a.name}{a.requested ? ' asked' : ''}
                                 </span>
                               ))}
                               {canDailyAssign && (
-                                <button onClick={() => setDAssignFor(dAssignFor === ua.id ? null : ua.id)}
+                                <button onClick={() => setDAssignFor(dAssignFor === wa.id ? null : wa.id)}
                                   className="text-[10px] font-mono px-2 py-0.5 rounded-full border border-dashed border-stone-300 text-stone-500 inline-flex items-center gap-1">
                                   <Plus size={9} /> Assign
                                 </button>
                               )}
 
                               {/* Took longer → charge extra on the invoice */}
-                              <button onClick={() => dToggleExtra(ua.id, ua.tookLonger)} disabled={dBusy === ua.id}
-                                className={`text-[10px] font-mono px-2 py-0.5 rounded-full inline-flex items-center gap-1 disabled:opacity-50 ${ua.tookLonger ? 'bg-amber-500 text-white' : 'bg-white border border-dashed border-stone-300 text-stone-500'}`}>
-                                <Clock size={9} /> {ua.tookLonger ? 'Extra' : 'Mark extra'}
+                              <button onClick={() => dToggleExtra(wa.id, wa.tookLonger)} disabled={dBusy === wa.id}
+                                className={`text-[10px] font-mono px-2 py-0.5 rounded-full inline-flex items-center gap-1 disabled:opacity-50 ${wa.tookLonger ? 'bg-amber-500 text-white' : 'bg-white border border-dashed border-stone-300 text-stone-500'}`}>
+                                <Clock size={9} /> {wa.tookLonger ? 'Extra' : 'Mark extra'}
                               </button>
 
-                              {canDailyDone && (ua.open ? (
-                                <button onClick={() => dMarkDone(ua.id, u.unitLabel)} disabled={dBusy === ua.id}
+                              {canDailyDone && (wa.open ? (
+                                <button onClick={() => dMarkDone(wa.id, u.unitLabel)} disabled={dBusy === wa.id}
                                   className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-600 text-white inline-flex items-center gap-1 disabled:opacity-50">
                                   <Check size={9} /> Mark done
                                 </button>
@@ -40648,16 +42197,42 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit, onShift
                                   <Check size={9} /> Done
                                 </span>
                               ))}
-                            </>) : (
-                              <span className="text-[10px] font-mono text-stone-400">No open assignment</span>
-                            )}
+                            </>) : offDay ? (<>
+                              {/* The day's hours were logged against a booking
+                                 dated another day. Assigning here would put the
+                                 cleaner on Pay for THAT day, so no actions --
+                                 only a confirmed move onto this day. */}
+                              <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 border border-amber-300">
+                                Booked for {fmtDueDate(dayAsg.scheduledDate)}
+                              </span>
+                              {dayAsg.open && canDailyDates && (
+                                <button onClick={() => dMoveToDay(dayAsg, u.unitLabel)} disabled={dBusy === dayAsg.id}
+                                  className="text-[10px] font-mono px-2 py-0.5 rounded-full border border-amber-400 bg-white text-amber-800 inline-flex items-center gap-1 disabled:opacity-50">
+                                  <Calendar size={9} /> Move to this day
+                                </button>
+                              )}
+                            </>) : (noMatch && nextBk) ? (<>
+                              <span className="text-[10px] font-mono text-stone-500">
+                                Nothing booked here this day · next booking: {nextBk.scheduledDate ? fmtDueDate(nextBk.scheduledDate) : 'no date'}
+                              </span>
+                              {canDailyDates && (
+                                <button onClick={() => dMoveToDay(nextBk, u.unitLabel)} disabled={dBusy === nextBk.id}
+                                  className="text-[10px] font-mono px-2 py-0.5 rounded-full border border-amber-400 bg-white text-amber-800 inline-flex items-center gap-1 disabled:opacity-50">
+                                  <Calendar size={9} /> Move to this day
+                                </button>
+                              )}
+                            </>) : noMatch ? (
+                              <span className="text-[10px] font-mono text-stone-500">
+                                Nothing booked here this day · to pay another cleaner for it: Shifts → Pay → Edit pay → Job by job → Split with
+                              </span>
+                            ) : null}
                           </div>
 
-                          {ua && canDailyAssign && dAssignFor === ua.id && (
-                            <AssignPicker key={ua.id} assignmentId={ua.id} team={dTeam} busy={dBusy === ua.id}
-                              currentIds={ua.assignees.map(a => a.id)}
+                          {wa && canDailyAssign && dAssignFor === wa.id && (
+                            <AssignPicker key={wa.id} assignmentId={wa.id} team={dTeam} busy={dBusy === wa.id}
+                              currentIds={wa.assignees.map(a => a.id)}
                               onCancel={() => setDAssignFor(null)}
-                              onSave={(ids, audience) => dCommitAssignees(ua, ids, audience)} />
+                              onSave={(ids, audience) => dCommitAssignees(wa, ids, audience)} />
                           )}
                         </div>
                         );
@@ -40789,6 +42364,7 @@ function DailyDayDetail({ date, employee, showMoney, onBack, onOpenUnit, onShift
             })}
           </div>
         )}
+        </>)}
       </div>
     </div>
   );

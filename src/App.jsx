@@ -118,7 +118,7 @@ const uploadButtonLabel = (name) => {
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "nov6-tap275b";
+const BUILD_TAG = "nov6-tap275c";
 // ---- Hidden for now, at Allan's request -------------------------------
 // Both of these are switches rather than deletions: the code stays whole
 // and working, so turning either back on is this one line. Flip to true.
@@ -18203,7 +18203,7 @@ function ShiftPayView({ shifts, currentEmployee, onReload, onAddShift, onOpenShi
       if (asgIds.length) {
         for (let i = 0; i < asgIds.length; i += 200) {
           const { data: aa, error: aaErr } = await supabase.from('assignment_assignees')
-            .select('assignment_id, employee_id, status, employee:employees(id, name)')
+            .select('assignment_id, employee_id, status, employee:employees!assignment_assignees_employee_id_fkey(id, name)')
             .in('assignment_id', asgIds.slice(i, i + 200));
           // A failed read here used to drop who the job was given to, so a
           // card could look ready when an assigned apartment wasn't priced.
@@ -50092,7 +50092,7 @@ function AssignmentTabContent({ propertyId, property = null, employee, statusFil
   const loadAssignees = async (ids) => {
     if (!ids || ids.length === 0) { setAssigneeMap({}); return; }
     const { data } = await supabase.from('assignment_assignees')
-      .select('assignment_id, employee_id, status, employee:employees(id, name)')
+      .select('assignment_id, employee_id, status, employee:employees!assignment_assignees_employee_id_fkey(id, name)')
       .in('assignment_id', ids.slice(0, 1000));
     const m = {};
     (data || []).forEach(r => {

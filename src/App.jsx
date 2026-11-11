@@ -110,15 +110,30 @@ const assignmentTypeLabel = (value) =>
 // without a generic suffix (Carriage Cove) come through untouched.
 const shortPropertyName = (name) =>
   String(name || '').replace(/\s+(apartments?|apts?|properties|property)\s*$/i, '').trim();
-const uploadButtonLabel = (name) => {
+// `word` is optional and goes before "Upload" ("Quick" / "Full"). Without
+// it the label is exactly as before.
+const uploadButtonLabel = (name, word = '') => {
   const short = shortPropertyName(name);
-  return short ? `${short} Upload` : 'New assignment';
+  const w = String(word || '').trim();
+  if (short) return w ? `${short} ${w} Upload` : `${short} Upload`;
+  return w ? `${w} Upload` : 'New assignment';
+};
+// What a PM sees for the Quick or Full upload at the property they have
+// selected (Allan, tap276): "<Property> Upload" when only one of the two is
+// on, "<Property> Quick Upload" / "<Property> Full Upload" when both are, so
+// the same name never shows twice. Reads portalUploadMethods, the same
+// answer the "Add an assignment" sheet uses, so a title can't disagree with
+// the row that opened it. which: 'quick' | 'full'.
+const pmUploadLabel = (property, portalUser, which) => {
+  const m = portalUploadMethods(property, portalUser);
+  const both = m.quick && m.checklist;
+  return uploadButtonLabel(property?.name, both ? (which === 'quick' ? 'Quick' : 'Full') : '');
 };
 
 // Build tag — shows next to "TidyTrack" in the top bar so you can verify
 // which version is live. Kept well away from the Supabase keys so it
 // doesn't get wiped when you paste your keys. Bump it every update.
-const BUILD_TAG = "nov6-tap275c";
+const BUILD_TAG = "nov6-tap276";
 // ---- Hidden for now, at Allan's request -------------------------------
 // Both of these are switches rather than deletions: the code stays whole
 // and working, so turning either back on is this one line. Flip to true.
@@ -25405,6 +25420,17 @@ function PropertySetup({ property, onDone, onAssignPortalUsers, onAddUnits, onEd
 function PortalUserAssignmentSection({ portalUsers, assignedIds, loaded, loadError = '', search, setSearch, onToggle, onUserCreated }) {
   const [kindFilter, setKindFilter] = useState('pm'); // 'pm' | 'property_owner' | 'pm_staff'
   const [showQuickAdd, setShowQuickAdd] = useState(false);
+  // Who was linked when the list loaded. Those people are listed first.
+  // A snapshot, not the live ticks, so a row never moves under the owner's
+  // finger; retaken whenever loaded goes false -> true (the Team tab's
+  // reload). Display order only: nothing that saves reads it.
+  const [linkedFirst, setLinkedFirst] = useState(() => new Set());
+  const wasLoadedRef = useRef(false);
+  useEffect(() => {
+    if (loaded && !wasLoadedRef.current) setLinkedFirst(new Set(assignedIds));
+    wasLoadedRef.current = !!loaded;
+    /* eslint-disable-next-line */
+  }, [loaded]);
 
   const KIND_TABS = [
     { id: 'pm', label: 'Managers' },
@@ -25414,11 +25440,17 @@ function PortalUserAssignmentSection({ portalUsers, assignedIds, loaded, loadErr
 
   // Filter by kind first, then by search
   const byKind = (portalUsers || []).filter(u => u.kind === kindFilter && u.active !== false);
-  const filtered = search.trim()
+  const searched = search.trim()
     ? byKind.filter(u =>
         u.name?.toLowerCase().includes(search.trim().toLowerCase()) ||
         u.code?.toLowerCase().includes(search.trim().toLowerCase()))
     : byKind;
+  // Linked-at-load first, then everyone else. Both keep the incoming
+  // (name) order.
+  const filtered = [
+    ...searched.filter(u => linkedFirst.has(u.id)),
+    ...searched.filter(u => !linkedFirst.has(u.id)),
+  ];
 
   // Count assigned per kind for the badge
   const assignedByKind = { pm: 0, property_owner: 0, pm_staff: 0 };
@@ -25427,6 +25459,13 @@ function PortalUserAssignmentSection({ portalUsers, assignedIds, loaded, loadErr
       assignedByKind[u.kind]++;
     }
   });
+  // Who is linked on this tab, said in words. Counts the same people as the
+  // badge, so someone inactive (hidden from the list) is named as such.
+  const linkedHere = (portalUsers || []).filter(u => u.kind === kindFilter && assignedIds.has(u.id));
+  const KIND_NOUN = { pm: 'managers', property_owner: 'owners', pm_staff: 'PM staff' };
+  const linkedSummary = linkedHere.length
+    ? 'Linked: ' + linkedHere.map(u => (u.name || 'Unnamed') + (u.active === false ? ' (inactive)' : '')).join(', ')
+    : `No ${KIND_NOUN[kindFilter] || 'people'} linked yet.`;
 
   return (
     <div className="p-4 rounded-2xl bg-white border border-stone-200">
@@ -25461,6 +25500,12 @@ function PortalUserAssignmentSection({ portalUsers, assignedIds, loaded, loadErr
           );
         })}
       </div>
+
+      {/* Hidden while loading (the list says Loading…) and on a failed load,
+         where "nobody linked" would be a guess. */}
+      {loaded && !loadError && (
+        <div className="text-xs text-stone-700 font-medium mb-3">{linkedSummary}</div>
+      )}
 
       {byKind.length >= 6 && (
         <input type="text" value={search} onChange={(e) => setSearch(e.target.value)}
@@ -25514,6 +25559,8 @@ function PortalUserAssignmentSection({ portalUsers, assignedIds, loaded, loadErr
             setShowQuickAdd(false);
             // Switch to the kind tab the new user lives in so they're visible
             if (user.kind && user.kind !== kindFilter) setKindFilter(user.kind);
+            // Created here = linked here, so they join the top group.
+            if (user?.id) setLinkedFirst(prev => new Set(prev).add(user.id));
             onUserCreated(user);
           }}
         />
@@ -25658,6 +25705,11 @@ function PropertyForm({ property, currentUserRole, onCancel, onSaved, onManageAs
   const [portalCode, setPortalCode] = useState(property?.portal_code || '');
   const [staffPortalCode, setStaffPortalCode] = useState(property?.staff_portal_code || '');
   const [portalStartDate, setPortalStartDate] = useState(property?.portal_start_date || '');
+  // The old shared PM / staff codes are being retired. Their boxes only show
+  // on a property that had one when this form opened, so it can still be
+  // cleared; clearing it mid-edit doesn't hide the box. Display only: the
+  // save still writes portal_code / staff_portal_code exactly as before.
+  const hadOldCodeAtOpen = useRef(!!(property?.portal_code || property?.staff_portal_code)).current;
   const [active, setActive] = useState(property?.active ?? true);
   const [bedrooms, setBedrooms] = useState(property?.bedrooms ?? null);
   const [bathrooms, setBathrooms] = useState(property?.bathrooms ?? null);
@@ -25679,7 +25731,24 @@ function PropertyForm({ property, currentUserRole, onCancel, onSaved, onManageAs
     property?.presence_window_minutes != null ? String(property.presence_window_minutes) : '').current;
   const [presenceWindow, setPresenceWindow] = useState(presenceWindowAtOpen);
   // Which assignment-upload styles THIS property's PM can see in their portal.
-  const [pmMethods, setPmMethods] = useState(property?.pm_upload_methods || { quick: false, checklist: true, legacy: false });
+  // pmStoredAtOpen is the stored setting when the form opened (null = never
+  // set). The baseline is what PMs here actually get right now; the save only
+  // writes pm_upload_methods when the ticks differ from it (see save).
+  //   Set:     baseline = the stored value, toggles live at once.
+  //   Not set: the portal gives Quick off, Full on, and Legacy per PM
+  //            (portalUploadMethods). The baseline waits for the people list,
+  //            then starts Legacy ticked if any active person linked at open
+  //            has allow_legacy_uploads, so a save can't silently take it
+  //            away. Toggles stay disabled until then.
+  const pmStoredAtOpen = useRef(property?.pm_upload_methods || null).current;
+  const [pmMethods, setPmMethods] = useState(pmStoredAtOpen || { quick: false, checklist: true, legacy: false });
+  const [pmBaseline, setPmBaseline] = useState(pmStoredAtOpen
+    ? { quick: !!pmStoredAtOpen.quick, checklist: !!pmStoredAtOpen.checklist, legacy: !!pmStoredAtOpen.legacy }
+    : null);
+  // Set once. A later reload must never overwrite what the owner has ticked.
+  const pmBaselineSetRef = useRef(!!pmStoredAtOpen);
+  // Names of the active linked people whose own setting gives them Legacy.
+  const [pmLegacyNames, setPmLegacyNames] = useState([]);
   const togglePmMethod = (k) => setPmMethods(m => ({ ...(m || {}), [k]: !(m || {})[k] }));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -25707,7 +25776,7 @@ function PropertyForm({ property, currentUserRole, onCancel, onSaved, onManageAs
     (async () => {
       setPortalLoadError('');
       const { data: users, error: usersErr } = await supabase.from('portal_users')
-        .select('id, name, kind, active, code')
+        .select('id, name, kind, active, code, allow_legacy_uploads')
         .order('name');
       if (cancelled) return;
       if (usersErr) {
@@ -25732,6 +25801,18 @@ function PropertyForm({ property, currentUserRole, onCancel, onSaved, onManageAs
     })();
     return () => { cancelled = true; };
   }, [property?.id]);
+
+  // Unset upload setting: fix the baseline once the people and links are in.
+  useEffect(() => {
+    if (!portalLoaded || pmBaselineSetRef.current) return;
+    pmBaselineSetRef.current = true;
+    const holders = (allPortalUsers || []).filter(u =>
+      initialPortalUserIds.has(u.id) && u.active !== false && u.allow_legacy_uploads);
+    const base = { quick: false, checklist: true, legacy: holders.length > 0 };
+    setPmBaseline(base);
+    setPmMethods(base);
+    setPmLegacyNames(holders.map(u => u.name || 'Unnamed'));
+  }, [portalLoaded, allPortalUsers, initialPortalUserIds]);
 
   // Write only the ticks that changed, judged against what is linked RIGHT
   // NOW. Removals are limited twice over: to users the checkbox list
@@ -25832,9 +25913,22 @@ function PropertyForm({ property, currentUserRole, onCancel, onSaved, onManageAs
       portal_start_date: portalStartDate || null,
       bedrooms: type === 'simple' ? bedrooms : null,
       bathrooms: type === 'simple' ? bathrooms : null,
-      pm_upload_methods: pmMethods,
       active
     };
+    // The PM upload setting is written ONLY when a tick differs from the
+    // baseline (what PMs here get right now). A value comparison, not a
+    // "was anything clicked" flag, so tick-then-untick writes nothing, and
+    // an address-only save leaves the stored setting (or its absence)
+    // alone. No baseline yet (people list still loading or failed) = no
+    // write. When it is written, all three keys go.
+    const pmChanged = !!pmBaseline &&
+      ['quick', 'checklist', 'legacy'].some(k => !!pmMethods?.[k] !== pmBaseline[k]);
+    if (pmChanged) {
+      payload.pm_upload_methods = {
+        ...(pmMethods || {}),
+        quick: !!pmMethods?.quick, checklist: !!pmMethods?.checklist, legacy: !!pmMethods?.legacy,
+      };
+    }
     // The bedroom time limit is written ONLY when the owner changed the
     // field. Leaving the key out of the payload leaves the stored value
     // exactly as it is, which is the whole point: this form cannot be
@@ -26098,7 +26192,78 @@ function PropertyForm({ property, currentUserRole, onCancel, onSaved, onManageAs
           </p>
         </div>
 
+        {/* Property manager portal. Always shown: PMs sign in with their own
+           codes now, so the upload styles and start date must not depend on
+           the old shared code (empty on every property). */}
         <div className="p-4 rounded-2xl bg-stone-50 border border-stone-200">
+          <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-3">Property manager portal</div>
+          {/* Which upload styles this property's PM sees in their portal. */}
+          <div>
+            <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-1 block">PM assignment uploads</label>
+            <p className="text-xs text-stone-500 mb-2">Pick which ways this property's PM can create assignments in their portal. Off = hidden from them.</p>
+            {!pmStoredAtOpen && (
+              !pmBaseline ? (
+                portalLoadError
+                  ? <p className="text-xs text-red-700 mb-2">{portalLoadError}</p>
+                  : <p className="text-xs text-stone-500 mb-2">Checking who's linked…</p>
+              ) : pmLegacyNames.length === 0 ? (
+                <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-2">
+                  Not set yet. PMs here see Full Upload only. Tick what they should see.
+                </p>
+              ) : (
+                <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-2">
+                  Not set yet. PMs here see Full Upload. {pmLegacyNames.length === 1
+                    ? pmLegacyNames[0]
+                    : `${pmLegacyNames.slice(0, -1).join(', ')} and ${pmLegacyNames[pmLegacyNames.length - 1]}`} also
+                  see Legacy file upload through their own setting, so Legacy starts ticked. Whatever is ticked when
+                  you save applies to every PM at this property.
+                </p>
+              )
+            )}
+            <div className="space-y-2">
+              {[
+                { k: 'quick', label: 'Quick Upload', desc: 'Fast builder — no cleaner picker. Lands as a draft for your approval.' },
+                { k: 'checklist', label: 'Full Upload', desc: 'The structured upload with bedroom items.' },
+                { k: 'legacy', label: 'Legacy file upload', desc: 'Upload a file or photo as the source.' },
+              ].map(m => (
+                <button type="button" key={m.k} onClick={() => togglePmMethod(m.k)} disabled={!pmBaseline}
+                  className={`w-full flex items-center justify-between gap-3 p-3 rounded-xl border-2 text-left transition-colors disabled:opacity-50 ${pmMethods?.[m.k] ? 'border-emerald-400 bg-emerald-50' : 'border-stone-200 bg-white'}`}>
+                  <span className="min-w-0">
+                    <span className="block text-sm font-medium text-stone-900">{m.label}</span>
+                    <span className="block text-[11px] text-stone-500">{m.desc}</span>
+                  </span>
+                  <span className={`w-5 h-5 rounded-md flex items-center justify-center flex-shrink-0 border-2 ${pmMethods?.[m.k] ? 'bg-emerald-600 border-emerald-600 text-white' : 'bg-white border-stone-300'}`}>
+                    {pmMethods?.[m.k] && <Check size={13} />}
+                  </span>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Portal start date */}
+          <div className="mt-4 pt-4 border-t border-stone-200">
+            <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Portal start date (optional)</label>
+            <div className="flex gap-2">
+              <input type="date" value={portalStartDate} onChange={(e) => setPortalStartDate(e.target.value)}
+                className="flex-1 px-4 py-3 rounded-xl border border-stone-300 bg-white focus:outline-none focus:border-stone-900 text-stone-900 font-mono" />
+              {portalStartDate && (
+                <button type="button" onClick={() => setPortalStartDate('')}
+                  className="px-3 rounded-xl border border-stone-300 bg-white text-stone-500 text-sm hover:bg-stone-100">
+                  Clear
+                </button>
+              )}
+            </div>
+            <p className="text-xs text-stone-500 mt-2">
+              {portalStartDate
+                ? <>The property manager will only see cleanings from <strong>{new Date(portalStartDate + 'T12:00:00').toLocaleDateString('en-US', { month:'long', day:'numeric', year:'numeric' })}</strong> forward.</>
+                : <>If set, only cleanings from this date forward will be visible to the property manager. Useful for hiding old test data or starting fresh with a new client.</>}
+            </p>
+          </div>
+        </div>
+
+        {hadOldCodeAtOpen ? (
+        <div className="p-4 rounded-2xl bg-stone-50 border border-stone-200">
+          <div className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-3">Old shared code (being retired)</div>
           <div className="flex items-baseline justify-between mb-2">
             <label className="text-xs uppercase tracking-wider text-stone-500 font-mono">Property manager portal code</label>
             <button type="button" onClick={generatePortalCode}
@@ -26113,74 +26278,27 @@ function PropertyForm({ property, currentUserRole, onCancel, onSaved, onManageAs
               : <>Optional. If set, the property manager can sign in at <code className="font-mono bg-white px-1.5 py-0.5 rounded">/#/portal</code> with this code to see cleaning photos for this property only.</>}
           </p>
 
-          {/* Portal start date — only show if portal is enabled */}
-          {portalCode && (
-            <div className="mt-4 pt-4 border-t border-stone-200">
-              <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-2 block">Portal start date (optional)</label>
-              <div className="flex gap-2">
-                <input type="date" value={portalStartDate} onChange={(e) => setPortalStartDate(e.target.value)}
-                  className="flex-1 px-4 py-3 rounded-xl border border-stone-300 bg-white focus:outline-none focus:border-stone-900 text-stone-900 font-mono" />
-                {portalStartDate && (
-                  <button type="button" onClick={() => setPortalStartDate('')}
-                    className="px-3 rounded-xl border border-stone-300 bg-white text-stone-500 text-sm hover:bg-stone-100">
-                    Clear
-                  </button>
-                )}
-              </div>
-              <p className="text-xs text-stone-500 mt-2">
-                {portalStartDate
-                  ? <>The property manager will only see cleanings from <strong>{new Date(portalStartDate + 'T12:00:00').toLocaleDateString('en-US', { month:'long', day:'numeric', year:'numeric' })}</strong> forward.</>
-                  : <>If set, only cleanings from this date forward will be visible to the property manager. Useful for hiding old test data or starting fresh with a new client.</>}
-              </p>
-            </div>
-          )}
-
-          {/* Which upload styles this property's PM sees in their portal. */}
-          {portalCode && (
-            <div className="mt-4 pt-4 border-t border-stone-200">
-              <label className="text-xs uppercase tracking-wider text-stone-500 font-mono mb-1 block">PM assignment uploads</label>
-              <p className="text-xs text-stone-500 mb-2">Pick which ways this property's PM can create assignments in their portal. Off = hidden from them.</p>
-              <div className="space-y-2">
-                {[
-                  { k: 'quick', label: 'Quick Upload', desc: 'Fast builder — no cleaner picker. Lands as a draft for your approval.' },
-                  { k: 'checklist', label: 'Full Upload', desc: 'The structured upload with bedroom items.' },
-                  { k: 'legacy', label: 'Legacy file upload', desc: 'Upload a file or photo as the source.' },
-                ].map(m => (
-                  <button type="button" key={m.k} onClick={() => togglePmMethod(m.k)}
-                    className={`w-full flex items-center justify-between gap-3 p-3 rounded-xl border-2 text-left transition-colors ${pmMethods?.[m.k] ? 'border-emerald-400 bg-emerald-50' : 'border-stone-200 bg-white'}`}>
-                    <span className="min-w-0">
-                      <span className="block text-sm font-medium text-stone-900">{m.label}</span>
-                      <span className="block text-[11px] text-stone-500">{m.desc}</span>
-                    </span>
-                    <span className={`w-5 h-5 rounded-md flex items-center justify-center flex-shrink-0 border-2 ${pmMethods?.[m.k] ? 'bg-emerald-600 border-emerald-600 text-white' : 'bg-white border-stone-300'}`}>
-                      {pmMethods?.[m.k] && <Check size={13} />}
-                    </span>
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
-
           {/* PM staff code — separate sign-in for the PM's assistants */}
-          {portalCode && (
-            <div className="mt-4 pt-4 border-t border-stone-200">
-              <div className="flex items-baseline justify-between mb-2">
-                <label className="text-xs uppercase tracking-wider text-stone-500 font-mono">PM staff code (optional)</label>
-                <button type="button" onClick={generateStaffCode}
-                  className="text-xs font-mono text-amber-700 hover:text-amber-800">Generate</button>
-              </div>
-              <input type="text" value={staffPortalCode}
-                onChange={(e) => setStaffPortalCode(e.target.value.toLowerCase().replace(/[^a-z0-9]/g, ''))}
-                placeholder="e.g. team1234 (lowercase letters & numbers only)"
-                className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white focus:outline-none focus:border-stone-900 text-stone-900 font-mono" />
-              <p className="text-xs text-stone-500 mt-2">
-                {staffPortalCode
-                  ? <>Share this with the PM's staff/assistants. They sign in the same way but their actions are tagged "PM staff" in your inbox.</>
-                  : <>Optional. If set, the PM's assistants can sign in to the same property portal with this separate code. Their actions are tagged "PM staff" so you can tell who did what.</>}
-              </p>
+          <div className="mt-4 pt-4 border-t border-stone-200">
+            <div className="flex items-baseline justify-between mb-2">
+              <label className="text-xs uppercase tracking-wider text-stone-500 font-mono">PM staff code (optional)</label>
+              <button type="button" onClick={generateStaffCode}
+                className="text-xs font-mono text-amber-700 hover:text-amber-800">Generate</button>
             </div>
-          )}
+            <input type="text" value={staffPortalCode}
+              onChange={(e) => setStaffPortalCode(e.target.value.toLowerCase().replace(/[^a-z0-9]/g, ''))}
+              placeholder="e.g. team1234 (lowercase letters & numbers only)"
+              className="w-full px-4 py-3 rounded-xl border border-stone-300 bg-white focus:outline-none focus:border-stone-900 text-stone-900 font-mono" />
+            <p className="text-xs text-stone-500 mt-2">
+              {staffPortalCode
+                ? <>Share this with the PM's staff/assistants. They sign in the same way but their actions are tagged "PM staff" in your inbox.</>
+                : <>Optional. If set, the PM's assistants can sign in to the same property portal with this separate code. Their actions are tagged "PM staff" so you can tell who did what.</>}
+            </p>
+          </div>
         </div>
+        ) : (
+          <p className="text-xs text-stone-500 px-1 -mt-2">PMs sign in with their own codes. Link them under Who's over this property.</p>
+        )}
 
         <div className="p-4 rounded-2xl bg-white border border-stone-200">
           <label className="flex items-center justify-between cursor-pointer">
@@ -37440,7 +37558,7 @@ function PortalHome({ property, portalKind, portalUser, properties, onSwitchProp
                 <button onClick={() => goAdd('quick')}
                   className="w-full px-5 py-4 flex items-center gap-3 active:bg-stone-100 text-left border-b border-stone-100">
                   <Building2 size={18} className="text-stone-500" />
-                  <span className="flex-1 text-sm font-medium text-stone-900">{uploadButtonLabel(property?.name)}</span>
+                  <span className="flex-1 text-sm font-medium text-stone-900">{pmUploadLabel(property, portalUser, 'quick')}</span>
                   <ChevronRight size={16} className="text-stone-400" />
                 </button>
               )}
@@ -37448,7 +37566,7 @@ function PortalHome({ property, portalKind, portalUser, properties, onSwitchProp
                 <button onClick={() => goAdd('wizard')}
                   className="w-full px-5 py-4 flex items-center gap-3 active:bg-stone-100 text-left border-b border-stone-100">
                   <ClipboardList size={18} className="text-stone-500" />
-                  <span className="flex-1 text-sm font-medium text-stone-900">{uploadButtonLabel(property?.name)}</span>
+                  <span className="flex-1 text-sm font-medium text-stone-900">{pmUploadLabel(property, portalUser, 'full')}</span>
                   <ChevronRight size={16} className="text-stone-400" />
                 </button>
               )}
@@ -44636,7 +44754,7 @@ function QuickAssignmentForm({ property, employee, portalUser = null, portalKind
         <div>
           <div className="text-xs uppercase tracking-wider text-stone-500 font-mono">{property.name}</div>
           <div className="font-serif text-xl text-stone-900">
-            {isEditMode ? 'Edit assignment' : (isPM ? 'Bridges/Citifront' : 'Quick Upload')}
+            {isEditMode ? 'Edit assignment' : (isPM ? pmUploadLabel(property, portalUser, 'quick') : 'Quick Upload')}
           </div>
         </div>
       </div>
@@ -47630,7 +47748,7 @@ function ChecklistAssignmentWizard({ property, employee, actorKind = null, porta
           <div className="flex-1 min-w-0">
             <div className="text-xs uppercase tracking-wider font-mono text-stone-500">{property.name}</div>
             <div className="font-serif text-lg text-stone-900 font-bold">
-              {isEditMode ? 'Edit assignment' : (isPmActor ? 'Carriage Cove Uploads' : 'Full Upload')}
+              {isEditMode ? 'Edit assignment' : (isPmActor ? pmUploadLabel(property, portalUser, 'full') : 'Full Upload')}
             </div>
             {isEditMode && (
               <div className="text-[11px] font-mono text-stone-500 truncate">{editAssignment.title}</div>
